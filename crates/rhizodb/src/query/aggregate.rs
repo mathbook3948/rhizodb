@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -65,6 +66,27 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(out)
     }
 
+    fn group_percentile(&self, extra: &Expr, rows: &[Row]) -> Result<Datum, Error> {
+        let mut percentile: Option<Datum> = None;
+        for row in rows {
+            let value = self.eval(extra, row)?;
+            match &percentile {
+                Some(first) if order(first, &value) != Ordering::Equal => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidArgumentValue,
+                        "the percentile must be the same for every row of a group",
+                    ));
+                }
+                Some(_) => {}
+                None => percentile = Some(value),
+            }
+        }
+        match percentile {
+            Some(percentile) => Ok(percentile),
+            None => self.eval(extra, &Row::default()),
+        }
+    }
+
     fn compute(&self, aggregate: &Aggregate, rows: &[Row]) -> Result<Datum, Error> {
         let Some(argument) = &aggregate.argument else {
             return Ok(Datum::Integer(
@@ -114,10 +136,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc => {
                 let percentile = match &aggregate.extra {
-                    Some(extra) => {
-                        let first = rows.first().cloned().unwrap_or_default();
-                        self.eval(extra, &first)?
-                    }
+                    Some(extra) => self.group_percentile(extra, rows)?,
                     None => Datum::Null,
                 };
                 percentile_of(aggregate.function, values, &percentile)

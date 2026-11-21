@@ -455,3 +455,44 @@ fn range_refuses_a_list_too_long_to_hold() {
         int(2)
     );
 }
+
+#[test]
+fn a_percentile_must_be_the_same_for_every_row_of_a_group() {
+    let db = db();
+    assert_eq!(
+        error_kind(
+            &db,
+            "UNWIND [[10, 0.0], [20, 1.0]] AS r RETURN percentileDisc(r[0], r[1])"
+        ),
+        ErrorKind::InvalidArgumentValue
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "UNWIND [[10, 0.0], [20, 1.0]] AS r RETURN percentileCont(r[0], r[1])"
+        ),
+        ErrorKind::InvalidArgumentValue
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [[10, 0.0, 'a'], [20, 1.0, 'b'], [30, 1.0, 'b']] AS r \
+             RETURN r[2] AS g, percentileDisc(r[0], r[1]) AS p ORDER BY g"
+        ),
+        [vec![string("a"), int(10)], vec![string("b"), int(30)]]
+    );
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [10, 20, 30] AS x RETURN percentileCont(x, 0.5)"
+        ),
+        float(20.0)
+    );
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [10, 20] AS x RETURN percentileDisc(x, CASE x WHEN 10 THEN 1 ELSE 1.0 END)"
+        ),
+        int(20)
+    );
+}
