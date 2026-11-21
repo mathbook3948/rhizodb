@@ -409,8 +409,23 @@ impl Binder<'_> {
             let node = self.node_pattern(&step.node, scope, usage, introduced)?;
             steps.push(Step { relationship, node });
         }
+        if matches!(usage, PatternUse::Create | PatternUse::Merge)
+            && steps.is_empty()
+            && start.bound
+        {
+            return Err(error(
+                ErrorKind::VariableAlreadyBound,
+                "a bound node cannot be created again",
+            ));
+        }
         let path = match &part.path_variable {
             Some(name) => {
+                if scope.get(&name.0).is_some() {
+                    return Err(error(
+                        ErrorKind::VariableAlreadyBound,
+                        format!("path `{}` also names an element of its pattern", name.0),
+                    ));
+                }
                 let slot = self.slot();
                 scope.insert(&name.0, slot, Kind::Path);
                 introduced.push(slot);
@@ -506,6 +521,14 @@ impl Binder<'_> {
     ) -> Result<RelationshipPattern, Error> {
         let creates = matches!(usage, PatternUse::Create | PatternUse::Merge);
         if creates {
+            if let Some(name) = &relationship.variable
+                && scope.get(&name.0).is_some()
+            {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("relationship `{}` is already bound", name.0),
+                ));
+            }
             if relationship.length.is_some() {
                 return Err(error(
                     ErrorKind::CreatingVarLength,
@@ -538,12 +561,6 @@ impl Binder<'_> {
         let (slot, bound) = match &relationship.variable {
             Some(name) => match scope.get(&name.0) {
                 Some(variable) => {
-                    if creates {
-                        return Err(error(
-                            ErrorKind::VariableAlreadyBound,
-                            format!("relationship `{}` is already bound", name.0),
-                        ));
-                    }
                     if variable.kind != kind && variable.kind != Kind::Unknown {
                         return Err(error(
                             ErrorKind::VariableTypeConflict,
@@ -971,6 +988,17 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::Pattern(element) => {
+                if let Some(name) =
+                    pattern_variables(element).find(|name| scope.get(&name.0).is_none())
+                {
+                    return Err(error(
+                        ErrorKind::UndefinedVariable,
+                        format!(
+                            "variable `{}` is not defined; a pattern predicate cannot introduce one",
+                            name.0
+                        ),
+                    ));
+                }
                 let part = ast::PatternPart {
                     path_variable: None,
                     element: element.clone(),
@@ -1100,6 +1128,15 @@ fn aggregate_not_allowed(mode: &Mode<'_>) -> Error {
             "aggregates are only allowed in WITH and RETURN",
         ),
     }
+}
+
+fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast::Name> {
+    element.start.variable.iter().chain(
+        element
+            .steps
+            .iter()
+            .flat_map(|step| step.relationship.variable.iter().chain(&step.node.variable)),
+    )
 }
 
 fn names(names: &[ast::Name]) -> Vec<String> {

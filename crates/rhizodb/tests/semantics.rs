@@ -176,6 +176,27 @@ fn binding_errors_are_reported_before_running() {
         error_kind(&db, "UNWIND [1] AS x UNWIND [2] AS x RETURN x"),
         ErrorKind::VariableAlreadyBound
     );
+    for query in [
+        "MATCH p = (p)-[]->() RETURN p",
+        "MATCH (a) CREATE (a)",
+        "MATCH (a) MERGE (a)",
+        "MATCH ()-[r]->() CREATE ()-[r]->()",
+        "MATCH (a)-[r]->(b) MERGE (a)-[r]->(b)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::VariableAlreadyBound,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) WHERE (n)-[r]->() RETURN n"),
+        ErrorKind::UndefinedVariable
+    );
+    assert_eq!(
+        run(&db, "MATCH (n) WHERE EXISTS { (n)-[r]->() } RETURN n"),
+        Vec::<Vec<Value>>::new()
+    );
     assert_eq!(
         error_kind(&db, "MATCH (a)-[r]->()-[r]->() RETURN r"),
         ErrorKind::RelationshipUniquenessViolation
