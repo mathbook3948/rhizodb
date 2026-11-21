@@ -171,6 +171,31 @@ fn type_errors_in_the_query_text_fail_even_without_rows() {
 }
 
 #[test]
+fn statically_known_kinds_are_checked_before_running() {
+    let db = db();
+    for query in [
+        "MATCH p = (a) RETURN labels(p)",
+        "MATCH (n) RETURN type(n)",
+        "MATCH (r)-[]->() RETURN length(r)",
+        "MATCH p = ()-[*]->() RETURN size(p)",
+        "MATCH p = ()-->() WHERE p.name = 'x' RETURN p",
+        "MATCH (n) WHERE n RETURN n",
+        "RETURN properties(1)",
+        "MATCH () DELETE 1 + 1",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) DELETE n:L"),
+        ErrorKind::InvalidDelete
+    );
+}
+
+#[test]
 fn type_errors_found_in_data_are_type_mismatches() {
     let db = db();
     assert_eq!(

@@ -283,20 +283,17 @@ impl Binder<'_> {
                 ast::Clause::Delete(delete) => {
                     let mut targets = Vec::new();
                     for target in &delete.targets {
-                        if !matches!(
-                            target,
-                            ast::Expr::Variable(_)
-                                | ast::Expr::Property { .. }
-                                | ast::Expr::Index { .. }
-                                | ast::Expr::Function(_)
-                                | ast::Expr::Parameter(_)
-                                | ast::Expr::Literal(ast::Literal::Null)
-                        ) {
+                        if matches!(target, ast::Expr::HasLabels { .. }) {
                             return Err(error(
                                 ErrorKind::InvalidDelete,
-                                "DELETE takes a node, relationship, or path",
+                                "DELETE takes an element, not a label expression",
                             ));
                         }
+                        self.expect_shape(
+                            target,
+                            &scope,
+                            &[Shape::Node, Shape::Relationship, Shape::Path],
+                        )?;
                         let bound = self.expr(target, &scope, &mut Mode::Plain)?;
                         if let ast::Expr::Variable(name) = target
                             && self.lookup(&name.0, &scope)?.kind == Kind::Value
@@ -381,7 +378,7 @@ impl Binder<'_> {
         let filter = found
             .filter
             .as_ref()
-            .map(|filter| self.expr(filter, scope, &mut Mode::Plain))
+            .map(|filter| self.filter(filter, scope))
             .transpose()?;
         Ok(ReadClause::Match(MatchClause {
             optional: found.optional,
@@ -603,6 +600,81 @@ impl Binder<'_> {
         })
     }
 
+    fn filter(&mut self, filter: &ast::Expr, scope: &Scope) -> Result<Expr, Error> {
+        self.expect_shape(filter, scope, &[Shape::Boolean])?;
+        self.expr(filter, scope, &mut Mode::Plain)
+    }
+
+    fn expect_shape(
+        &self,
+        expr: &ast::Expr,
+        scope: &Scope,
+        accepted: &[Shape],
+    ) -> Result<(), Error> {
+        match self.shape(expr, scope) {
+            Some(shape) if !accepted.is_empty() && !accepted.contains(&shape) => Err(error(
+                ErrorKind::InvalidArgumentType,
+                format!("a {shape:?} cannot be used here; expected one of {accepted:?}"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn shape(&self, expr: &ast::Expr, scope: &Scope) -> Option<Shape> {
+        match expr {
+            ast::Expr::Variable(name) => match scope.get(&name.0)?.kind {
+                Kind::Node => Some(Shape::Node),
+                Kind::Relationship => Some(Shape::Relationship),
+                Kind::Path => Some(Shape::Path),
+                Kind::RelationshipList => Some(Shape::List),
+                Kind::Value | Kind::Unknown => None,
+            },
+            ast::Expr::Parameter(name) => {
+                datum_shape(&from_parameter(self.parameters.get(&name.0)?))
+            }
+            ast::Expr::Literal(literal) => match literal {
+                ast::Literal::Integer(_) | ast::Literal::Float(_) => Some(Shape::Number),
+                ast::Literal::String(_) => Some(Shape::String),
+                ast::Literal::Boolean(_) => Some(Shape::Boolean),
+                ast::Literal::Null => None,
+            },
+            ast::Expr::List(_)
+            | ast::Expr::ListComprehension(_)
+            | ast::Expr::PatternComprehension(_) => Some(Shape::List),
+            ast::Expr::Map(_) => Some(Shape::Map),
+            ast::Expr::Comparison { .. }
+            | ast::Expr::IsNull { .. }
+            | ast::Expr::HasLabels { .. }
+            | ast::Expr::ListPredicate(_)
+            | ast::Expr::Pattern(_)
+            | ast::Expr::Exists(_) => Some(Shape::Boolean),
+            ast::Expr::Unary {
+                op: ast::UnaryOp::Not,
+                ..
+            } => Some(Shape::Boolean),
+            ast::Expr::Binary { op, lhs, rhs } => match op {
+                ast::BinaryOp::And
+                | ast::BinaryOp::Or
+                | ast::BinaryOp::Xor
+                | ast::BinaryOp::In
+                | ast::BinaryOp::StartsWith
+                | ast::BinaryOp::EndsWith
+                | ast::BinaryOp::Contains
+                | ast::BinaryOp::RegexMatch => Some(Shape::Boolean),
+                ast::BinaryOp::Add
+                | ast::BinaryOp::Subtract
+                | ast::BinaryOp::Multiply
+                | ast::BinaryOp::Divide
+                | ast::BinaryOp::Modulo
+                | ast::BinaryOp::Power => {
+                    let lhs = self.shape(lhs, scope)?;
+                    (lhs == self.shape(rhs, scope)? && matches!(lhs, Shape::Number)).then_some(lhs)
+                }
+            },
+            _ => None,
+        }
+    }
+
     fn parameter(&self, name: &str) -> Result<Datum, Error> {
         self.parameters
             .get(name)
@@ -770,7 +842,7 @@ impl Binder<'_> {
             .map(|limit| self.expr(limit, &Scope::default(), &mut Mode::Constant))
             .transpose()?;
         let filter = filter
-            .map(|filter| self.expr(filter, &visible, &mut Mode::Plain))
+            .map(|filter| self.filter(filter, &visible))
             .transpose()?;
         Ok((
             Projection {
@@ -884,6 +956,7 @@ impl Binder<'_> {
                 Expr::Map(bound)
             }
             ast::Expr::Property { base, key } => {
+                self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map])?;
                 Expr::Property(self.boxed(base, scope, mode)?, key.0.clone())
             }
             ast::Expr::Index { base, index } => Expr::Index(
@@ -946,6 +1019,9 @@ impl Binder<'_> {
                         ErrorKind::InvalidNumberOfArguments,
                         format!("function `{name}` got {} arguments", call.args.len()),
                     ));
+                }
+                if let Some(first) = call.args.first() {
+                    self.expect_shape(first, scope, argument_shapes(function))?;
                 }
                 Expr::Call(function, self.exprs(&call.args, scope, mode)?)
             }
@@ -1155,6 +1231,44 @@ fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast
             .iter()
             .flat_map(|step| step.relationship.variable.iter().chain(&step.node.variable)),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    Node,
+    Relationship,
+    Path,
+    List,
+    Map,
+    String,
+    Number,
+    Boolean,
+}
+
+fn datum_shape(value: &Datum) -> Option<Shape> {
+    Some(match value {
+        Datum::Null => return None,
+        Datum::Boolean(_) => Shape::Boolean,
+        Datum::Integer(_) | Datum::Float(_) => Shape::Number,
+        Datum::String(_) => Shape::String,
+        Datum::List(_) => Shape::List,
+        Datum::Map(_) => Shape::Map,
+        Datum::Node(_) => Shape::Node,
+        Datum::Relationship(_) => Shape::Relationship,
+        Datum::Path(_) => Shape::Path,
+        Datum::Bytes(_) => return None,
+    })
+}
+
+fn argument_shapes(function: Function) -> &'static [Shape] {
+    match function {
+        Function::Labels => &[Shape::Node],
+        Function::Type | Function::StartNode | Function::EndNode => &[Shape::Relationship],
+        Function::Length | Function::Nodes | Function::Relationships => &[Shape::Path],
+        Function::Size => &[Shape::List, Shape::String],
+        Function::Keys | Function::Properties => &[Shape::Node, Shape::Relationship, Shape::Map],
+        _ => &[],
+    }
 }
 
 fn is_closed(expr: &Expr, local: &mut Vec<Slot>) -> bool {

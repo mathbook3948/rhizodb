@@ -100,6 +100,7 @@ clauses/delete/Delete5.feature: [5] Detach delete nodes from nested map/list
 clauses/delete/Delete5.feature: [6] Delete relationships from nested map/list
 clauses/delete/Delete5.feature: [7] Delete paths from nested map/list
 clauses/delete/Delete5.feature: [8] Failing when using undefined variable in DELETE
+clauses/delete/Delete5.feature: [9] Failing when deleting an integer expression
 clauses/delete/Delete6.feature: [10] Skipping and limiting to a few results after deleting relationships affects the result set but not the side effects
 clauses/delete/Delete6.feature: [11] Skipping zero result and limiting to all results after deleting relationships does not affect the result set nor the side effects
 clauses/delete/Delete6.feature: [12] Filtering after deleting relationships affects the result set but not the side effects
@@ -118,6 +119,7 @@ clauses/match-where/MatchWhere1.feature: [10] Filter node with disjunctive prope
 clauses/match-where/MatchWhere1.feature: [11] Filter relationship with disjunctive relationship type predicate on multi variables with multiple bindings
 clauses/match-where/MatchWhere1.feature: [12] Filter path with path length predicate on multi variables with one binding
 clauses/match-where/MatchWhere1.feature: [13] Filter path with false path length predicate on multi variables with one binding
+clauses/match-where/MatchWhere1.feature: [14] Fail when filtering path with property predicate
 clauses/match-where/MatchWhere1.feature: [15] Fail on aggregation in WHERE
 clauses/match-where/MatchWhere1.feature: [1] Filter node with node label predicate on multi variables with multiple bindings
 clauses/match-where/MatchWhere1.feature: [2] Filter node with node label predicate on multi variables without any bindings
@@ -1391,6 +1393,7 @@ expressions/graph/Graph3.feature: [4] Create node with label in pattern
 expressions/graph/Graph3.feature: [5] Using `labels()` in return clauses
 expressions/graph/Graph3.feature: [6] `labels()` should accept type Any
 expressions/graph/Graph3.feature: [7] `labels()` on null node
+expressions/graph/Graph3.feature: [8] `labels()` failing on a path
 expressions/graph/Graph3.feature: [9] `labels()` failing on invalid arguments
 expressions/graph/Graph4.feature: [1] `type()`
 expressions/graph/Graph4.feature: [2] `type()` on two relationships
@@ -1402,6 +1405,7 @@ expressions/graph/Graph4.feature: [6] `type()` failing on invalid arguments #2
 expressions/graph/Graph4.feature: [6] `type()` failing on invalid arguments #3
 expressions/graph/Graph4.feature: [6] `type()` failing on invalid arguments #4
 expressions/graph/Graph4.feature: [6] `type()` failing on invalid arguments #5
+expressions/graph/Graph4.feature: [7] Failing when using `type()` on a node
 expressions/graph/Graph5.feature: [1] Single-labels expression on nodes
 expressions/graph/Graph5.feature: [3] Conjunctive labels expression on nodes
 expressions/graph/Graph5.feature: [4] Conjunctive labels expression on nodes with varying order and repeating labels #1
@@ -1439,6 +1443,9 @@ expressions/graph/Graph9.feature: [1] `properties()` on a node
 expressions/graph/Graph9.feature: [2] `properties()` on a relationship
 expressions/graph/Graph9.feature: [3] `properties()` on null
 expressions/graph/Graph9.feature: [4] `properties()` on a map
+expressions/graph/Graph9.feature: [5] `properties()` failing on an integer literal
+expressions/graph/Graph9.feature: [6] `properties()` failing on a string literal
+expressions/graph/Graph9.feature: [7] `properties()` failing on a list of booleans
 expressions/list/List1.feature: [1] Indexing into literal list
 expressions/list/List1.feature: [2] Indexing into nested literal lists
 expressions/list/List1.feature: [3] Use list lookup based on parameters when there is no type information
@@ -1588,6 +1595,7 @@ expressions/list/List6.feature: [1] Return list size
 expressions/list/List6.feature: [2] Setting and returning the size of a list property
 expressions/list/List6.feature: [3] Concatenating and returning the size of literal lists
 expressions/list/List6.feature: [4] `size()` on null list
+expressions/list/List6.feature: [5] Fail for `size()` on paths
 expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #1
 expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #2
 expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #3
@@ -1827,6 +1835,8 @@ expressions/path/Path2.feature: [1] Return relationships by fetching them from t
 expressions/path/Path2.feature: [2] Return relationships by fetching them from the path - starting from the end
 expressions/path/Path2.feature: [3] `relationships()` on null path
 expressions/path/Path3.feature: [1] Return a var length path of length zero
+expressions/path/Path3.feature: [2] Failing when using `length()` on a node
+expressions/path/Path3.feature: [3] Failing when using `length()` on a relationship
 expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variables in pattern #1
 expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variables in pattern #10
 expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variables in pattern #11
@@ -1843,6 +1853,7 @@ expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variabl
 expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variables in pattern #8
 expressions/pattern/Pattern1.feature: [10] Fail on introducing unbounded variables in pattern #9
 expressions/pattern/Pattern1.feature: [10] Matching on a specific type of undirected connection with length 2
+expressions/pattern/Pattern1.feature: [11] Fail on checking self pattern
 expressions/pattern/Pattern1.feature: [12] Matching two nodes on a single directed connection between them
 expressions/pattern/Pattern1.feature: [13] Fail on matching two nodes on a single undirected connection between them
 expressions/pattern/Pattern1.feature: [14] Matching two nodes on a specific type of single outgoing directed connection
