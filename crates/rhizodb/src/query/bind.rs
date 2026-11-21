@@ -48,6 +48,7 @@ pub(crate) fn bind(
         slot_count: 0,
         closed: Vec::new(),
         expression_depth: 0,
+        parameter_reads: 0,
     };
     let (singles, distinct) = match query {
         ast::Query::Single(single) => (vec![single], false),
@@ -186,6 +187,7 @@ struct Binder<'a> {
     slot_count: usize,
     closed: Vec<Expr>,
     expression_depth: usize,
+    parameter_reads: usize,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
@@ -239,9 +241,11 @@ impl Binder<'_> {
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
                 ast::Clause::Return(returned) => {
+                    let reads_before = self.parameter_reads;
                     let (projection, _, columns) =
                         self.projection(returned, &scope, false, None)?;
-                    result_reads_variables = reads_variables(returned);
+                    result_reads_variables =
+                        reads_variables(returned) || self.parameter_reads > reads_before;
                     output = Some((projection.outputs.clone(), columns));
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
@@ -708,7 +712,8 @@ impl Binder<'_> {
         }
     }
 
-    fn parameter(&self, name: &str) -> Result<Datum, Error> {
+    fn parameter(&mut self, name: &str) -> Result<Datum, Error> {
+        self.parameter_reads += 1;
         self.parameters
             .get(name)
             .map(from_parameter)

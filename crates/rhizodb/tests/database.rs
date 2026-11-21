@@ -130,3 +130,19 @@ fn a_node_returned_earlier_can_be_passed_back_as_a_parameter() {
         .unwrap();
     assert_eq!(result.rows(), [vec![string("Ada")]]);
 }
+
+#[test]
+fn a_deleted_node_passed_as_a_parameter_can_still_be_returned() {
+    let db = db();
+    let node = single(&db, "CREATE (n {name: 'Ada'}) RETURN n");
+    let mut parameters = rhizodb::Parameters::new();
+    parameters.insert("n".to_owned(), node.clone());
+    let result = db
+        .execute(
+            "MATCH (m) WHERE m = $n DELETE m RETURN $n AS gone",
+            &parameters,
+        )
+        .unwrap();
+    assert_eq!(result.rows(), [vec![node]]);
+    assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(0));
+}
