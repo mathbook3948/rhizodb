@@ -13,6 +13,7 @@ pub mod literal;
 pub mod matching;
 pub mod parser;
 pub mod ratchet;
+pub mod rhizo;
 pub mod run;
 pub mod scenario;
 pub mod side_effects;

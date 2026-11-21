@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 libtest-mimic = "0.8"
+rhizodb = { path = "../rhizodb" }
 
 [[test]]
 name = "tck"

@@ -507,6 +507,7 @@ name = "tck"
 version = "0.0.0"
 dependencies = [
  "libtest-mimic",
+ "rhizodb",
 ]
 
 [[package]]
