@@ -1,10 +1,26 @@
 use std::marker::PhantomData;
 
+/// Identifies a node. Node IDs only grow and are never reused after a delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct NodeId(pub(crate) u64);
+pub struct NodeId(pub(crate) u64);
 
+impl NodeId {
+    /// The ID as a number, stable for the life of the database.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Identifies a relationship. Relationship IDs only grow and are never reused after a delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct RelationshipId(pub(crate) u64);
+pub struct RelationshipId(pub(crate) u64);
+
+impl RelationshipId {
+    /// The ID as a number, stable for the life of the database.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 /// One of the three name spaces interned to tokens. Each has its own token counter.
 pub(crate) trait TokenKind {

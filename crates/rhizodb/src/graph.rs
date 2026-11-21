@@ -16,9 +16,9 @@ mod keys;
 mod records;
 
 pub(crate) use ids::Label;
-pub(crate) use ids::NodeId;
+pub use ids::NodeId;
 pub(crate) use ids::PropertyKey;
-pub(crate) use ids::RelationshipId;
+pub use ids::RelationshipId;
 pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;

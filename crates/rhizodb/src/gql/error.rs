@@ -1,25 +1,35 @@
 use std::error::Error;
 use std::fmt;
 
-/// Why the query text was rejected.
-///
-/// The variants are fine-grained enough for a later layer to map them onto
-/// the openCypher TCK detail codes (`UnexpectedSyntax`, `InvalidNumberLiteral`,
-/// `InvalidUnicodeLiteral`, `IntegerOverflow`).
+/// Why the query text was rejected by the parser.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SyntaxErrorKind {
+#[non_exhaustive]
+pub enum SyntaxErrorKind {
+    /// A token appeared where the grammar does not allow it.
     UnexpectedToken,
+    /// The query ended before a construct was complete.
     UnexpectedEnd,
+    /// A character that starts no token.
     UnexpectedCharacter,
+    /// A malformed number literal.
     InvalidNumberLiteral,
+    /// An integer literal outside the 64-bit signed range.
     IntegerOverflow,
+    /// An unknown escape sequence in a string literal.
     InvalidEscape,
+    /// A malformed `\u` escape sequence.
     InvalidUnicodeEscape,
+    /// A string literal without its closing quote.
     UnterminatedString,
+    /// A backtick-quoted name without its closing backtick.
     UnterminatedQuotedName,
+    /// A block comment without its closing `*/`.
     UnterminatedComment,
+    /// `UNION` and `UNION ALL` in one query.
     MixedUnion,
+    /// Syntax that is recognized but not supported.
     UnsupportedFeature,
+    /// Expressions or patterns nested past the parser's limit.
     NestingTooDeep,
 }
 
