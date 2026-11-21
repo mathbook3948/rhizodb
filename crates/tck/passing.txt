@@ -1080,6 +1080,7 @@ clauses/with-skip-limit/WithSkipLimit3.feature: [1] Get rows in the middle
 clauses/with-skip-limit/WithSkipLimit3.feature: [2] Get rows in the middle by param
 clauses/with-skip-limit/WithSkipLimit3.feature: [3] Limiting amount of rows when there are fewer left than the LIMIT argument
 clauses/with-where/WithWhere1.feature: [1] Filter node with property predicate on a single variable with multiple bindings
+clauses/with-where/WithWhere1.feature: [2] Filter node with property predicate on a single variable with multiple distinct bindings
 clauses/with-where/WithWhere1.feature: [3] Filter for an unbound relationship variable
 clauses/with-where/WithWhere1.feature: [4] Filter for an unbound node variable
 clauses/with-where/WithWhere2.feature: [1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings

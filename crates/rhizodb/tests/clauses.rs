@@ -555,3 +555,36 @@ fn union_concatenates_and_union_distinct_dedupes() {
     assert_eq!(run(&db, "RETURN 1 AS x UNION ALL RETURN 1 AS x").len(), 2);
     assert_eq!(run(&db, "RETURN 1 AS x UNION RETURN 1 AS x").len(), 1);
 }
+
+#[test]
+fn where_after_with_distinct_reads_projected_expressions_of_earlier_variables() {
+    let db = db();
+    run(
+        &db,
+        "CREATE ({name2: 'A', other: 1}), ({name2: 'A', other: 2}), ({name2: 'B', other: 3})",
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a) WITH DISTINCT a.name2 AS name WHERE a.name2 = 'B' RETURN *"
+        ),
+        [vec![string("B")]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a) WITH DISTINCT a.name2 AS name WHERE a.name2 + 'x' = 'Ax' RETURN name"
+        ),
+        [vec![string("A")]]
+    );
+    for query in [
+        "MATCH (a) WITH DISTINCT a.name2 AS name WHERE a.other = 3 RETURN name",
+        "MATCH (a) WITH DISTINCT a.name2 AS name WHERE a IS NOT NULL RETURN name",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            rhizodb::ErrorKind::UndefinedVariable,
+            "{query}"
+        );
+    }
+}

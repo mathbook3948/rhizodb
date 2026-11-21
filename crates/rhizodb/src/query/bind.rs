@@ -151,6 +151,9 @@ enum Mode<'a> {
     /// slot, aggregates are collected and read their result slot, and any other variable of the
     /// incoming scope is ambiguous.
     Grouped(&'a mut Grouping),
+    /// Against the scope, where subexpressions equal to a projected item read the item's slot.
+    /// That is how the `WHERE` of `WITH DISTINCT` names an earlier variable's property.
+    Projected(&'a [(ast::Expr, Slot)]),
     /// Inside `SKIP` or `LIMIT`, where no variable may appear.
     Constant,
 }
@@ -381,7 +384,7 @@ impl Binder<'_> {
         let filter = found
             .filter
             .as_ref()
-            .map(|filter| self.filter(filter, scope))
+            .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
         Ok(ReadClause::Match(MatchClause {
             optional: found.optional,
@@ -608,9 +611,14 @@ impl Binder<'_> {
         })
     }
 
-    fn filter(&mut self, filter: &ast::Expr, scope: &Scope) -> Result<Expr, Error> {
+    fn filter(
+        &mut self,
+        filter: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
         self.expect_shape(filter, scope, &[Shape::Boolean])?;
-        self.expr(filter, scope, &mut Mode::Plain)
+        self.expr(filter, scope, mode)
     }
 
     fn expect_shape(
@@ -854,8 +862,12 @@ impl Binder<'_> {
             .as_ref()
             .map(|limit| self.expr(limit, &Scope::default(), &mut Mode::Constant))
             .transpose()?;
+        let projected = (projection.distinct && !aggregating).then_some(item_slots.as_slice());
         let filter = filter
-            .map(|filter| self.filter(filter, &visible))
+            .map(|filter| match projected {
+                Some(projected) => self.filter(filter, &visible, &mut Mode::Projected(projected)),
+                None => self.filter(filter, &visible, &mut Mode::Plain),
+            })
             .transpose()?;
         Ok((
             Projection {
@@ -917,6 +929,11 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
+        if let Mode::Projected(items) = mode
+            && let Some((_, slot)) = items.iter().find(|(item, _)| item == expr)
+        {
+            return Ok(Expr::Slot(*slot));
+        }
         if let Mode::Grouped(grouping) = mode {
             if let Some((key, slot)) = grouping.keys.iter().find(|(key, _)| key == expr) {
                 if !is_simple_key(key) && !contains_aggregate(key) {
@@ -1271,7 +1288,7 @@ fn aggregate_not_allowed(mode: &Mode<'_>) -> Error {
             ErrorKind::NestedAggregation,
             "an aggregate cannot contain another aggregate",
         ),
-        Mode::Plain | Mode::Constant => error(
+        Mode::Plain | Mode::Projected(_) | Mode::Constant => error(
             ErrorKind::InvalidAggregation,
             "aggregates are only allowed in WITH and RETURN",
         ),
