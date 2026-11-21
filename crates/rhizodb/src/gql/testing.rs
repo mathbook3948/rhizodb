@@ -44,6 +44,17 @@ pub(super) fn error(source: &str) -> (usize, SyntaxErrorKind) {
     }
 }
 
+pub(super) fn predicate(source: &str) -> Expr {
+    let query = format!("MATCH (a) WHERE {source} RETURN a");
+    match single_query_clauses(&query).into_iter().next() {
+        Some(Clause::Match(found)) => match found.filter {
+            Some(filter) => filter,
+            None => panic!("expected a WHERE in {query:?}"),
+        },
+        other => panic!("expected MATCH, got {other:?}"),
+    }
+}
+
 pub(super) fn expr_error(source: &str) -> (usize, SyntaxErrorKind) {
     let (offset, kind) = error(&format!("RETURN {source}"));
     (offset - "RETURN ".len(), kind)

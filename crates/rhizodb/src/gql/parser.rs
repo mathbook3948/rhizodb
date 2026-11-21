@@ -26,6 +26,7 @@ pub(crate) fn parse(input: &str) -> ParseResult<Query> {
         pos: 0,
         depth: 0,
         input_len: input.len(),
+        in_where: false,
     };
     parser.query()
 }
@@ -35,6 +36,7 @@ struct Parser {
     pos: usize,
     depth: usize,
     input_len: usize,
+    in_where: bool,
 }
 
 impl Parser {

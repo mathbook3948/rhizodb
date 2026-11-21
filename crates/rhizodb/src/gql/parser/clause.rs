@@ -93,7 +93,7 @@ impl Parser {
 
     fn where_filter(&mut self) -> ParseResult<Option<Expr>> {
         if self.eat_keyword("WHERE") {
-            Ok(Some(self.expression()?))
+            Ok(Some(self.predicate()?))
         } else {
             Ok(None)
         }

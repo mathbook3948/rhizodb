@@ -1588,6 +1588,14 @@ expressions/list/List6.feature: [1] Return list size
 expressions/list/List6.feature: [2] Setting and returning the size of a list property
 expressions/list/List6.feature: [3] Concatenating and returning the size of literal lists
 expressions/list/List6.feature: [4] `size()` on null list
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #1
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #2
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #3
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #4
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #5
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #6
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #7
+expressions/list/List6.feature: [6] Fail for `size()` on pattern predicates #8
 expressions/list/List6.feature: [7] Using size of pattern comprehension to test existence
 expressions/list/List6.feature: [8] Get node degree via size of pattern comprehension
 expressions/list/List6.feature: [9] Get node degree via size of pattern comprehension that specifies a relationship type
@@ -1846,6 +1854,9 @@ expressions/pattern/Pattern1.feature: [19] Using a negated existential pattern p
 expressions/pattern/Pattern1.feature: [1] Matching on any single outgoing directed connection
 expressions/pattern/Pattern1.feature: [20] Using two existential pattern predicates in a conjunction
 expressions/pattern/Pattern1.feature: [21] Using two existential pattern predicates in a disjunction
+expressions/pattern/Pattern1.feature: [22] Fail on using pattern in RETURN projection
+expressions/pattern/Pattern1.feature: [23] Fail on using pattern in WITH projection
+expressions/pattern/Pattern1.feature: [24] Fail on using pattern in right-hand side of SET
 expressions/pattern/Pattern1.feature: [2] Matching on a single undirected connection
 expressions/pattern/Pattern1.feature: [3] Matching on any single incoming directed connection
 expressions/pattern/Pattern1.feature: [4] Matching on a specific type of single outgoing directed connection

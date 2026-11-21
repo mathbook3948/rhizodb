@@ -8,6 +8,7 @@ use crate::gql::ast::Quantifier;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::testing::expr;
 use crate::gql::testing::expr_error;
+use crate::gql::testing::predicate;
 use crate::gql::testing::sexp;
 
 fn assert_shapes(cases: &[(&str, &str)]) {
@@ -339,13 +340,41 @@ fn a_quantifier_without_where_is_rejected() {
 
 #[test]
 fn pattern_predicates_parse_as_patterns() {
-    assert!(matches!(expr("(a)-->(b)"), Expr::Pattern(found) if found.steps.len() == 1));
+    assert!(matches!(predicate("(a)-->(b)"), Expr::Pattern(found) if found.steps.len() == 1));
     assert!(
-        matches!(expr("(a)<-[:T]-(b)-[:U]->()"), Expr::Pattern(found) if found.steps.len() == 2)
+        matches!(predicate("(a)<-[:T]-(b)-[:U]->()"), Expr::Pattern(found) if found.steps.len() == 2)
     );
     assert!(matches!(
-        expr("NOT (a)--(b)"),
+        predicate("NOT (a)--(b)"),
         Expr::Unary { operand, .. } if matches!(*operand, Expr::Pattern(_))
+    ));
+}
+
+#[test]
+fn pattern_predicates_are_only_allowed_inside_a_where() {
+    assert_eq!(
+        expr_error("(a)-->(b)"),
+        (0, SyntaxErrorKind::UnexpectedToken)
+    );
+    assert_eq!(
+        expr_error("size((a)-->())"),
+        (5, SyntaxErrorKind::UnexpectedToken)
+    );
+    assert!(matches!(
+        expr("[x IN xs WHERE (x)-->() | x]"),
+        Expr::ListComprehension(_)
+    ));
+    assert!(matches!(
+        expr("[(a)-->(b) WHERE (b)-->() | b]"),
+        Expr::PatternComprehension(_)
+    ));
+    assert!(matches!(
+        expr("any(x IN xs WHERE (x)-->())"),
+        Expr::ListPredicate(_)
+    ));
+    assert!(matches!(
+        expr("EXISTS { (a)-->(b) WHERE (b)-->() }"),
+        Expr::Exists(_)
     ));
 }
 

@@ -64,6 +64,13 @@ impl Parser {
         self.binary(0)
     }
 
+    pub(super) fn predicate(&mut self) -> ParseResult<Expr> {
+        let outer = std::mem::replace(&mut self.in_where, true);
+        let predicate = self.expression();
+        self.in_where = outer;
+        predicate
+    }
+
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
         self.nested(|parser| parser.binary_chain(min_precedence))
     }
@@ -286,6 +293,9 @@ impl Parser {
 
     fn parenthesized(&mut self) -> ParseResult<Expr> {
         if self.paren_starts_pattern() {
+            if !self.in_where {
+                return Err(self.unexpected());
+            }
             return Ok(Expr::Pattern(self.pattern_element()?));
         }
         self.pos += 1;
@@ -322,7 +332,7 @@ impl Parser {
             let variable = self.name()?;
             self.pos += 1;
             let source = Box::new(self.expression()?);
-            let filter = self.optional_after_keyword("WHERE")?;
+            let filter = self.optional_predicate()?;
             let projection = if self.eat_punct(Punct::Pipe) {
                 Some(Box::new(self.expression()?))
             } else {
@@ -355,7 +365,7 @@ impl Parser {
             None
         };
         let element = self.pattern_element()?;
-        let filter = self.optional_after_keyword("WHERE")?;
+        let filter = self.optional_predicate()?;
         self.expect_punct(Punct::Pipe)?;
         let projection = Box::new(self.expression()?);
         self.expect_punct(Punct::RBracket)?;
@@ -374,7 +384,7 @@ impl Parser {
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
-                Some(self.expression()?)
+                Some(self.predicate()?)
             } else {
                 None
             };
@@ -382,6 +392,14 @@ impl Parser {
         };
         self.expect_punct(Punct::RBrace)?;
         Ok(Expr::Exists(Box::new(body)))
+    }
+
+    fn optional_predicate(&mut self) -> ParseResult<Option<Box<Expr>>> {
+        if self.eat_keyword("WHERE") {
+            Ok(Some(Box::new(self.predicate()?)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn optional_after_keyword(&mut self, keyword: &str) -> ParseResult<Option<Box<Expr>>> {
@@ -487,7 +505,7 @@ impl Parser {
         self.pos += 1;
         let source = Box::new(self.expression()?);
         self.expect_keyword("WHERE")?;
-        let predicate = Box::new(self.expression()?);
+        let predicate = Box::new(self.predicate()?);
         self.expect_punct(Punct::RParen)?;
         Ok(Expr::ListPredicate(ListPredicate {
             quantifier,
