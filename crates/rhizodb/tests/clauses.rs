@@ -330,6 +330,40 @@ fn delete_refuses_connected_nodes_unless_detached() {
 }
 
 #[test]
+fn returning_a_deleted_element_commits_the_delete() {
+    let db = db();
+    run(&db, "CREATE (:A {x: 1})-[:R {w: 2}]->(:B)");
+    let rows = run(&db, "MATCH (n:A) DETACH DELETE n RETURN n");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {rows:?}");
+    };
+    let [Value::Node(node)] = row.as_slice() else {
+        panic!("expected one node, got {row:?}");
+    };
+    assert_eq!(node.labels, ["A".to_owned()].into());
+    assert_eq!(node.properties.get("x"), Some(&int(1)));
+    assert_eq!(single(&db, "MATCH (n:A) RETURN count(n)"), int(0));
+    assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
+    assert_eq!(single(&db, "MATCH (n:B) RETURN count(n)"), int(1));
+}
+
+#[test]
+fn returning_a_deleted_relationship_commits_the_delete() {
+    let db = db();
+    run(&db, "CREATE (:A)-[:R {w: 2}]->(:B)");
+    let rows = run(&db, "MATCH ()-[r]->() DELETE r RETURN r");
+    let [row] = rows.as_slice() else {
+        panic!("expected one row, got {rows:?}");
+    };
+    let [Value::Relationship(relationship)] = row.as_slice() else {
+        panic!("expected one relationship, got {row:?}");
+    };
+    assert_eq!(relationship.rel_type, "R");
+    assert_eq!(relationship.properties.get("w"), Some(&int(2)));
+    assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
+}
+
+#[test]
 fn merge_matches_or_creates() {
     let db = db();
     run(&db, "MERGE (n:A {k: 1}) ON CREATE SET n.created = true");

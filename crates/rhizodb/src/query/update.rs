@@ -29,14 +29,26 @@ use super::plan::RemoveAction;
 use super::plan::SetAction;
 use super::plan::UpdateClause;
 
+/// The records of the elements a query deleted, kept so the query can still return them.
+#[derive(Default)]
+pub(crate) struct Graveyard {
+    pub(crate) nodes: BTreeMap<NodeId, NodeRecord>,
+    pub(crate) relationships: BTreeMap<RelationshipId, RelationshipRecord>,
+}
+
 /// Applies one updating clause to every row, in row order. Later rows see earlier rows' writes.
 pub(crate) fn apply<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     slots: usize,
+    graveyard: &mut Graveyard,
     clause: &UpdateClause,
     rows: Vec<Row>,
 ) -> Result<Vec<Row>, Error> {
-    let mut writer = Writer { tx, slots };
+    let mut writer = Writer {
+        tx,
+        slots,
+        graveyard,
+    };
     match clause {
         UpdateClause::Create(parts) => {
             let mut rows = rows;
@@ -78,6 +90,7 @@ pub(crate) fn apply<W: WriteTransaction>(
 struct Writer<'a, W> {
     tx: &'a mut GraphTx<W>,
     slots: usize,
+    graveyard: &'a mut Graveyard,
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -324,13 +337,15 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
         }
         for relationship in relationships {
-            if self.tx.relationship(relationship)?.is_some() {
+            if let Some(record) = self.tx.relationship(relationship)? {
                 self.tx.delete_relationship(relationship)?;
+                self.graveyard.relationships.insert(relationship, record);
             }
         }
         for node in nodes {
-            if self.tx.node(node)?.is_some() {
+            if let Some(record) = self.tx.node(node)? {
                 self.tx.delete_node(node)?;
+                self.graveyard.nodes.insert(node, record);
             }
         }
         Ok(())

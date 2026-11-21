@@ -25,6 +25,7 @@ use super::plan::MatchClause;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
+use super::update::Graveyard;
 
 /// Runs a read-only program. It only needs a read transaction.
 pub(crate) fn run_read<T: ReadTransaction>(
@@ -37,7 +38,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
-    materialize(&env, &program.columns, rows)
+    materialize(&env, &Graveyard::default(), &program.columns, rows)
 }
 
 /// Runs a program with updating clauses on a write transaction. The caller commits.
@@ -47,11 +48,12 @@ pub(crate) fn run_write<W: WriteTransaction>(
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
     Env { tx: &*tx, slots }.check_closed(&program.closed)?;
+    let mut graveyard = Graveyard::default();
     let rows = run(program, |clause, rows| match clause {
         Clause::Read(clause) => Env { tx: &*tx, slots }.read_clause(clause, rows),
-        Clause::Update(clause) => super::update::apply(tx, slots, clause, rows),
+        Clause::Update(clause) => super::update::apply(tx, slots, &mut graveyard, clause, rows),
     })?;
-    materialize(&Env { tx: &*tx, slots }, &program.columns, rows)
+    materialize(&Env { tx: &*tx, slots }, &graveyard, &program.columns, rows)
 }
 
 fn run<C>(
@@ -85,12 +87,17 @@ fn run<C>(
 
 fn materialize<T: ReadTransaction>(
     env: &Env<'_, T>,
+    graveyard: &Graveyard,
     columns: &[String],
     rows: Vec<Vec<Datum>>,
 ) -> Result<QueryResult, Error> {
     let rows = rows
         .into_iter()
-        .map(|row| row.into_iter().map(|value| env.value(value)).collect())
+        .map(|row| {
+            row.into_iter()
+                .map(|value| env.value(value, graveyard))
+                .collect()
+        })
         .collect::<Result<_, _>>()?;
     Ok(QueryResult::new(columns.to_vec(), rows))
 }
@@ -247,8 +254,9 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(keyed.into_iter().map(|(_, row)| row).collect())
     }
 
-    /// Turns a runtime value into a public value, reading graph elements as they are now.
-    pub(crate) fn value(&self, value: Datum) -> Result<Value, Error> {
+    /// Turns a runtime value into a public value, reading graph elements as they are now and
+    /// deleted ones as they were when deleted.
+    pub(crate) fn value(&self, value: Datum, graveyard: &Graveyard) -> Result<Value, Error> {
         Ok(match value {
             Datum::Null => Value::Null,
             Datum::Boolean(value) => Value::Boolean(value),
@@ -259,20 +267,20 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::List(items) => Value::List(
                 items
                     .into_iter()
-                    .map(|item| self.value(item))
+                    .map(|item| self.value(item, graveyard))
                     .collect::<Result<_, _>>()?,
             ),
-            Datum::Map(entries) => Value::Map(self.map_value(entries)?),
-            Datum::Node(id) => Value::Node(self.node_value(id)?),
-            Datum::Relationship(id) => Value::Relationship(self.relationship_value(id)?),
+            Datum::Map(entries) => Value::Map(self.map_value(entries, graveyard)?),
+            Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
+            Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
             Datum::Path(path) => Value::Path(result::Path::new(
                 path.nodes
                     .into_iter()
-                    .map(|id| self.node_value(id))
+                    .map(|id| self.node_value(id, graveyard))
                     .collect::<Result<_, _>>()?,
                 path.relationships
                     .into_iter()
-                    .map(|id| self.relationship_value(id))
+                    .map(|id| self.relationship_value(id, graveyard))
                     .collect::<Result<_, _>>()?,
             )),
         })
@@ -281,33 +289,45 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn map_value(
         &self,
         entries: BTreeMap<String, Datum>,
+        graveyard: &Graveyard,
     ) -> Result<BTreeMap<String, Value>, Error> {
         entries
             .into_iter()
-            .map(|(key, value)| Ok((key, self.value(value)?)))
+            .map(|(key, value)| Ok((key, self.value(value, graveyard)?)))
             .collect()
     }
 
-    fn node_value(&self, id: crate::graph::NodeId) -> Result<result::Node, Error> {
-        let record = self.node(id)?;
+    fn node_value(
+        &self,
+        id: crate::graph::NodeId,
+        graveyard: &Graveyard,
+    ) -> Result<result::Node, Error> {
+        let record = match graveyard.nodes.get(&id) {
+            Some(record) => record.clone(),
+            None => self.node(id)?,
+        };
         Ok(result::Node {
             id,
             labels: self.label_names(&record)?.into_iter().collect(),
-            properties: self.map_value(self.property_map(&record.properties)?)?,
+            properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,
         })
     }
 
     fn relationship_value(
         &self,
         id: crate::graph::RelationshipId,
+        graveyard: &Graveyard,
     ) -> Result<result::Relationship, Error> {
-        let record = self.relationship(id)?;
+        let record = match graveyard.relationships.get(&id) {
+            Some(record) => record.clone(),
+            None => self.relationship(id)?,
+        };
         Ok(result::Relationship {
             id,
             rel_type: self.tx.token_name(record.rel_type)?,
             start: record.source,
             end: record.target,
-            properties: self.map_value(self.property_map(&record.properties)?)?,
+            properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,
         })
     }
 }
