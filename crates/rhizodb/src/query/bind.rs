@@ -47,6 +47,7 @@ pub(crate) fn bind(
         parameters,
         slot_count: 0,
         closed: Vec::new(),
+        expression_depth: 0,
     };
     let (singles, distinct) = match query {
         ast::Query::Single(single) => (vec![single], false),
@@ -174,6 +175,7 @@ struct Binder<'a> {
     parameters: &'a Parameters,
     slot_count: usize,
     closed: Vec<Expr>,
+    expression_depth: usize,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
@@ -461,7 +463,7 @@ impl Binder<'_> {
                         "a parameter map is only allowed in a pattern that creates",
                     ));
                 }
-                Ok(Some(Expr::Constant(self.parameter(&name.0)?)))
+                Ok(Some(Expr::Parameter(self.parameter(&name.0)?)))
             }
         }
     }
@@ -897,9 +899,14 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
-        let bound = self.open_expr(expr, scope, mode)?;
-        if !matches!(bound, Expr::Constant(_)) && is_closed(&bound, &mut Vec::new()) {
-            self.closed.push(bound.clone());
+        self.expression_depth += 1;
+        let bound = self.open_expr(expr, scope, mode);
+        self.expression_depth -= 1;
+        let bound = bound?;
+        if self.expression_depth == 0 {
+            let mut closed = Vec::new();
+            collect_closed(&bound, &mut Vec::new(), &mut closed);
+            self.closed.extend(closed.into_iter().cloned());
         }
         Ok(bound)
     }
@@ -958,7 +965,7 @@ impl Binder<'_> {
                 ast::Literal::Boolean(value) => Datum::Boolean(*value),
                 ast::Literal::Null => Datum::Null,
             }),
-            ast::Expr::Parameter(name) => Expr::Constant(self.parameter(&name.0)?),
+            ast::Expr::Parameter(name) => Expr::Parameter(self.parameter(&name.0)?),
             ast::Expr::Variable(name) => {
                 if matches!(mode, Mode::Constant) {
                     return Err(error(
@@ -1318,61 +1325,99 @@ fn argument_shapes(function: Function) -> &'static [Shape] {
     }
 }
 
-fn is_closed(expr: &Expr, local: &mut Vec<Slot>) -> bool {
-    match expr {
-        Expr::Constant(_) => true,
-        Expr::Slot(slot) => local.contains(slot),
-        Expr::List(items) | Expr::Call(_, items) => items.iter().all(|item| is_closed(item, local)),
-        Expr::Map(entries) => entries.iter().all(|(_, value)| is_closed(value, local)),
+fn evaluated_parts(expr: &Expr) -> Option<(Vec<&Expr>, Vec<&Expr>, Option<Slot>)> {
+    Some(match expr {
+        Expr::List(items) | Expr::Call(_, items) => (items.iter().collect(), Vec::new(), None),
+        Expr::Map(entries) => (
+            entries.iter().map(|(_, value)| value).collect(),
+            Vec::new(),
+            None,
+        ),
         Expr::Property(operand, _)
         | Expr::HasLabels(operand, _)
         | Expr::Not(operand)
         | Expr::Negate(operand)
         | Expr::UnaryPlus(operand)
-        | Expr::IsNull { operand, .. } => is_closed(operand, local),
+        | Expr::IsNull { operand, .. } => (vec![operand], Vec::new(), None),
         Expr::Index(base, index) | Expr::Binary(_, base, index) => {
-            is_closed(base, local) && is_closed(index, local)
+            (vec![base, index], Vec::new(), None)
         }
-        Expr::Slice(base, from, to) => {
-            is_closed(base, local)
-                && [from, to]
-                    .into_iter()
-                    .flatten()
-                    .all(|bound| is_closed(bound, local))
+        Expr::Slice(base, from, to) => (
+            std::iter::once(&**base)
+                .chain([from, to].into_iter().flatten().map(|bound| &**bound))
+                .collect(),
+            Vec::new(),
+            None,
+        ),
+        Expr::Comparison(first, rest) => (
+            std::iter::once(&**first)
+                .chain(rest.iter().map(|(_, operand)| operand))
+                .collect(),
+            Vec::new(),
+            None,
+        ),
+        Expr::Case(case) => {
+            let mut always: Vec<&Expr> = case.scrutinee.iter().collect();
+            let mut sometimes: Vec<&Expr> = Vec::new();
+            for (position, (when, then)) in case.branches.iter().enumerate() {
+                if position == 0 {
+                    always.push(when);
+                } else {
+                    sometimes.push(when);
+                }
+                sometimes.push(then);
+            }
+            sometimes.extend(&case.otherwise);
+            (always, sometimes, None)
         }
-        Expr::Comparison(first, rest) => {
-            is_closed(first, local) && rest.iter().all(|(_, operand)| is_closed(operand, local))
-        }
-        Expr::Case(case) => case
-            .scrutinee
-            .iter()
-            .chain(case.branches.iter().flat_map(|(when, then)| [when, then]))
-            .chain(&case.otherwise)
-            .all(|part| is_closed(part, local)),
-        Expr::ListComprehension(comprehension) => {
-            is_closed(&comprehension.source, local)
-                && within(local, comprehension.slot, |local| {
-                    comprehension
-                        .filter
-                        .iter()
-                        .chain(&comprehension.projection)
-                        .all(|part| is_closed(part, local))
-                })
-        }
-        Expr::Quantified(quantified) => {
-            is_closed(&quantified.source, local)
-                && within(local, quantified.slot, |local| {
-                    is_closed(&quantified.predicate, local)
-                })
-        }
-        Expr::Exists(_) | Expr::PatternComprehension(..) => false,
-    }
+        Expr::ListComprehension(comprehension) => (
+            vec![&comprehension.source],
+            comprehension
+                .filter
+                .iter()
+                .chain(&comprehension.projection)
+                .collect(),
+            Some(comprehension.slot),
+        ),
+        Expr::Quantified(quantified) => (
+            vec![&quantified.source],
+            vec![&quantified.predicate],
+            Some(quantified.slot),
+        ),
+        Expr::Constant(_)
+        | Expr::Parameter(_)
+        | Expr::Slot(_)
+        | Expr::Exists(_)
+        | Expr::PatternComprehension(..) => return None,
+    })
 }
 
-fn within(local: &mut Vec<Slot>, slot: Slot, check: impl FnOnce(&mut Vec<Slot>) -> bool) -> bool {
-    local.push(slot);
-    let closed = check(local);
-    local.pop();
+fn collect_closed<'a>(expr: &'a Expr, local: &mut Vec<Slot>, out: &mut Vec<&'a Expr>) -> bool {
+    let Some((always, sometimes, bound)) = evaluated_parts(expr) else {
+        return match expr {
+            Expr::Constant(_) => true,
+            Expr::Slot(slot) => local.contains(slot),
+            _ => false,
+        };
+    };
+    let mark = out.len();
+    let mut closed = true;
+    for child in always {
+        closed &= collect_closed(child, local, out);
+    }
+    let kept = out.len();
+    local.extend(bound);
+    for child in sometimes {
+        closed &= collect_closed(child, local, out);
+    }
+    if bound.is_some() {
+        local.pop();
+    }
+    out.truncate(kept);
+    if closed {
+        out.truncate(mark);
+        out.push(expr);
+    }
     closed
 }
 
@@ -1490,3 +1535,7 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         _ => Kind::Unknown,
     }
 }
+
+#[cfg(test)]
+#[path = "bind.test.rs"]
+mod tests;

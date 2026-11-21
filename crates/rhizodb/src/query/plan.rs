@@ -24,8 +24,9 @@ pub(crate) struct Program<C> {
     pub(crate) distinct: bool,
     pub(crate) columns: Vec<String>,
     pub(crate) slot_count: usize,
-    /// Expressions that read no row and match no pattern. They are evaluated once before the
-    /// first clause runs, so a type error in the query text is reported whatever the data.
+    /// The unconditionally evaluated expressions that read no row, no parameter, and match no
+    /// pattern. Each is evaluated once before the first clause runs, so a type error in the
+    /// query text is reported whatever the data.
     pub(crate) closed: Vec<Expr>,
 }
 
@@ -188,6 +189,9 @@ pub(crate) enum AggregateFunction {
 #[derive(Clone, Debug)]
 pub(crate) enum Expr {
     Constant(Datum),
+    /// A supplied parameter's value. It is data, not query text, so it never makes an
+    /// expression closed.
+    Parameter(Datum),
     Slot(Slot),
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),

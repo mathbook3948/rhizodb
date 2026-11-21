@@ -366,3 +366,66 @@ fn reading_a_deleted_element_fails() {
         ErrorKind::DeletedEntityAccess
     );
 }
+
+#[test]
+fn an_expression_conditional_evaluation_skips_never_fails() {
+    let db = db();
+    assert!(
+        run(
+            &db,
+            "MATCH (n) WHERE false RETURN CASE WHEN n IS NULL THEN 0 ELSE -'x' END"
+        )
+        .is_empty()
+    );
+    run(&db, "CREATE (:N)");
+    assert_eq!(
+        single(
+            &db,
+            "MATCH (n:N) RETURN CASE WHEN n IS NOT NULL THEN 0 ELSE -'x' END"
+        ),
+        int(0)
+    );
+    assert_eq!(
+        single(&db, "RETURN CASE WHEN true THEN 1 ELSE -'x' END"),
+        int(1)
+    );
+    assert_eq!(
+        single(&db, "RETURN [x IN [] | -'x']"),
+        Value::List(Vec::new())
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:N) RETURN CASE WHEN n IS NULL THEN 0 ELSE -'x' END"
+        ),
+        ErrorKind::TypeMismatch
+    );
+}
+
+#[test]
+fn parameter_values_are_data_not_query_text() {
+    let db = db();
+    let run_with = |query: &str, flag: Option<bool>| {
+        let mut parameters = rhizodb::Parameters::new();
+        parameters.insert("a".to_owned(), string("x"));
+        if let Some(flag) = flag {
+            parameters.insert("flag".to_owned(), boolean(flag));
+        }
+        db.execute(query, &parameters)
+    };
+    let branch = "RETURN CASE WHEN $flag THEN $a - 1 ELSE $a END";
+    assert_eq!(
+        run_with(branch, Some(false)).unwrap().rows(),
+        [vec![string("x")]]
+    );
+    assert_eq!(
+        run_with(branch, Some(true)).unwrap_err().kind(),
+        ErrorKind::TypeMismatch
+    );
+    assert!(
+        run_with("MATCH (n) RETURN $a - 1", None)
+            .unwrap()
+            .rows()
+            .is_empty()
+    );
+}

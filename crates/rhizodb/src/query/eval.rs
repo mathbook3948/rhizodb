@@ -137,7 +137,7 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
         match expr {
-            Expr::Constant(value) => Ok(value.clone()),
+            Expr::Constant(value) | Expr::Parameter(value) => Ok(value.clone()),
             Expr::Slot(slot) => Ok(row.get(*slot).cloned().unwrap_or(Datum::Null)),
             Expr::List(items) => items
                 .iter()
