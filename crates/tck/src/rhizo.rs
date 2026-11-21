@@ -172,6 +172,7 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::CreatingVarLength => ("SyntaxError", "CreatingVarLength"),
         ErrorKind::InvalidParameterUse => ("SyntaxError", "InvalidParameterUse"),
         ErrorKind::InvalidDelete => ("SyntaxError", "InvalidDelete"),
+        ErrorKind::NullMergeProperty => ("SemanticError", "MergeReadOwnWrites"),
         ErrorKind::RelationshipUniquenessViolation => {
             ("SyntaxError", "RelationshipUniquenessViolation")
         }

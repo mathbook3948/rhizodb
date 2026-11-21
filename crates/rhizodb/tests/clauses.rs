@@ -379,6 +379,31 @@ fn merge_matches_or_creates() {
 }
 
 #[test]
+fn merge_with_a_null_property_value_fails_instead_of_creating_forever() {
+    let db = db();
+    run(&db, "CREATE (:A), (:B)");
+    for query in [
+        "MERGE (n:N {k: null})",
+        "MATCH (a:A), (b:B) MERGE (a)-[r:X {k: null}]->(b)",
+        "MATCH (a:A) MERGE (a)-[:X]->(n:N {k: null})",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            rhizodb::ErrorKind::NullMergeProperty,
+            "{query}"
+        );
+    }
+    let mut parameters = Parameters::new();
+    parameters.insert("v".to_owned(), Value::Null);
+    let error = db
+        .execute("WITH $v AS v MERGE (n:N {k: v})", &parameters)
+        .unwrap_err();
+    assert_eq!(error.kind(), rhizodb::ErrorKind::NullMergeProperty);
+    assert_eq!(single(&db, "MATCH (n) RETURN count(n)"), int(2));
+    assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
+}
+
+#[test]
 fn aggregates_group_by_the_non_aggregated_items() {
     let db = people();
     let rows = run(

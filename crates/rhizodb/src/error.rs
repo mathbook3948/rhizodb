@@ -47,6 +47,8 @@ pub enum ErrorKind {
     CreatingVarLength,
     /// A parameter is used where only a literal map is allowed.
     InvalidParameterUse,
+    /// A `MERGE` pattern property evaluated to null, which can never match what the pattern creates.
+    NullMergeProperty,
     /// `DELETE` names something that is not a node, relationship, or path.
     InvalidDelete,
     /// One relationship variable appears twice in one pattern.

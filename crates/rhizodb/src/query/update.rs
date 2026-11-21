@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::Error;
+use crate::error::ErrorKind;
 use crate::gql::ast::Direction;
 use crate::graph::Direction as Adjacency;
 use crate::graph::GraphTx;
@@ -54,7 +55,7 @@ pub(crate) fn apply<W: WriteTransaction>(
             let mut rows = rows;
             for row in &mut rows {
                 for part in parts {
-                    writer.create(part, row)?;
+                    writer.create(part, row, false)?;
                 }
             }
             Ok(rows)
@@ -105,14 +106,28 @@ impl<W: WriteTransaction> Writer<'_, W> {
         self.env().eval(expr, row)
     }
 
-    fn properties(&mut self, expr: Option<&Expr>, row: &Row) -> Result<Properties, Error> {
+    fn properties(
+        &mut self,
+        expr: Option<&Expr>,
+        row: &Row,
+        merging: bool,
+    ) -> Result<Properties, Error> {
         let mut properties = Properties::new();
         let Some(expr) = expr else {
             return Ok(properties);
         };
         for (key, value) in self.map_operand(self.eval(expr, row)?)? {
-            if let Some(value) = to_property(&value)? {
-                properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
+            match to_property(&value)? {
+                Some(value) => {
+                    properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
+                }
+                None if merging => {
+                    return Err(Error::new(
+                        ErrorKind::NullMergeProperty,
+                        format!("MERGE cannot use a null value for property `{key}`"),
+                    ));
+                }
+                None => {}
             }
         }
         Ok(properties)
@@ -132,7 +147,12 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
     }
 
-    fn node(&mut self, pattern: &NodePattern, row: &mut Row) -> Result<NodeId, Error> {
+    fn node(
+        &mut self,
+        pattern: &NodePattern,
+        row: &mut Row,
+        merging: bool,
+    ) -> Result<NodeId, Error> {
         if pattern.bound {
             return match row.get(pattern.slot) {
                 Some(Datum::Node(id)) => Ok(*id),
@@ -144,7 +164,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             };
         }
         let mut record = NodeRecord {
-            properties: self.properties(pattern.properties.as_ref(), row)?,
+            properties: self.properties(pattern.properties.as_ref(), row, merging)?,
             ..NodeRecord::default()
         };
         for label in &pattern.labels {
@@ -155,14 +175,14 @@ impl<W: WriteTransaction> Writer<'_, W> {
         Ok(id)
     }
 
-    fn create(&mut self, part: &PatternPart, row: &mut Row) -> Result<(), Error> {
-        let mut current = self.node(&part.start, row)?;
+    fn create(&mut self, part: &PatternPart, row: &mut Row, merging: bool) -> Result<(), Error> {
+        let mut current = self.node(&part.start, row, merging)?;
         let mut trail = PathIds {
             nodes: vec![current],
             relationships: Vec::new(),
         };
         for step in &part.steps {
-            let next = self.node(&step.node, row)?;
+            let next = self.node(&step.node, row, merging)?;
             let relationship = &step.relationship;
             let (source, target) = match relationship.direction {
                 Direction::Incoming => (next, current),
@@ -176,7 +196,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 rel_type,
                 source,
                 target,
-                properties: self.properties(relationship.properties.as_ref(), row)?,
+                properties: self.properties(relationship.properties.as_ref(), row, merging)?,
             };
             let id = self.tx.create_relationship(&record)?;
             set(row, relationship.slot, Datum::Relationship(id));
@@ -199,7 +219,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             })?;
         if matches.is_empty() {
             let mut row = row;
-            self.create(&merge.pattern, &mut row)?;
+            self.create(&merge.pattern, &mut row, true)?;
             self.set_all(&merge.on_create, &row)?;
             out.push(row);
             return Ok(());
