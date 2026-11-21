@@ -564,7 +564,12 @@ impl Binder<'_> {
         let (slot, bound) = match &relationship.variable {
             Some(name) => match scope.get(&name.0) {
                 Some(variable) => {
-                    if variable.kind != kind && variable.kind != Kind::Unknown {
+                    let list_of_relationships =
+                        kind == Kind::RelationshipList && variable.kind == Kind::Value;
+                    if variable.kind != kind
+                        && variable.kind != Kind::Unknown
+                        && !list_of_relationships
+                    {
                         return Err(error(
                             ErrorKind::VariableTypeConflict,
                             format!("variable `{}` is not a relationship", name.0),
@@ -709,7 +714,7 @@ impl Binder<'_> {
         let mut items: Vec<(ast::Expr, String)> = Vec::new();
         let explicit = match &projection.items {
             ast::ProjectionItems::Star(extra) => {
-                if scope.variables.is_empty() {
+                if !is_with && scope.variables.is_empty() {
                     return Err(error(
                         ErrorKind::NoVariablesInScope,
                         "`*` needs at least one variable in scope",

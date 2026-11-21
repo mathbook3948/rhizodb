@@ -108,6 +108,25 @@ fn variable_length_relationships_respect_their_bounds() {
         reached("MATCH ({i: 0})-[rs:R*..2]->(n) RETURN size(rs) ORDER BY size(rs)"),
         [1, 2]
     );
+    assert_eq!(
+        reached(
+            "MATCH ({i: 1})-[r1]->()-[r2]->() WITH [r1, r2] AS rs \
+             MATCH (a)-[rs*]->(b) RETURN a.i * 10 + b.i"
+        ),
+        [13]
+    );
+}
+
+#[test]
+fn with_star_passes_on_rows_even_without_variables() {
+    let db = db();
+    run(&db, "CREATE (), ()");
+    run(&db, "MATCH () CREATE () WITH * CREATE ()");
+    assert_eq!(single(&db, "MATCH (n) RETURN count(n)"), int(6));
+    assert_eq!(
+        error_kind(&db, "MATCH () RETURN *"),
+        ErrorKind::NoVariablesInScope
+    );
 }
 
 #[test]
