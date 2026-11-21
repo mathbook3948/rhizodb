@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-const MAX_DEPTH: usize = 64;
+pub(crate) const MAX_DEPTH: usize = 64;
 
 const TAG_BOOLEAN: u8 = 0;
 const TAG_INTEGER: u8 = 1;

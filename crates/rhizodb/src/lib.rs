@@ -7,6 +7,11 @@ mod error;
 pub mod gql;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod graph;
+#[allow(
+    dead_code,
+    reason = "the interpreter that uses runtime values comes in a later unit"
+)]
+mod query;
 #[allow(dead_code, reason = "built by the query executor in a later unit")]
 mod result;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
