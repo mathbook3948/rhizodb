@@ -521,3 +521,59 @@ fn floats_print_like_the_reference_implementation() {
     }
     assert_eq!(single(&db, "RETURN 'x' + 1e20"), string("x1.0E20"));
 }
+
+#[test]
+fn a_quantifier_variable_that_reuses_a_projected_name_is_its_own_variable() {
+    let db = db();
+    assert_eq!(
+        ints(&run(
+            &db,
+            "UNWIND [1, 2] AS x WITH DISTINCT x AS y WHERE any(x IN [5] WHERE x > y) RETURN y \
+             ORDER BY y"
+        )),
+        [1, 2]
+    );
+}
+
+#[test]
+fn a_rebound_name_in_with_distinct_where_is_the_new_binding() {
+    let db = db();
+    run(&db, "CREATE ({x: 1}), ({x: 2})");
+    assert_eq!(
+        ints(&run(
+            &db,
+            "MATCH (n {x: 1}), (m {x: 2}) WITH DISTINCT n.x AS nx, m AS n WHERE n.x = 2 \
+             RETURN nx"
+        )),
+        [1]
+    );
+}
+
+#[test]
+fn a_comprehension_variable_that_reuses_a_grouping_key_name_is_its_own_variable() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 2] AS x RETURN x, count(*) + [x IN [9] | x][0] AS c ORDER BY x"
+        ),
+        [vec![int(1), int(10)], vec![int(2), int(10)]]
+    );
+}
+
+#[test]
+fn order_by_and_where_after_with_distinct_read_projected_expressions_alike() {
+    let db = db();
+    run(
+        &db,
+        "CREATE ({name: 'a'}), ({name: 'b'}), ({name: 'c'}), ({name: 'c'})",
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n) WITH DISTINCT n.name AS name ORDER BY toUpper(n.name) DESC \
+             WHERE n.name <> 'a' RETURN name"
+        ),
+        [vec![string("c")], vec![string("b")]]
+    );
+}

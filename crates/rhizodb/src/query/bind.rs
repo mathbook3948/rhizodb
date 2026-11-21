@@ -151,11 +151,18 @@ enum Mode<'a> {
     /// slot, aggregates are collected and read their result slot, and any other variable of the
     /// incoming scope is ambiguous.
     Grouped(&'a mut Grouping),
-    /// Against the scope, where subexpressions equal to a projected item read the item's slot.
-    /// That is how the `WHERE` of `WITH DISTINCT` names an earlier variable's property.
-    Projected(&'a [(ast::Expr, Slot)]),
+    /// Against the scope, where subexpressions with the meaning of a projected item read the
+    /// item's slot. That is how the `WHERE` and `ORDER BY` of `WITH DISTINCT` name an earlier
+    /// variable's property.
+    Projected(Projected<'a>),
     /// Inside `SKIP` or `LIMIT`, where no variable may appear.
     Constant,
+}
+
+#[derive(Clone, Copy)]
+struct Projected<'a> {
+    items: &'a [(ast::Expr, Slot)],
+    scope: &'a Scope,
 }
 
 struct Grouping {
@@ -806,7 +813,10 @@ impl Binder<'_> {
                 };
                 let mut order_by = Vec::new();
                 for item in &projection.order_by {
-                    let bound = match item_slots.iter().find(|(expr, _)| *expr == item.expr) {
+                    let bound = match item_slots
+                        .iter()
+                        .find(|(expr, _)| same_meaning(expr, scope, &item.expr, &next))
+                    {
                         Some((_, slot)) => Expr::Slot(*slot),
                         None => self.expr(&item.expr, &next, &mut Mode::Grouped(&mut ordering))?,
                     };
@@ -843,10 +853,11 @@ impl Binder<'_> {
             }
             let mut order_by = Vec::new();
             for item in &projection.order_by {
-                let bound = match item_slots.iter().find(|(expr, _)| *expr == item.expr) {
-                    Some((_, slot)) => Expr::Slot(*slot),
-                    None => self.expr(&item.expr, &visible, &mut Mode::Plain)?,
+                let projected = Projected {
+                    items: &item_slots,
+                    scope,
                 };
+                let bound = self.expr(&item.expr, &visible, &mut Mode::Projected(projected))?;
                 order_by.push((bound, item.direction));
             }
             (Items::Plain(plain), order_by, visible)
@@ -862,7 +873,10 @@ impl Binder<'_> {
             .as_ref()
             .map(|limit| self.expr(limit, &Scope::default(), &mut Mode::Constant))
             .transpose()?;
-        let projected = (projection.distinct && !aggregating).then_some(item_slots.as_slice());
+        let projected = (projection.distinct && !aggregating).then_some(Projected {
+            items: &item_slots,
+            scope,
+        });
         let filter = filter
             .map(|filter| match projected {
                 Some(projected) => self.filter(filter, &visible, &mut Mode::Projected(projected)),
@@ -929,13 +943,20 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
-        if let Mode::Projected(items) = mode
-            && let Some((_, slot)) = items.iter().find(|(item, _)| item == expr)
+        if let Mode::Projected(projected) = mode
+            && let Some((_, slot)) = projected
+                .items
+                .iter()
+                .find(|(item, _)| same_meaning(item, projected.scope, expr, scope))
         {
             return Ok(Expr::Slot(*slot));
         }
         if let Mode::Grouped(grouping) = mode {
-            if let Some((key, slot)) = grouping.keys.iter().find(|(key, _)| key == expr) {
+            if let Some((key, slot)) = grouping
+                .keys
+                .iter()
+                .find(|(key, _)| same_meaning(key, &grouping.input, expr, scope))
+            {
                 if !is_simple_key(key) && !contains_aggregate(key) {
                     return Err(error(
                         ErrorKind::AmbiguousAggregationExpression,
@@ -1481,6 +1502,98 @@ fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::E
         ast::Expr::Function(call) => aggregate_function(&qualified_name(call))
             .map(|function| (function, call.distinct, call.args.as_slice())),
         _ => None,
+    }
+}
+
+fn same_meaning(key: &ast::Expr, key_scope: &Scope, expr: &ast::Expr, scope: &Scope) -> bool {
+    key == expr
+        && free_variables(expr).iter().all(|name| {
+            scope.get(name).is_none_or(|used| {
+                key_scope
+                    .get(name)
+                    .is_some_and(|keyed| keyed.slot == used.slot)
+            })
+        })
+}
+
+fn free_variables(expr: &ast::Expr) -> Vec<&str> {
+    let mut free = Vec::new();
+    collect_free(expr, &mut Vec::new(), &mut free);
+    free
+}
+
+fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Vec<&'a str>) {
+    match expr {
+        ast::Expr::Variable(name) => {
+            if !bound.contains(&name.0.as_str()) {
+                free.push(&name.0);
+            }
+        }
+        ast::Expr::ListComprehension(comprehension) => {
+            collect_free(&comprehension.source, bound, free);
+            bound.push(&comprehension.variable.0);
+            for body in comprehension.filter.iter().chain(&comprehension.projection) {
+                collect_free(body, bound, free);
+            }
+            bound.pop();
+        }
+        ast::Expr::ListPredicate(predicate) => {
+            collect_free(&predicate.source, bound, free);
+            bound.push(&predicate.variable.0);
+            collect_free(&predicate.predicate, bound, free);
+            bound.pop();
+        }
+        ast::Expr::Pattern(element) => collect_pattern_free(element, bound, free),
+        ast::Expr::Exists(subquery) => {
+            if let ast::ExistsSubquery::Pattern { patterns, filter } = subquery.as_ref() {
+                for part in patterns {
+                    collect_pattern_free(&part.element, bound, free);
+                }
+                if let Some(filter) = filter {
+                    collect_free(filter, bound, free);
+                }
+            }
+        }
+        ast::Expr::PatternComprehension(comprehension) => {
+            collect_pattern_free(&comprehension.element, bound, free);
+            for body in comprehension
+                .filter
+                .iter()
+                .chain(std::iter::once(&comprehension.projection))
+            {
+                collect_free(body, bound, free);
+            }
+        }
+        other => {
+            for child in children(other) {
+                collect_free(child, bound, free);
+            }
+        }
+    }
+}
+
+fn collect_pattern_free<'a>(
+    element: &'a ast::PatternElement,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    for name in pattern_variables(element) {
+        if !bound.contains(&name.0.as_str()) {
+            free.push(&name.0);
+        }
+    }
+    let nodes = std::iter::once(&element.start.properties)
+        .chain(element.steps.iter().map(|step| &step.node.properties));
+    let relationships = element
+        .steps
+        .iter()
+        .map(|step| &step.relationship.properties);
+    for properties in nodes.chain(relationships) {
+        if let Some(ast::Properties::Map(entries)) = properties {
+            for (_, value) in entries {
+                collect_free(value, bound, free);
+            }
+        }
     }
 }
 
