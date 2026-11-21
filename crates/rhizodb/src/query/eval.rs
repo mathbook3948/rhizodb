@@ -32,7 +32,7 @@ pub(crate) struct Env<'a, T> {
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::InvalidArgumentType, message)
+    Error::new(ErrorKind::TypeMismatch, message)
 }
 
 fn deleted() -> Error {

@@ -180,9 +180,9 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::InvalidArgumentType => ("SyntaxError", "InvalidArgumentType"),
         ErrorKind::MissingParameter => ("ParameterMissing", "MissingParameter"),
         ErrorKind::InvalidArgumentValue => ("TypeError", "InvalidArgumentValue"),
-        ErrorKind::PropertyAccessOnNonEntity | ErrorKind::ListElementAccessByNonInteger => {
-            ("TypeError", "InvalidArgumentType")
-        }
+        ErrorKind::TypeMismatch
+        | ErrorKind::PropertyAccessOnNonEntity
+        | ErrorKind::ListElementAccessByNonInteger => ("TypeError", "InvalidArgumentType"),
         ErrorKind::MapElementAccessByNonString => ("TypeError", "MapElementAccessByNonString"),
         ErrorKind::InvalidPropertyType => ("TypeError", "InvalidPropertyType"),
         ErrorKind::NumberOutOfRange => ("ArgumentError", "NumberOutOfRange"),

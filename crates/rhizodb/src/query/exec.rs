@@ -18,7 +18,6 @@ use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
-use super::eval::type_error;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
@@ -36,6 +35,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         tx,
         slots: program.slot_count,
     };
+    env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
     materialize(&env, &program.columns, rows)
 }
@@ -46,6 +46,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
     program: &Program<Clause>,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
+    Env { tx: &*tx, slots }.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| match clause {
         Clause::Read(clause) => Env { tx: &*tx, slots }.read_clause(clause, rows),
         Clause::Update(clause) => super::update::apply(tx, slots, clause, rows),
@@ -195,6 +196,18 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(rows)
     }
 
+    fn check_closed(&self, closed: &[Expr]) -> Result<(), Error> {
+        let row = vec![Datum::Null; self.slots];
+        for expr in closed {
+            if let Err(error) = self.eval(expr, &row)
+                && error.kind() == ErrorKind::TypeMismatch
+            {
+                return Err(error.with_kind(ErrorKind::InvalidArgumentType));
+            }
+        }
+        Ok(())
+    }
+
     fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
         match self.eval(expr, row)? {
             Datum::Integer(value) if value < 0 => Err(Error::new(
@@ -202,10 +215,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                 format!("{clause} cannot be negative"),
             )),
             Datum::Integer(value) => Ok(usize::try_from(value).unwrap_or(usize::MAX)),
-            other => Err(type_error(format!(
-                "{clause} needs an integer, not a {}",
-                other.type_name()
-            ))),
+            other => Err(Error::new(
+                ErrorKind::InvalidArgumentType,
+                format!("{clause} needs an integer, not a {}", other.type_name()),
+            )),
         }
     }
 

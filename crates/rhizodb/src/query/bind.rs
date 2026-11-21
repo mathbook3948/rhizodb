@@ -46,6 +46,7 @@ pub(crate) fn bind(
         source,
         parameters,
         slot_count: 0,
+        closed: Vec::new(),
     };
     let (singles, distinct) = match query {
         ast::Query::Single(single) => (vec![single], false),
@@ -71,6 +72,7 @@ pub(crate) fn bind(
     }
     let columns = columns.unwrap_or_default();
     let slot_count = binder.slot_count;
+    let closed = binder.closed;
     let updating = parts.iter().any(|part| {
         part.clauses
             .iter()
@@ -82,6 +84,7 @@ pub(crate) fn bind(
             distinct,
             columns,
             slot_count,
+            closed,
         }));
     }
     let parts = parts
@@ -103,6 +106,7 @@ pub(crate) fn bind(
         distinct,
         columns,
         slot_count,
+        closed,
     }))
 }
 
@@ -168,6 +172,7 @@ struct Binder<'a> {
     source: &'a str,
     parameters: &'a Parameters,
     slot_count: usize,
+    closed: Vec<Expr>,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
@@ -809,6 +814,19 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
+        let bound = self.open_expr(expr, scope, mode)?;
+        if !matches!(bound, Expr::Constant(_)) && is_closed(&bound, &mut Vec::new()) {
+            self.closed.push(bound.clone());
+        }
+        Ok(bound)
+    }
+
+    fn open_expr(
+        &mut self,
+        expr: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
         if let Mode::Grouped(grouping) = mode {
             if let Some((_, slot)) = grouping.keys.iter().find(|(key, _)| key == expr) {
                 return Ok(Expr::Slot(*slot));
@@ -1137,6 +1155,64 @@ fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast
             .iter()
             .flat_map(|step| step.relationship.variable.iter().chain(&step.node.variable)),
     )
+}
+
+fn is_closed(expr: &Expr, local: &mut Vec<Slot>) -> bool {
+    match expr {
+        Expr::Constant(_) => true,
+        Expr::Slot(slot) => local.contains(slot),
+        Expr::List(items) | Expr::Call(_, items) => items.iter().all(|item| is_closed(item, local)),
+        Expr::Map(entries) => entries.iter().all(|(_, value)| is_closed(value, local)),
+        Expr::Property(operand, _)
+        | Expr::HasLabels(operand, _)
+        | Expr::Not(operand)
+        | Expr::Negate(operand)
+        | Expr::UnaryPlus(operand)
+        | Expr::IsNull { operand, .. } => is_closed(operand, local),
+        Expr::Index(base, index) | Expr::Binary(_, base, index) => {
+            is_closed(base, local) && is_closed(index, local)
+        }
+        Expr::Slice(base, from, to) => {
+            is_closed(base, local)
+                && [from, to]
+                    .into_iter()
+                    .flatten()
+                    .all(|bound| is_closed(bound, local))
+        }
+        Expr::Comparison(first, rest) => {
+            is_closed(first, local) && rest.iter().all(|(_, operand)| is_closed(operand, local))
+        }
+        Expr::Case(case) => case
+            .scrutinee
+            .iter()
+            .chain(case.branches.iter().flat_map(|(when, then)| [when, then]))
+            .chain(&case.otherwise)
+            .all(|part| is_closed(part, local)),
+        Expr::ListComprehension(comprehension) => {
+            is_closed(&comprehension.source, local)
+                && within(local, comprehension.slot, |local| {
+                    comprehension
+                        .filter
+                        .iter()
+                        .chain(&comprehension.projection)
+                        .all(|part| is_closed(part, local))
+                })
+        }
+        Expr::Quantified(quantified) => {
+            is_closed(&quantified.source, local)
+                && within(local, quantified.slot, |local| {
+                    is_closed(&quantified.predicate, local)
+                })
+        }
+        Expr::Exists(_) | Expr::PatternComprehension(..) => false,
+    }
+}
+
+fn within(local: &mut Vec<Slot>, slot: Slot, check: impl FnOnce(&mut Vec<Slot>) -> bool) -> bool {
+    local.push(slot);
+    let closed = check(local);
+    local.pop();
+    closed
 }
 
 fn names(names: &[ast::Name]) -> Vec<String> {

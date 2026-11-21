@@ -57,8 +57,11 @@ pub enum ErrorKind {
     InvalidNumberOfArguments,
     /// A query refers to a parameter that was not supplied.
     MissingParameter,
-    /// An operator, function, or clause got a value of a type it does not accept.
+    /// The query text itself applies an operator or clause to a value of a type it does not
+    /// accept, so it fails before reading any data: `RETURN 1 AND 'a'`, `SKIP 1.5`.
     InvalidArgumentType,
+    /// An operator or clause got a value of a type it does not accept from the data it read.
+    TypeMismatch,
     /// A function got a value of the right type that it cannot convert or use.
     InvalidArgumentValue,
     /// A property was read from a value that is not a node, relationship, or map.
@@ -112,6 +115,11 @@ impl Error {
     /// The condition that caused the failure.
     pub fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// The same failure, classified as `kind` instead.
+    pub(crate) fn with_kind(self, kind: ErrorKind) -> Self {
+        Self { kind, ..self }
     }
 }
 

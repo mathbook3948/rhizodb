@@ -1444,6 +1444,14 @@ expressions/list/List1.feature: [2] Indexing into nested literal lists
 expressions/list/List1.feature: [3] Use list lookup based on parameters when there is no type information
 expressions/list/List1.feature: [4] Use list lookup based on parameters when there is lhs type information
 expressions/list/List1.feature: [5] Use list lookup based on parameters when there is rhs type information
+expressions/list/List1.feature: [6] Fail when indexing a non-list #Example: <exampleName> #1
+expressions/list/List1.feature: [6] Fail when indexing a non-list #Example: <exampleName> #2
+expressions/list/List1.feature: [6] Fail when indexing a non-list #Example: <exampleName> #3
+expressions/list/List1.feature: [6] Fail when indexing a non-list #Example: <exampleName> #4
+expressions/list/List1.feature: [7] Fail when indexing a non-list given by a parameter #Example: <exampleName> #1
+expressions/list/List1.feature: [7] Fail when indexing a non-list given by a parameter #Example: <exampleName> #2
+expressions/list/List1.feature: [7] Fail when indexing a non-list given by a parameter #Example: <exampleName> #3
+expressions/list/List1.feature: [7] Fail when indexing a non-list given by a parameter #Example: <exampleName> #4
 expressions/list/List1.feature: [8] Fail when indexing with a non-integer #Example: <exampleName> #1
 expressions/list/List1.feature: [8] Fail when indexing with a non-integer #Example: <exampleName> #2
 expressions/list/List1.feature: [8] Fail when indexing with a non-integer #Example: <exampleName> #3
@@ -1745,6 +1753,7 @@ expressions/map/Map2.feature: [5] Dynamically access a field is case-sensitive #
 expressions/map/Map2.feature: [5] Dynamically access a field is case-sensitive #7
 expressions/map/Map2.feature: [6] Fail at runtime when attempting to index with an Int into a Map
 expressions/map/Map2.feature: [7] Fail at runtime when trying to index into a map with a non-string
+expressions/map/Map2.feature: [8] Fail at runtime when trying to index something which is not a map
 expressions/map/Map3.feature: [1] Using `keys()` on a literal map
 expressions/map/Map3.feature: [2] Using `keys()` on a parameter map
 expressions/map/Map3.feature: [3] Using `keys()` on null map

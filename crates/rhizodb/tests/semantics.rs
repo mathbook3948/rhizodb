@@ -154,6 +154,40 @@ fn skip_and_limit_must_be_non_negative_integer_constants() {
 }
 
 #[test]
+fn type_errors_in_the_query_text_fail_even_without_rows() {
+    let db = db();
+    for query in [
+        "MATCH (n) RETURN 1 AND 'a'",
+        "MATCH (n) RETURN NOT 3",
+        "MATCH (n) RETURN 1 IN true",
+        "MATCH (n) RETURN any(x IN ['a'] WHERE x % 2 = 0)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn type_errors_found_in_data_are_type_mismatches() {
+    let db = db();
+    assert_eq!(
+        error_kind(&db, "UNWIND [true, 'a'] AS x RETURN x AND true"),
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(
+        error_kind(&db, "WITH 123 AS list RETURN list[0]"),
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(
+        run(&db, "UNWIND [] AS x RETURN x AND true"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn binding_errors_are_reported_before_running() {
     let db = db();
     assert_eq!(

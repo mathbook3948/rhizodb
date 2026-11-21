@@ -24,6 +24,9 @@ pub(crate) struct Program<C> {
     pub(crate) distinct: bool,
     pub(crate) columns: Vec<String>,
     pub(crate) slot_count: usize,
+    /// Expressions that read no row and match no pattern. They are evaluated once before the
+    /// first clause runs, so a type error in the query text is reported whatever the data.
+    pub(crate) closed: Vec<Expr>,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.
