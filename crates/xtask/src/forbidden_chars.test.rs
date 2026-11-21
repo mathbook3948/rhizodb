@@ -37,6 +37,11 @@ fn skips_vendored_skills_and_tck_files() {
 }
 
 #[test]
+fn skips_the_tck_ratchet_whose_lines_are_vendored_scenario_names() {
+    assert!(is_vendored("crates/tck/passing.txt"));
+}
+
+#[test]
 fn checks_project_files_next_to_vendored_ones() {
     assert!(!is_vendored("crates/tck/src/lib.rs"));
     assert!(!is_vendored("docs/README.md"));

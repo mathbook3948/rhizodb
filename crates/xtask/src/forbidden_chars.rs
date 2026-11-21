@@ -2,7 +2,11 @@ use std::error::Error;
 use std::path::Path;
 use std::process::Command;
 
-const VENDORED_PREFIXES: [&str; 2] = [".claude/skills/", "crates/tck/vendor/"];
+const VENDORED_PREFIXES: [&str; 3] = [
+    ".claude/skills/",
+    "crates/tck/vendor/",
+    "crates/tck/passing.txt",
+];
 
 const FORBIDDEN: [(char, &str); 13] = [
     ('\u{2013}', "en dash"),
