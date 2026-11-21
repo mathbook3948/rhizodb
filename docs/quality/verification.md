@@ -19,5 +19,4 @@ A database that returns wrong results or loses data after a crash is worse than 
 
 ## Open
 
-- How TCK setup queries written in Cypher-only syntax, such as `CREATE`, are run
 - How GQL features outside the Cypher overlap are verified
