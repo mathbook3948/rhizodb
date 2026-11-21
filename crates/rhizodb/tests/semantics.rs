@@ -137,6 +137,37 @@ fn implicit_grouping_keys_are_the_non_aggregated_items() {
 }
 
 #[test]
+fn next_to_an_aggregate_only_simple_keys_and_projected_names_are_visible() {
+    let db = db();
+    let rows = run(
+        &db,
+        "UNWIND [{a: 1}, {a: 1}, {a: 1}, {a: 5}] AS m \
+         RETURN m.a AS a, m.a + count(*) AS score ORDER BY m.a + count(*) DESC",
+    );
+    assert_eq!(rows, [vec![int(5), int(6)], vec![int(1), int(4)]]);
+    for (query, kind) in [
+        (
+            "UNWIND [1, 2] AS x RETURN x + 1, x + 1 + count(*)",
+            ErrorKind::AmbiguousAggregationExpression,
+        ),
+        (
+            "UNWIND [1, 2] AS x WITH count(*) AS c ORDER BY x + count(*) RETURN c",
+            ErrorKind::UndefinedVariable,
+        ),
+        (
+            "UNWIND [1, 2] AS x WITH count(*) AS c ORDER BY sum(x) RETURN c",
+            ErrorKind::UndefinedVariable,
+        ),
+        (
+            "RETURN [x IN [1, 2] | count(*)]",
+            ErrorKind::InvalidAggregation,
+        ),
+    ] {
+        assert_eq!(error_kind(&db, query), kind, "{query}");
+    }
+}
+
+#[test]
 fn skip_and_limit_must_be_non_negative_integer_constants() {
     let db = db();
     assert_eq!(

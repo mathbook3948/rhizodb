@@ -664,6 +664,8 @@ clauses/return-orderby/ReturnOrderBy5.feature: [1] Renaming columns before ORDER
 clauses/return-orderby/ReturnOrderBy6.feature: [1] Handle constants and parameters inside an order by item which contains an aggregation expression
 clauses/return-orderby/ReturnOrderBy6.feature: [2] Handle returned aliases inside an order by item which contains an aggregation expression
 clauses/return-orderby/ReturnOrderBy6.feature: [3] Handle returned property accesses inside an order by item which contains an aggregation expression
+clauses/return-orderby/ReturnOrderBy6.feature: [4] Fail if not returned variables are used inside an order by item which contains an aggregation expression
+clauses/return-orderby/ReturnOrderBy6.feature: [5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression
 clauses/return-skip-limit/ReturnSkipLimit1.feature: [10] Fail when using non-constants in SKIP
 clauses/return-skip-limit/ReturnSkipLimit1.feature: [11] Fail when using negative value in SKIP
 clauses/return-skip-limit/ReturnSkipLimit1.feature: [1] Start the result from the second row
@@ -744,6 +746,7 @@ clauses/return/Return6.feature: [18] Handle returned variables inside an express
 clauses/return/Return6.feature: [19] Handle returned property accesses inside an expression which contains an aggregation expression
 clauses/return/Return6.feature: [1] Return count aggregation over nodes
 clauses/return/Return6.feature: [20] Fail if not returned variables are used inside an expression which contains an aggregation expression
+clauses/return/Return6.feature: [21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression
 clauses/return/Return6.feature: [2] Projecting an arithmetic expression with aggregation
 clauses/return/Return6.feature: [3] Aggregating by a list property has a correct definition of equality
 clauses/return/Return6.feature: [4] Support multiple divisions in aggregate function
@@ -1044,10 +1047,13 @@ clauses/with-orderBy/WithOrderBy3.feature: [8] Fail on sorting by any number of 
 clauses/with-orderBy/WithOrderBy4.feature: [10] Sort by a non-projected expression containing an alias of a projected expression containing the variable shadowed by the alias
 clauses/with-orderBy/WithOrderBy4.feature: [11] Sort by an aggregate projection
 clauses/with-orderBy/WithOrderBy4.feature: [12] Sort by an aliased aggregate projection
+clauses/with-orderBy/WithOrderBy4.feature: [13] Fail on sorting by a non-projected aggregation on a variable
+clauses/with-orderBy/WithOrderBy4.feature: [14] Fail on sorting by a non-projected aggregation on an expression
 clauses/with-orderBy/WithOrderBy4.feature: [15] Sort by an aliased aggregate projection does allow subsequent matching
 clauses/with-orderBy/WithOrderBy4.feature: [16] Handle constants and parameters inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [17] Handle projected variables inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [18]  Handle projected property accesses inside an order by item which contains an aggregation expression
+clauses/with-orderBy/WithOrderBy4.feature: [19] Fail if not projected variables are used inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [1] Sort by a projected expression
 clauses/with-orderBy/WithOrderBy4.feature: [2] Sort by an alias of a projected expression
 clauses/with-orderBy/WithOrderBy4.feature: [3] Sort by two projected expressions with order priority being different than projection order
@@ -1110,6 +1116,7 @@ clauses/with/With6.feature: [5] Handle constants and parameters inside an expres
 clauses/with/With6.feature: [6] Handle projected variables inside an expression which contains an aggregation expression
 clauses/with/With6.feature: [7] Handle projected property accesses inside an expression which contains an aggregation expression
 clauses/with/With6.feature: [8] Fail if not projected variables are used inside an expression which contains an aggregation expression
+clauses/with/With6.feature: [9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression
 clauses/with/With7.feature: [1] A simple pattern with one bound endpoint
 clauses/with/With7.feature: [2] Multiple WITHs using a predicate and aggregation
 expressions/aggregation/Aggregation1.feature: [1] Count only non-null values
@@ -1520,6 +1527,7 @@ expressions/list/List12.feature: [3] Size of list comprehension
 expressions/list/List12.feature: [4] Returning a list comprehension
 expressions/list/List12.feature: [5] Using a list comprehension in a WITH
 expressions/list/List12.feature: [6] Using a list comprehension in a WHERE
+expressions/list/List12.feature: [7] Fail when using aggregation in list comprehension
 expressions/list/List2.feature: [10] List slice with parameterised range
 expressions/list/List2.feature: [11] List slice with parameterised invalid range
 expressions/list/List2.feature: [1] List slice

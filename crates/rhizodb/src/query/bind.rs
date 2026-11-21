@@ -158,6 +158,7 @@ struct Grouping {
     keys: Vec<(ast::Expr, Slot)>,
     input: Scope,
     aggregates: Vec<(Aggregate, Slot)>,
+    ordering: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -753,6 +754,7 @@ impl Binder<'_> {
                 keys: Vec::new(),
                 input: scope.clone(),
                 aggregates: Vec::new(),
+                ordering: false,
             };
             let mut keys = Vec::new();
             for (expr, _) in &items {
@@ -785,10 +787,14 @@ impl Binder<'_> {
                     keys: item_slots.clone(),
                     input: scope.clone(),
                     aggregates: std::mem::take(&mut grouping.aggregates),
+                    ordering: true,
                 };
                 let mut order_by = Vec::new();
                 for item in &projection.order_by {
-                    let bound = self.expr(&item.expr, &next, &mut Mode::Grouped(&mut ordering))?;
+                    let bound = match item_slots.iter().find(|(expr, _)| *expr == item.expr) {
+                        Some((_, slot)) => Expr::Slot(*slot),
+                        None => self.expr(&item.expr, &next, &mut Mode::Grouped(&mut ordering))?,
+                    };
                     order_by.push((bound, item.direction));
                 }
                 grouping.aggregates = ordering.aggregates;
@@ -900,10 +906,20 @@ impl Binder<'_> {
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
         if let Mode::Grouped(grouping) = mode {
-            if let Some((_, slot)) = grouping.keys.iter().find(|(key, _)| key == expr) {
+            if let Some((key, slot)) = grouping.keys.iter().find(|(key, _)| key == expr) {
+                if !is_simple_key(key) && !contains_aggregate(key) {
+                    return Err(error(
+                        ErrorKind::AmbiguousAggregationExpression,
+                        "only a variable or a property of one can be used as a grouping key \
+                         next to an aggregate",
+                    ));
+                }
                 return Ok(Expr::Slot(*slot));
             }
             if let Some((function, distinct, args)) = aggregate_call(expr) {
+                if grouping.ordering {
+                    self.aggregate(function, distinct, args, scope)?;
+                }
                 let aggregate = self.aggregate(function, distinct, args, &grouping.input)?;
                 let slot = self.slot();
                 grouping.aggregates.push((aggregate, slot));
@@ -912,7 +928,7 @@ impl Binder<'_> {
             if let ast::Expr::Variable(name) = expr
                 && scope.get(&name.0).is_none()
             {
-                let known = grouping.input.get(&name.0).is_some();
+                let known = !grouping.ordering && grouping.input.get(&name.0).is_some();
                 return Err(if known {
                     error(
                         ErrorKind::AmbiguousAggregationExpression,
@@ -1049,6 +1065,14 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::ListComprehension(comprehension) => {
+                if comprehension
+                    .filter
+                    .iter()
+                    .chain(&comprehension.projection)
+                    .any(|body| contains_aggregate(body))
+                {
+                    return Err(per_element_aggregate());
+                }
                 let source = self.expr(&comprehension.source, scope, mode)?;
                 let slot = self.slot();
                 let mut inner = scope.clone();
@@ -1069,6 +1093,9 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::ListPredicate(predicate) => {
+                if contains_aggregate(&predicate.predicate) {
+                    return Err(per_element_aggregate());
+                }
                 let source = self.expr(&predicate.source, scope, mode)?;
                 let slot = self.slot();
                 let mut inner = scope.clone();
@@ -1116,6 +1143,14 @@ impl Binder<'_> {
                 }
             },
             ast::Expr::PatternComprehension(comprehension) => {
+                if comprehension
+                    .filter
+                    .iter()
+                    .chain(std::iter::once(&comprehension.projection))
+                    .any(|body| contains_aggregate(body))
+                {
+                    return Err(per_element_aggregate());
+                }
                 let part = ast::PatternPart {
                     path_variable: comprehension.path_variable.clone(),
                     element: comprehension.element.clone(),
@@ -1209,6 +1244,13 @@ impl Binder<'_> {
             extra,
         })
     }
+}
+
+fn per_element_aggregate() -> Error {
+    error(
+        ErrorKind::InvalidAggregation,
+        "an aggregate cannot be computed once per list element",
+    )
 }
 
 fn aggregate_not_allowed(mode: &Mode<'_>) -> Error {
@@ -1329,6 +1371,14 @@ fn within(local: &mut Vec<Slot>, slot: Slot, check: impl FnOnce(&mut Vec<Slot>) 
     closed
 }
 
+fn is_simple_key(key: &ast::Expr) -> bool {
+    match key {
+        ast::Expr::Variable(_) => true,
+        ast::Expr::Property { base, .. } => matches!(base.as_ref(), ast::Expr::Variable(_)),
+        _ => false,
+    }
+}
+
 fn names(names: &[ast::Name]) -> Vec<String> {
     names.iter().map(|name| name.0.clone()).collect()
 }
@@ -1406,19 +1456,9 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
             )
             .chain(case.otherwise.as_deref())
             .collect(),
-        ast::Expr::ListComprehension(comprehension) => {
-            std::iter::once(comprehension.source.as_ref())
-                .chain(comprehension.filter.as_deref())
-                .chain(comprehension.projection.as_deref())
-                .collect()
-        }
-        ast::Expr::ListPredicate(predicate) => vec![&predicate.source, &predicate.predicate],
-        ast::Expr::PatternComprehension(comprehension) => comprehension
-            .filter
-            .as_deref()
-            .into_iter()
-            .chain(std::iter::once(comprehension.projection.as_ref()))
-            .collect(),
+        ast::Expr::ListComprehension(comprehension) => vec![&comprehension.source],
+        ast::Expr::ListPredicate(predicate) => vec![&predicate.source],
+        ast::Expr::PatternComprehension(_) => Vec::new(),
     }
 }
 
