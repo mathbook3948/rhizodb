@@ -1169,6 +1169,7 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::Pattern(element) => {
+                let scope = &self.pattern_scope(scope, pattern_variables(element), mode)?;
                 if let Some(name) =
                     pattern_variables(element).find(|name| scope.get(&name.0).is_none())
                 {
@@ -1192,9 +1193,18 @@ impl Binder<'_> {
                 )?))
             }
             ast::Expr::Exists(subquery) => match subquery.as_ref() {
-                ast::ExistsSubquery::Pattern { patterns, filter } => Expr::Exists(Box::new(
-                    self.pattern_query(patterns, filter.as_ref(), scope, mode)?,
-                )),
+                ast::ExistsSubquery::Pattern { patterns, filter } => {
+                    let names = patterns
+                        .iter()
+                        .flat_map(|part| pattern_variables(&part.element));
+                    let scope = &self.pattern_scope(scope, names, mode)?;
+                    Expr::Exists(Box::new(self.pattern_query(
+                        patterns,
+                        filter.as_ref(),
+                        scope,
+                        mode,
+                    )?))
+                }
                 ast::ExistsSubquery::Query(_) => {
                     return Err(error(
                         ErrorKind::Unsupported,
@@ -1215,7 +1225,8 @@ impl Binder<'_> {
                     path_variable: comprehension.path_variable.clone(),
                     element: comprehension.element.clone(),
                 };
-                let mut inner = scope.clone();
+                let mut inner =
+                    self.pattern_scope(scope, pattern_variables(&part.element), mode)?;
                 let mut introduced = Vec::new();
                 let pattern =
                     self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
@@ -1233,6 +1244,51 @@ impl Binder<'_> {
                 )
             }
         })
+    }
+
+    fn pattern_scope<'n>(
+        &self,
+        scope: &Scope,
+        names: impl Iterator<Item = &'n ast::Name>,
+        mode: &Mode<'_>,
+    ) -> Result<Scope, Error> {
+        let mut visible = scope.clone();
+        let hidden = |name: &ast::Name| match mode {
+            Mode::Grouped(grouping) => grouping.input.get(&name.0).map(|_| {
+                if grouping.ordering {
+                    ErrorKind::UndefinedVariable
+                } else {
+                    ErrorKind::AmbiguousAggregationExpression
+                }
+            }),
+            Mode::Projected(projected) => projected
+                .scope
+                .get(&name.0)
+                .map(|_| ErrorKind::UndefinedVariable),
+            Mode::Plain | Mode::Constant => None,
+        };
+        if let Mode::Grouped(grouping) = mode
+            && !grouping.ordering
+        {
+            for (key, slot) in &grouping.keys {
+                if let ast::Expr::Variable(name) = key
+                    && visible.get(&name.0).is_none()
+                {
+                    visible.insert(&name.0, *slot, kind_of(key, &grouping.input));
+                }
+            }
+        }
+        for name in names {
+            if visible.get(&name.0).is_none()
+                && let Some(kind) = hidden(name)
+            {
+                return Err(error(
+                    kind,
+                    format!("`{}` is not visible next to this projection", name.0),
+                ));
+            }
+        }
+        Ok(visible)
     }
 
     fn pattern_query(

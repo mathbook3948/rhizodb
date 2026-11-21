@@ -577,3 +577,73 @@ fn order_by_and_where_after_with_distinct_read_projected_expressions_alike() {
         [vec![string("c")], vec![string("b")]]
     );
 }
+
+const CHAIN: &str = "CREATE (:N {i: 1})-[:R]->(:N {i: 2})-[:R]->(:N {i: 3})";
+
+#[test]
+fn a_pattern_next_to_an_aggregate_sees_the_grouped_variable() {
+    let db = db();
+    run(&db, CHAIN);
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a:N) WITH a, count(*) + size([(a)-->(x) | x]) AS v RETURN a.i, v ORDER BY a.i"
+        ),
+        [
+            vec![int(1), int(2)],
+            vec![int(2), int(2)],
+            vec![int(3), int(1)]
+        ]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a:N) WITH a, count(*) AS c, count(*) > 0 AND exists { (a)-->() } AS e RETURN a.i, c, e ORDER BY a.i"
+        ),
+        [
+            vec![int(1), int(1), boolean(true)],
+            vec![int(2), int(1), boolean(true)],
+            vec![int(3), int(1), boolean(false)]
+        ]
+    );
+}
+
+#[test]
+fn a_pattern_next_to_an_aggregate_cannot_use_a_variable_that_is_not_a_grouping_key() {
+    let db = db();
+    run(&db, CHAIN);
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (a:N) RETURN a.i AS i, count(*) + size([(a)-->(x) | x]) AS v"
+        ),
+        ErrorKind::AmbiguousAggregationExpression
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (a:N) RETURN a.i AS i, count(*) AS c ORDER BY exists { (a)-->() }"
+        ),
+        ErrorKind::UndefinedVariable
+    );
+}
+
+#[test]
+fn a_pattern_after_with_distinct_sees_only_projected_variables() {
+    let db = db();
+    run(&db, CHAIN);
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:N) WITH DISTINCT n.i AS i WHERE size([(n)-->(m) | m]) = 0 RETURN i"
+        ),
+        ErrorKind::UndefinedVariable
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:N) WITH DISTINCT n AS n WHERE size([(n)-->(m) | m]) = 0 RETURN n.i"
+        ),
+        [vec![int(3)]]
+    );
+}
