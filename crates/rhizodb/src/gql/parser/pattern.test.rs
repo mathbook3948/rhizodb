@@ -85,6 +85,7 @@ fn every_arrow_form_has_its_direction() {
         ("(a)<-[]->(b)", Direction::Undirected),
         ("(a)->(b)", Direction::Outgoing),
         ("(a)<-(b)", Direction::Incoming),
+        ("(a)-(b)", Direction::Undirected),
     ] {
         assert_eq!(only_relationship(pattern).direction, direction, "{pattern}");
     }
