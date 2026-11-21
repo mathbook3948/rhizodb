@@ -1024,6 +1024,8 @@ clauses/with-skip-limit/WithSkipLimit3.feature: [1] Get rows in the middle
 clauses/with-skip-limit/WithSkipLimit3.feature: [2] Get rows in the middle by param
 clauses/with-skip-limit/WithSkipLimit3.feature: [3] Limiting amount of rows when there are fewer left than the LIMIT argument
 clauses/with-where/WithWhere1.feature: [1] Filter node with property predicate on a single variable with multiple bindings
+clauses/with-where/WithWhere1.feature: [3] Filter for an unbound relationship variable
+clauses/with-where/WithWhere1.feature: [4] Filter for an unbound node variable
 clauses/with-where/WithWhere2.feature: [1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings
 clauses/with-where/WithWhere2.feature: [2] Filter node with conjunctive multi-part property predicates on multi variables with multiple bindings
 clauses/with-where/WithWhere3.feature: [1] Join between node identities
@@ -1036,7 +1038,9 @@ clauses/with-where/WithWhere5.feature: [2] Filter out on null if the AND'd predi
 clauses/with-where/WithWhere5.feature: [3] Filter out on null if the AND'd predicate evaluates to true
 clauses/with-where/WithWhere5.feature: [4] Do not filter out on null if the OR'd predicate evaluates to true
 clauses/with-where/WithWhere6.feature: [1] Filter a single aggregate
+clauses/with-where/WithWhere7.feature: [1] WHERE sees a variable bound before but not after WITH
 clauses/with-where/WithWhere7.feature: [2] WHERE sees a variable bound after but not before WITH
+clauses/with-where/WithWhere7.feature: [3] WHERE sees both, variable bound before but not after WITH and variable bound after but not before WITH
 clauses/with/With1.feature: [1] Forwarind a node variable 1
 clauses/with/With1.feature: [2] Forwarind a node variable 2
 clauses/with/With1.feature: [3] Forwarding a relationship variable
@@ -1288,6 +1292,10 @@ expressions/comparison/Comparison1.feature: [9] Equality between strings and num
 expressions/comparison/Comparison1.feature: [9] Equality between strings and numbers #4
 expressions/comparison/Comparison2.feature: [1] Comparing strings and integers using > in an AND'd predicate
 expressions/comparison/Comparison2.feature: [2] Comparing strings and integers using > in a OR'd predicate
+expressions/comparison/Comparison2.feature: [3] Comparing across types yields null, except numbers #1
+expressions/comparison/Comparison2.feature: [3] Comparing across types yields null, except numbers #2
+expressions/comparison/Comparison2.feature: [3] Comparing across types yields null, except numbers #3
+expressions/comparison/Comparison2.feature: [3] Comparing across types yields null, except numbers #4
 expressions/comparison/Comparison2.feature: [4] Comparing lists #1
 expressions/comparison/Comparison2.feature: [4] Comparing lists #2
 expressions/comparison/Comparison2.feature: [4] Comparing lists #3
@@ -2572,4 +2580,22 @@ useCases/countingSubgraphMatches/CountingSubgraphMatches1.feature: [6] Counting 
 useCases/countingSubgraphMatches/CountingSubgraphMatches1.feature: [7] Counting distinct undirected self-relationships in self-relationship graph
 useCases/countingSubgraphMatches/CountingSubgraphMatches1.feature: [8] Directed match of a simple relationship, count
 useCases/countingSubgraphMatches/CountingSubgraphMatches1.feature: [9] Counting directed self-relationships
+useCases/triadicSelection/TriadicSelection1.feature: [10] Handling triadic friend of a friend that is not a friend with implicit superset of labels
+useCases/triadicSelection/TriadicSelection1.feature: [11] Handling triadic friend of a friend that is a friend
+useCases/triadicSelection/TriadicSelection1.feature: [12] Handling triadic friend of a friend that is a friend with different relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [13] Handling triadic friend of a friend that is a friend with superset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [16] Handling triadic friend of a friend that is a friend with same labels
+useCases/triadicSelection/TriadicSelection1.feature: [17] Handling triadic friend of a friend that is a friend with different labels
+useCases/triadicSelection/TriadicSelection1.feature: [18] Handling triadic friend of a friend that is a friend with implicit subset of labels
+useCases/triadicSelection/TriadicSelection1.feature: [19] Handling triadic friend of a friend that is a friend with implicit superset of labels
 useCases/triadicSelection/TriadicSelection1.feature: [1] Handling triadic friend of a friend
+useCases/triadicSelection/TriadicSelection1.feature: [2] Handling triadic friend of a friend that is not a friend
+useCases/triadicSelection/TriadicSelection1.feature: [3] Handling triadic friend of a friend that is not a friend with different relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [4] Handling triadic friend of a friend that is not a friend with superset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type
+useCases/triadicSelection/TriadicSelection1.feature: [7] Handling triadic friend of a friend that is not a friend with same labels
+useCases/triadicSelection/TriadicSelection1.feature: [8] Handling triadic friend of a friend that is not a friend with different labels
+useCases/triadicSelection/TriadicSelection1.feature: [9] Handling triadic friend of a friend that is not a friend with implicit subset of labels

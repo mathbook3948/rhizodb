@@ -1,5 +1,6 @@
 mod support;
 
+use rhizodb::ErrorKind;
 use rhizodb::Parameters;
 use rhizodb::Value;
 use support::*;
@@ -154,6 +155,30 @@ fn with_projects_a_new_scope_and_filters() {
         "MATCH (n:Person) WITH n.name AS name, n.age AS age WHERE age < 40 RETURN name ORDER BY name",
     );
     assert_eq!(rows, [vec![string("Ada")], vec![string("Bob")]]);
+}
+
+#[test]
+fn with_where_sees_variables_bound_before_the_with() {
+    let db = people();
+    let rows = run(
+        &db,
+        "MATCH (n:Person) WITH n.name AS name WHERE n.age < 40 RETURN name ORDER BY name",
+    );
+    assert_eq!(rows, [vec![string("Ada")], vec![string("Bob")]]);
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:Person) WITH n.name AS name WHERE n.age < 40 RETURN n"
+        ),
+        ErrorKind::UndefinedVariable
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:Person) WITH count(*) AS c WHERE n.age < 40 RETURN c"
+        ),
+        ErrorKind::UndefinedVariable
+    );
 }
 
 #[test]

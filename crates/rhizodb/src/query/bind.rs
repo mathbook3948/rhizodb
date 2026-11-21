@@ -707,6 +707,7 @@ impl Binder<'_> {
                     finals,
                 },
                 order_by,
+                next.clone(),
             )
         } else {
             let mut plain = Vec::new();
@@ -733,9 +734,9 @@ impl Binder<'_> {
                 };
                 order_by.push((bound, item.direction));
             }
-            (Items::Plain(plain), order_by)
+            (Items::Plain(plain), order_by, visible)
         };
-        let (items_bound, order_by) = bound_items;
+        let (items_bound, order_by, visible) = bound_items;
         let skip = projection
             .skip
             .as_ref()
@@ -747,7 +748,7 @@ impl Binder<'_> {
             .map(|limit| self.expr(limit, &Scope::default(), &mut Mode::Constant))
             .transpose()?;
         let filter = filter
-            .map(|filter| self.expr(filter, &next, &mut Mode::Plain))
+            .map(|filter| self.expr(filter, &visible, &mut Mode::Plain))
             .transpose()?;
         Ok((
             Projection {
