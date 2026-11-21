@@ -156,7 +156,18 @@ fn chained_comparisons_form_one_chain_but_parentheses_break_it() {
 }
 
 #[test]
-fn predicates_share_the_comparison_level() {
+fn predicates_bind_tighter_than_comparisons() {
+    assert_shapes(&[
+        ("a IS NULL = b IS NULL", "(cmp (is-null a) = (is-null b))"),
+        ("a = b IS NOT NULL", "(cmp a = (is-not-null b))"),
+        ("a IN b = c", "(cmp (in a b) = c)"),
+        ("a < b STARTS WITH c", "(cmp a < (starts b c))"),
+        ("a IN b IS NULL", "(is-null (in a b))"),
+    ]);
+}
+
+#[test]
+fn predicates_sit_below_arithmetic() {
     assert_shapes(&[
         ("a IN b + c", "(in a (+ b c))"),
         ("a + b IN c", "(in (+ a b) c)"),

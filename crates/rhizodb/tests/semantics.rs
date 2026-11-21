@@ -40,6 +40,16 @@ fn equality_with_null_is_null_but_grouping_treats_nulls_as_one() {
 }
 
 #[test]
+fn null_and_list_predicates_bind_tighter_than_comparisons() {
+    let db = db();
+    assert_eq!(
+        single(&db, "RETURN false IS NULL = null IS NULL"),
+        boolean(false)
+    );
+    assert_eq!(single(&db, "RETURN 1 IN [1] = true"), boolean(true));
+}
+
+#[test]
 fn in_returns_null_when_only_a_null_could_match() {
     let db = db();
     assert_eq!(single(&db, "RETURN 1 IN [1, null]"), boolean(true));

@@ -27,6 +27,7 @@ const RESERVED_WORDS: [&str; 26] = [
 
 const NOT_PRECEDENCE: u8 = 4;
 const COMPARISON_PRECEDENCE: u8 = 5;
+const PREDICATE_PRECEDENCE: u8 = 6;
 
 #[derive(Clone, Copy)]
 enum Infix {
@@ -49,11 +50,11 @@ impl Infix {
                 | BinaryOp::RegexMatch,
                 _,
             )
-            | Self::Comparison(_)
-            | Self::IsNull => COMPARISON_PRECEDENCE,
-            Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 6,
-            Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 7,
-            Self::Binary(BinaryOp::Power, _) => 8,
+            | Self::IsNull => PREDICATE_PRECEDENCE,
+            Self::Comparison(_) => COMPARISON_PRECEDENCE,
+            Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 7,
+            Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 8,
+            Self::Binary(BinaryOp::Power, _) => 9,
         }
     }
 }

@@ -1108,7 +1108,9 @@ expressions/boolean/Boolean1.feature: [1] Conjunction of two truth values
 expressions/boolean/Boolean1.feature: [2] Conjunction of three truth values
 expressions/boolean/Boolean1.feature: [3] Conjunction of many truth values
 expressions/boolean/Boolean1.feature: [4] Conjunction is commutative on non-null
+expressions/boolean/Boolean1.feature: [5] Conjunction is commutative on null
 expressions/boolean/Boolean1.feature: [6] Conjunction is associative on non-null
+expressions/boolean/Boolean1.feature: [7] Conjunction is associative on null
 expressions/boolean/Boolean1.feature: [8] Fail on conjunction of at least one non-booleans #1
 expressions/boolean/Boolean1.feature: [8] Fail on conjunction of at least one non-booleans #10
 expressions/boolean/Boolean1.feature: [8] Fail on conjunction of at least one non-booleans #11
@@ -1136,7 +1138,9 @@ expressions/boolean/Boolean2.feature: [1] Disjunction of two truth values
 expressions/boolean/Boolean2.feature: [2] Disjunction of three truth values
 expressions/boolean/Boolean2.feature: [3] Disjunction of many truth values
 expressions/boolean/Boolean2.feature: [4] Disjunction is commutative on non-null
+expressions/boolean/Boolean2.feature: [5] Disjunction is commutative on null
 expressions/boolean/Boolean2.feature: [6] Disjunction is associative on non-null
+expressions/boolean/Boolean2.feature: [7] Disjunction is associative on null
 expressions/boolean/Boolean2.feature: [8] Fail on disjunction of at least one non-booleans #1
 expressions/boolean/Boolean2.feature: [8] Fail on disjunction of at least one non-booleans #10
 expressions/boolean/Boolean2.feature: [8] Fail on disjunction of at least one non-booleans #11
@@ -1243,8 +1247,11 @@ expressions/boolean/Boolean4.feature: [4] Fail when using NOT on a non-boolean l
 expressions/boolean/Boolean4.feature: [4] Fail when using NOT on a non-boolean literal #8
 expressions/boolean/Boolean4.feature: [4] Fail when using NOT on a non-boolean literal #9
 expressions/boolean/Boolean5.feature: [1] Disjunction is distributive over conjunction on non-null
+expressions/boolean/Boolean5.feature: [2] Disjunction is distributive over conjunction on null
 expressions/boolean/Boolean5.feature: [3] Conjunction is distributive over disjunction on non-null
+expressions/boolean/Boolean5.feature: [4] Conjunction is distributive over disjunction on null
 expressions/boolean/Boolean5.feature: [5] Conjunction is distributive over exclusive disjunction on non-null
+expressions/boolean/Boolean5.feature: [6] Conjunction is not distributive over exclusive disjunction on null
 expressions/boolean/Boolean5.feature: [7] De Morgan's law on non-null: the negation of a disjunction is the conjunction of the negations
 expressions/boolean/Boolean5.feature: [8] De Morgan's law on non-null: the negation of a conjunction is the disjunction of the negations
 expressions/comparison/Comparison1.feature: [10] Handling inlined equality of large integer
@@ -1795,6 +1802,7 @@ expressions/pattern/Pattern2.feature: [7] Use a pattern comprehension inside a l
 expressions/pattern/Pattern2.feature: [8] Use a pattern comprehension in WITH
 expressions/pattern/Pattern2.feature: [9] Use a variable-length pattern comprehension in WITH
 expressions/precedence/Precedence1.feature: [10] Null predicate takes precedence over boolean operator
+expressions/precedence/Precedence1.feature: [11] List predicate takes precedence over comparison operator
 expressions/precedence/Precedence1.feature: [12] List predicate takes precedence over negation
 expressions/precedence/Precedence1.feature: [13] List predicate takes precedence over boolean operator
 expressions/precedence/Precedence1.feature: [14] Exclusive disjunction takes precedence over inclusive disjunction in every combination of truth values
@@ -1827,6 +1835,18 @@ expressions/precedence/Precedence1.feature: [22] Pairs of comparison operators a
 expressions/precedence/Precedence1.feature: [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #2
 expressions/precedence/Precedence1.feature: [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #3
 expressions/precedence/Precedence1.feature: [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #4
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #1
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #10
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #11
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #12
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #2
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #3
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #4
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #5
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #6
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #7
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #8
+expressions/precedence/Precedence1.feature: [23] Null predicates take precedence over comparison operators in every combination of truth values #9
 expressions/precedence/Precedence1.feature: [24] Null predicates take precedence over boolean negation on every truth values #1
 expressions/precedence/Precedence1.feature: [24] Null predicates take precedence over boolean negation on every truth values #2
 expressions/precedence/Precedence1.feature: [25] Null predicates take precedence over binary boolean operators in every combination of truth values #1
@@ -1835,6 +1855,12 @@ expressions/precedence/Precedence1.feature: [25] Null predicates take precedence
 expressions/precedence/Precedence1.feature: [25] Null predicates take precedence over binary boolean operators in every combination of truth values #4
 expressions/precedence/Precedence1.feature: [25] Null predicates take precedence over binary boolean operators in every combination of truth values #5
 expressions/precedence/Precedence1.feature: [25] Null predicates take precedence over binary boolean operators in every combination of truth values #6
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #1
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #2
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #3
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #4
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #5
+expressions/precedence/Precedence1.feature: [26] List predicate takes precedence over comparison operators in every combination of truth values #6
 expressions/precedence/Precedence1.feature: [27] List predicate takes precedence over negation in every combination of truth values
 expressions/precedence/Precedence1.feature: [28] List predicate takes precedence over binary boolean operators in every combination of truth values #1
 expressions/precedence/Precedence1.feature: [28] List predicate takes precedence over binary boolean operators in every combination of truth values #2
@@ -1845,6 +1871,7 @@ expressions/precedence/Precedence1.feature: [4] Negation takes precedence over c
 expressions/precedence/Precedence1.feature: [5] Negation takes precedence over inclusive disjunction
 expressions/precedence/Precedence1.feature: [6] Comparison operator takes precedence over boolean negation
 expressions/precedence/Precedence1.feature: [7] Comparison operator takes precedence over binary boolean operator
+expressions/precedence/Precedence1.feature: [8] Null predicate takes precedence over comparison operator
 expressions/precedence/Precedence1.feature: [9] Null predicate takes precedence over negation
 expressions/precedence/Precedence2.feature: [1] Numeric multiplicative operations takes precedence over numeric additive operations #1
 expressions/precedence/Precedence2.feature: [1] Numeric multiplicative operations takes precedence over numeric additive operations #10
@@ -1877,6 +1904,15 @@ expressions/precedence/Precedence3.feature: [2] List element access takes preced
 expressions/precedence/Precedence3.feature: [3] List slicing takes precedence over list concatenation
 expressions/precedence/Precedence3.feature: [4] List appending takes precedence over list element containment
 expressions/precedence/Precedence3.feature: [5] List concatenation takes precedence over list element containment
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #1
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #2
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #3
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #4
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #5
+expressions/precedence/Precedence3.feature: [6] List element containment takes precedence over comparison operator #6
+expressions/precedence/Precedence4.feature: [1] Null predicate takes precedence over comparison operator #1
+expressions/precedence/Precedence4.feature: [1] Null predicate takes precedence over comparison operator #2
+expressions/precedence/Precedence4.feature: [1] Null predicate takes precedence over comparison operator #3
 expressions/precedence/Precedence4.feature: [2] Null predicate takes precedence over boolean negation
 expressions/precedence/Precedence4.feature: [3] Null predicate takes precedence over binary boolean operator #1
 expressions/precedence/Precedence4.feature: [3] Null predicate takes precedence over binary boolean operator #2
