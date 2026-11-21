@@ -2,9 +2,9 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod gql;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod graph;
-pub mod gql;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod storage;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
