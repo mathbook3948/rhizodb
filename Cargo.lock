@@ -407,6 +407,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11175cc688ba1b9d3cec4fe582fd82cb97e2a82e28ccc8101b7b8030a8003280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -417,6 +426,8 @@ name = "rhizodb"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "redb",
+ "tempfile",
 ]
 
 [[package]]
