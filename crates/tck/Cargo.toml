@@ -8,3 +8,10 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+libtest-mimic = "0.8"
+
+[[test]]
+name = "tck"
+harness = false
