@@ -647,3 +647,31 @@ fn a_pattern_after_with_distinct_sees_only_projected_variables() {
         [vec![int(3)]]
     );
 }
+
+#[test]
+fn a_bad_parameter_is_the_same_data_error_as_the_same_value_in_a_variable() {
+    let db = db();
+    let kind_with = |query: &str| {
+        let mut parameters = rhizodb::Parameters::new();
+        parameters.insert("p".to_owned(), int(1));
+        db.execute(query, &parameters).unwrap_err().kind()
+    };
+    for (direct, through_variable) in [
+        ("RETURN $p.x", "WITH $p AS q RETURN q.x"),
+        ("RETURN size($p)", "WITH $p AS q RETURN size(q)"),
+    ] {
+        assert_eq!(
+            kind_with(direct),
+            kind_with(through_variable),
+            "{direct} against {through_variable}"
+        );
+    }
+    assert_eq!(
+        kind_with("RETURN $p.x"),
+        ErrorKind::PropertyAccessOnNonEntity
+    );
+    assert_eq!(
+        kind_with("RETURN size($p)"),
+        ErrorKind::InvalidArgumentValue
+    );
+}

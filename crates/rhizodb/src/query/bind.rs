@@ -666,9 +666,6 @@ impl Binder<'_> {
                 Kind::RelationshipList => Some(Shape::List),
                 Kind::Value | Kind::Unknown => None,
             },
-            ast::Expr::Parameter(name) => {
-                datum_shape(&from_parameter(self.parameters.get(&name.0)?))
-            }
             ast::Expr::Literal(literal) => match literal {
                 ast::Literal::Integer(_) | ast::Literal::Float(_) => Some(Shape::Number),
                 ast::Literal::String(_) => Some(Shape::String),
@@ -1406,21 +1403,6 @@ enum Shape {
     String,
     Number,
     Boolean,
-}
-
-fn datum_shape(value: &Datum) -> Option<Shape> {
-    Some(match value {
-        Datum::Null => return None,
-        Datum::Boolean(_) => Shape::Boolean,
-        Datum::Integer(_) | Datum::Float(_) => Shape::Number,
-        Datum::String(_) => Shape::String,
-        Datum::List(_) => Shape::List,
-        Datum::Map(_) => Shape::Map,
-        Datum::Node(_) => Shape::Node,
-        Datum::Relationship(_) => Shape::Relationship,
-        Datum::Path(_) => Shape::Path,
-        Datum::Bytes(_) => return None,
-    })
 }
 
 fn argument_shapes(function: Function) -> &'static [Shape] {
