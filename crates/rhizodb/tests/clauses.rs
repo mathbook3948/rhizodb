@@ -588,3 +588,27 @@ fn where_after_with_distinct_reads_projected_expressions_of_earlier_variables() 
         );
     }
 }
+
+#[test]
+fn delete_takes_a_list_of_elements_whether_collected_or_written_out() {
+    let db = db();
+    for query in [
+        "MATCH (n:A) WITH collect(n) AS ns DELETE ns",
+        "MATCH (n:A) WITH [n] AS ns DELETE ns",
+        "MATCH (n:A) DELETE [n]",
+        "MATCH (n:A) WITH n.k AS k, [n] AS ns DELETE ns",
+    ] {
+        run(&db, "CREATE (:A {k: 1}), (:A {k: 2})");
+        run(&db, query);
+        assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(0), "{query}");
+    }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) WITH 1 + 1 AS x DELETE x"),
+        ErrorKind::InvalidArgumentType
+    );
+    run(&db, "CREATE (:A)");
+    assert_eq!(
+        error_kind(&db, "MATCH (n) WITH [1] AS xs DELETE xs"),
+        ErrorKind::TypeMismatch
+    );
+}

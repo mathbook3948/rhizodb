@@ -118,6 +118,7 @@ enum Kind {
     Relationship,
     RelationshipList,
     Path,
+    List,
     /// Known not to be a graph element, such as a literal or arithmetic result.
     Value,
     Unknown,
@@ -311,7 +312,7 @@ impl Binder<'_> {
                         self.expect_shape(
                             target,
                             &scope,
-                            &[Shape::Node, Shape::Relationship, Shape::Path],
+                            &[Shape::Node, Shape::Relationship, Shape::Path, Shape::List],
                         )?;
                         let bound = self.expr(target, &scope, &mut Mode::Plain)?;
                         if let ast::Expr::Variable(name) = target
@@ -590,8 +591,8 @@ impl Binder<'_> {
         let (slot, bound) = match &relationship.variable {
             Some(name) => match scope.get(&name.0) {
                 Some(variable) => {
-                    let list_of_relationships =
-                        kind == Kind::RelationshipList && variable.kind == Kind::Value;
+                    let list_of_relationships = kind == Kind::RelationshipList
+                        && matches!(variable.kind, Kind::Value | Kind::List);
                     if variable.kind != kind
                         && variable.kind != Kind::Unknown
                         && !list_of_relationships
@@ -664,7 +665,7 @@ impl Binder<'_> {
                 Kind::Relationship => Some(Shape::Relationship),
                 Kind::Path => Some(Shape::Path),
                 Kind::RelationshipList => Some(Shape::List),
-                Kind::Value | Kind::Unknown => None,
+                Kind::List | Kind::Value | Kind::Unknown => None,
             },
             ast::Expr::Literal(literal) => match literal {
                 ast::Literal::Integer(_) | ast::Literal::Float(_) => Some(Shape::Number),
@@ -1710,17 +1711,17 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
             .get(&name.0)
             .map_or(Kind::Unknown, |variable| variable.kind),
         ast::Expr::Literal(ast::Literal::Null) => Kind::Unknown,
+        ast::Expr::List(_)
+        | ast::Expr::ListComprehension(_)
+        | ast::Expr::PatternComprehension(_) => Kind::List,
         ast::Expr::Literal(_)
-        | ast::Expr::List(_)
         | ast::Expr::Map(_)
         | ast::Expr::Binary { .. }
         | ast::Expr::Comparison { .. }
         | ast::Expr::IsNull { .. }
         | ast::Expr::HasLabels { .. }
         | ast::Expr::Unary { .. }
-        | ast::Expr::ListComprehension(_)
         | ast::Expr::ListPredicate(_)
-        | ast::Expr::PatternComprehension(_)
         | ast::Expr::Pattern(_)
         | ast::Expr::Exists(_)
         | ast::Expr::CountStar => Kind::Value,
