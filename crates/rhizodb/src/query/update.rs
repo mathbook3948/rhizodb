@@ -1,0 +1,366 @@
+use std::collections::BTreeMap;
+
+use crate::error::Error;
+use crate::gql::ast::Direction;
+use crate::graph::Direction as Adjacency;
+use crate::graph::GraphTx;
+use crate::graph::Label;
+use crate::graph::NodeId;
+use crate::graph::NodeRecord;
+use crate::graph::Properties;
+use crate::graph::PropertyKey;
+use crate::graph::RelationshipId;
+use crate::graph::RelationshipRecord;
+use crate::graph::RelationshipType;
+use crate::storage::WriteTransaction;
+
+use super::datum::Datum;
+use super::datum::PathIds;
+use super::datum::to_property;
+use super::eval::Env;
+use super::eval::Row;
+use super::eval::set;
+use super::eval::type_error;
+use super::plan::Expr;
+use super::plan::MergeClause;
+use super::plan::NodePattern;
+use super::plan::PatternPart;
+use super::plan::RemoveAction;
+use super::plan::SetAction;
+use super::plan::UpdateClause;
+
+/// Applies one updating clause to every row, in row order. Later rows see earlier rows' writes.
+pub(crate) fn apply<W: WriteTransaction>(
+    tx: &mut GraphTx<W>,
+    slots: usize,
+    clause: &UpdateClause,
+    rows: Vec<Row>,
+) -> Result<Vec<Row>, Error> {
+    let mut writer = Writer { tx, slots };
+    match clause {
+        UpdateClause::Create(parts) => {
+            let mut rows = rows;
+            for row in &mut rows {
+                for part in parts {
+                    writer.create(part, row)?;
+                }
+            }
+            Ok(rows)
+        }
+        UpdateClause::Merge(merge) => {
+            let mut out = Vec::new();
+            for row in rows {
+                writer.merge(merge, row, &mut out)?;
+            }
+            Ok(out)
+        }
+        UpdateClause::Set(actions) => {
+            for row in &rows {
+                writer.set_all(actions, row)?;
+            }
+            Ok(rows)
+        }
+        UpdateClause::Remove(actions) => {
+            for row in &rows {
+                for action in actions {
+                    writer.remove(action, row)?;
+                }
+            }
+            Ok(rows)
+        }
+        UpdateClause::Delete { detach, targets } => {
+            writer.delete(*detach, targets, &rows)?;
+            Ok(rows)
+        }
+    }
+}
+
+struct Writer<'a, W> {
+    tx: &'a mut GraphTx<W>,
+    slots: usize,
+}
+
+impl<W: WriteTransaction> Writer<'_, W> {
+    fn env(&self) -> Env<'_, W> {
+        Env {
+            tx: &*self.tx,
+            slots: self.slots,
+        }
+    }
+
+    fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
+        self.env().eval(expr, row)
+    }
+
+    fn properties(&mut self, expr: Option<&Expr>, row: &Row) -> Result<Properties, Error> {
+        let mut properties = Properties::new();
+        let Some(expr) = expr else {
+            return Ok(properties);
+        };
+        for (key, value) in self.map_operand(self.eval(expr, row)?)? {
+            if let Some(value) = to_property(&value)? {
+                properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
+            }
+        }
+        Ok(properties)
+    }
+
+    fn map_operand(&self, value: Datum) -> Result<BTreeMap<String, Datum>, Error> {
+        let env = self.env();
+        match value {
+            Datum::Map(entries) => Ok(entries),
+            Datum::Node(id) => env.property_map(&env.node(id)?.properties),
+            Datum::Relationship(id) => env.property_map(&env.relationship(id)?.properties),
+            Datum::Null => Ok(BTreeMap::new()),
+            other => Err(type_error(format!(
+                "expected a map of properties, got a {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn node(&mut self, pattern: &NodePattern, row: &mut Row) -> Result<NodeId, Error> {
+        if pattern.bound {
+            return match row.get(pattern.slot) {
+                Some(Datum::Node(id)) => Ok(*id),
+                Some(other) => Err(type_error(format!(
+                    "expected a node to connect, got a {}",
+                    other.type_name()
+                ))),
+                None => Err(type_error("expected a node to connect")),
+            };
+        }
+        let mut record = NodeRecord {
+            properties: self.properties(pattern.properties.as_ref(), row)?,
+            ..NodeRecord::default()
+        };
+        for label in &pattern.labels {
+            record.labels.insert(self.tx.intern_token::<Label>(label)?);
+        }
+        let id = self.tx.create_node(&record)?;
+        set(row, pattern.slot, Datum::Node(id));
+        Ok(id)
+    }
+
+    fn create(&mut self, part: &PatternPart, row: &mut Row) -> Result<(), Error> {
+        let mut current = self.node(&part.start, row)?;
+        let mut trail = PathIds {
+            nodes: vec![current],
+            relationships: Vec::new(),
+        };
+        for step in &part.steps {
+            let next = self.node(&step.node, row)?;
+            let relationship = &step.relationship;
+            let (source, target) = match relationship.direction {
+                Direction::Incoming => (next, current),
+                Direction::Outgoing | Direction::Undirected => (current, next),
+            };
+            let rel_type = match relationship.types.first() {
+                Some(name) => self.tx.intern_token::<RelationshipType>(name)?,
+                None => return Err(type_error("a relationship to create needs a type")),
+            };
+            let record = RelationshipRecord {
+                rel_type,
+                source,
+                target,
+                properties: self.properties(relationship.properties.as_ref(), row)?,
+            };
+            let id = self.tx.create_relationship(&record)?;
+            set(row, relationship.slot, Datum::Relationship(id));
+            trail.relationships.push(id);
+            trail.nodes.push(next);
+            current = next;
+        }
+        if let Some(path) = part.path {
+            set(row, path, Datum::Path(trail));
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, merge: &MergeClause, row: Row, out: &mut Vec<Row>) -> Result<(), Error> {
+        let mut matches = Vec::new();
+        self.env()
+            .match_patterns(std::slice::from_ref(&merge.pattern), &row, &mut |found| {
+                matches.push(found.clone());
+                Ok(true)
+            })?;
+        if matches.is_empty() {
+            let mut row = row;
+            self.create(&merge.pattern, &mut row)?;
+            self.set_all(&merge.on_create, &row)?;
+            out.push(row);
+            return Ok(());
+        }
+        for found in matches {
+            self.set_all(&merge.on_match, &found)?;
+            out.push(found);
+        }
+        Ok(())
+    }
+
+    fn set_all(&mut self, actions: &[SetAction], row: &Row) -> Result<(), Error> {
+        for action in actions {
+            self.set(action, row)?;
+        }
+        Ok(())
+    }
+
+    fn set(&mut self, action: &SetAction, row: &Row) -> Result<(), Error> {
+        match action {
+            SetAction::Property { target, key, value } => {
+                let target = self.eval(target, row)?;
+                let value = to_property(&self.eval(value, row)?)?;
+                self.write_property(&target, key, value)
+            }
+            SetAction::Properties {
+                target,
+                value,
+                replace,
+            } => {
+                let target = row.get(*target).cloned().unwrap_or(Datum::Null);
+                if target.is_null() {
+                    return Ok(());
+                }
+                let entries = self.map_operand(self.eval(value, row)?)?;
+                if *replace {
+                    for key in self.map_operand(target.clone())?.into_keys() {
+                        if !entries.contains_key(&key) {
+                            self.write_property(&target, &key, None)?;
+                        }
+                    }
+                }
+                for (key, value) in entries {
+                    self.write_property(&target, &key, to_property(&value)?)?;
+                }
+                Ok(())
+            }
+            SetAction::Labels { target, labels } => match row.get(*target) {
+                Some(Datum::Node(id)) => {
+                    for label in labels {
+                        let token = self.tx.intern_token::<Label>(label)?;
+                        self.tx.add_label(*id, token)?;
+                    }
+                    Ok(())
+                }
+                Some(Datum::Null) | None => Ok(()),
+                Some(other) => Err(type_error(format!(
+                    "labels can only be set on a node, not a {}",
+                    other.type_name()
+                ))),
+            },
+        }
+    }
+
+    fn write_property(
+        &mut self,
+        target: &Datum,
+        key: &str,
+        value: Option<crate::value::PropertyValue>,
+    ) -> Result<(), Error> {
+        match target {
+            Datum::Null => Ok(()),
+            Datum::Node(id) => {
+                let token = self.tx.intern_token::<PropertyKey>(key)?;
+                match value {
+                    Some(value) => self.tx.set_node_property(*id, token, value)?,
+                    None => self.tx.remove_node_property(*id, token)?,
+                }
+                Ok(())
+            }
+            Datum::Relationship(id) => {
+                let token = self.tx.intern_token::<PropertyKey>(key)?;
+                match value {
+                    Some(value) => self.tx.set_relationship_property(*id, token, value)?,
+                    None => self.tx.remove_relationship_property(*id, token)?,
+                }
+                Ok(())
+            }
+            other => Err(type_error(format!(
+                "properties can only be set on a node or relationship, not a {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn remove(&mut self, action: &RemoveAction, row: &Row) -> Result<(), Error> {
+        match action {
+            RemoveAction::Property { target, key } => {
+                let target = self.eval(target, row)?;
+                self.write_property(&target, key, None)
+            }
+            RemoveAction::Labels { target, labels } => match row.get(*target) {
+                Some(Datum::Node(id)) => {
+                    for label in labels {
+                        if let Some(token) = self.tx.lookup_token::<Label>(label)? {
+                            self.tx.remove_label(*id, token)?;
+                        }
+                    }
+                    Ok(())
+                }
+                Some(Datum::Null) | None => Ok(()),
+                Some(other) => Err(type_error(format!(
+                    "labels can only be removed from a node, not a {}",
+                    other.type_name()
+                ))),
+            },
+        }
+    }
+
+    fn delete(&mut self, detach: bool, targets: &[Expr], rows: &[Row]) -> Result<(), Error> {
+        let mut nodes: Vec<NodeId> = Vec::new();
+        let mut relationships: Vec<RelationshipId> = Vec::new();
+        for row in rows {
+            for target in targets {
+                collect_targets(self.eval(target, row)?, &mut nodes, &mut relationships)?;
+            }
+        }
+        if detach {
+            for node in &nodes {
+                if self.tx.node(*node)?.is_some() {
+                    for adjacent in self.tx.adjacent(*node, Adjacency::Both, None)? {
+                        relationships.push(adjacent.relationship);
+                    }
+                }
+            }
+        }
+        for relationship in relationships {
+            if self.tx.relationship(relationship)?.is_some() {
+                self.tx.delete_relationship(relationship)?;
+            }
+        }
+        for node in nodes {
+            if self.tx.node(node)?.is_some() {
+                self.tx.delete_node(node)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn collect_targets(
+    value: Datum,
+    nodes: &mut Vec<NodeId>,
+    relationships: &mut Vec<RelationshipId>,
+) -> Result<(), Error> {
+    match value {
+        Datum::Null => {}
+        Datum::Node(id) => nodes.push(id),
+        Datum::Relationship(id) => relationships.push(id),
+        Datum::Path(path) => {
+            nodes.extend(path.nodes);
+            relationships.extend(path.relationships);
+        }
+        Datum::List(items) => {
+            for item in items {
+                collect_targets(item, nodes, relationships)?;
+            }
+        }
+        other => {
+            return Err(type_error(format!(
+                "DELETE takes a node, relationship, or path, not a {}",
+                other.type_name()
+            )));
+        }
+    }
+    Ok(())
+}

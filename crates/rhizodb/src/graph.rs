@@ -11,6 +11,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod ids;
+#[cfg(test)]
 pub(crate) mod integrity;
 mod keys;
 mod records;
@@ -23,6 +24,7 @@ pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use records::NodeRecord;
+pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 
 const FORMAT_VERSION: u32 = 1;

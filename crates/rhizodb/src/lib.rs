@@ -1,24 +1,39 @@
-//! An embedded, schemaless property graph database.
+//! An embedded, schemaless property graph database queried with GQL.
+//!
+//! ```
+//! use rhizodb::Database;
+//! use rhizodb::Parameters;
+//! use rhizodb::Value;
+//!
+//! let db = Database::in_memory()?;
+//! db.execute(
+//!     "INSERT (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Grace'})",
+//!     &Parameters::new(),
+//! )?;
+//!
+//! let mut parameters = Parameters::new();
+//! parameters.insert("name".to_owned(), Value::String("Ada".to_owned()));
+//! let result = db.execute(
+//!     "MATCH (a:Person {name: $name})-[:KNOWS]->(b) RETURN b.name AS friend",
+//!     &parameters,
+//! )?;
+//! assert_eq!(result.columns(), ["friend"]);
+//! assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
+//! # Ok::<(), rhizodb::Error>(())
+//! ```
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-#[allow(dead_code, reason = "raised by the query executor in a later unit")]
+mod database;
 mod error;
 pub mod gql;
-#[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod graph;
-#[allow(
-    dead_code,
-    reason = "the interpreter that uses runtime values comes in a later unit"
-)]
 mod query;
-#[allow(dead_code, reason = "built by the query executor in a later unit")]
 mod result;
-#[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod storage;
-#[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod value;
 
+pub use database::Database;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;

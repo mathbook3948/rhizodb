@@ -1,8 +1,4 @@
 #![doc(hidden)]
-#![allow(
-    dead_code,
-    reason = "the executor that consumes the syntax tree does not exist yet"
-)]
 
 pub(crate) mod ast;
 pub(crate) mod error;

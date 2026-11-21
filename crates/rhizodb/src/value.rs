@@ -49,6 +49,7 @@ impl fmt::Display for DecodeError {
 impl Error for DecodeError {}
 
 impl PropertyValue {
+    #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         self.encode_into(&mut out);
@@ -89,6 +90,7 @@ impl PropertyValue {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let value = reader.value()?;
