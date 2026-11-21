@@ -476,3 +476,7 @@ impl<T: WriteTransaction> GraphTx<T> {
 #[cfg(test)]
 #[path = "graph.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "graph/crash.test.rs"]
+mod crash_tests;
