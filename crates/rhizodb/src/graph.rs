@@ -11,6 +11,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod ids;
+pub(crate) mod integrity;
 mod keys;
 mod records;
 
