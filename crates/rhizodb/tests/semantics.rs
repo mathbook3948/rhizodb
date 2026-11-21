@@ -496,3 +496,28 @@ fn a_percentile_must_be_the_same_for_every_row_of_a_group() {
         int(20)
     );
 }
+
+#[test]
+fn floats_print_like_the_reference_implementation() {
+    let db = db();
+    for (value, text) in [
+        ("1e20", "1.0E20"),
+        ("-1e20", "-1.0E20"),
+        ("1.5e-7", "1.5E-7"),
+        ("12345678.9", "1.23456789E7"),
+        ("1.0e7", "1.0E7"),
+        ("0.0001", "1.0E-4"),
+        ("9999999.0", "9999999.0"),
+        ("0.001", "0.001"),
+        ("100.0", "100.0"),
+        ("2.3", "2.3"),
+        ("0.0", "0.0"),
+    ] {
+        assert_eq!(
+            single(&db, &format!("RETURN toString({value})")),
+            string(text),
+            "{value}"
+        );
+    }
+    assert_eq!(single(&db, "RETURN 'x' + 1e20"), string("x1.0E20"));
+}

@@ -513,10 +513,22 @@ pub(crate) fn float_text(value: f64) -> String {
         "NaN".to_owned()
     } else if value.is_infinite() {
         if value > 0.0 { "Infinity" } else { "-Infinity" }.to_owned()
-    } else if value == value.trunc() && value.abs() < 1e16 {
-        format!("{value:.1}")
+    } else if value == 0.0 || (1e-3..1e7).contains(&value.abs()) {
+        with_fraction(format!("{value}"))
     } else {
-        format!("{value}")
+        let text = format!("{value:e}");
+        match text.split_once('e') {
+            Some((mantissa, exponent)) => format!("{}E{exponent}", with_fraction(mantissa.into())),
+            None => text,
+        }
+    }
+}
+
+fn with_fraction(text: String) -> String {
+    if text.contains('.') {
+        text
+    } else {
+        text + ".0"
     }
 }
 
