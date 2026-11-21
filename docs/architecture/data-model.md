@@ -11,7 +11,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Node and relationship IDs are separate `u64` counters that only grow. A deleted ID is never reused.
 - Labels, relationship types, and property keys are interned to `u32` tokens in a dictionary table. Each kind has its own token space.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
-- Keys are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency and label members.
+- Keys of the node, relationship, adjacency, and label tables are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency and label members.
 - Each relationship is indexed twice, under its source node for outgoing scans and under its target node for incoming scans. The index entry holds the node at the other end, so a traversal reads no relationship record.
 - Each node label has an index from label to node ID.
 - Stored property values are null-free. Setting a property to null removes it.
