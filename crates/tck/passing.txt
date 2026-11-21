@@ -250,6 +250,31 @@ clauses/match/Match2.feature: [10] Fail when a path has the same variable in a p
 clauses/match/Match2.feature: [10] Fail when a path has the same variable in a preceding MATCH #7
 clauses/match/Match2.feature: [10] Fail when a path has the same variable in a preceding MATCH #8
 clauses/match/Match2.feature: [10] Fail when a path has the same variable in a preceding MATCH #9
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #1
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #10
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #11
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #12
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #13
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #14
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #15
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #16
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #17
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #2
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #3
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #4
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #5
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #6
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #7
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #8
+clauses/match/Match2.feature: [11] Fail when a node has the same variable in the same pattern #9
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #1
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #2
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #3
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #4
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #5
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #6
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #7
+clauses/match/Match2.feature: [12] Fail when a path has the same variable in the same pattern #8
 clauses/match/Match2.feature: [13] Fail when matching a relationship variable bound to a value #1
 clauses/match/Match2.feature: [13] Fail when matching a relationship variable bound to a value #2
 clauses/match/Match2.feature: [13] Fail when matching a relationship variable bound to a value #3

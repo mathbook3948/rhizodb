@@ -544,16 +544,16 @@ impl Binder<'_> {
                             format!("relationship `{}` is already bound", name.0),
                         ));
                     }
-                    if introduced.contains(&variable.slot) {
-                        return Err(error(
-                            ErrorKind::RelationshipUniquenessViolation,
-                            format!("relationship `{}` appears twice in one pattern", name.0),
-                        ));
-                    }
                     if variable.kind != kind && variable.kind != Kind::Unknown {
                         return Err(error(
                             ErrorKind::VariableTypeConflict,
                             format!("variable `{}` is not a relationship", name.0),
+                        ));
+                    }
+                    if introduced.contains(&variable.slot) {
+                        return Err(error(
+                            ErrorKind::RelationshipUniquenessViolation,
+                            format!("relationship `{}` appears twice in one pattern", name.0),
                         ));
                     }
                     (variable.slot, true)

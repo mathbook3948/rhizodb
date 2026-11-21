@@ -165,6 +165,10 @@ fn binding_errors_are_reported_before_running() {
         ErrorKind::VariableTypeConflict
     );
     assert_eq!(
+        error_kind(&db, "MATCH (r)-[r]->() RETURN r"),
+        ErrorKind::VariableTypeConflict
+    );
+    assert_eq!(
         error_kind(&db, "CREATE (a)-[:R]->(a:L) RETURN a"),
         ErrorKind::VariableAlreadyBound
     );
