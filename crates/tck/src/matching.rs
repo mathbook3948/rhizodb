@@ -10,14 +10,14 @@ const ANY_ERROR_DETAIL: &str = "*";
 
 /// Checks a query result against what the scenario expects.
 ///
-/// Error matching compares kind and detail and ignores the phase. The kind `Error` and the detail
-/// `*` match anything.
+/// Error matching compares kind and detail and ignores the phase. An expected kind `Error` or an
+/// expected detail `*` matches anything. The engine cannot use either as a wildcard.
 pub fn check_outcome(expected: &Expected, actual: &Result<Rows, QueryError>) -> Result<(), String> {
     match (expected, actual) {
         (_, Err(QueryError::Unsupported)) => Err("the engine does not support the query".into()),
         (Expected::Error { kind, detail, .. }, Err(QueryError::Raised { kind: k, detail: d })) => {
-            let kind_matches = kind == k || kind == ANY_ERROR_KIND || k == ANY_ERROR_KIND;
-            let detail_matches = detail == d || detail == ANY_ERROR_DETAIL || d == ANY_ERROR_DETAIL;
+            let kind_matches = kind == k || kind == ANY_ERROR_KIND;
+            let detail_matches = detail == d || detail == ANY_ERROR_DETAIL;
             if kind_matches && detail_matches {
                 Ok(())
             } else {

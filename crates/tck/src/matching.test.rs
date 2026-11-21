@@ -212,3 +212,11 @@ fn an_unsupported_query_fails_even_when_an_error_is_expected() {
 
     assert!(check_outcome(&expected, &Err(QueryError::Unsupported)).is_err());
 }
+
+#[test]
+fn wildcards_raised_by_the_engine_match_only_themselves() {
+    let expected = expect_error("SyntaxError", Phase::CompileTime, "UndefinedVariable");
+
+    assert!(check_outcome(&expected, &raised("Error", "UndefinedVariable")).is_err());
+    assert!(check_outcome(&expected, &raised("SyntaxError", "*")).is_err());
+}
