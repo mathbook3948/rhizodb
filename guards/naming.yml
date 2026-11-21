@@ -1,0 +1,34 @@
+id: error-type-name
+language: rust
+severity: error
+message: A type that implements `Error` ends in `Error`.
+files:
+  - crates/*/src/**/*.rs
+rule:
+  kind: impl_item
+  has:
+    field: trait
+    regex: ^(std::error::)?Error$
+  not:
+    has:
+      field: type
+      regex: Error$
+---
+id: derive-order
+language: rust
+severity: error
+message: Derive in this order. Clone, Copy, Debug, Default, PartialEq, Eq, Hash.
+files:
+  - crates/*/src/**/*.rs
+rule:
+  kind: attribute_item
+  regex: ^#\[derive\(.*(\bCopy\b.*\bClone\b|\bDebug\b.*\bClone\b|\bDefault\b.*\bClone\b|\bPartialEq\b.*\bClone\b|\bEq\b.*\bClone\b|\bHash\b.*\bClone\b|\bDebug\b.*\bCopy\b|\bDefault\b.*\bCopy\b|\bPartialEq\b.*\bCopy\b|\bEq\b.*\bCopy\b|\bHash\b.*\bCopy\b|\bDefault\b.*\bDebug\b|\bPartialEq\b.*\bDebug\b|\bEq\b.*\bDebug\b|\bHash\b.*\bDebug\b|\bPartialEq\b.*\bDefault\b|\bEq\b.*\bDefault\b|\bHash\b.*\bDefault\b|\bEq\b.*\bPartialEq\b|\bHash\b.*\bPartialEq\b|\bHash\b.*\bEq\b)
+---
+id: one-import-per-line
+language: rust
+severity: error
+message: Import one item per `use` line. Braces are not used.
+files:
+  - crates/*/src/**/*.rs
+rule:
+  kind: use_list

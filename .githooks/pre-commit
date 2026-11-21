@@ -1,0 +1,4 @@
+#!/bin/sh
+if git diff --cached --name-only | grep -Eq '(^|/)Cargo\.(toml|lock)$|^deny\.toml$'; then
+  exec mise exec -- cargo deny check licenses
+fi

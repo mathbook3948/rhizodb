@@ -1,0 +1,35 @@
+id: no-inline-test-module
+language: rust
+severity: error
+message: Unit tests live in a sibling `<name>.test.rs` file, not in an inline test module.
+note: |
+  Replace the inline module with:
+    #[cfg(test)]
+    #[path = "<name>.test.rs"]
+    mod tests;
+files:
+  - crates/*/src/**/*.rs
+rule:
+  kind: mod_item
+  has:
+    field: body
+    kind: declaration_list
+  any:
+    - has:
+        field: name
+        regex: ^tests?$
+    - follows:
+        kind: attribute_item
+        regex: cfg\(test\)
+---
+id: no-test-fn-outside-test-file
+language: rust
+severity: error
+message: Test functions belong in a `<name>.test.rs` file.
+files:
+  - crates/*/src/**/*.rs
+ignores:
+  - crates/*/src/**/*.test.rs
+rule:
+  kind: attribute_item
+  regex: ^#\[(\w+::)*test\b

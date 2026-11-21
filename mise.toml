@@ -1,0 +1,15 @@
+[tools]
+rust = { version = "1.100.0", components = "rustfmt,clippy" }
+ast-grep = "0.51.3"
+cargo-deny = "0.22.0"
+
+[tasks.check]
+description = "Format, lint, test, and guard checks"
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
+  "ast-grep scan --no-ignore hidden",
+  "cargo run --quiet --package xtask -- forbidden-chars",
+  "cargo deny check licenses",
+]

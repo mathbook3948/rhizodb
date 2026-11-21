@@ -1,0 +1,6 @@
+ruleDirs:
+  - guards
+languageGlobs:
+  bash:
+    - pre-push
+    - commit-msg

@@ -1,0 +1,72 @@
+id: no-comments
+language: rust
+severity: error
+message: Comments are not allowed. Make the code say it through names, types, or structure.
+note: Doc comments on public API are allowed. A comment about an external constraint needs `// ast-grep-ignore` on the line above it.
+files:
+  - crates/*/src/**/*.rs
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment
+  not:
+    any:
+      - regex: ^//[/!]
+      - regex: ^/\*[*!]
+      - regex: ast-grep-ignore
+---
+id: doc-comments-on-public-api-only
+language: rust
+severity: error
+message: Doc comments are for public API contracts only.
+files:
+  - crates/*/src/**/*.rs
+rule:
+  kind: line_comment
+  regex: ^///
+  not:
+    any:
+      - precedes:
+          stopBy:
+            not:
+              any:
+                - kind: line_comment
+                - kind: attribute_item
+          has:
+            kind: visibility_modifier
+      - inside:
+          kind: enum_variant_list
+      - inside:
+          kind: declaration_list
+          inside:
+            kind: trait_item
+---
+id: no-comments-shell
+language: bash
+severity: error
+message: Comments are not allowed. Make the script say it through names and structure.
+files:
+  - "**/*.sh"
+  - .githooks/*
+ignores:
+  - .claude/skills/**
+rule:
+  kind: comment
+  not:
+    any:
+      - regex: ^#!
+      - regex: ast-grep-ignore
+---
+id: no-comments-yaml
+language: yaml
+severity: error
+message: Comments are not allowed.
+files:
+  - "**/*.yml"
+  - "**/*.yaml"
+ignores:
+  - .claude/skills/**
+rule:
+  kind: comment
+  not:
+    regex: ast-grep-ignore

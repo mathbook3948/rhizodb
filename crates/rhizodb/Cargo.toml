@@ -1,0 +1,12 @@
+[package]
+name = "rhizodb"
+description = "An embedded, schemaless property graph database with a GQL query layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
