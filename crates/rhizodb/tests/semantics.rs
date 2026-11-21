@@ -429,3 +429,29 @@ fn parameter_values_are_data_not_query_text() {
             .is_empty()
     );
 }
+
+#[test]
+fn range_refuses_a_list_too_long_to_hold() {
+    let db = db();
+    assert_eq!(
+        single(&db, "RETURN size(range(1, 1000001))"),
+        int(1_000_001)
+    );
+    for query in [
+        "RETURN size(range(1, 10000001))",
+        "RETURN size(range(0, 10000000000))",
+        "RETURN size(range(10000000000, 0, -1))",
+        "RETURN size(range(-9223372036854775807 - 1, 9223372036854775807))",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::NumberOutOfRange,
+            "{query}"
+        );
+    }
+    assert_eq!(single(&db, "RETURN size(range(5, 1))"), int(0));
+    assert_eq!(
+        single(&db, "RETURN size(range(0, 10000000000, 10000000000))"),
+        int(2)
+    );
+}

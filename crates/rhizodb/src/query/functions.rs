@@ -67,6 +67,8 @@ pub(crate) enum Function {
     Exists,
 }
 
+const MAX_RANGE_LENGTH: i128 = 10_000_000;
+
 const SIGNATURES: [(&str, Function, usize, usize); 53] = [
     ("id", Function::Id, 1, 1),
     ("labels", Function::Labels, 1, 1),
@@ -473,15 +475,26 @@ fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum,
             "range() needs a step other than zero",
         ));
     }
-    let mut items = Vec::new();
-    let mut current = start;
-    while (step > 0 && current <= end) || (step < 0 && current >= end) {
-        items.push(Datum::Integer(current));
-        match current.checked_add(step) {
-            Some(next) => current = next,
-            None => break,
-        }
+    let distance = if step > 0 {
+        i128::from(end) - i128::from(start)
+    } else {
+        i128::from(start) - i128::from(end)
+    };
+    let length = if distance < 0 {
+        0
+    } else {
+        distance / i128::from(step).abs() + 1
+    };
+    if length > MAX_RANGE_LENGTH {
+        return Err(Error::new(
+            ErrorKind::NumberOutOfRange,
+            format!("range() would build more than {MAX_RANGE_LENGTH} elements"),
+        ));
     }
+    let items = (0..length)
+        .map_while(|index| i64::try_from(i128::from(start) + index * i128::from(step)).ok())
+        .map(Datum::Integer)
+        .collect();
     Ok(Datum::List(items))
 }
 
