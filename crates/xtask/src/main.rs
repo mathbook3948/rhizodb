@@ -1,3 +1,4 @@
+mod docs;
 mod forbidden_chars;
 
 use std::path::Path;
@@ -9,8 +10,10 @@ fn main() -> ExitCode {
 
     let violations = match guard.as_str() {
         "forbidden-chars" => forbidden_chars::run(&workspace_root),
+        "docs" => docs::check(&workspace_root),
+        "docs-write" => docs::write(&workspace_root),
         _ => {
-            eprintln!("usage: xtask <forbidden-chars>");
+            eprintln!("usage: xtask <forbidden-chars|docs|docs-write>");
             return ExitCode::from(2);
         }
     };

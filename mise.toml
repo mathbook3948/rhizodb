@@ -11,5 +11,10 @@ run = [
   "cargo test --workspace",
   "ast-grep scan --no-ignore hidden",
   "cargo run --quiet --package xtask -- forbidden-chars",
+  "cargo run --quiet --package xtask -- docs",
   "cargo deny check licenses",
 ]
+
+[tasks.docs]
+description = "Regenerate the docs index"
+run = "cargo run --quiet --package xtask -- docs-write"
