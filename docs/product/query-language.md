@@ -16,6 +16,12 @@ GQL is the reference language, but the only public conformance suite is the open
 - A pattern used as a predicate is accepted only inside a `WHERE`.
 - A type error visible in the query text fails the query before it reads data. A type error that depends on data fails when a row reaches it.
 - Procedures and `CALL` are not supported.
+- Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`. Inside an expression, a single `-` between parenthesized terms is always subtraction.
+- Parameters are data. They never take part in the type checks made on the query text.
+- An element deleted earlier in the same query is returned as it was when deleted, and reading its properties fails.
+- A `MERGE` property that evaluates to null is an error.
+- `range()` has a length cap, so one query cannot exhaust the host's memory.
+- Floats convert to strings in the same form as the openCypher reference implementation.
 
 ## Open
 
