@@ -675,3 +675,22 @@ fn a_bad_parameter_is_the_same_data_error_as_the_same_value_in_a_variable() {
         ErrorKind::InvalidArgumentValue
     );
 }
+
+#[test]
+fn skip_and_limit_may_use_a_comprehension_variable_but_no_outer_variable() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 2, 3] AS i RETURN i ORDER BY i LIMIT size([x IN [1, 2] | x])"
+        ),
+        [vec![int(1)], vec![int(2)]]
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "UNWIND [1, 2, 3] AS i RETURN i LIMIT size([x IN [1, 2] | i])"
+        ),
+        ErrorKind::NonConstantExpression
+    );
+}

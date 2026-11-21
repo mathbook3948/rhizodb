@@ -1017,7 +1017,7 @@ impl Binder<'_> {
             }),
             ast::Expr::Parameter(name) => Expr::Parameter(self.parameter(&name.0)?),
             ast::Expr::Variable(name) => {
-                if matches!(mode, Mode::Constant) {
+                if matches!(mode, Mode::Constant) && scope.get(&name.0).is_none() {
                     return Err(error(
                         ErrorKind::NonConstantExpression,
                         "SKIP and LIMIT cannot refer to variables",
