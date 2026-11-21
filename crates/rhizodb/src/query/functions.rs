@@ -391,9 +391,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let text = string_argument(function, first)?;
                 let (Some(Datum::String(from)), Some(Datum::String(to))) = (&second, &third) else {
                     return match (second, third) {
-                        (Some(Datum::Null), _) | (_, Some(Datum::Null)) => Ok(Datum::Null),
-                        (Some(other), _) => Err(invalid(&other)),
-                        (None, _) => Ok(Datum::Null),
+                        (Some(Datum::Null), _) | (_, Some(Datum::Null)) | (None, _) => {
+                            Ok(Datum::Null)
+                        }
+                        (Some(Datum::String(_)), Some(other)) | (Some(other), _) => {
+                            Err(invalid(&other))
+                        }
                     };
                 };
                 Ok(Datum::String(text.replace(from.as_str(), to)))
