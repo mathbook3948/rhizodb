@@ -258,7 +258,9 @@ fn verify(graph: &Graph<RedbStorage>) -> Result<u64, String> {
 #[test]
 #[ignore = "child process of the crash test, selected by DATABASE_ENV"]
 fn crash_writer() {
-    let path = std::env::var(DATABASE_ENV).unwrap();
+    let Ok(path) = std::env::var(DATABASE_ENV) else {
+        return;
+    };
     let graph = Graph::open(RedbStorage::open(path).unwrap()).unwrap();
     let mut stdout = std::io::stdout();
     writeln!(stdout, "{READY_LINE}").unwrap();
