@@ -16,7 +16,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each node label has an index from label to node ID.
 - Stored property values are null-free. Setting a property to null removes it.
 - A stored value is a boolean, integer, float, string, byte string, or a list of stored values. Maps, nodes, relationships, and paths exist only while a query runs.
-- Stored lists nest at most 64 levels deep. A write that exceeds it fails.
+- Stored lists have a fixed nesting limit, enforced on write as well as on read.
 - The database records one format version in a metadata table, and opening a database with an unknown version fails.
 - Each query runs in its own transaction. redb allows one writer and many concurrent readers.
 
