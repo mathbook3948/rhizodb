@@ -14,7 +14,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - The first features are `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP` or `OFFSET`, `LIMIT`, `INSERT`, and the core expressions over the stored value types.
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
-- A type error visible in the query text fails the query before it reads data. A type error that depends on data fails when a row reaches it.
+- A type error in a part of the query text that every evaluation reaches fails the query before it reads data.
+- A type error in a part that only some evaluations reach, or that depends on data, fails when a row reaches it.
 - Procedures and `CALL` are not supported.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`. Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - Parameters are data. They never take part in the type checks made on the query text.
