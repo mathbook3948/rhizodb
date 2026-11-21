@@ -2,5 +2,6 @@ ruleDirs:
   - guards
 languageGlobs:
   bash:
+    - pre-commit
     - pre-push
     - commit-msg
