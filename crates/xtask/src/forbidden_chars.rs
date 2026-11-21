@@ -2,7 +2,7 @@ use std::error::Error;
 use std::path::Path;
 use std::process::Command;
 
-const VENDORED_SKILLS: &str = ".claude/skills/";
+const VENDORED_PREFIXES: [&str; 2] = [".claude/skills/", "crates/tck/vendor/"];
 
 const FORBIDDEN: [(char, &str); 13] = [
     ('\u{2013}', "en dash"),
@@ -43,6 +43,12 @@ pub fn forbidden_chars_in(text: &str) -> Vec<ForbiddenChar> {
         .collect()
 }
 
+pub fn is_vendored(path: &str) -> bool {
+    VENDORED_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
 pub fn run(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let listing = Command::new("git")
         .current_dir(workspace_root)
@@ -62,7 +68,7 @@ pub fn run(workspace_root: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let project_files = String::from_utf8(listing.stdout)?;
     for path in project_files
         .split('\0')
-        .filter(|path| !path.is_empty() && !path.starts_with(VENDORED_SKILLS))
+        .filter(|path| !path.is_empty() && !is_vendored(path))
     {
         let Ok(bytes) = std::fs::read(workspace_root.join(path)) else {
             continue;

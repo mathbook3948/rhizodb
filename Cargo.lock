@@ -7,5 +7,9 @@ name = "rhizodb"
 version = "0.0.0"
 
 [[package]]
+name = "tck"
+version = "0.0.0"
+
+[[package]]
 name = "xtask"
 version = "0.0.0"
