@@ -9,13 +9,14 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 ## Decisions
 
 - Node and relationship IDs are separate `u64` counters that only grow. A deleted ID is never reused.
-- Labels, relationship types, and property keys are interned to `u32` tokens in a dictionary table.
+- Labels, relationship types, and property keys are interned to `u32` tokens in a dictionary table. Each kind has its own token space.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
 - Keys are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency and label members.
-- Each relationship is indexed twice, under its source node for outgoing scans and under its target node for incoming scans.
+- Each relationship is indexed twice, under its source node for outgoing scans and under its target node for incoming scans. The index entry holds the node at the other end, so a traversal reads no relationship record.
 - Each node label has an index from label to node ID.
 - Stored property values are null-free. Setting a property to null removes it.
 - A stored value is a boolean, integer, float, string, byte string, or a list of stored values. Maps, nodes, relationships, and paths exist only while a query runs.
+- Stored lists nest at most 64 levels deep. A write that exceeds it fails.
 - The database records one format version in a metadata table, and opening a database with an unknown version fails.
 - Each query runs in its own transaction. redb allows one writer and many concurrent readers.
 
