@@ -4,7 +4,7 @@
 
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod graph;
-mod gql;
+pub mod gql;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]
 mod storage;
 #[allow(dead_code, reason = "consumed by the Database API in a later unit")]

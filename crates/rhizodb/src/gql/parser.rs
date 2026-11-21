@@ -1,0 +1,198 @@
+mod clause;
+mod expression;
+mod pattern;
+
+use super::ast::Name;
+use super::ast::Query;
+use super::ast::SingleQuery;
+use super::ast::Union;
+use super::ast::UnionKind;
+use super::error::SyntaxError;
+use super::error::SyntaxErrorKind;
+use super::lexer::Punct;
+use super::lexer::Token;
+use super::lexer::TokenKind;
+use super::lexer::lex;
+
+const MAX_DEPTH: usize = 128;
+
+pub(crate) type ParseResult<T> = Result<T, SyntaxError>;
+
+/// Parses one query. Never panics: malformed input, including deeply nested
+/// input, comes back as a `SyntaxError`.
+pub(crate) fn parse(input: &str) -> ParseResult<Query> {
+    let mut parser = Parser {
+        tokens: lex(input)?,
+        pos: 0,
+        depth: 0,
+        input_len: input.len(),
+    };
+    parser.query()
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+    depth: usize,
+    input_len: usize,
+}
+
+impl Parser {
+    fn query(&mut self) -> ParseResult<Query> {
+        let first = self.single_query()?;
+        let mut rest = Vec::new();
+        let mut kind = None;
+        while self.at_keyword("UNION") {
+            let union_offset = self.offset();
+            self.pos += 1;
+            let this = if self.eat_keyword("ALL") {
+                UnionKind::All
+            } else {
+                self.eat_keyword("DISTINCT");
+                UnionKind::Distinct
+            };
+            if kind.is_some_and(|earlier| earlier != this) {
+                return Err(SyntaxError::new(union_offset, SyntaxErrorKind::MixedUnion));
+            }
+            kind = Some(this);
+            rest.push(self.single_query()?);
+        }
+        self.eat_punct(Punct::Semicolon);
+        if self.peek().is_some() {
+            return Err(self.unexpected());
+        }
+        Ok(match kind {
+            Some(kind) => Query::Union(Union { kind, first, rest }),
+            None => Query::Single(first),
+        })
+    }
+
+    fn single_query(&mut self) -> ParseResult<SingleQuery> {
+        let mut clauses = vec![self.clause()?];
+        while self.at_clause_start() {
+            clauses.push(self.clause()?);
+        }
+        Ok(SingleQuery { clauses })
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn kind_at(&self, ahead: usize) -> Option<&TokenKind> {
+        self.tokens.get(self.pos + ahead).map(|token| &token.kind)
+    }
+
+    fn offset(&self) -> usize {
+        self.peek().map_or(self.input_len, |token| token.start)
+    }
+
+    fn previous_end(&self) -> usize {
+        self.pos
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+            .map_or(0, |token| token.end)
+    }
+
+    fn unexpected(&self) -> SyntaxError {
+        let kind = if self.peek().is_some() {
+            SyntaxErrorKind::UnexpectedToken
+        } else {
+            SyntaxErrorKind::UnexpectedEnd
+        };
+        SyntaxError::new(self.offset(), kind)
+    }
+
+    fn unsupported(&self) -> SyntaxError {
+        SyntaxError::new(self.offset(), SyntaxErrorKind::UnsupportedFeature)
+    }
+
+    fn at_punct(&self, punct: Punct) -> bool {
+        self.punct_at(0, punct)
+    }
+
+    fn punct_at(&self, ahead: usize, punct: Punct) -> bool {
+        self.kind_at(ahead) == Some(&TokenKind::Punct(punct))
+    }
+
+    fn eat_punct(&mut self, punct: Punct) -> bool {
+        let found = self.at_punct(punct);
+        if found {
+            self.pos += 1;
+        }
+        found
+    }
+
+    fn expect_punct(&mut self, punct: Punct) -> ParseResult<()> {
+        if self.eat_punct(punct) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
+    }
+
+    fn keyword_at(&self, ahead: usize, keyword: &str) -> bool {
+        matches!(
+            self.kind_at(ahead),
+            Some(TokenKind::Word { text, quoted: false }) if text.eq_ignore_ascii_case(keyword)
+        )
+    }
+
+    fn at_keyword(&self, keyword: &str) -> bool {
+        self.keyword_at(0, keyword)
+    }
+
+    fn eat_keyword(&mut self, keyword: &str) -> bool {
+        let found = self.at_keyword(keyword);
+        if found {
+            self.pos += 1;
+        }
+        found
+    }
+
+    fn eat_any_keyword(&mut self, keywords: &[&str]) -> bool {
+        keywords.iter().any(|keyword| self.eat_keyword(keyword))
+    }
+
+    fn expect_keyword(&mut self, keyword: &str) -> ParseResult<()> {
+        if self.eat_keyword(keyword) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
+    }
+
+    fn name(&mut self) -> ParseResult<Name> {
+        match self.kind_at(0) {
+            Some(TokenKind::Word { text, .. }) => {
+                let name = Name::new(text.as_str());
+                self.pos += 1;
+                Ok(name)
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    fn deepen(&mut self) -> ParseResult<()> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(SyntaxError::new(
+                self.offset(),
+                SyntaxErrorKind::NestingTooDeep,
+            ));
+        }
+        Ok(())
+    }
+
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> ParseResult<T>) -> ParseResult<T> {
+        let before = self.depth;
+        self.deepen()?;
+        let result = parse(self);
+        self.depth = before;
+        result
+    }
+}
+
+#[cfg(test)]
+#[path = "parser.test.rs"]
+mod tests;
