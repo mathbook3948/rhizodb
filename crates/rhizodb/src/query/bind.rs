@@ -206,6 +206,7 @@ impl Binder<'_> {
         let mut scope = Scope::default();
         let mut clauses = Vec::new();
         let mut output = None;
+        let mut result_reads_variables = false;
         let last = query.clauses.len().saturating_sub(1);
         for (index, clause) in query.clauses.iter().enumerate() {
             if output.is_some() {
@@ -237,9 +238,10 @@ impl Binder<'_> {
                     scope = next;
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
-                ast::Clause::Return(projection) => {
+                ast::Clause::Return(returned) => {
                     let (projection, _, columns) =
-                        self.projection(projection, &scope, false, None)?;
+                        self.projection(returned, &scope, false, None)?;
+                    result_reads_variables = reads_variables(returned);
                     output = Some((projection.outputs.clone(), columns));
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
@@ -319,6 +321,7 @@ impl Binder<'_> {
                         targets.push(bound);
                     }
                     clauses.push(Clause::Update(UpdateClause::Delete {
+                        retain: true,
                         detach: delete.detach,
                         targets,
                     }));
@@ -335,6 +338,13 @@ impl Binder<'_> {
                     ErrorKind::InvalidClauseComposition,
                     "a query cannot end with a reading clause",
                 ));
+            }
+        }
+        if !result_reads_variables {
+            for clause in &mut clauses {
+                if let Clause::Update(UpdateClause::Delete { retain, .. }) = clause {
+                    *retain = false;
+                }
             }
         }
         let (output, columns) = output.unwrap_or_default();
@@ -1502,6 +1512,15 @@ fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::E
         ast::Expr::Function(call) => aggregate_function(&qualified_name(call))
             .map(|function| (function, call.distinct, call.args.as_slice())),
         _ => None,
+    }
+}
+
+fn reads_variables(projection: &ast::Projection) -> bool {
+    match &projection.items {
+        ast::ProjectionItems::Star(_) => true,
+        ast::ProjectionItems::Items(items) => items
+            .iter()
+            .any(|item| !free_variables(&item.expr).is_empty()),
     }
 }
 

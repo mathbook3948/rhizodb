@@ -56,7 +56,11 @@ pub(crate) enum UpdateClause {
     Merge(Box<MergeClause>),
     Set(Vec<SetAction>),
     Remove(Vec<RemoveAction>),
-    Delete { detach: bool, targets: Vec<Expr> },
+    Delete {
+        detach: bool,
+        targets: Vec<Expr>,
+        retain: bool,
+    },
 }
 
 #[derive(Clone, Debug)]

@@ -81,8 +81,12 @@ pub(crate) fn apply<W: WriteTransaction>(
             }
             Ok(rows)
         }
-        UpdateClause::Delete { detach, targets } => {
-            writer.delete(*detach, targets, &rows)?;
+        UpdateClause::Delete {
+            detach,
+            targets,
+            retain,
+        } => {
+            writer.delete(*detach, *retain, targets, &rows)?;
             Ok(rows)
         }
     }
@@ -339,7 +343,13 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
     }
 
-    fn delete(&mut self, detach: bool, targets: &[Expr], rows: &[Row]) -> Result<(), Error> {
+    fn delete(
+        &mut self,
+        detach: bool,
+        retain: bool,
+        targets: &[Expr],
+        rows: &[Row],
+    ) -> Result<(), Error> {
         let mut nodes: Vec<NodeId> = Vec::new();
         let mut relationships: Vec<RelationshipId> = Vec::new();
         for row in rows {
@@ -359,13 +369,17 @@ impl<W: WriteTransaction> Writer<'_, W> {
         for relationship in relationships {
             if let Some(record) = self.tx.relationship(relationship)? {
                 self.tx.delete_relationship(relationship)?;
-                self.graveyard.relationships.insert(relationship, record);
+                if retain {
+                    self.graveyard.relationships.insert(relationship, record);
+                }
             }
         }
         for node in nodes {
             if let Some(record) = self.tx.node(node)? {
                 self.tx.delete_node(node)?;
-                self.graveyard.nodes.insert(node, record);
+                if retain {
+                    self.graveyard.nodes.insert(node, record);
+                }
             }
         }
         Ok(())
