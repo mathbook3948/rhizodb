@@ -40,7 +40,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - The `transaction` and `statement` clocks and the clock of a call without arguments read one instant per query, so two calls in one query agree. The `realtime` clock reads the system clock at each call.
 - Temporal values convert to strings in the ISO 8601 forms the TCK expects, and a temporal function reads back every string it produces.
 - A fractional duration component carries into the next smaller units, with a month of 30.436875 days, and the carry is exact before the nanoseconds are truncated.
-- Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have. A date keeps only whole days of the seconds.
+- Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have.
+- A date moves by the whole days in the seconds and nanoseconds of a duration, truncated toward zero.
 - `<`, `<=`, `>`, and `>=` compare two temporal values of the same type and give null otherwise.
 - Times and datetimes compare by instant alone, so the same instant at two offsets or zones is neither less nor greater, even though the two are not equal.
 - Durations do not compare.

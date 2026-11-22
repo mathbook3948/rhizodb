@@ -161,6 +161,31 @@ fn a_duration_divided_by_a_float_is_exact() {
 }
 
 #[test]
+fn a_date_moves_by_the_whole_days_of_the_time_truncated_toward_zero() {
+    let db = db();
+    for (query, expected) in [
+        (
+            "RETURN date('2020-01-02') + duration({seconds: -86399.5})",
+            "2020-01-02",
+        ),
+        (
+            "RETURN date('2020-01-02') - duration({seconds: 86399.5})",
+            "2020-01-02",
+        ),
+        (
+            "RETURN date('2020-01-02') + duration({seconds: -86400.5})",
+            "2020-01-01",
+        ),
+        (
+            "RETURN date('2020-01-02') + duration({hours: 47, minutes: 59})",
+            "2020-01-03",
+        ),
+    ] {
+        assert_eq!(text(&db, query), expected, "{query}");
+    }
+}
+
+#[test]
 fn duration_strings_read_their_amounts_exactly() {
     let db = db();
     assert_eq!(

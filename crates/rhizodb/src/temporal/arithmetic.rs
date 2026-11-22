@@ -8,18 +8,21 @@ use super::Time;
 use super::Zone;
 use super::amount::Amount;
 use super::amount::carry;
+use super::calendar::NANOS_PER_DAY;
 use super::calendar::civil_from_days;
 use super::calendar::days_in_month;
 
 /// `value` moved by `duration`: by its months, then its days, then its seconds and nanoseconds,
-/// leaving out the units `value` does not have. A date moves by the whole days of the seconds.
+/// leaving out the units `value` does not have. A date moves by the whole days of the seconds and
+/// nanoseconds, truncated toward zero.
 /// `None` when the result is out of range.
 pub(crate) fn plus(value: &Temporal, duration: &Duration) -> Option<Temporal> {
     let nanos = duration.total_nanos();
     Some(match value {
         Temporal::Date(date) => {
             let date = plus_days(plus_months(*date, duration.months)?, duration.days)?;
-            Temporal::Date(plus_days(date, duration.seconds / 86_400)?)
+            let whole_days = i64::try_from(nanos / i128::from(NANOS_PER_DAY)).ok()?;
+            Temporal::Date(plus_days(date, whole_days)?)
         }
         Temporal::LocalTime(time) => {
             Temporal::LocalTime(LocalTime::wrapping(i128::from(time.nanos()) + nanos))
