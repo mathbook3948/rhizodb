@@ -82,6 +82,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data and never take part in the type checks made on the query text.
+- A database binds each query text once and reuses the plan for later runs with other parameter values.
+- Registering a procedure forgets every bound plan.
 - An element deleted earlier in the same query is returned as it was when deleted.
 - Reading the properties of an element deleted earlier in the same query fails.
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.

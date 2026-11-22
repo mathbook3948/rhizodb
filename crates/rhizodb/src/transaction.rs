@@ -3,8 +3,8 @@ use std::fmt;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::GraphTx;
-use crate::procedure::Procedures;
 use crate::query;
+use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::redb_backend::RedbRead;
@@ -19,15 +19,15 @@ use crate::temporal::DateTime;
 pub struct ReadTransaction<'db> {
     tx: GraphTx<RedbRead>,
     began: DateTime,
-    procedures: &'db Procedures,
+    statements: &'db Statements,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbRead>, procedures: &'db Procedures) -> Self {
+    pub(crate) fn new(tx: GraphTx<RedbRead>, statements: &'db Statements) -> Self {
         Self {
             tx,
             began: temporal::now(),
-            procedures,
+            statements,
         }
     }
 
@@ -35,7 +35,7 @@ impl<'db> ReadTransaction<'db> {
     /// fails with [`ErrorKind::ReadOnlyTransaction`] before it reads data. A failed query leaves
     /// the transaction usable.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute_read(&self.tx, &self.began, self.procedures, query, parameters)
+        query::execute_read(&self.tx, &self.began, self.statements, query, parameters)
     }
 }
 
@@ -46,15 +46,15 @@ impl<'db> ReadTransaction<'db> {
 pub struct WriteTransaction<'db> {
     tx: Option<GraphTx<RedbWrite>>,
     began: DateTime,
-    procedures: &'db Procedures,
+    statements: &'db Statements,
 }
 
 impl<'db> WriteTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbWrite>, procedures: &'db Procedures) -> Self {
+    pub(crate) fn new(tx: GraphTx<RedbWrite>, statements: &'db Statements) -> Self {
         Self {
             tx: Some(tx),
             began: temporal::now(),
-            procedures,
+            statements,
         }
     }
 
@@ -62,7 +62,7 @@ impl<'db> WriteTransaction<'db> {
     /// the whole transaction, so every later call fails with [`ErrorKind::TransactionAborted`].
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         let tx = self.tx.as_mut().ok_or_else(aborted)?;
-        let result = query::execute_write(tx, &self.began, self.procedures, query, parameters);
+        let result = query::execute_write(tx, &self.began, self.statements, query, parameters);
         if result.is_err() {
             self.tx = None;
         }

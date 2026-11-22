@@ -44,78 +44,70 @@ pub(crate) struct Graveyard {
     pub(crate) relationships: BTreeMap<RelationshipId, RelationshipRecord>,
 }
 
-/// Applies one updating clause to every row, in row order. Later rows see earlier rows' writes.
-pub(crate) fn apply<W: WriteTransaction>(
-    tx: &mut GraphTx<W>,
-    slots: usize,
-    now: &Clocks,
-    patterns: &Patterns,
-    graveyard: &mut Graveyard,
-    clause: &UpdateClause,
-    rows: Vec<Row>,
-) -> Result<Vec<Row>, Error> {
-    let mut writer = Writer {
-        tx,
-        slots,
-        now,
-        patterns,
-        graveyard,
-    };
-    match clause {
-        UpdateClause::Create(parts) => {
-            let mut rows = rows;
-            for row in &mut rows {
-                for part in parts {
-                    writer.create(part, row, false)?;
-                }
-            }
-            Ok(rows)
-        }
-        UpdateClause::Merge(merge) => {
-            let mut out = Vec::new();
-            for row in rows {
-                writer.merge(merge, row, &mut out)?;
-            }
-            Ok(out)
-        }
-        UpdateClause::Set(actions) => {
-            for row in &rows {
-                writer.set_all(actions, row)?;
-            }
-            Ok(rows)
-        }
-        UpdateClause::Remove(actions) => {
-            for row in &rows {
-                for action in actions {
-                    writer.remove(action, row)?;
-                }
-            }
-            Ok(rows)
-        }
-        UpdateClause::Delete {
-            detach,
-            targets,
-            retain,
-        } => {
-            writer.delete(*detach, *retain, targets, &rows)?;
-            Ok(rows)
-        }
-    }
-}
-
-struct Writer<'a, W> {
-    tx: &'a mut GraphTx<W>,
-    slots: usize,
-    now: &'a Clocks,
-    patterns: &'a Patterns,
-    graveyard: &'a mut Graveyard,
+/// Applies updating clauses to the rows of one query.
+pub(crate) struct Writer<'a, W> {
+    pub(crate) tx: &'a mut GraphTx<W>,
+    pub(crate) slots: usize,
+    pub(crate) parameters: &'a [Datum],
+    pub(crate) now: &'a Clocks,
+    pub(crate) patterns: &'a Patterns,
+    pub(crate) graveyard: &'a mut Graveyard,
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
+    /// Applies one updating clause to every row, in row order. Later rows see earlier rows' writes.
+    pub(crate) fn apply(
+        &mut self,
+        clause: &UpdateClause,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
+        match clause {
+            UpdateClause::Create(parts) => {
+                let mut rows = rows;
+                for row in &mut rows {
+                    for part in parts {
+                        self.create(part, row, false)?;
+                    }
+                }
+                Ok(rows)
+            }
+            UpdateClause::Merge(merge) => {
+                let mut out = Vec::new();
+                for row in rows {
+                    self.merge(merge, row, &mut out)?;
+                }
+                Ok(out)
+            }
+            UpdateClause::Set(actions) => {
+                for row in &rows {
+                    self.set_all(actions, row)?;
+                }
+                Ok(rows)
+            }
+            UpdateClause::Remove(actions) => {
+                for row in &rows {
+                    for action in actions {
+                        self.remove(action, row)?;
+                    }
+                }
+                Ok(rows)
+            }
+            UpdateClause::Delete {
+                detach,
+                targets,
+                retain,
+            } => {
+                self.delete(*detach, *retain, targets, &rows)?;
+                Ok(rows)
+            }
+        }
+    }
+
     fn env(&self) -> Env<'_, W> {
         Env {
             tx: &*self.tx,
             slots: self.slots,
+            parameters: self.parameters,
             now: self.now,
             graveyard: &*self.graveyard,
             patterns: self.patterns,

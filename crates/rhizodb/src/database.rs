@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -7,8 +6,8 @@ use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
-use crate::procedure::Procedures;
 use crate::query;
+use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::redb_backend::RedbStorage;
@@ -20,7 +19,7 @@ use crate::transaction::WriteTransaction;
 #[derive(Debug)]
 pub struct Database {
     graph: Graph<RedbStorage>,
-    procedures: Procedures,
+    statements: Statements,
 }
 
 impl Database {
@@ -28,7 +27,7 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::open(path)?)?,
-            procedures: Procedures::new(),
+            statements: Statements::default(),
         })
     }
 
@@ -36,7 +35,7 @@ impl Database {
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::in_memory()?)?,
-            procedures: Procedures::new(),
+            statements: Statements::default(),
         })
     }
 
@@ -49,13 +48,13 @@ impl Database {
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// when the calling thread holds one.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute(&self.graph, &self.procedures, query, parameters)
+        query::execute(&self.graph, &self.statements, query, parameters)
     }
 
     /// Begins a read transaction, which sees the graph as it was committed at this moment for as
     /// long as it lives. Read transactions run alongside each other and alongside a writer.
     pub fn begin_read(&self) -> Result<ReadTransaction<'_>, Error> {
-        Ok(ReadTransaction::new(self.graph.read()?, &self.procedures))
+        Ok(ReadTransaction::new(self.graph.read()?, &self.statements))
     }
 
     /// Begins a write transaction. Only one is open at a time, so this waits until any open write
@@ -64,7 +63,7 @@ impl Database {
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// instead of waiting for itself.
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, Error> {
-        Ok(WriteTransaction::new(self.graph.write()?, &self.procedures))
+        Ok(WriteTransaction::new(self.graph.write()?, &self.statements))
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
@@ -80,7 +79,7 @@ impl Database {
                 format!("procedure `{name}` is in the reserved `db` namespace"),
             ));
         }
-        self.procedures.insert(name.clone(), Arc::new(procedure));
+        self.statements.register(procedure);
         Ok(())
     }
 

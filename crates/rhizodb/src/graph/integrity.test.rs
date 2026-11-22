@@ -584,7 +584,7 @@ fn every_violation_is_reported_not_just_the_first() {
 fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error::Error> {
     crate::query::execute(
         graph,
-        &crate::procedure::Procedures::new(),
+        &crate::query::Statements::default(),
         query,
         &crate::result::Parameters::new(),
     )
@@ -594,7 +594,7 @@ fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error
 fn count(graph: &Graph<RedbStorage>, query: &str) -> usize {
     crate::query::execute(
         graph,
-        &crate::procedure::Procedures::new(),
+        &crate::query::Statements::default(),
         query,
         &crate::result::Parameters::new(),
     )

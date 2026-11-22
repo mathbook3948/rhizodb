@@ -9,7 +9,6 @@ use crate::result::Parameters;
 
 use super::builtin::Builtin;
 use super::datum::Datum;
-use super::datum::from_parameter;
 use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
@@ -66,6 +65,7 @@ pub(crate) fn bind(
         closed: Vec::new(),
         expression_depth: 0,
         parameter_reads: 0,
+        parameter_names: Vec::new(),
         type_error: None,
     };
     let (singles, distinct) = match query {
@@ -106,6 +106,7 @@ pub(crate) fn bind(
     let columns = columns.unwrap_or_default();
     let slot_count = binder.slot_count;
     let closed = binder.closed;
+    let parameters = binder.parameter_names;
     let updating = parts.iter().any(|part| {
         part.clauses
             .iter()
@@ -118,6 +119,7 @@ pub(crate) fn bind(
             columns,
             slot_count,
             closed,
+            parameters,
         }));
     }
     let parts = parts
@@ -140,6 +142,7 @@ pub(crate) fn bind(
         columns,
         slot_count,
         closed,
+        parameters,
     }))
 }
 
@@ -221,11 +224,20 @@ struct Binder<'a> {
     closed: Vec<Expr>,
     expression_depth: usize,
     parameter_reads: usize,
+    parameter_names: Vec<String>,
     type_error: Option<Error>,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
     Error::new(kind, message)
+}
+
+/// The error for a query that reads the parameter `name` when it was not supplied.
+pub(crate) fn missing_parameter(name: &str) -> Error {
+    error(
+        ErrorKind::MissingParameter,
+        format!("parameter `${name}` was not supplied"),
+    )
 }
 
 impl Binder<'_> {
@@ -983,17 +995,20 @@ impl Binder<'_> {
         }
     }
 
-    fn parameter(&mut self, name: &str) -> Result<Datum, Error> {
+    fn parameter(&mut self, name: &str) -> Result<usize, Error> {
         self.parameter_reads += 1;
-        self.parameters
-            .get(name)
-            .map(from_parameter)
-            .ok_or_else(|| {
-                error(
-                    ErrorKind::MissingParameter,
-                    format!("parameter `${name}` was not supplied"),
-                )
-            })
+        if !self.parameters.contains_key(name) {
+            return Err(missing_parameter(name));
+        }
+        Ok(
+            match self.parameter_names.iter().position(|known| known == name) {
+                Some(index) => index,
+                None => {
+                    self.parameter_names.push(name.to_owned());
+                    self.parameter_names.len() - 1
+                }
+            },
+        )
     }
 
     fn column_name(&self, item: &ast::ProjectionItem) -> String {

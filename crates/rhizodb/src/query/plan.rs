@@ -24,6 +24,16 @@ pub(crate) enum Plan {
     Updating(Program<Clause>),
 }
 
+impl Plan {
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) fn parameters(&self) -> &[String] {
+        match self {
+            Self::ReadOnly(program) => &program.parameters,
+            Self::Updating(program) => &program.parameters,
+        }
+    }
+}
+
 /// One or more pipelines whose results are concatenated, as `UNION` does.
 #[derive(Clone, Debug)]
 pub(crate) struct Program<C> {
@@ -35,6 +45,8 @@ pub(crate) struct Program<C> {
     /// pattern. Each is evaluated once before the first clause runs, so a type error in the
     /// query text is reported whatever the data.
     pub(crate) closed: Vec<Expr>,
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) parameters: Vec<String>,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.
@@ -271,9 +283,9 @@ pub(crate) enum AggregateFunction {
 #[derive(Clone, Debug)]
 pub(crate) enum Expr {
     Constant(Datum),
-    /// A supplied parameter's value. It is data, not query text, so it never makes an
-    /// expression closed.
-    Parameter(Datum),
+    /// The value of the supplied parameter that [`Program::parameters`] names at this index. It
+    /// is data, not query text, so it never makes an expression closed.
+    Parameter(usize),
     Slot(Slot),
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),

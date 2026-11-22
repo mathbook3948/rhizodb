@@ -199,3 +199,14 @@ fn registering_a_name_again_replaces_the_procedure() {
     .unwrap();
     assert_eq!(single(&db, "CALL test.nothing()"), int(7));
 }
+
+#[test]
+fn a_query_run_before_a_procedure_is_replaced_calls_the_new_one() {
+    let mut db = with_procedures();
+    assert!(run(&db, "CALL test.nothing()").is_empty());
+    db.register_procedure(
+        Procedure::new("test.nothing", |_| Ok(vec![vec![int(7)]])).output("seven"),
+    )
+    .unwrap();
+    assert_eq!(single(&db, "CALL test.nothing()"), int(7));
+}

@@ -40,6 +40,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) tx: &'a GraphTx<T>,
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
+    /// The values of [`Program::parameters`](super::plan::Program::parameters), in order.
+    pub(crate) parameters: &'a [Datum],
     /// The statement and transaction instants, which the clock functions other than `realtime`
     /// read.
     pub(crate) now: &'a Clocks,
@@ -243,7 +245,11 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn eval_node(&self, expr: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         match expr {
-            Expr::Constant(value) | Expr::Parameter(value) => Ok((value.clone(), Taint::Clean)),
+            Expr::Constant(value) => Ok((value.clone(), Taint::Clean)),
+            Expr::Parameter(index) => Ok((
+                self.parameters.get(*index).cloned().unwrap_or(Datum::Null),
+                Taint::Clean,
+            )),
             Expr::Slot(slot) => Ok((
                 row.get(*slot).cloned().unwrap_or(Datum::Null),
                 self.slot_taint(*slot),
