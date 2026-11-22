@@ -1435,3 +1435,16 @@ fn both_exists_forms_reject_a_variable_hidden_by_the_projection_next_to_them() {
         [vec![int(1)]]
     );
 }
+
+#[test]
+fn a_distinct_aggregate_counts_each_element_and_each_equal_value_once() {
+    let db = db();
+    run(&db, "INSERT (:D)-[:R]->(:D)-[:R]->(:D)");
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a)-[r]->(b) UNWIND [a, b, r, r, 1, 1.0, 'x', [a]] AS v RETURN count(DISTINCT v)"
+        ),
+        [vec![int(9)]]
+    );
+}
