@@ -5,6 +5,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::graph;
 use crate::graph::Adjacent;
+use crate::graph::EncodedNode;
 use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
@@ -31,6 +32,8 @@ use super::plan::Step;
 
 /// Receives each complete match. Returning `false` stops the search.
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
+
+type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
 
 struct Search<'s, 'e, T> {
     env: &'s Env<'e, T>,
@@ -69,15 +72,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         })
     }
 
-    fn properties_match(
-        &self,
-        stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
-        expected: Option<&Expr>,
-        row: &Row,
-    ) -> Result<bool, Error> {
-        let Some(expected) = expected else {
-            return Ok(true);
-        };
+    fn expected_properties(&self, expected: &Expr, row: &Row) -> Result<ExpectedProperties, Error> {
         let entries = match self.eval(expected, row)? {
             Datum::Map(entries) => entries,
             other => {
@@ -87,17 +82,32 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )));
             }
         };
-        for (key, value) in &entries {
-            let stored = match self.tx.lookup_token::<PropertyKey>(key)? {
-                Some(token) => stored(token)?.map(Datum::from),
-                None => None,
-            };
-            let stored = stored.unwrap_or(Datum::Null);
-            if equals(&stored, value) != Some(true) {
-                return Ok(false);
-            }
+        entries
+            .into_iter()
+            .map(|(key, value)| Ok((self.tx.lookup_token::<PropertyKey>(&key)?, value)))
+            .collect()
+    }
+
+    fn properties_match(
+        &self,
+        stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
+        expected: Option<&Expr>,
+        row: &Row,
+    ) -> Result<bool, Error> {
+        match expected {
+            Some(expected) => holds(&self.expected_properties(expected, row)?, stored),
+            None => Ok(true),
         }
-        Ok(true)
+    }
+
+    fn node_labelled(&self, node: &EncodedNode<'_>, labels: &LabelExpr) -> Result<bool, Error> {
+        match labels {
+            LabelExpr::Name(name) => match self.tx.lookup_token::<Label>(&name.0)? {
+                Some(label) => Ok(node.has_label(label)?),
+                None => Ok(false),
+            },
+            labels => self.node_has_labels(&node.labels()?, labels),
+        }
     }
 
     fn node_matches(
@@ -110,20 +120,23 @@ impl<T: ReadTransaction> Env<'_, T> {
         if labels_known && pattern.properties.is_none() {
             return Ok(true);
         }
-        let Some(node) = self.tx.encoded_node(id)? else {
-            return Ok(false);
-        };
-        if let Some(labels) = &pattern.labels
-            && !labels_known
-            && !self.node_has_labels(&node.labels()?, labels)?
-        {
-            return Ok(false);
+        if !labels_known {
+            let labelled = self.tx.with_node(id, |node| match &pattern.labels {
+                Some(labels) => self.node_labelled(&node, labels),
+                None => Ok(true),
+            })?;
+            if labelled != Some(true) {
+                return Ok(false);
+            }
         }
-        self.properties_match(
-            |key| Ok(node.property(key)?),
-            pattern.properties.as_ref(),
-            row,
-        )
+        let Some(expected) = &pattern.properties else {
+            return Ok(true);
+        };
+        let expected = self.expected_properties(expected, row)?;
+        let matches = self
+            .tx
+            .with_node(id, |node| holds(&expected, |key| Ok(node.property(key)?)))?;
+        Ok(matches == Some(true))
     }
 
     fn relationship_matches(
@@ -211,6 +224,22 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         Ok(kept)
     }
+}
+
+fn holds(
+    expected: &ExpectedProperties,
+    stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
+) -> Result<bool, Error> {
+    for (key, value) in expected {
+        let stored = match key {
+            Some(key) => stored(*key)?.map_or(Datum::Null, Datum::from),
+            None => Datum::Null,
+        };
+        if equals(&stored, value) != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn label_scan_decides(pattern: &NodePattern) -> bool {

@@ -111,6 +111,32 @@ fn collect_prefix<T: ReadableTable<&'static [u8], &'static [u8]>>(
     Ok(entries)
 }
 
+fn read_value<T: ReadableTable<&'static [u8], &'static [u8]>, R, E: From<StorageError>>(
+    table: &T,
+    key: &[u8],
+    read: impl FnOnce(&[u8]) -> Result<R, E>,
+) -> Result<Option<R>, E> {
+    match table.get(key).map_err(StorageError::new)? {
+        Some(guard) => read(guard.value()).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn visit_entries<T: ReadableTable<&'static [u8], &'static [u8]>, E: From<StorageError>>(
+    table: &T,
+    prefix: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    for item in table.range(prefix..).map_err(StorageError::new)? {
+        let (key, value) = item.map_err(StorageError::new)?;
+        if !key.value().starts_with(prefix) {
+            break;
+        }
+        visit(key.value(), value.value())?;
+    }
+    Ok(())
+}
+
 fn collect_range<T: ReadableTable<&'static [u8], &'static [u8]>>(
     table: &T,
     start: &[u8],
@@ -145,6 +171,24 @@ impl ReadTransaction for RedbRead {
     ) -> Result<Vec<Entry>, StorageError> {
         collect_range(self.table(table)?, start, end)
     }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        read_value(self.table(table)?, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visit_entries(self.table(table)?, prefix, visit)
+    }
 }
 
 impl ReadTransaction for RedbWrite {
@@ -176,6 +220,32 @@ impl ReadTransaction for RedbWrite {
             .open_table(definition(table))
             .map_err(StorageError::new)?;
         collect_range(&table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        read_value(&table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        visit_entries(&table, prefix, visit)
     }
 }
 

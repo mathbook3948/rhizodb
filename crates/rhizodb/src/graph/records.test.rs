@@ -21,10 +21,12 @@ proptest! {
         labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
+        label in (0u32..5).prop_map(Token::new),
     ) {
         let record = NodeRecord { labels: labels.clone(), properties };
-        prop_assert_eq!(EncodedNode(record.encode()).labels().unwrap(), labels);
-        let read = EncodedNode(record.encode()).property(key).unwrap();
+        prop_assert_eq!(EncodedNode(&record.encode()).labels().unwrap(), labels.clone());
+        prop_assert_eq!(EncodedNode(&record.encode()).has_label(label).unwrap(), labels.contains(&label));
+        let read = EncodedNode(&record.encode()).property(key).unwrap();
         prop_assert!(agrees(read, record.properties.get(&key)));
     }
 

@@ -321,15 +321,22 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 
 impl<T: ReadTransaction> GraphTx<T> {
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
-        self.encoded_node(id)?.map(|node| node.decode()).transpose()
+        self.with_node(id, |node| node.decode())
     }
 
     /// A node's stored record, left encoded so the caller decodes only the parts it reads.
-    pub(crate) fn encoded_node(&self, id: NodeId) -> Result<Option<EncodedNode>, GraphError> {
-        Ok(self
-            .transaction
-            .get(Table::Nodes, &keys::element_key(id.0))?
-            .map(EncodedNode))
+    /// Calls `read` with the stored record of the node with ID `id`, if there is one.
+    pub(crate) fn with_node<R, E: From<GraphError>>(
+        &self,
+        id: NodeId,
+        read: impl FnOnce(EncodedNode<'_>) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.transaction
+            .get_with(Table::Nodes, &keys::element_key(id.0), |bytes| {
+                Ok::<_, GraphError>(read(EncodedNode(bytes)))
+            })
+            .map_err(E::from)?
+            .transpose()
     }
 
     /// One property of a relationship, decoding none of the others. The outer `None` means the
@@ -416,18 +423,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         node: NodeId,
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
-        self.transaction
-            .scan_prefix(table, &keys::adjacency_prefix(node, rel_type))?
-            .iter()
-            .map(|(key, value)| {
+        let mut found = Vec::new();
+        self.transaction.visit_prefix(
+            table,
+            &keys::adjacency_prefix(node, rel_type),
+            |key, value| {
                 let (rel_type, relationship) = keys::parse_adjacency_key(key)?;
-                Ok(Adjacent {
+                found.push(Adjacent {
                     relationship,
                     rel_type,
                     other: NodeId(decode_u64(value)?),
-                })
-            })
-            .collect()
+                });
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(found)
     }
 
     /// Looks a name up without creating it, so a read never writes.

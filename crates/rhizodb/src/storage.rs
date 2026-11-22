@@ -116,6 +116,23 @@ pub(crate) trait ReadTransaction {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<Entry>, StorageError>;
+
+    /// Calls `read` with the value stored under `key`, without copying it.
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E>;
+
+    /// Calls `visit` with every entry whose key starts with `prefix`, in ascending key order,
+    /// without copying them.
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

@@ -700,6 +700,24 @@ impl ReadTransaction for CountingWrite {
     ) -> Result<Vec<crate::storage::Entry>, StorageError> {
         self.inner.scan_range(table, start, end)
     }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
+    }
 }
 
 impl WriteTransaction for CountingWrite {

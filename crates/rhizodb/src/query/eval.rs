@@ -132,11 +132,9 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
         let stored = match (value, token) {
-            (Datum::Node(id), Some(token)) => self
-                .tx
-                .encoded_node(*id)?
-                .map(|node| node.property(token))
-                .transpose()?,
+            (Datum::Node(id), Some(token)) => {
+                self.tx.with_node(*id, |node| node.property(token))?
+            }
             (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
             (Datum::Node(id), None) => self.tx.node(*id)?.map(|_| None),
             (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
@@ -541,10 +539,11 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn has_labels(&self, operand: Datum, labels: &LabelExpr) -> Result<Datum, Error> {
         match operand {
             Datum::Null => Ok(Datum::Null),
-            Datum::Node(id) => Ok(Datum::Boolean(self.node_has_labels(
-                &self.tx.encoded_node(id)?.ok_or_else(deleted)?.labels()?,
-                labels,
-            )?)),
+            Datum::Node(id) => Ok(Datum::Boolean(
+                self.tx
+                    .with_node(id, |node| self.node_has_labels(&node.labels()?, labels))?
+                    .ok_or_else(deleted)?,
+            )),
             Datum::Relationship(id) => {
                 let rel_type = self.relationship_type(id)?;
                 let Ok(found) =

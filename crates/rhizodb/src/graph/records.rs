@@ -72,11 +72,22 @@ fn find_property(
 
 /// A node record as stored, read one part at a time instead of decoded whole.
 #[derive(Debug)]
-pub(crate) struct EncodedNode(pub(super) Vec<u8>);
+pub(crate) struct EncodedNode<'a>(pub(super) &'a [u8]);
 
-impl EncodedNode {
+impl EncodedNode<'_> {
     pub(crate) fn labels(&self) -> Result<BTreeSet<Token<Label>>, GraphError> {
-        Ok(read_labels(&mut Reader::new(&self.0))?)
+        Ok(read_labels(&mut Reader::new(self.0))?)
+    }
+
+    /// Whether the node has the label `label`, decoding nothing else.
+    pub(crate) fn has_label(&self, label: Token<Label>) -> Result<bool, GraphError> {
+        let mut reader = Reader::new(self.0);
+        for _ in 0..reader.varint()? {
+            if Token::new(reader.u32()?) == label {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The value of `key`, decoding none of the other values.
@@ -84,7 +95,7 @@ impl EncodedNode {
         &self,
         key: Token<PropertyKey>,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        let mut reader = Reader::new(&self.0);
+        let mut reader = Reader::new(self.0);
         let label_count = reader.varint()?;
         reader.take(
             label_count
@@ -95,7 +106,7 @@ impl EncodedNode {
     }
 
     pub(crate) fn decode(&self) -> Result<NodeRecord, GraphError> {
-        Ok(NodeRecord::decode(&self.0)?)
+        Ok(NodeRecord::decode(self.0)?)
     }
 }
 
