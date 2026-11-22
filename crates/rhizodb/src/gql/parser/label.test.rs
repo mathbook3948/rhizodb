@@ -106,6 +106,16 @@ fn a_variable_named_is_takes_an_is_label_expression() {
 }
 
 #[test]
+fn a_label_named_is_needs_no_variable() {
+    let parts = patterns("(IS IS)");
+    assert_eq!(parts[0].element.start.variable, None);
+    assert_eq!(node_labels("(IS IS)"), "IS");
+    let parts = patterns("()-[IS IS]->()");
+    assert_eq!(parts[0].element.steps[0].relationship.variable, None);
+    assert_eq!(relationship_labels("()-[IS IS]->()"), "IS");
+}
+
+#[test]
 fn relationship_patterns_take_one_label_expression() {
     for (source, expected) in [
         ("()-[]->()", "_"),

@@ -247,7 +247,7 @@ fn a_deleted_relationship_keeps_its_type_for_a_label_expression() {
 }
 
 #[test]
-fn delete_rejects_every_form_of_label_test() {
+fn delete_rejects_a_label_test_and_its_negation() {
     let db = labeled();
     for query in [
         "MATCH (n) DELETE n:A",
