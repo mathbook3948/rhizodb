@@ -5,19 +5,20 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  tag:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: jdx/mise-action@v5
       - name: Check that the tag is on main and matches the crate version
         shell: bash
@@ -33,7 +34,6 @@ jobs:
             echo "tag $GITHUB_REF_NAME is not on main" >&2
             exit 1
           fi
-      - run: mise run check
       - name: Extract the release notes
         shell: bash
         run: |
@@ -43,13 +43,69 @@ jobs:
             found && /^## / { exit }
             found { print }
           ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then
-            echo "CHANGELOG.md has no section for $version" >&2
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "CHANGELOG.md has no notes under ## $version" >&2
             exit 1
           fi
-      - run: cargo publish --package rhizodb --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  check:
+    needs: tag
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+      - run: mise run check
+
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+      - name: Publish unless this version is already on crates.io
+        shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --user-agent "rhizodb-release (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY})" \
+            "https://crates.io/api/v1/crates/rhizodb/${version}")"
+          if [ "$status" = "200" ]; then
+            echo "rhizodb ${version} is already on crates.io"
+          else
+            cargo publish --package rhizodb --locked
+          fi
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+      - name: Create the GitHub release unless it exists
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          fi
