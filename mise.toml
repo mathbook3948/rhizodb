@@ -13,6 +13,16 @@ run = [
   "cargo run --quiet --package xtask -- forbidden-chars",
   "cargo run --quiet --package xtask -- docs",
   "cargo deny check licenses",
+  "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
+  "cargo deny --manifest-path crates/differential/Cargo.toml check licenses",
+]
+
+[tasks.differential]
+description = "Compare query results with LadybugDB, which builds from C++ source"
+dir = "crates/differential"
+run = [
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo test",
 ]
 
 [tasks.docs]
