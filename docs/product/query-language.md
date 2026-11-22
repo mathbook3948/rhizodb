@@ -46,9 +46,11 @@ GQL is the reference language, but the only public conformance suite is the open
 - A duration string amount keeps its whole part exactly and drops the fraction digits past the 24th place, which are worth less than a nanosecond in any unit.
 - A float that multiplies or divides a duration counts as the shortest decimal that reads back as it.
 - A duration multiplied by a number keeps 24 decimal places of each unit.
-- A duration divided by a number above 10^24 keeps 24 decimal places of each unit, and is the zero duration when the number is above 10^36.
+- A duration divided by a number above 10^24 keeps 24 decimal places of each unit.
+- A duration divided by a number above 10^36 is the zero duration.
 - Any other product or quotient that fits in the duration range is computed exactly.
-- A duration divided by an infinite float is the zero duration, and a duration divided by NaN or multiplied by an infinite float or NaN raises an invalid temporal value error, even when the duration is zero.
+- A duration divided by an infinite float is the zero duration.
+- A duration divided by NaN, or multiplied by an infinite float or NaN, raises an invalid temporal value error, even when the duration is zero.
 - Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have.
 - A date moves by the whole days in the seconds and nanoseconds of a duration, truncated toward zero.
 - `<`, `<=`, `>`, and `>=` compare two temporal values of the same type and give null otherwise.
