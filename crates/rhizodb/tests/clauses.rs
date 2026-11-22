@@ -597,6 +597,7 @@ fn delete_takes_a_list_of_elements_whether_collected_or_written_out() {
         "MATCH (n:A) WITH [n] AS ns DELETE ns",
         "MATCH (n:A) DELETE [n]",
         "MATCH (n:A) WITH n.k AS k, [n] AS ns DELETE ns",
+        "MATCH (n:A) WITH [n] + [] AS ns DETACH DELETE ns",
     ] {
         run(&db, "CREATE (:A {k: 1}), (:A {k: 2})");
         run(&db, query);

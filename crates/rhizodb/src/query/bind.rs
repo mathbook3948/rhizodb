@@ -1722,6 +1722,17 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         ast::Expr::List(_)
         | ast::Expr::ListComprehension(_)
         | ast::Expr::PatternComprehension(_) => Kind::List,
+        ast::Expr::Binary {
+            op: ast::BinaryOp::Add,
+            lhs,
+            rhs,
+        } => {
+            if kind_of(lhs, scope) == Kind::Value && kind_of(rhs, scope) == Kind::Value {
+                Kind::Value
+            } else {
+                Kind::Unknown
+            }
+        }
         ast::Expr::Literal(_)
         | ast::Expr::Map(_)
         | ast::Expr::Binary { .. }
