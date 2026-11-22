@@ -7,6 +7,7 @@ mod exec;
 mod functions;
 mod matcher;
 mod plan;
+mod shape;
 mod update;
 
 use crate::error::Error;

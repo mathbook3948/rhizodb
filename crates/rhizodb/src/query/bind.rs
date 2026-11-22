@@ -34,6 +34,9 @@ use super::plan::SetAction;
 use super::plan::Slot;
 use super::plan::Step;
 use super::plan::UpdateClause;
+use super::shape::NUMBER;
+use super::shape::Shape;
+use super::shape::admits;
 
 /// Resolves every variable of `query` to a row slot and rejects queries that are malformed by
 /// scope or by clause order. Parameters are folded in as constants.
@@ -650,7 +653,7 @@ impl Binder<'_> {
         accepted: &[Shape],
     ) -> Result<(), Error> {
         match self.shape(expr, scope) {
-            Some(shape) if !accepted.is_empty() && !accepted.contains(&shape) => Err(error(
+            Some(shape) if !admits(accepted, shape) => Err(error(
                 ErrorKind::InvalidArgumentType,
                 format!("a {shape:?} cannot be used here; expected one of {accepted:?}"),
             )),
@@ -668,7 +671,8 @@ impl Binder<'_> {
                 Kind::List | Kind::Value | Kind::Unknown => None,
             },
             ast::Expr::Literal(literal) => match literal {
-                ast::Literal::Integer(_) | ast::Literal::Float(_) => Some(Shape::Number),
+                ast::Literal::Integer(_) => Some(Shape::Integer),
+                ast::Literal::Float(_) => Some(Shape::Float),
                 ast::Literal::String(_) => Some(Shape::String),
                 ast::Literal::Boolean(_) => Some(Shape::Boolean),
                 ast::Literal::Null => None,
@@ -703,7 +707,17 @@ impl Binder<'_> {
                 | ast::BinaryOp::Modulo
                 | ast::BinaryOp::Power => {
                     let lhs = self.shape(lhs, scope)?;
-                    (lhs == self.shape(rhs, scope)? && matches!(lhs, Shape::Number)).then_some(lhs)
+                    let rhs = self.shape(rhs, scope)?;
+                    (NUMBER.contains(&lhs) && NUMBER.contains(&rhs)).then_some(
+                        if lhs == Shape::Integer
+                            && rhs == Shape::Integer
+                            && *op != ast::BinaryOp::Power
+                        {
+                            Shape::Integer
+                        } else {
+                            Shape::Float
+                        },
+                    )
                 }
             },
             _ => None,
@@ -1099,8 +1113,8 @@ impl Binder<'_> {
                         format!("function `{name}` got {} arguments", call.args.len()),
                     ));
                 }
-                if let Some(first) = call.args.first() {
-                    self.expect_shape(first, scope, argument_shapes(function))?;
+                for (index, arg) in call.args.iter().enumerate() {
+                    self.expect_shape(arg, scope, function.parameter(index))?;
                 }
                 Expr::Call(function, self.exprs(&call.args, scope, mode)?)
             }
@@ -1395,29 +1409,6 @@ fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast
             .iter()
             .flat_map(|step| step.relationship.variable.iter().chain(&step.node.variable)),
     )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shape {
-    Node,
-    Relationship,
-    Path,
-    List,
-    Map,
-    String,
-    Number,
-    Boolean,
-}
-
-fn argument_shapes(function: Function) -> &'static [Shape] {
-    match function {
-        Function::Labels => &[Shape::Node],
-        Function::Type | Function::StartNode | Function::EndNode => &[Shape::Relationship],
-        Function::Length | Function::Nodes | Function::Relationships => &[Shape::Path],
-        Function::Size => &[Shape::List, Shape::String],
-        Function::Keys | Function::Properties => &[Shape::Node, Shape::Relationship, Shape::Map],
-        _ => &[],
-    }
 }
 
 fn evaluated_parts(expr: &Expr) -> Option<(Vec<&Expr>, Vec<&Expr>, Option<Slot>)> {

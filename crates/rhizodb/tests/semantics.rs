@@ -698,11 +698,28 @@ fn skip_and_limit_may_use_a_comprehension_variable_but_no_outer_variable() {
 #[test]
 fn replace_names_the_argument_that_is_wrong() {
     let db = db();
-    for (query, wrong) in [
-        ("RETURN replace('abc', 'b', 1)", "integer"),
-        ("RETURN replace('abc', true, 'x')", "boolean"),
-        ("RETURN replace('abc', 2, 1.5)", "integer"),
+    for (literal, query, wrong) in [
+        (
+            "RETURN replace('abc', 'b', 1)",
+            "UNWIND [1] AS x RETURN replace('abc', 'b', x)",
+            "integer",
+        ),
+        (
+            "RETURN replace('abc', true, 'x')",
+            "UNWIND [true] AS x RETURN replace('abc', x, 'x')",
+            "boolean",
+        ),
+        (
+            "RETURN replace('abc', 2, 1.5)",
+            "UNWIND [[2, 1.5]] AS x RETURN replace('abc', x[0], x[1])",
+            "integer",
+        ),
     ] {
+        assert_eq!(
+            error_kind(&db, literal),
+            ErrorKind::InvalidArgumentType,
+            "{literal}"
+        );
         let error = db.execute(query, &rhizodb::Parameters::new()).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidArgumentValue, "{query}");
         assert!(

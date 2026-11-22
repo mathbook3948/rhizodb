@@ -8,6 +8,9 @@ use crate::storage::ReadTransaction;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::float_text;
+use super::shape::NUMBER;
+use super::shape::Shape;
+use super::shape::admits;
 
 /// A scalar function, resolved by name when the query is bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -69,60 +72,90 @@ pub(crate) enum Function {
 
 const MAX_RANGE_LENGTH: i128 = 10_000_000;
 
-const SIGNATURES: [(&str, Function, usize, usize); 53] = [
-    ("id", Function::Id, 1, 1),
-    ("labels", Function::Labels, 1, 1),
-    ("type", Function::Type, 1, 1),
-    ("keys", Function::Keys, 1, 1),
-    ("properties", Function::Properties, 1, 1),
-    ("size", Function::Size, 1, 1),
-    ("length", Function::Length, 1, 1),
-    ("head", Function::Head, 1, 1),
-    ("last", Function::Last, 1, 1),
-    ("tail", Function::Tail, 1, 1),
-    ("range", Function::Range, 2, 3),
-    ("reverse", Function::Reverse, 1, 1),
-    ("coalesce", Function::Coalesce, 1, usize::MAX),
-    ("tointeger", Function::ToInteger, 1, 1),
-    ("tofloat", Function::ToFloat, 1, 1),
-    ("tostring", Function::ToString, 1, 1),
-    ("toboolean", Function::ToBoolean, 1, 1),
-    ("abs", Function::Abs, 1, 1),
-    ("sign", Function::Sign, 1, 1),
-    ("ceil", Function::Ceil, 1, 1),
-    ("floor", Function::Floor, 1, 1),
-    ("round", Function::Round, 1, 1),
-    ("sqrt", Function::Sqrt, 1, 1),
-    ("exp", Function::Exp, 1, 1),
-    ("log", Function::Log, 1, 1),
-    ("log10", Function::Log10, 1, 1),
-    ("sin", Function::Sin, 1, 1),
-    ("cos", Function::Cos, 1, 1),
-    ("tan", Function::Tan, 1, 1),
-    ("asin", Function::Asin, 1, 1),
-    ("acos", Function::Acos, 1, 1),
-    ("atan", Function::Atan, 1, 1),
-    ("atan2", Function::Atan2, 2, 2),
-    ("degrees", Function::Degrees, 1, 1),
-    ("radians", Function::Radians, 1, 1),
-    ("pi", Function::Pi, 0, 0),
-    ("e", Function::E, 0, 0),
-    ("rand", Function::Rand, 0, 0),
-    ("startnode", Function::StartNode, 1, 1),
-    ("endnode", Function::EndNode, 1, 1),
-    ("nodes", Function::Nodes, 1, 1),
-    ("relationships", Function::Relationships, 1, 1),
-    ("toupper", Function::ToUpper, 1, 1),
-    ("tolower", Function::ToLower, 1, 1),
-    ("trim", Function::Trim, 1, 1),
-    ("ltrim", Function::LTrim, 1, 1),
-    ("rtrim", Function::RTrim, 1, 1),
-    ("substring", Function::Substring, 2, 3),
-    ("replace", Function::Replace, 3, 3),
-    ("split", Function::Split, 2, 2),
-    ("left", Function::Left, 2, 2),
-    ("right", Function::Right, 2, 2),
-    ("exists", Function::Exists, 1, 1),
+type Accepted = &'static [Shape];
+
+const ANY: Accepted = &[];
+const INTEGER: Accepted = &[Shape::Integer];
+const STRING: Accepted = &[Shape::String];
+const LIST: Accepted = &[Shape::List];
+const PATH: Accepted = &[Shape::Path];
+const NODE: Accepted = &[Shape::Node];
+const RELATIONSHIP: Accepted = &[Shape::Relationship];
+const ELEMENT: Accepted = &[Shape::Node, Shape::Relationship];
+const ENTITY: Accepted = &[Shape::Node, Shape::Relationship, Shape::Map];
+const LIST_OR_STRING: Accepted = &[Shape::List, Shape::String];
+const INTEGER_CONVERTIBLE: Accepted =
+    &[Shape::Integer, Shape::Float, Shape::Boolean, Shape::String];
+const FLOAT_CONVERTIBLE: Accepted = &[Shape::Integer, Shape::Float, Shape::String];
+const STRING_CONVERTIBLE: Accepted = &[Shape::String, Shape::Integer, Shape::Float, Shape::Boolean];
+const BOOLEAN_CONVERTIBLE: Accepted = &[Shape::Boolean, Shape::Integer, Shape::String];
+
+const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 53] = [
+    ("id", Function::Id, 1, 1, &[ELEMENT]),
+    ("labels", Function::Labels, 1, 1, &[NODE]),
+    ("type", Function::Type, 1, 1, &[RELATIONSHIP]),
+    ("keys", Function::Keys, 1, 1, &[ENTITY]),
+    ("properties", Function::Properties, 1, 1, &[ENTITY]),
+    ("size", Function::Size, 1, 1, &[LIST_OR_STRING]),
+    ("length", Function::Length, 1, 1, &[PATH]),
+    ("head", Function::Head, 1, 1, &[LIST]),
+    ("last", Function::Last, 1, 1, &[LIST]),
+    ("tail", Function::Tail, 1, 1, &[LIST]),
+    ("range", Function::Range, 2, 3, &[INTEGER]),
+    ("reverse", Function::Reverse, 1, 1, &[LIST_OR_STRING]),
+    ("coalesce", Function::Coalesce, 1, usize::MAX, &[ANY]),
+    (
+        "tointeger",
+        Function::ToInteger,
+        1,
+        1,
+        &[INTEGER_CONVERTIBLE],
+    ),
+    ("tofloat", Function::ToFloat, 1, 1, &[FLOAT_CONVERTIBLE]),
+    ("tostring", Function::ToString, 1, 1, &[STRING_CONVERTIBLE]),
+    (
+        "toboolean",
+        Function::ToBoolean,
+        1,
+        1,
+        &[BOOLEAN_CONVERTIBLE],
+    ),
+    ("abs", Function::Abs, 1, 1, &[NUMBER]),
+    ("sign", Function::Sign, 1, 1, &[NUMBER]),
+    ("ceil", Function::Ceil, 1, 1, &[NUMBER]),
+    ("floor", Function::Floor, 1, 1, &[NUMBER]),
+    ("round", Function::Round, 1, 1, &[NUMBER]),
+    ("sqrt", Function::Sqrt, 1, 1, &[NUMBER]),
+    ("exp", Function::Exp, 1, 1, &[NUMBER]),
+    ("log", Function::Log, 1, 1, &[NUMBER]),
+    ("log10", Function::Log10, 1, 1, &[NUMBER]),
+    ("sin", Function::Sin, 1, 1, &[NUMBER]),
+    ("cos", Function::Cos, 1, 1, &[NUMBER]),
+    ("tan", Function::Tan, 1, 1, &[NUMBER]),
+    ("asin", Function::Asin, 1, 1, &[NUMBER]),
+    ("acos", Function::Acos, 1, 1, &[NUMBER]),
+    ("atan", Function::Atan, 1, 1, &[NUMBER]),
+    ("atan2", Function::Atan2, 2, 2, &[NUMBER]),
+    ("degrees", Function::Degrees, 1, 1, &[NUMBER]),
+    ("radians", Function::Radians, 1, 1, &[NUMBER]),
+    ("pi", Function::Pi, 0, 0, &[]),
+    ("e", Function::E, 0, 0, &[]),
+    ("rand", Function::Rand, 0, 0, &[]),
+    ("startnode", Function::StartNode, 1, 1, &[RELATIONSHIP]),
+    ("endnode", Function::EndNode, 1, 1, &[RELATIONSHIP]),
+    ("nodes", Function::Nodes, 1, 1, &[PATH]),
+    ("relationships", Function::Relationships, 1, 1, &[PATH]),
+    ("toupper", Function::ToUpper, 1, 1, &[STRING]),
+    ("tolower", Function::ToLower, 1, 1, &[STRING]),
+    ("trim", Function::Trim, 1, 1, &[STRING]),
+    ("ltrim", Function::LTrim, 1, 1, &[STRING]),
+    ("rtrim", Function::RTrim, 1, 1, &[STRING]),
+    ("substring", Function::Substring, 2, 3, &[STRING, INTEGER]),
+    ("replace", Function::Replace, 3, 3, &[STRING]),
+    ("split", Function::Split, 2, 2, &[STRING]),
+    ("left", Function::Left, 2, 2, &[STRING, INTEGER]),
+    ("right", Function::Right, 2, 2, &[STRING, INTEGER]),
+    ("exists", Function::Exists, 1, 1, &[ANY]),
 ];
 
 impl Function {
@@ -137,7 +170,19 @@ impl Function {
         SIGNATURES
             .iter()
             .find(|(_, function, ..)| *function == self)
-            .is_some_and(|(_, _, min, max)| (*min..=*max).contains(&count))
+            .is_some_and(|(_, _, min, max, _)| (*min..=*max).contains(&count))
+    }
+
+    /// The shapes the argument at `index` accepts, where none means any. The binder checks the
+    /// arguments whose shape the query text decides against them, and a call checks the values it
+    /// gets against them, so a function takes the same types whichever way they arrive.
+    pub(crate) fn parameter(self, index: usize) -> &'static [Shape] {
+        SIGNATURES
+            .iter()
+            .find(|(_, function, ..)| *function == self)
+            .and_then(|(.., parameters)| parameters.get(index).or(parameters.last()))
+            .copied()
+            .unwrap_or(ANY)
     }
 
     fn name(self) -> &'static str {
@@ -172,6 +217,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                 .into_iter()
                 .find(|value| !value.is_null())
                 .unwrap_or(Datum::Null));
+        }
+        for (index, value) in args.iter().enumerate() {
+            if let Some(shape) = Shape::of(value)
+                && !admits(function.parameter(index), shape)
+            {
+                return Err(invalid_value(function, value));
+            }
         }
         let mut args = args.into_iter();
         let first = args.next().unwrap_or(Datum::Null);
@@ -229,13 +281,10 @@ impl<T: ReadTransaction> Env<'_, T> {
             Function::Size => match first {
                 Datum::List(items) => Ok(integer(items.len())),
                 Datum::String(text) => Ok(integer(text.chars().count())),
-                Datum::Map(entries) => Ok(integer(entries.len())),
                 other => Err(invalid(&other)),
             },
             Function::Length => match first {
                 Datum::Path(path) => Ok(integer(path.relationships.len())),
-                Datum::List(items) => Ok(integer(items.len())),
-                Datum::String(text) => Ok(integer(text.chars().count())),
                 other => Err(invalid(&other)),
             },
             Function::Head | Function::Last | Function::Tail => match first {
