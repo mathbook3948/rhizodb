@@ -247,14 +247,22 @@ fn a_deleted_relationship_keeps_its_type_for_a_label_expression() {
 }
 
 #[test]
-fn delete_rejects_a_label_test_and_its_negation() {
+fn delete_rejects_a_label_test_under_any_boolean_operators() {
     let db = labeled();
     for query in [
         "MATCH (n) DELETE n:A",
         "MATCH (n) DELETE n:A|B",
         "MATCH (n) DELETE n IS LABELED A",
         "MATCH (n) DELETE n IS NOT LABELED A",
+        "MATCH (n) DELETE NOT NOT n:A",
+        "MATCH (n) DELETE (n:A) AND true",
+        "MATCH (n) DELETE true OR n:A",
+        "MATCH (n) DELETE NOT (n:A XOR n:B)",
     ] {
         assert_eq!(error_kind(&db, query), ErrorKind::InvalidDelete, "{query}");
     }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) DELETE true AND false"),
+        ErrorKind::InvalidArgumentType
+    );
 }

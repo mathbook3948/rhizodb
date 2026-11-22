@@ -396,14 +396,7 @@ impl Binder<'_> {
                 ast::Clause::Delete(delete) => {
                     let mut targets = Vec::new();
                     for target in &delete.targets {
-                        let label_test = match target {
-                            ast::Expr::Unary {
-                                op: ast::UnaryOp::Not,
-                                operand,
-                            } => operand.as_ref(),
-                            other => other,
-                        };
-                        if matches!(label_test, ast::Expr::HasLabels { .. }) {
+                        if is_label_predicate(target) {
                             return Err(error(
                                 ErrorKind::InvalidDelete,
                                 "DELETE takes an element, not a label expression",
@@ -1931,6 +1924,22 @@ fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::E
         ast::Expr::Function(call) => aggregate_function(&qualified_name(call))
             .map(|function| (function, call.distinct, call.args.as_slice())),
         _ => None,
+    }
+}
+
+fn is_label_predicate(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::HasLabels { .. } => true,
+        ast::Expr::Unary {
+            op: ast::UnaryOp::Not,
+            operand,
+        } => is_label_predicate(operand),
+        ast::Expr::Binary {
+            op: ast::BinaryOp::And | ast::BinaryOp::Or | ast::BinaryOp::Xor,
+            lhs,
+            rhs,
+        } => is_label_predicate(lhs) || is_label_predicate(rhs),
+        _ => false,
     }
 }
 
