@@ -24,6 +24,12 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `MERGE` property that evaluates to null is an error.
 - `range()` has a length cap, so one query cannot exhaust the host's memory.
 - Floats convert to strings in the same form as the openCypher reference implementation.
+- Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
+- `length()` takes a path, and `size()` takes a list or a string.
+- `sum`, `avg`, `stDev`, `stDevP`, and the percentile aggregates take numbers only.
+- Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
+- A reading clause that follows an updating clause needs a `WITH` between them.
+- `toInteger()` and `toFloat()` read text only in the decimal number literal syntax with an optional sign, and give null for anything else.
 
 ## Open
 

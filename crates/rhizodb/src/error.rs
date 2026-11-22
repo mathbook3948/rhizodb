@@ -64,7 +64,7 @@ pub enum ErrorKind {
     InvalidArgumentType,
     /// An operator or clause got a value of a type it does not accept from the data it read.
     TypeMismatch,
-    /// A function got a value of the right type that it cannot convert or use.
+    /// A function got an argument from the data it read that it cannot use, whether of a type it does not accept or a value it cannot convert.
     InvalidArgumentValue,
     /// A property was read from a value that is not a node, relationship, or map.
     PropertyAccessOnNonEntity,
