@@ -2,7 +2,10 @@ use std::sync::LazyLock;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::ElementKind;
 use crate::graph::GraphTx;
+use crate::graph::NodeId;
+use crate::graph::RelationshipId;
 use crate::procedure::Signature;
 use crate::procedure::ValueType;
 use crate::storage::ReadTransaction;
@@ -16,11 +19,16 @@ pub(crate) const RESERVED_NAMESPACE: &str = "db";
 /// transaction that calls it, including that transaction's own writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Builtin {
-    KeywordQuery,
-    VectorQuery,
+    KeywordNodes,
+    KeywordRelationships,
+    VectorNodes,
+    VectorRelationships,
 }
 
-fn signature(name: &str, query: (&str, ValueType)) -> Signature {
+const KEYWORD: (&str, ValueType) = ("query", ValueType::String);
+const VECTOR: (&str, ValueType) = ("vector", ValueType::List);
+
+fn signature(name: &str, query: (&str, ValueType), element: &str) -> Signature {
     Signature {
         name: name.to_owned(),
         parameters: vec![
@@ -28,15 +36,26 @@ fn signature(name: &str, query: (&str, ValueType)) -> Signature {
             (query.0.to_owned(), query.1),
             ("limit".to_owned(), ValueType::Integer),
         ],
-        outputs: vec!["node".to_owned(), "score".to_owned()],
+        outputs: vec![element.to_owned(), "score".to_owned()],
     }
 }
 
-static KEYWORD_QUERY: LazyLock<Signature> =
-    LazyLock::new(|| signature("db.index.keyword.query", ("query", ValueType::String)));
+static KEYWORD_NODES: LazyLock<Signature> =
+    LazyLock::new(|| signature("db.index.keyword.query", KEYWORD, "node"));
 
-static VECTOR_QUERY: LazyLock<Signature> =
-    LazyLock::new(|| signature("db.index.vector.query", ("vector", ValueType::List)));
+static KEYWORD_RELATIONSHIPS: LazyLock<Signature> = LazyLock::new(|| {
+    signature(
+        "db.index.keyword.queryRelationships",
+        KEYWORD,
+        "relationship",
+    )
+});
+
+static VECTOR_NODES: LazyLock<Signature> =
+    LazyLock::new(|| signature("db.index.vector.query", VECTOR, "node"));
+
+static VECTOR_RELATIONSHIPS: LazyLock<Signature> =
+    LazyLock::new(|| signature("db.index.vector.queryRelationships", VECTOR, "relationship"));
 
 /// Whether `name` lies in the namespace reserved for built-in procedures.
 pub(crate) fn is_reserved(name: &str) -> bool {
@@ -44,7 +63,12 @@ pub(crate) fn is_reserved(name: &str) -> bool {
 }
 
 impl Builtin {
-    const ALL: [Builtin; 2] = [Builtin::KeywordQuery, Builtin::VectorQuery];
+    const ALL: [Builtin; 4] = [
+        Builtin::KeywordNodes,
+        Builtin::KeywordRelationships,
+        Builtin::VectorNodes,
+        Builtin::VectorRelationships,
+    ];
 
     pub(crate) fn named(name: &str) -> Option<Self> {
         Self::ALL
@@ -54,8 +78,17 @@ impl Builtin {
 
     pub(crate) fn signature(self) -> &'static Signature {
         match self {
-            Self::KeywordQuery => &KEYWORD_QUERY,
-            Self::VectorQuery => &VECTOR_QUERY,
+            Self::KeywordNodes => &KEYWORD_NODES,
+            Self::KeywordRelationships => &KEYWORD_RELATIONSHIPS,
+            Self::VectorNodes => &VECTOR_NODES,
+            Self::VectorRelationships => &VECTOR_RELATIONSHIPS,
+        }
+    }
+
+    fn element(self) -> ElementKind {
+        match self {
+            Self::KeywordNodes | Self::VectorNodes => ElementKind::Node,
+            Self::KeywordRelationships | Self::VectorRelationships => ElementKind::Relationship,
         }
     }
 
@@ -79,9 +112,12 @@ impl Builtin {
                 format!("the limit of `{name}` cannot be negative"),
             )
         })?;
+        let element = self.element();
         let found = match (self, query) {
-            (Self::KeywordQuery, Datum::String(text)) => tx.keyword_search(index, text, limit)?,
-            (Self::VectorQuery, Datum::List(items)) => {
+            (Self::KeywordNodes | Self::KeywordRelationships, Datum::String(text)) => {
+                tx.keyword_search(index, element, text, limit)?
+            }
+            (Self::VectorNodes | Self::VectorRelationships, Datum::List(items)) => {
                 let vector = items
                     .iter()
                     .map(|item| match item {
@@ -96,13 +132,19 @@ impl Builtin {
                             format!("the vector of `{name}` must hold only numbers"),
                         )
                     })?;
-                tx.vector_search(index, &vector, limit)?
+                tx.vector_search(index, element, &vector, limit)?
             }
             _ => return Ok(Vec::new()),
         };
         Ok(found
             .into_iter()
-            .map(|(node, score)| vec![Datum::Node(node), Datum::Float(score)])
+            .map(|(id, score)| {
+                let found = match element {
+                    ElementKind::Node => Datum::Node(NodeId(id)),
+                    ElementKind::Relationship => Datum::Relationship(RelationshipId(id)),
+                };
+                vec![found, Datum::Float(score)]
+            })
             .collect())
     }
 }

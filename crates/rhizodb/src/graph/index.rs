@@ -11,10 +11,13 @@ use crate::value::put_varint;
 
 use super::GraphError;
 use super::GraphTx;
-use super::NodeId;
 use super::NodeRecord;
+use super::Properties;
+use super::RelationshipRecord;
+use super::decode_u64;
 use super::ids::Label;
 use super::ids::PropertyKey;
+use super::ids::RelationshipType;
 use super::ids::Token;
 use super::keys;
 use super::tokenize;
@@ -29,6 +32,9 @@ const VALUE_DISTANCE: u32 = 3;
 
 const LARGEST_SQUARED_LENGTH: f64 = f64::MAX / 4.0;
 const SMALLEST_COSINE_SQUARED_LENGTH: f64 = f64::MIN_POSITIVE;
+
+const TARGET_LABEL: u8 = 0;
+const TARGET_RELATIONSHIP_TYPE: u8 = 1;
 
 const KIND_KEYWORD: u8 = 0;
 const KIND_VECTOR: u8 = 1;
@@ -115,7 +121,68 @@ fn norm(vector: &[f64]) -> f64 {
     dot(vector, vector).sqrt()
 }
 
-/// What an index reads from each node with its label. Keyword properties are sorted and
+/// What an index covers: the nodes that carry a label, or the relationships of a type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum IndexTarget<'a> {
+    /// The nodes that carry this label.
+    Label(&'a str),
+    /// The relationships of this type.
+    RelationshipType(&'a str),
+}
+
+/// Whether an index is searched by text or by vector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchKind {
+    Keyword,
+    Vector,
+}
+
+/// Whether an index holds nodes or relationships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ElementKind {
+    Node,
+    Relationship,
+}
+
+/// What a stored index covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    Label(Token<Label>),
+    RelationshipType(Token<RelationshipType>),
+}
+
+impl Target {
+    pub(crate) fn element_kind(self) -> ElementKind {
+        match self {
+            Self::Label(_) => ElementKind::Node,
+            Self::RelationshipType(_) => ElementKind::Relationship,
+        }
+    }
+
+    fn covered<'a>(self, element: Element<'a>) -> Option<&'a Properties> {
+        match (self, element) {
+            (Self::Label(label), Element::Node(record)) if record.labels.contains(&label) => {
+                Some(&record.properties)
+            }
+            (Self::RelationshipType(rel_type), Element::Relationship(record))
+                if record.rel_type == rel_type =>
+            {
+                Some(&record.properties)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A stored node or relationship, as an index reads it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Element<'a> {
+    Node(&'a NodeRecord),
+    Relationship(&'a RelationshipRecord),
+}
+
+/// What an index reads from each element it covers. Keyword properties are sorted and
 /// distinct, so two definitions over the same properties are equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IndexKind {
@@ -131,7 +198,7 @@ pub(crate) enum IndexKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct IndexDefinition {
-    pub(crate) label: Token<Label>,
+    pub(crate) target: Target,
     pub(crate) kind: IndexKind,
 }
 
@@ -143,10 +210,10 @@ pub(crate) struct Index {
 }
 
 /// A keyword document: the positions, in ascending order, at which each term occurs in the
-/// indexed properties of one node. How often a term occurs is how many positions it has.
+/// indexed properties of one element. How often a term occurs is how many positions it has.
 pub(crate) type Document = BTreeMap<String, Vec<u32>>;
 
-/// What one node contributes to one index.
+/// What one element contributes to one index.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Entry {
     Keyword(Document),
@@ -160,7 +227,16 @@ impl Index {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.id.to_be_bytes());
-        out.extend_from_slice(&self.definition.label.id().to_be_bytes());
+        match self.definition.target {
+            Target::Label(label) => {
+                out.push(TARGET_LABEL);
+                out.extend_from_slice(&label.id().to_be_bytes());
+            }
+            Target::RelationshipType(rel_type) => {
+                out.push(TARGET_RELATIONSHIP_TYPE);
+                out.extend_from_slice(&rel_type.id().to_be_bytes());
+            }
+        }
         match &self.definition.kind {
             IndexKind::Keyword { properties } => {
                 out.push(KIND_KEYWORD);
@@ -186,7 +262,24 @@ impl Index {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let id = reader.u32()?;
-        let label = Token::new(reader.u32()?);
+        let target = match reader.u8()? {
+            TARGET_LABEL => Target::Label(Token::new(reader.u32()?)),
+            TARGET_RELATIONSHIP_TYPE => Target::RelationshipType(Token::new(reader.u32()?)),
+            other => return Err(DecodeError::UnknownTag(other)),
+        };
+        Self::decode_kind(id, target, reader)
+    }
+
+    /// Reads a definition stored before format version 5, which names a label and no target
+    /// tag, because every index then covered the nodes that carry a label.
+    pub(crate) fn decode_label_only(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let id = reader.u32()?;
+        let target = Target::Label(Token::new(reader.u32()?));
+        Self::decode_kind(id, target, reader)
+    }
+
+    fn decode_kind(id: u32, target: Target, mut reader: Reader<'_>) -> Result<Self, DecodeError> {
         let kind = match reader.u8()? {
             KIND_KEYWORD => {
                 let count = reader.varint()?;
@@ -206,13 +299,14 @@ impl Index {
         reader.finish()?;
         Ok(Self {
             id,
-            definition: IndexDefinition { label, kind },
+            definition: IndexDefinition { target, kind },
         })
     }
 
-    /// The rows that hold `entry` for `node`, leaving out the keyword totals.
-    pub(crate) fn rows(&self, node: NodeId, entry: &Entry) -> Vec<Row> {
-        let entry_key = keys::index_entry_key(self.id, node).to_vec();
+    /// The rows that hold `entry` for the element with ID `element`, leaving out the keyword
+    /// totals.
+    pub(crate) fn rows(&self, element: u64, entry: &Entry) -> Vec<Row> {
+        let entry_key = keys::index_entry_key(self.id, element).to_vec();
         match entry {
             Entry::Keyword(document) => {
                 let length = document_length(document);
@@ -221,7 +315,7 @@ impl Index {
                     .map(|(term, positions)| {
                         (
                             Table::KeywordPostings,
-                            keys::posting_key(self.id, term, node),
+                            keys::posting_key(self.id, term, element),
                             encode_posting(positions, length),
                         )
                     })
@@ -243,16 +337,26 @@ impl Index {
 }
 
 impl IndexDefinition {
-    /// What `record` contributes, or `None` when it lacks the label or holds nothing to index.
-    /// A keyword document numbers the terms of its string values in property order, list items
-    /// in list order, and starts each value three positions past the last term of the one
-    /// before. Neighbouring query terms are at most two positions apart, so a phrase never
-    /// matches across two values.
-    pub(crate) fn entry(&self, record: &NodeRecord) -> Option<Entry> {
-        if !record.labels.contains(&self.label) {
-            return None;
+    /// What `element` contributes, or `None` when the target does not cover it or it holds
+    /// nothing to index. A keyword document numbers the terms of its string values in property
+    /// order, list items in list order, and starts each value three positions past the last
+    /// term of the one before. Neighbouring query terms are at most two positions apart, so a
+    /// phrase never matches across two values.
+    pub(crate) fn entry(&self, element: Element<'_>) -> Option<Entry> {
+        self.kind.entry(self.target.covered(element)?)
+    }
+}
+
+impl IndexKind {
+    pub(crate) fn search_kind(&self) -> SearchKind {
+        match self {
+            Self::Keyword { .. } => SearchKind::Keyword,
+            Self::Vector { .. } => SearchKind::Vector,
         }
-        match &self.kind {
+    }
+
+    fn entry(&self, values: &Properties) -> Option<Entry> {
+        match self {
             IndexKind::Keyword { properties } => {
                 let mut document = Document::new();
                 let mut start = 0u32;
@@ -270,7 +374,7 @@ impl IndexDefinition {
                     start = start.saturating_add(last).saturating_add(VALUE_DISTANCE);
                 };
                 for property in properties {
-                    match record.properties.get(property) {
+                    match values.get(property) {
                         Some(PropertyValue::String(text)) => add(text),
                         Some(PropertyValue::List(items)) => {
                             for item in items {
@@ -292,7 +396,7 @@ impl IndexDefinition {
                 dimension,
                 metric,
             } => {
-                let Some(PropertyValue::List(items)) = record.properties.get(property) else {
+                let Some(PropertyValue::List(items)) = values.get(property) else {
                     return None;
                 };
                 if usize::try_from(*dimension).ok() != Some(items.len()) {
@@ -323,7 +427,7 @@ fn frequency(positions: &[u32]) -> u32 {
     u32::try_from(positions.len()).unwrap_or(u32::MAX)
 }
 
-/// The keyword totals row value: how many nodes the index holds and their summed length.
+/// The keyword totals row value: how many elements the index holds and their summed length.
 pub(crate) fn encode_totals(documents: u64, length: u64) -> Vec<u8> {
     let mut out = documents.to_be_bytes().to_vec();
     out.extend_from_slice(&length.to_be_bytes());
@@ -424,7 +528,7 @@ fn bm25(idf: f64, frequency: u32, length: u32, average_length: f64) -> f64 {
         / (frequency + BM25_K1 * (1.0 - BM25_B + BM25_B * relative_length))
 }
 
-fn ranking(left: &(NodeId, f64), right: &(NodeId, f64)) -> Ordering {
+fn ranking(left: &(u64, f64), right: &(u64, f64)) -> Ordering {
     left.1
         .is_nan()
         .cmp(&right.1.is_nan())
@@ -432,7 +536,7 @@ fn ranking(left: &(NodeId, f64), right: &(NodeId, f64)) -> Ordering {
         .then_with(|| left.0.cmp(&right.0))
 }
 
-fn best(mut scored: Vec<(NodeId, f64)>, limit: usize) -> Vec<(NodeId, f64)> {
+fn best(mut scored: Vec<(u64, f64)>, limit: usize) -> Vec<(u64, f64)> {
     if limit < scored.len() {
         scored.select_nth_unstable_by(limit, ranking);
         scored.truncate(limit);
@@ -459,19 +563,38 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(bytes.map(|bytes| Index::decode(&bytes)).transpose()?)
     }
 
-    /// The nodes that best match `text` in the keyword index `name`, ranked by BM25. A node
-    /// matches when it matches any clause of the text. A phrase is ranked as one term whose
-    /// occurrences are the phrase's, and a prefix by the best of the terms it starts.
+    fn searched_index(
+        &self,
+        name: &str,
+        search: SearchKind,
+        element: ElementKind,
+    ) -> Result<Index, GraphError> {
+        let what = match (search, element) {
+            (SearchKind::Keyword, ElementKind::Node) => "keyword index over nodes",
+            (SearchKind::Keyword, ElementKind::Relationship) => "keyword index over relationships",
+            (SearchKind::Vector, ElementKind::Node) => "vector index over nodes",
+            (SearchKind::Vector, ElementKind::Relationship) => "vector index over relationships",
+        };
+        self.index(name)?
+            .filter(|index| {
+                index.definition.kind.search_kind() == search
+                    && index.definition.target.element_kind() == element
+            })
+            .ok_or_else(|| GraphError::IndexNotFound(name.to_owned(), what))
+    }
+
+    /// The IDs of the elements of kind `element` that best match `text` in the keyword index
+    /// `name`, ranked by BM25. An element matches when it matches any clause of the text. A
+    /// phrase is ranked as one term whose occurrences are the phrase's, and a prefix by the
+    /// best of the terms it starts.
     pub(crate) fn keyword_search(
         &self,
         name: &str,
+        element: ElementKind,
         text: &str,
         limit: usize,
-    ) -> Result<Vec<(NodeId, f64)>, GraphError> {
-        let index = self
-            .index(name)?
-            .filter(|index| matches!(index.definition.kind, IndexKind::Keyword { .. }))
-            .ok_or_else(|| GraphError::IndexNotFound(name.to_owned(), "keyword index"))?;
+    ) -> Result<Vec<(u64, f64)>, GraphError> {
+        let index = self.searched_index(name, SearchKind::Keyword, element)?;
         let totals = self
             .transaction
             .get(Table::KeywordTotals, &keys::index_prefix(index.id))?
@@ -481,33 +604,35 @@ impl<T: ReadTransaction> GraphTx<T> {
             return Ok(Vec::new());
         }
         let average_length = length as f64 / documents as f64;
-        let score = |matches: BTreeMap<NodeId, (u32, u32)>| {
+        let score = |matches: BTreeMap<u64, (u32, u32)>| {
             let matching = matches.len() as f64;
             let idf = (1.0 + (documents as f64 - matching + 0.5) / (matching + 0.5)).ln();
-            matches.into_iter().map(move |(node, (frequency, length))| {
-                (node, bm25(idf, frequency, length, average_length))
-            })
+            matches
+                .into_iter()
+                .map(move |(element, (frequency, length))| {
+                    (element, bm25(idf, frequency, length, average_length))
+                })
         };
-        let mut scores: BTreeMap<NodeId, f64> = BTreeMap::new();
+        let mut scores: BTreeMap<u64, f64> = BTreeMap::new();
         for clause in tokenize::clauses(text) {
-            let clause_scores: BTreeMap<NodeId, f64> = match &clause {
+            let clause_scores: BTreeMap<u64, f64> = match &clause {
                 Clause::Term(term) => {
                     let mut counts = BTreeMap::new();
                     for (key, value) in self.transaction.scan_prefix(
                         Table::KeywordPostings,
                         &keys::posting_prefix(index.id, term),
                     )? {
-                        counts.insert(keys::parse_posting_node(&key)?, decode_counts(&value)?);
+                        counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
                     }
                     score(counts).collect()
                 }
                 Clause::Prefix(prefix) => {
-                    let mut best_scores: BTreeMap<NodeId, f64> = BTreeMap::new();
+                    let mut best_scores: BTreeMap<u64, f64> = BTreeMap::new();
                     let mut current: Option<Vec<u8>> = None;
                     let mut counts = BTreeMap::new();
-                    let mut merge = |counts: BTreeMap<NodeId, (u32, u32)>| {
-                        for (node, value) in score(counts) {
-                            let held = best_scores.entry(node).or_insert(value);
+                    let mut merge = |counts: BTreeMap<u64, (u32, u32)>| {
+                        for (element, value) in score(counts) {
+                            let held = best_scores.entry(element).or_insert(value);
                             *held = held.max(value);
                         }
                     };
@@ -520,25 +645,25 @@ impl<T: ReadTransaction> GraphTx<T> {
                             merge(std::mem::take(&mut counts));
                             current = Some(term.to_vec());
                         }
-                        counts.insert(keys::parse_posting_node(&key)?, decode_counts(&value)?);
+                        counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
                     }
                     merge(counts);
                     best_scores
                 }
                 Clause::Phrase(terms) => score(self.phrase_matches(index.id, terms)?).collect(),
             };
-            for (node, value) in clause_scores {
-                *scores.entry(node).or_insert(0.0) += value;
+            for (element, value) in clause_scores {
+                *scores.entry(element).or_insert(0.0) += value;
             }
         }
         Ok(best(scores.into_iter().collect(), limit))
     }
 
-    fn postings(&self, index: u32, term: &str) -> Result<BTreeMap<NodeId, Posting>, GraphError> {
+    fn postings(&self, index: u32, term: &str) -> Result<BTreeMap<u64, Posting>, GraphError> {
         self.transaction
             .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(index, term))?
             .into_iter()
-            .map(|(key, value)| Ok((keys::parse_posting_node(&key)?, decode_posting(&value)?)))
+            .map(|(key, value)| Ok((keys::parse_posting_element(&key)?, decode_posting(&value)?)))
             .collect()
     }
 
@@ -546,7 +671,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         index: u32,
         terms: &[Term],
-    ) -> Result<BTreeMap<NodeId, (u32, u32)>, GraphError> {
+    ) -> Result<BTreeMap<u64, (u32, u32)>, GraphError> {
         let mut lists = Vec::new();
         for term in terms {
             lists.push((term.position, self.postings(index, &term.text)?));
@@ -559,12 +684,12 @@ impl<T: ReadTransaction> GraphTx<T> {
         else {
             return Ok(matches);
         };
-        for (node, posting) in anchor {
+        for (element, posting) in anchor {
             let Some(others) = lists
                 .iter()
                 .enumerate()
                 .filter(|(position, _)| *position != rarest)
-                .map(|(_, (offset, postings))| Some((*offset, postings.get(node)?)))
+                .map(|(_, (offset, postings))| Some((*offset, postings.get(element)?)))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -582,27 +707,27 @@ impl<T: ReadTransaction> GraphTx<T> {
                 .count();
             if occurrences > 0 {
                 let occurrences = u32::try_from(occurrences).unwrap_or(u32::MAX);
-                matches.insert(*node, (occurrences, posting.length));
+                matches.insert(*element, (occurrences, posting.length));
             }
         }
         Ok(matches)
     }
 
-    /// The nodes whose vectors in the vector index `name` are closest to `query`, found by
-    /// scoring every vector in the index.
+    /// The IDs of the elements of kind `element` whose vectors in the vector index `name` are
+    /// closest to `query`, found by scoring every vector in the index.
     pub(crate) fn vector_search(
         &self,
         name: &str,
+        element: ElementKind,
         query: &[f64],
         limit: usize,
-    ) -> Result<Vec<(NodeId, f64)>, GraphError> {
-        let not_found = || GraphError::IndexNotFound(name.to_owned(), "vector index");
-        let index = self.index(name)?.ok_or_else(not_found)?;
+    ) -> Result<Vec<(u64, f64)>, GraphError> {
+        let index = self.searched_index(name, SearchKind::Vector, element)?;
         let IndexKind::Vector {
             dimension, metric, ..
         } = index.definition.kind
         else {
-            return Err(not_found());
+            return Err(GraphError::IndexNotFound(name.to_owned(), "vector index"));
         };
         if usize::try_from(dimension).ok() != Some(query.len()) {
             return Err(GraphError::InvalidQueryVector(format!(
@@ -634,15 +759,50 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         Ok(best(scored, limit))
     }
+
+    fn covered_entries(
+        &self,
+        definition: &IndexDefinition,
+    ) -> Result<Vec<(u64, Entry)>, GraphError> {
+        let mut entries = Vec::new();
+        match definition.target {
+            Target::Label(label) => {
+                for node in self.node_ids_with_label(label)? {
+                    let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
+                    if let Some(entry) = definition.entry(Element::Node(&record)) {
+                        entries.push((node.0, entry));
+                    }
+                }
+            }
+            Target::RelationshipType(_) => {
+                for (key, value) in self.transaction.scan_prefix(Table::Relationships, &[])? {
+                    let record = RelationshipRecord::decode(&value)?;
+                    if let Some(entry) = definition.entry(Element::Relationship(&record)) {
+                        entries.push((decode_u64(&key)?, entry));
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
 }
 
 impl<T: WriteTransaction> GraphTx<T> {
-    /// Creates a keyword index over the string properties `properties` of nodes labelled
-    /// `label`, filled from the nodes already there.
+    fn intern_target(&mut self, target: IndexTarget<'_>) -> Result<Target, GraphError> {
+        Ok(match target {
+            IndexTarget::Label(label) => Target::Label(self.intern_token(label)?),
+            IndexTarget::RelationshipType(rel_type) => {
+                Target::RelationshipType(self.intern_token(rel_type)?)
+            }
+        })
+    }
+
+    /// Creates a keyword index over the string properties `properties` of the elements
+    /// `target` covers, filled from the elements already there.
     pub(crate) fn create_keyword_index(
         &mut self,
         name: &str,
-        label: &str,
+        target: IndexTarget<'_>,
         properties: &[&str],
     ) -> Result<(), GraphError> {
         if properties.is_empty() {
@@ -650,7 +810,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                 "a keyword index needs at least one property",
             ));
         }
-        let label = self.intern_token(label)?;
+        let target = self.intern_target(target)?;
         let mut tokens = properties
             .iter()
             .map(|property| self.intern_token(property))
@@ -660,18 +820,18 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.create_index(
             name,
             IndexDefinition {
-                label,
+                target,
                 kind: IndexKind::Keyword { properties: tokens },
             },
         )
     }
 
-    /// Creates a vector index over the list property `property` of nodes labelled `label`,
-    /// filled from the nodes already there.
+    /// Creates a vector index over the list property `property` of the elements `target`
+    /// covers, filled from the elements already there.
     pub(crate) fn create_vector_index(
         &mut self,
         name: &str,
-        label: &str,
+        target: IndexTarget<'_>,
         property: &str,
         dimension: usize,
         metric: VectorMetric,
@@ -682,12 +842,12 @@ impl<T: WriteTransaction> GraphTx<T> {
             .ok_or(GraphError::InvalidIndex(
                 "a vector index needs a dimension from one to u32::MAX",
             ))?;
-        let label = self.intern_token(label)?;
+        let target = self.intern_target(target)?;
         let property = self.intern_token(property)?;
         self.create_index(
             name,
             IndexDefinition {
-                label,
+                target,
                 kind: IndexKind::Vector {
                     property,
                     dimension,
@@ -722,11 +882,19 @@ impl<T: WriteTransaction> GraphTx<T> {
                 &encode_totals(0, 0),
             )?;
         }
-        for node in self.node_ids_with_label(index.definition.label)? {
-            let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
-            if let Some(entry) = index.definition.entry(&record) {
-                self.insert_entry(index, node, &entry)?;
-            }
+        for (element, entry) in self.covered_entries(&index.definition)? {
+            self.insert_entry(index, element, &entry)?;
+        }
+        Ok(())
+    }
+
+    /// Rewrites every index definition stored before format version 5, which names a label and
+    /// no target tag, in the current layout.
+    pub(crate) fn tag_index_targets(&mut self) -> Result<(), GraphError> {
+        for (name, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
+            let index = Index::decode_label_only(&bytes)?;
+            self.transaction
+                .put(Table::Indexes, &name, &index.encode())?;
         }
         Ok(())
     }
@@ -774,33 +942,34 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Brings every index in line with a node that changed from `before` to `after`. `None`
-    /// stands for a node that did not exist or no longer does.
-    pub(crate) fn reindex_node(
+    /// Brings every index in line with the element with ID `element` that changed from
+    /// `before` to `after`, both records of one node or of one relationship. `None` stands for
+    /// an element that did not exist or no longer does.
+    pub(crate) fn reindex(
         &mut self,
-        node: NodeId,
-        before: Option<&NodeRecord>,
-        after: Option<&NodeRecord>,
+        element: u64,
+        before: Option<Element<'_>>,
+        after: Option<Element<'_>>,
     ) -> Result<(), GraphError> {
         for (_, index) in self.indexes()? {
             let definition = &index.definition;
-            let covers = |record: &&NodeRecord| record.labels.contains(&definition.label);
+            let covers = |record: &Element<'_>| definition.target.covered(*record).is_some();
             let before = before.filter(covers);
             let after = after.filter(covers);
             if before.is_none() && after.is_none() {
                 continue;
             }
-            let rows = |entry: &Entry| index.rows(node, entry);
+            let rows = |entry: &Entry| index.rows(element, entry);
             let old = before.and_then(|record| definition.entry(record));
             let new = after.and_then(|record| definition.entry(record));
             if old.as_ref().map(rows) == new.as_ref().map(rows) {
                 continue;
             }
             if before.is_some() {
-                self.remove_entry(&index, node)?;
+                self.remove_entry(&index, element)?;
             }
             if let Some(entry) = new {
-                self.insert_entry(&index, node, &entry)?;
+                self.insert_entry(&index, element, &entry)?;
             }
         }
         Ok(())
@@ -809,10 +978,10 @@ impl<T: WriteTransaction> GraphTx<T> {
     fn insert_entry(
         &mut self,
         index: &Index,
-        node: NodeId,
+        element: u64,
         entry: &Entry,
     ) -> Result<(), GraphError> {
-        for (table, key, value) in index.rows(node, entry) {
+        for (table, key, value) in index.rows(element, entry) {
             self.transaction.put(table, &key, &value)?;
         }
         if let Entry::Keyword(document) = entry {
@@ -821,8 +990,8 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    fn remove_entry(&mut self, index: &Index, node: NodeId) -> Result<(), GraphError> {
-        let entry_key = keys::index_entry_key(index.id, node);
+    fn remove_entry(&mut self, index: &Index, element: u64) -> Result<(), GraphError> {
+        let entry_key = keys::index_entry_key(index.id, element);
         match index.definition.kind {
             IndexKind::Keyword { .. } => {
                 let Some(bytes) = self.transaction.get(Table::KeywordDocuments, &entry_key)? else {
@@ -832,7 +1001,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                 for (term, frequency) in decode_document(&bytes)? {
                     self.transaction.delete(
                         Table::KeywordPostings,
-                        &keys::posting_key(index.id, &term, node),
+                        &keys::posting_key(index.id, &term, element),
                     )?;
                     length = length.saturating_add(frequency);
                 }

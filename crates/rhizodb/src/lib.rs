@@ -68,6 +68,7 @@ pub use database::Database;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
+pub use graph::IndexTarget;
 pub use graph::NodeId;
 pub use graph::RelationshipId;
 pub use graph::VectorMetric;

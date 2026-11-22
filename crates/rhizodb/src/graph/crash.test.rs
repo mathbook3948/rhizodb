@@ -137,10 +137,16 @@ fn write_iteration(graph: &Graph<RedbStorage>, iteration: u64) {
     let tokens = Tokens::intern(&mut write);
     if iteration == 0 {
         write
-            .create_keyword_index("words", "Iter", &["name", "payload"])
+            .create_keyword_index("words", IndexTarget::Label("Iter"), &["name", "payload"])
             .unwrap();
         write
-            .create_vector_index("points", "Tail", "at", 2, VectorMetric::Cosine)
+            .create_vector_index(
+                "points",
+                IndexTarget::Label("Tail"),
+                "at",
+                2,
+                VectorMetric::Cosine,
+            )
             .unwrap();
     }
     assert_eq!(
@@ -382,7 +388,7 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
         |write, _| {
             write
                 .transaction
-                .delete(Table::Vectors, &keys::index_entry_key(1, tail_id(2)))
+                .delete(Table::Vectors, &keys::index_entry_key(1, tail_id(2).0))
                 .unwrap();
         },
     ];

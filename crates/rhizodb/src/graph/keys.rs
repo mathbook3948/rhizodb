@@ -92,15 +92,21 @@ pub(crate) fn index_prefix(index: u32) -> [u8; 4] {
     index.to_be_bytes()
 }
 
-pub(crate) fn index_entry_key(index: u32, node: NodeId) -> [u8; 12] {
+/// The key of an index entry. An index covers nodes or relationships, never both, so the
+/// element ID alone tells its entries apart.
+pub(crate) fn index_entry_key(index: u32, element: u64) -> [u8; 12] {
     let mut key = [0u8; 12];
     key[..4].copy_from_slice(&index.to_be_bytes());
-    key[4..].copy_from_slice(&node.0.to_be_bytes());
+    key[4..].copy_from_slice(&element.to_be_bytes());
     key
 }
 
-pub(crate) fn parse_index_entry_key(key: &[u8]) -> Result<NodeId, DecodeError> {
-    parse_label_key(key)
+pub(crate) fn parse_index_entry_key(key: &[u8]) -> Result<u64, DecodeError> {
+    let mut reader = Reader::new(key);
+    reader.u32()?;
+    let element = reader.u64()?;
+    reader.finish()?;
+    Ok(element)
 }
 
 /// The tokenizer drops control characters, so a term never holds a zero byte, and the zero
@@ -122,9 +128,9 @@ pub(crate) fn term_prefix(index: u32, prefix: &str) -> Vec<u8> {
     key
 }
 
-pub(crate) fn posting_key(index: u32, term: &str, node: NodeId) -> Vec<u8> {
+pub(crate) fn posting_key(index: u32, term: &str, element: u64) -> Vec<u8> {
     let mut key = posting_prefix(index, term);
-    key.extend_from_slice(&node.0.to_be_bytes());
+    key.extend_from_slice(&element.to_be_bytes());
     key
 }
 
@@ -137,10 +143,10 @@ pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
     std::str::from_utf8(term).map_err(|_| DecodeError::InvalidUtf8)
 }
 
-pub(crate) fn parse_posting_node(key: &[u8]) -> Result<NodeId, DecodeError> {
+pub(crate) fn parse_posting_element(key: &[u8]) -> Result<u64, DecodeError> {
     let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
     let mut reader = Reader::new(&key[start..]);
-    let node = NodeId(reader.u64()?);
+    let element = reader.u64()?;
     reader.finish()?;
-    Ok(node)
+    Ok(element)
 }
