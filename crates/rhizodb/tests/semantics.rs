@@ -558,6 +558,38 @@ fn a_percentile_must_be_the_same_for_every_row_of_a_group() {
 }
 
 #[test]
+fn a_percentile_over_no_rows_is_null_without_reading_the_percentile() {
+    let db = db();
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [] AS x RETURN percentileDisc(x, [p IN [0.5] | p][0]) AS c"
+        ),
+        Value::Null
+    );
+    assert_eq!(
+        single(&db, "UNWIND [] AS x RETURN percentileCont(x, 2.0) AS c"),
+        Value::Null
+    );
+    run(&db, "CREATE (:A)");
+    assert_eq!(
+        single(
+            &db,
+            "MATCH (a:A) WITH 0.5 AS p OPTIONAL MATCH (m:Missing) \
+             WITH p, m WHERE m IS NOT NULL RETURN percentileCont(m.x, p)"
+        ),
+        Value::Null
+    );
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [1, 2] AS x RETURN percentileCont(x, null) AS c"
+        ),
+        Value::Null
+    );
+}
+
+#[test]
 fn floats_print_like_the_reference_implementation() {
     let db = db();
     for (value, text) in [

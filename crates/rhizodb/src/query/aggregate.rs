@@ -74,7 +74,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         function: AggregateFunction,
         extra: &Expr,
         rows: &[Row],
-    ) -> Result<Datum, Error> {
+    ) -> Result<Option<Datum>, Error> {
         let mut percentile: Option<Datum> = None;
         for row in rows {
             let value = self.eval(extra, row)?;
@@ -90,10 +90,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 None => percentile = Some(value),
             }
         }
-        match percentile {
-            Some(percentile) => Ok(percentile),
-            None => self.eval(extra, &Row::default()),
-        }
+        Ok(percentile)
     }
 
     fn compute(&self, aggregate: &Aggregate, rows: &[Row]) -> Result<Datum, Error> {
@@ -147,9 +144,12 @@ impl<T: ReadTransaction> Env<'_, T> {
             AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc => {
                 let percentile = match &aggregate.extra {
                     Some(extra) => self.group_percentile(aggregate.function, extra, rows)?,
-                    None => Datum::Null,
+                    None => Some(Datum::Null),
                 };
-                percentile_of(aggregate.function, values, &percentile)
+                match percentile {
+                    Some(percentile) => percentile_of(aggregate.function, values, &percentile),
+                    None => Ok(Datum::Null),
+                }
             }
         }
     }
@@ -225,6 +225,7 @@ fn percentile_of(
     let percentile = match percentile {
         Datum::Integer(value) => *value as f64,
         Datum::Float(value) => *value,
+        Datum::Null => return Ok(Datum::Null),
         other => {
             return Err(type_error(format!(
                 "a percentile must be a number, not a {}",
