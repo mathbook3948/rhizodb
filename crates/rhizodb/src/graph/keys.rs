@@ -102,7 +102,7 @@ pub(crate) fn parse_index_entry_key(key: &[u8]) -> Result<NodeId, DecodeError> {
     parse_label_key(key)
 }
 
-/// Word segmentation always breaks around U+0000, so a term never holds a zero byte, and the zero
+/// The tokenizer drops control characters, so a term never holds a zero byte, and the zero
 /// after it keeps one term's postings apart from those of a longer term it starts.
 pub(crate) fn posting_prefix(index: u32, term: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(4 + term.len() + 1 + 8);

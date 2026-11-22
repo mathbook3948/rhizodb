@@ -74,3 +74,17 @@ fn every_query_term_of_a_text_is_a_document_term_of_it() {
         }
     }
 }
+
+#[test]
+fn control_characters_never_reach_a_term() {
+    for text in ["\u{0}\u{903}", "a\u{0}\u{301}b", "x\u{7}\u{200d}y"] {
+        let found = document(text);
+        assert!(!found.is_empty(), "{text:?} gave no terms");
+        for term in found {
+            assert!(
+                !term.chars().any(char::is_control),
+                "{term:?} from {text:?}"
+            );
+        }
+    }
+}

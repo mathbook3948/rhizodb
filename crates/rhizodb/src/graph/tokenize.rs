@@ -8,7 +8,8 @@ pub(crate) enum Purpose {
     Query,
 }
 
-/// Splits `text` into lowercase terms at Unicode word boundaries. Hangul, Han, Hiragana, and
+/// Splits `text` into lowercase terms at Unicode word boundaries, dropping control characters,
+/// so no term holds a zero byte. Hangul, Han, Hiragana, and
 /// Katakana runs become overlapping character pairs, because those scripts attach particles to
 /// words or leave out spaces. The same text always gives the same terms, in the same order.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
@@ -20,7 +21,7 @@ pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
             continue;
         }
         let mut word = String::new();
-        for character in segment.chars() {
+        for character in segment.chars().filter(|character| !character.is_control()) {
             if is_paired_script(character) {
                 push_word(&mut word, &mut terms);
                 run.push(character);
