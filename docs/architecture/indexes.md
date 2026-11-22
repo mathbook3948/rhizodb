@@ -34,11 +34,12 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Text splits into words at Unicode word boundaries.
 - Words are lowercased.
 - A grapheme cluster that starts with whitespace, or with a character that Unicode grapheme rules join to the character before it, separates words.
-- A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of grapheme clusters and its single grapheme clusters.
+- A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of units and its single units.
+- A unit of such a run is a grapheme cluster, except in Hangul.
 - Such a run starts at a grapheme cluster whose first character is a letter.
 - Digits of such a script are words, not part of a run.
-- In a Hangul run, each syllable and each jamo left over after normalization is a unit of its own instead of a grapheme cluster.
-- A query run of such clusters looks for its pairs, or for its one cluster when it has one.
+- A unit of a Hangul run is a syllable or a jamo left over after normalization, with the marks and joiners of its grapheme cluster that follow it.
+- A query run looks for its pairs of units, or for its one unit when it has one.
 - No text is split with a word dictionary.
 - Text between two `"` characters in a keyword query is a phrase.
 - An unclosed `"` starts a phrase that runs to the end of the query.

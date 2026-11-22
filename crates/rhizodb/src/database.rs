@@ -89,7 +89,8 @@ impl Database {
     /// boundaries, and lowercased, so a composed accent matches its decomposed form, and a
     /// ligature or a full-width letter matches its plain form. Hangul, Han, kana, and scripts
     /// written without spaces between words, such as Thai, are indexed as overlapping pairs of
-    /// grapheme clusters, so a query finds a word inside a longer run. A property that holds a
+    /// letters, so a query finds a word inside a longer run. A letter here is a grapheme
+    /// cluster, or in Hangul a syllable or a loose jamo. A property that holds a
     /// list of strings is indexed string by string.
     ///
     /// Search it with `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, which

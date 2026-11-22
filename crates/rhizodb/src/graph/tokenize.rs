@@ -35,8 +35,8 @@ pub(crate) fn fingerprint() -> Vec<u8> {
     out
 }
 
-/// What the terms are for. A document also keeps the single grapheme clusters of a paired-script
-/// run, so a one-cluster query finds it, while a query of a longer run looks only for its pairs.
+/// What the terms are for. A document also keeps the single units of a paired-script run, so a
+/// one-unit query finds it, while a query of a longer run looks only for its pairs of units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Document,
@@ -44,8 +44,10 @@ pub(crate) enum Purpose {
 }
 
 /// A term and where it occurs in its text. A word takes one position. A paired-script run takes
-/// one position per grapheme cluster, and each pair and each single cluster sits at the position
-/// of its first cluster. Neighbouring query terms are therefore at most two positions apart.
+/// one position per unit, and each pair and each single unit sits at the position of its first
+/// unit. A unit is a grapheme cluster, except in Hangul, where it is a syllable or a jamo left
+/// over after normalization, with the marks and joiners of its cluster that follow it.
+/// Neighbouring query terms are therefore at most two positions apart.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Term {
     pub(crate) text: String,
@@ -98,17 +100,16 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// canonically equivalent text gives the same terms, and so do compatibility forms such as
 /// ligatures and full-width letters. Runs of Hangul, Han, Hiragana, Katakana, and the scripts
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
-/// grapheme clusters, because those scripts attach particles to words or leave out spaces
-/// between words. A grapheme cluster goes wholly to a run or wholly to a word, by its first
+/// units, as [`Term`] defines them, because those scripts attach particles to words or leave
+/// out spaces between words. A grapheme cluster goes wholly to a run or wholly to a word, by its first
 /// character, so a run starts at a letter that is not a digit. A cluster that starts with
 /// whitespace, or with a character the Unicode grapheme rules join to the character before it
 /// (Grapheme_Cluster_Break Extend, SpacingMark, or ZWJ), has no base letter and separates words
 /// like a space; a mark with Grapheme_Cluster_Break Other, such as a few spacing marks of
-/// Brahmic scripts, is still taken for a letter. Control characters are dropped. In Hangul
-/// the unit is each syllable and each jamo left over after normalization, together with the
-/// marks and joiners of its grapheme cluster that follow it, since a grapheme cluster of loose
-/// jamo such as "ㅋㅋㅋ" holds several letters a reader types and searches one at a time. The same text always gives the same terms, in the same order, with
-/// positions counted from zero.
+/// Brahmic scripts, is still taken for a letter. Control characters are dropped. Hangul units
+/// are smaller than grapheme clusters because a cluster of loose jamo such as "ㅋㅋㅋ" holds
+/// several letters a reader types and searches one at a time. The same text always gives the
+/// same terms, in the same order, with positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
     scan(&text.nfkc().collect::<String>(), purpose).terms
 }
