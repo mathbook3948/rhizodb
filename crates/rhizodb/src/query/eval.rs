@@ -14,7 +14,7 @@ use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
 use crate::storage::ReadTransaction;
-use crate::temporal::DateTime;
+use crate::temporal::Clocks;
 
 use super::compare::Comparison;
 use super::compare::compare;
@@ -35,7 +35,7 @@ pub(crate) struct Env<'a, T> {
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
     /// The instant the query started, which the clock functions other than `realtime` read.
-    pub(crate) now: &'a DateTime,
+    pub(crate) now: &'a Clocks,
     /// What the query deleted so far.
     pub(crate) graveyard: &'a Graveyard,
     /// The regular expressions the query compiled so far.

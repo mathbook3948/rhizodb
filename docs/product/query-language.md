@@ -71,7 +71,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - Temporal values follow openCypher: `date`, `localtime`, `time`, `localdatetime`, `datetime`, and `duration` build them from a map, a string, or another temporal value.
 - The temporal functions `truncate`, `transaction`, `statement`, `realtime`, `fromepoch`, `fromepochmillis`, `between`, `inMonths`, `inDays`, and `inSeconds` exist under the openCypher names.
 - A temporal value built without a time zone gets UTC.
-- The `transaction` and `statement` clocks and the clock of a call without arguments read one instant per query, so two calls in one query agree.
+- The `statement` clock and the clock of a call without arguments read one instant per query, so two calls in one query agree.
+- The `transaction` clock reads one instant per transaction, as decided in the transactions doc.
 - The `realtime` clock reads the system clock at each call.
 - Temporal values convert to strings in the ISO 8601 forms the TCK expects.
 - A temporal function reads back every string it produces.

@@ -23,7 +23,8 @@ use crate::result::QueryResult;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::WriteTransaction;
-use crate::temporal;
+use crate::temporal::Clocks;
+use crate::temporal::DateTime;
 
 use self::plan::Plan;
 
@@ -36,10 +37,12 @@ pub(crate) fn execute<S: Storage>(
     parameters: &Parameters,
 ) -> Result<QueryResult, Error> {
     match prepare(procedures, query, parameters)? {
-        Plan::ReadOnly(program) => exec::run_read(&graph.read()?, &program, &temporal::now()),
+        Plan::ReadOnly(program) => {
+            exec::run_read(&graph.read()?, &program, &Clocks::for_own_transaction())
+        }
         Plan::Updating(program) => {
             let mut tx = graph.write()?;
-            let result = exec::run_write(&mut tx, &program, &temporal::now())?;
+            let result = exec::run_write(&mut tx, &program, &Clocks::for_own_transaction())?;
             tx.commit()?;
             Ok(result)
         }
@@ -49,12 +52,13 @@ pub(crate) fn execute<S: Storage>(
 /// Parses, binds, and runs one query in a read transaction, refusing a query that updates.
 pub(crate) fn execute_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
+    began: &DateTime,
     procedures: &Procedures,
     query: &str,
     parameters: &Parameters,
 ) -> Result<QueryResult, Error> {
     match prepare(procedures, query, parameters)? {
-        Plan::ReadOnly(program) => exec::run_read(tx, &program, &temporal::now()),
+        Plan::ReadOnly(program) => exec::run_read(tx, &program, &Clocks::within(began)),
         Plan::Updating(_) => Err(Error::new(
             ErrorKind::ReadOnlyTransaction,
             "a read transaction cannot run a query that updates the graph",
@@ -66,13 +70,14 @@ pub(crate) fn execute_read<T: ReadTransaction>(
 /// query may leave some of its writes in the transaction.
 pub(crate) fn execute_write<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
+    began: &DateTime,
     procedures: &Procedures,
     query: &str,
     parameters: &Parameters,
 ) -> Result<QueryResult, Error> {
     match prepare(procedures, query, parameters)? {
-        Plan::ReadOnly(program) => exec::run_read(tx, &program, &temporal::now()),
-        Plan::Updating(program) => exec::run_write(tx, &program, &temporal::now()),
+        Plan::ReadOnly(program) => exec::run_read(tx, &program, &Clocks::within(began)),
+        Plan::Updating(program) => exec::run_write(tx, &program, &Clocks::within(began)),
     }
 }
 

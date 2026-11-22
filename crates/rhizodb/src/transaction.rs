@@ -9,6 +9,8 @@ use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::redb_backend::RedbRead;
 use crate::storage::redb_backend::RedbWrite;
+use crate::temporal;
+use crate::temporal::DateTime;
 
 /// A snapshot of the graph that several queries read, begun with
 /// [`Database::begin_read`](crate::Database::begin_read). Commits made after it began stay out of
@@ -16,19 +18,24 @@ use crate::storage::redb_backend::RedbWrite;
 #[derive(Debug)]
 pub struct ReadTransaction<'db> {
     tx: GraphTx<RedbRead>,
+    began: DateTime,
     procedures: &'db Procedures,
 }
 
 impl<'db> ReadTransaction<'db> {
     pub(crate) fn new(tx: GraphTx<RedbRead>, procedures: &'db Procedures) -> Self {
-        Self { tx, procedures }
+        Self {
+            tx,
+            began: temporal::now(),
+            procedures,
+        }
     }
 
     /// Runs one GQL query on the snapshot and returns its rows. A query that updates the graph
     /// fails with [`ErrorKind::ReadOnlyTransaction`] before it reads data. A failed query leaves
     /// the transaction usable.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute_read(&self.tx, self.procedures, query, parameters)
+        query::execute_read(&self.tx, &self.began, self.procedures, query, parameters)
     }
 }
 
@@ -38,6 +45,7 @@ impl<'db> ReadTransaction<'db> {
 /// commit rolls it back.
 pub struct WriteTransaction<'db> {
     tx: Option<GraphTx<RedbWrite>>,
+    began: DateTime,
     procedures: &'db Procedures,
 }
 
@@ -45,6 +53,7 @@ impl<'db> WriteTransaction<'db> {
     pub(crate) fn new(tx: GraphTx<RedbWrite>, procedures: &'db Procedures) -> Self {
         Self {
             tx: Some(tx),
+            began: temporal::now(),
             procedures,
         }
     }
@@ -53,7 +62,7 @@ impl<'db> WriteTransaction<'db> {
     /// the whole transaction, so every later call fails with [`ErrorKind::TransactionAborted`].
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         let tx = self.tx.as_mut().ok_or_else(aborted)?;
-        let result = query::execute_write(tx, self.procedures, query, parameters);
+        let result = query::execute_write(tx, &self.began, self.procedures, query, parameters);
         if result.is_err() {
             self.tx = None;
         }

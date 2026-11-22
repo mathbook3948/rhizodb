@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt::Display;
 
 use regex_automata::meta::Regex;
@@ -16,22 +16,27 @@ const CACHED_PATTERNS: usize = 8;
 /// The patterns one query compiled, so a pattern that many rows read compiles once.
 #[derive(Debug, Default)]
 pub(crate) struct Patterns {
-    compiled: RefCell<HashMap<String, Regex>>,
+    compiled: RefCell<VecDeque<(String, Regex)>>,
 }
 
 impl Patterns {
     /// Whether the regular expression `pattern` matches all of `text`.
     pub(crate) fn matches(&self, text: &str, pattern: &str) -> Result<bool, Error> {
-        if let Some(regex) = self.compiled.borrow().get(pattern) {
+        if let Some((_, regex)) = self
+            .compiled
+            .borrow()
+            .iter()
+            .find(|(cached, _)| cached == pattern)
+        {
             return Ok(regex.is_match(text));
         }
         let regex = compile(pattern)?;
         let matched = regex.is_match(text);
         let mut compiled = self.compiled.borrow_mut();
         if compiled.len() >= CACHED_PATTERNS {
-            compiled.clear();
+            compiled.pop_front();
         }
-        compiled.insert(pattern.to_owned(), regex);
+        compiled.push_back((pattern.to_owned(), regex));
         Ok(matched)
     }
 }

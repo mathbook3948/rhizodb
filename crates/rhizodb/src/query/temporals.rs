@@ -102,8 +102,8 @@ impl<T: ReadTransaction> Env<'_, T> {
         let value = match function {
             TemporalFunction::Construct(kind) => match &first {
                 Datum::String(text) => build::parsed(kind, text),
-                Datum::Map(_) => build::from_fields(kind, &fields(&first)?, self.now),
-                Datum::Temporal(value) => build::converted(kind, value, self.now),
+                Datum::Map(_) => build::from_fields(kind, &fields(&first)?, &self.now.statement),
+                Datum::Temporal(value) => build::converted(kind, value, &self.now.statement),
                 _ => return Ok(Datum::Null),
             },
             TemporalFunction::Clock(kind, _) => match &first {
@@ -114,7 +114,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let (Datum::String(unit), Datum::Temporal(value)) = (&first, &second) else {
                     return Ok(Datum::Null);
                 };
-                build::truncated(kind, unit, value, &fields(&third)?, self.now)
+                build::truncated(kind, unit, value, &fields(&third)?, &self.now.statement)
             }
             TemporalFunction::FromEpoch => match (&first, &second) {
                 (Datum::Integer(seconds), Datum::Integer(nanoseconds)) => {
@@ -152,11 +152,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         zone: Option<&str>,
     ) -> Result<Datum, Error> {
         let realtime;
-        let now = if function == TemporalFunction::Clock(kind, Moment::Realtime) {
-            realtime = temporal::now();
-            &realtime
-        } else {
-            self.now
+        let now = match function {
+            TemporalFunction::Clock(_, Moment::Realtime) => {
+                realtime = temporal::now();
+                &realtime
+            }
+            TemporalFunction::Clock(_, Moment::Transaction) => &self.now.transaction,
+            _ => &self.now.statement,
         };
         build::current(kind, zone, now)
             .map(temporal)

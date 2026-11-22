@@ -370,6 +370,33 @@ impl DateTime {
 }
 
 /// The instant the system clock reads now, in UTC.
+/// The instants the clock functions read: the statement clock is fixed for one query, the
+/// transaction clock for every query of one transaction.
+#[derive(Clone, Debug)]
+pub(crate) struct Clocks {
+    pub(crate) statement: DateTime,
+    pub(crate) transaction: DateTime,
+}
+
+impl Clocks {
+    /// The clocks of a query that is its own transaction.
+    pub(crate) fn for_own_transaction() -> Self {
+        let instant = now();
+        Self {
+            statement: instant.clone(),
+            transaction: instant,
+        }
+    }
+
+    /// The clocks of a query inside a transaction that began at `transaction`.
+    pub(crate) fn within(transaction: &DateTime) -> Self {
+        Self {
+            statement: now(),
+            transaction: transaction.clone(),
+        }
+    }
+}
+
 pub(crate) fn now() -> DateTime {
     let (epoch_second, nanosecond) = zone::system_now();
     DateTime::from_instant(epoch_second, nanosecond, &Zone::UTC).unwrap_or(DateTime {
