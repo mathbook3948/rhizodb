@@ -40,6 +40,7 @@ use index::Element;
 
 const FORMAT_VERSION: u32 = 5;
 const OLDEST_FORMAT_VERSION: u32 = 1;
+const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug)]
@@ -139,8 +140,8 @@ impl<S: Storage> Graph<S> {
     /// Records the format version on first open, upgrades a database written in an older
     /// version to the current one, and rejects a database written in a newer version. Index
     /// definitions written before indexes could cover relationships are rewritten, and keyword
-    /// indexes written in an older version or built by another tokenizer are rebuilt, in the
-    /// same write transaction.
+    /// indexes written before postings kept positions or built by another tokenizer are rebuilt,
+    /// in the same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
             let mut tx = GraphTx {
@@ -171,7 +172,9 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            if tx.adopt_current_tokenizer(upgrade)? || upgrade {
+            let stale_postings =
+                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
+            if tx.adopt_current_tokenizer(stale_postings)? || upgrade {
                 tx.commit()?;
             }
         }

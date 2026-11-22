@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use proptest::prelude::*;
 
 use super::*;
@@ -7,7 +10,10 @@ use crate::graph::NodeId;
 use crate::graph::RelationshipId;
 use crate::graph::records::Properties;
 use crate::storage::Storage;
+use crate::storage::StorageError;
+use crate::storage::redb_backend::RedbRead;
 use crate::storage::redb_backend::RedbStorage;
+use crate::storage::redb_backend::RedbWrite;
 
 const TEXTS: [&str; 6] = [
     "graph store",
@@ -497,8 +503,125 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     );
 }
 
+#[derive(Debug)]
+struct CountingStorage {
+    inner: RedbStorage,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+struct CountingWrite {
+    inner: RedbWrite,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+impl CountingWrite {
+    fn count(&self, table: Table) {
+        if ENTRY_TABLES.contains(&table) {
+            self.entry_writes.set(self.entry_writes.get() + 1);
+        }
+    }
+}
+
+impl Storage for CountingStorage {
+    type Read<'a> = RedbRead;
+    type Write<'a> = CountingWrite;
+
+    fn begin_read(&self) -> Result<RedbRead, StorageError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<CountingWrite, StorageError> {
+        Ok(CountingWrite {
+            inner: self.inner.begin_write()?,
+            entry_writes: Rc::clone(&self.entry_writes),
+        })
+    }
+}
+
+impl ReadTransaction for CountingWrite {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_prefix(table, prefix)
+    }
+}
+
+impl WriteTransaction for CountingWrite {
+    fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.put(table, key, value)
+    }
+
+    fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete(table, key)
+    }
+
+    fn commit(self) -> Result<(), StorageError> {
+        self.inner.commit()
+    }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback()
+    }
+}
+
 #[test]
-fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
+fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("four.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("graph store graph".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_label_only_definitions(&mut previous);
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &4u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+    }
+    let entry_writes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: RedbStorage::open(&path).unwrap(),
+        entry_writes: Rc::clone(&entry_writes),
+    })
+    .unwrap();
+    assert_eq!(entry_writes.get(), 0);
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "\"graph store\"", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("previous.redb");
     {
