@@ -70,10 +70,12 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Any other value leaves the element out of the vector index without an error.
 - A query vector that breaks the same rules fails the query.
 - Vectors are stored in a table of their own, so a search reads no node or relationship records.
-- Vector search is exact and scores every vector in the index.
+- Vector search is exact: each query reads and scores every vector in its index, so its cost grows with the number of vectors times their dimension.
+- RhizoDB offers no approximate vector index, such as HNSW.
+- A host with more vectors than one query can scan keeps an approximate index of its own outside the database and reads the elements it returns by ID.
 - The score is higher for closer vectors: the cosine similarity, the dot product, or the negative euclidean distance.
 - The integrity check derives every index entry from the nodes and relationships and compares it with the stored entries byte for byte.
 
 ## Open
 
-- An approximate vector structure, such as HNSW, for indexes too large to scan
+None

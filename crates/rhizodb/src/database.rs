@@ -149,7 +149,11 @@ impl Database {
     /// `CALL db.index.vector.queryNodes(name, vector, limit) YIELD node, score`, and one over a
     /// relationship type with
     /// `CALL db.index.vector.queryRelationships(name, vector, limit) YIELD relationship, score`.
-    /// Both score every vector in the index.
+    /// Search is exact: each query reads and scores every vector in the index, so its cost
+    /// grows with the number of indexed vectors times their dimension. There is no approximate
+    /// index. A host with more vectors than one query can scan keeps an approximate index of
+    /// its own outside the database and reads the elements it returns by ID, for example with
+    /// `MATCH (n) WHERE id(n) IN $ids`.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
