@@ -180,14 +180,21 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 }
 
+fn label_scan_decides(pattern: &NodePattern) -> bool {
+    !pattern.bound
+        && pattern.properties.is_none()
+        && matches!(pattern.labels, Some(LabelExpr::Name(_)))
+}
+
 impl<T: ReadTransaction> Search<'_, '_, T> {
     fn part(&mut self, index: usize, row: &mut Row, emit: &mut Emit<'_>) -> Result<bool, Error> {
         let patterns = self.patterns;
         let Some(part) = patterns.get(index) else {
             return emit(row);
         };
+        let decided = label_scan_decides(&part.start);
         for id in self.env.start_candidates(&part.start, row)? {
-            if !self.env.node_matches(id, &part.start, row)? {
+            if !decided && !self.env.node_matches(id, &part.start, row)? {
                 continue;
             }
             set(row, part.start.slot, Datum::Node(id));
