@@ -22,7 +22,18 @@ GQL is the reference language, but the only public conformance suite is the open
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
 - The check on the query text reads a value error as null and goes on.
-- The check reports a type error only when no value read as null was computed in the same expression step, so it reports only an error that evaluating the expression would really raise.
+- A value read as null this way stands for any value of the type its expression gives, so the check reports a type error only when the failing step raises it whatever those values are.
+- The check tracks, for each value, which parts it read as null: the whole value, or single items of a list and entries of a map.
+- An operator, indexing, slicing, property access, and `size`, `keys`, `head`, `last`, `tail`, `reverse`, and `properties` take their type errors from the types of their operands alone, so only an operand read as null as a whole hides a type error there.
+- Any other function hides a type error when any part of an argument was read as null.
+- List and map literals, indexing, slicing, property access on a map, `head`, `last`, `tail`, `reverse`, `properties`, and the variable of a comprehension or quantifier keep track of the items and entries they pass on.
+- `size` and `keys` read only how many items or which keys a list or map has, so an item read as null does not reach their result.
+- `IS NULL` reads only whether its operand is null.
+- Any other step that reads an item or entry read as null, such as `=`, `IN`, `+`, or another function, gives a value read as null as a whole.
+- `coalesce` gives a value read as null as a whole when an argument it passes over was read as null.
+- A `CASE` whose choice of branch reads a part read as null gives a value read as null as a whole and evaluates no branch.
+- A comprehension whose filter reads a part read as null for an item skips that item and gives a value read as null as a whole, and so does a quantifier for its result.
+- The type error the check reports is the first one it proves, which may be a later one than evaluation would raise first if each value error had given a value.
 - A type error the check skips this way still fails when a row reaches it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name.
 - `CALL` runs a registered procedure.
