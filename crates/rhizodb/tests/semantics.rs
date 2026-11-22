@@ -984,6 +984,11 @@ fn a_type_error_fails_before_any_row_reaches_it_in_every_place_an_expression_can
             "1 - 1",
         ),
         (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH m WHERE {} = 1 RETURN m } RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
             "MATCH (n) RETURN [(n)-->(m) WHERE {} = 1 | m] AS l",
             "1 - 'a'",
             "1 - 1",
@@ -1180,5 +1185,40 @@ fn an_operator_on_a_variable_of_a_kind_the_text_fixes_fails_before_reading_data(
     assert_eq!(
         run(&db, "MATCH (n:A) RETURN size(n + [1]) AS a, n['x'] AS b"),
         [vec![int(2), int(1)]]
+    );
+}
+
+#[test]
+fn a_full_exists_subquery_runs_from_the_outer_row_and_keeps_its_variables_inside() {
+    let db = db();
+    run(
+        &db,
+        "CREATE (a:A {i: 1})-[:R]->(:B {i: 1}), (a)-[:R]->(:B {i: 2}), (:A {i: 3})",
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) WITH count(m) AS c WHERE c = 2 RETURN c } \
+             RETURN n.i",
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) WHERE m.i = n.i } RETURN n.i",
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        error_kind(&db, "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) } RETURN m"),
+        ErrorKind::UndefinedVariable
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) SET m.i = 0 } RETURN n"
+        ),
+        ErrorKind::InvalidClauseComposition
     );
 }

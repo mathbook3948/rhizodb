@@ -133,7 +133,11 @@ fn materialize<T: ReadTransaction>(
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
-    fn read_clause(&self, clause: &ReadClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    pub(crate) fn read_clause(
+        &self,
+        clause: &ReadClause,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         match clause {
             ReadClause::Match(found) => self.match_clause(found, rows),
             ReadClause::Unwind { expr, slot } => {

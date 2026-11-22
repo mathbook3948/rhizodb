@@ -232,6 +232,8 @@ pub(crate) enum Expr {
     Quantified(Box<Quantified>),
     /// A pattern used as a predicate: true when it matches at least once.
     Exists(Box<PatternQuery>),
+    /// `EXISTS { query }`: true when the clauses, run from the current row, give a row.
+    Subquery(Vec<ReadClause>),
     /// `[pattern WHERE filter | projection]`: one value per match.
     PatternComprehension(Box<PatternQuery>, Box<Expr>),
 }

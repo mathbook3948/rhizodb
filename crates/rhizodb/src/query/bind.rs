@@ -76,7 +76,8 @@ pub(crate) fn bind(
     let mut columns: Option<Vec<String>> = None;
     let mut results_read_variables = false;
     for single in singles {
-        let (pipeline, part_columns, reads_variables) = binder.single_query(single)?;
+        let (pipeline, part_columns, reads_variables) =
+            binder.single_query(single, Scope::default(), false)?;
         results_read_variables |= reads_variables;
         match &columns {
             Some(first) if *first != part_columns => {
@@ -234,8 +235,9 @@ impl Binder<'_> {
     fn single_query(
         &mut self,
         query: &ast::SingleQuery,
+        mut scope: Scope,
+        subquery: bool,
     ) -> Result<(Pipeline<Clause>, Vec<String>, bool), Error> {
-        let mut scope = Scope::default();
         let mut clauses = Vec::new();
         let mut output = None;
         let mut result_reads_variables = false;
@@ -267,6 +269,12 @@ impl Binder<'_> {
                     | ast::Clause::Remove(_)
                     | ast::Clause::Delete(_)
             );
+            if subquery && follows_update {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "an EXISTS subquery cannot update the graph",
+                ));
+            }
             match clause {
                 ast::Clause::Match(found) => {
                     clauses.push(Clause::Read(self.match_clause(found, &mut scope)?));
@@ -391,7 +399,7 @@ impl Binder<'_> {
                     }));
                 }
             }
-            let ends_without_return = index == last && output.is_none();
+            let ends_without_return = index == last && output.is_none() && !subquery;
             if ends_without_return
                 && matches!(
                     clause,
@@ -1454,11 +1462,19 @@ impl Binder<'_> {
                         mode,
                     )?))
                 }
-                ast::ExistsSubquery::Query(_) => {
-                    return Err(error(
-                        ErrorKind::Unsupported,
-                        "EXISTS with a full subquery is not supported",
-                    ));
+                ast::ExistsSubquery::Query(query) => {
+                    let scope = self.pattern_scope(scope, std::iter::empty(), mode)?;
+                    let (pipeline, _, _) =
+                        self.root(|binder| binder.single_query(query, scope, true))?;
+                    let clauses = pipeline
+                        .clauses
+                        .into_iter()
+                        .filter_map(|clause| match clause {
+                            Clause::Read(clause) => Some(clause),
+                            Clause::Update(_) => None,
+                        })
+                        .collect();
+                    Expr::Subquery(clauses)
                 }
             },
             ast::Expr::PatternComprehension(comprehension) => {
@@ -1736,6 +1752,10 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
             ..Parts::default()
         },
         Expr::Exists(query) => Parts::matching(query, None),
+        Expr::Subquery(_) => Parts {
+            reads_graph: true,
+            ..Parts::default()
+        },
         Expr::PatternComprehension(query, projection) => {
             Parts::matching(query, Some(&**projection))
         }

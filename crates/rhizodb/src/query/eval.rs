@@ -290,6 +290,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                 })?;
                 Ok(Datum::Boolean(found))
             }
+            Expr::Subquery(clauses) => {
+                let mut rows = vec![row.clone()];
+                for clause in clauses {
+                    rows = self.read_clause(clause, rows)?;
+                }
+                Ok(Datum::Boolean(!rows.is_empty()))
+            }
             Expr::PatternComprehension(query, projection) => {
                 let mut out = Vec::new();
                 self.match_query(query, row, &mut |matched| {

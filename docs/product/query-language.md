@@ -14,6 +14,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - The first features are `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP` or `OFFSET`, `LIMIT`, `INSERT`, and the core expressions over the stored value types.
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
+- `EXISTS { query }` runs the query from the current row with the outer variables in scope, and is true when the query gives a row.
+- A query inside `EXISTS` may end without `RETURN`, cannot update the graph, and keeps its own variables to itself.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name, and `CALL` runs it.
@@ -77,4 +79,3 @@ GQL is the reference language, but the only public conformance suite is the open
 ## Open
 
 - Regular expression matching with `=~`
-- `EXISTS` subqueries that contain a full query
