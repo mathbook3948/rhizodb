@@ -41,15 +41,30 @@ run = [
 description = "Regenerate the docs index"
 run = "cargo run --quiet --package xtask -- docs-write"
 
+[tasks.lbug-extensions]
+description = "Build the LadybugDB FTS and VECTOR extensions from the source of the pinned release"
+run = "bash crates/bench/scripts/lbug-extensions.sh"
+
 [tasks.bench-test]
-description = "Run every benchmark workload at tiny scale on both engines, which builds LadybugDB from C++ source"
+description = "Run every benchmark workload at tiny scale on the embedded engines built by default, which builds LadybugDB from C++ source"
+depends = ["lbug-extensions"]
 dir = "crates/bench"
 run = [
   "cargo clippy --all-targets -- -D warnings",
   "cargo test",
 ]
 
-[tasks.bench]
-description = "Measure RhizoDB and LadybugDB, for example: mise run bench --scale small --reps 5 --out result.json"
+[tasks.bench-test-all]
+description = "Run bench-test with DuckDB and CozoDB, whose C++ builds are long"
+depends = ["lbug-extensions"]
 dir = "crates/bench"
-run = "cargo run --release --"
+run = [
+  "cargo clippy --all-targets --features duckdb,cozo -- -D warnings",
+  "cargo test --features duckdb,cozo",
+]
+
+[tasks.bench]
+description = "Measure every engine, for example: mise run bench --scale small --reps 5 --out result.json --neo4j bolt://127.0.0.1:7687"
+depends = ["lbug-extensions"]
+dir = "crates/bench"
+run = "cargo run --release --features duckdb,cozo --"

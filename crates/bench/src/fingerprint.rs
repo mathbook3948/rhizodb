@@ -1,6 +1,7 @@
 const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const PRIME: u64 = 0x0000_0100_0000_01b3;
 const FLOAT_SCALE: f64 = 1_000_000.0;
+const MIDPOINT_BIAS: f64 = 1e-3;
 
 /// The number of rows a query returned and an order-independent checksum of their values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -23,12 +24,25 @@ impl Fingerprint {
             checksum: self.checksum.wrapping_add(other.checksum),
         }
     }
+
+    /// Merges the result of the query at position `op`. The position is mixed into its checksum,
+    /// so the sum keeps which query gave which result: two queries that swap results differ.
+    pub fn merge_at(self, op: u64, other: Fingerprint) -> Fingerprint {
+        let mut seeded = RowHasher::default();
+        seeded.int(op as i64);
+        seeded.int(other.checksum as i64);
+        Fingerprint {
+            rows: self.rows + other.rows,
+            checksum: self.checksum.wrapping_add(seeded.finish()),
+        }
+    }
 }
 
 /// Hashes the values of one row into a number both engines compute the same way.
 ///
 /// An integer, a float, a string, a boolean, a null, and a list each hash under their own tag.
-/// A float is rounded to six decimals first, so two engines that sum in another order agree.
+/// A float is rounded to six decimals first, with the rounding boundary moved off the exact
+/// midpoint, so two engines that sum in another order agree even for a value such as `x.0000005`.
 #[derive(Clone, Copy, Debug)]
 pub struct RowHasher {
     state: u64,
@@ -67,7 +81,7 @@ impl RowHasher {
 
     pub fn float(&mut self, value: f64) {
         self.byte(b'f');
-        let rounded = (value * FLOAT_SCALE).round();
+        let rounded = (value * FLOAT_SCALE - MIDPOINT_BIAS).round();
         self.bytes(&(rounded as i64).to_le_bytes());
     }
 
@@ -85,7 +99,7 @@ impl RowHasher {
         self.byte(b']');
     }
 
-    fn finish(self) -> u64 {
+    pub(crate) fn finish(self) -> u64 {
         let mut x = self.state;
         x ^= x >> 30;
         x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);

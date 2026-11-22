@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use lbug::Connection;
 use lbug::Database;
@@ -13,6 +15,7 @@ use crate::data::Dataset;
 use crate::data::KNOWS_CSV;
 use crate::data::LIVES_IN_CSV;
 use crate::data::PERSONS_CSV;
+use crate::engine::Built;
 use crate::engine::Dialect;
 use crate::engine::Engine;
 use crate::engine::EngineError;
@@ -25,6 +28,20 @@ use crate::fingerprint::Fingerprint;
 use crate::fingerprint::RowHasher;
 
 const FILE_NAME: &str = "ladybug.lbdb";
+const BUFFER_POOL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The directory holding the extensions built from source, which `mise run lbug-extensions`
+/// fills and `LBUG_EXTENSION_DIR` overrides.
+pub fn extension_dir() -> PathBuf {
+    std::env::var_os("LBUG_EXTENSION_DIR").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join(".lbug-extensions"),
+        PathBuf::from,
+    )
+}
+
+fn threads() -> u64 {
+    std::thread::available_parallelism().map_or(1, |cores| cores.get() as u64)
+}
 
 const SCHEMA: [&str; 4] = [
     "CREATE NODE TABLE Person(id INT64 PRIMARY KEY, name STRING, age INT64, bio STRING, embedding FLOAT[64])",
@@ -39,6 +56,7 @@ pub struct LadybugEngine;
 
 struct LadybugInstance {
     database: Database,
+    search: OnceLock<Result<(), EngineError>>,
 }
 
 struct LadybugSession<'a> {
@@ -64,9 +82,26 @@ impl Engine for LadybugEngine {
     }
 
     fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
-        let database =
-            Database::new(dir.join(FILE_NAME), SystemConfig::default()).map_err(failed)?;
-        Ok(Box::new(LadybugInstance { database }))
+        let config = SystemConfig::default()
+            .max_num_threads(threads())
+            .buffer_pool_size(BUFFER_POOL_BYTES);
+        let database = Database::new(dir.join(FILE_NAME), config).map_err(failed)?;
+        Ok(Box::new(LadybugInstance {
+            database,
+            search: OnceLock::new(),
+        }))
+    }
+
+    fn config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "version": lbug::VERSION,
+            "pinned": env!("PIN_LBUG"),
+            "storage": "file",
+            "threads": threads(),
+            "buffer_pool_bytes": BUFFER_POOL_BYTES,
+            "compression": true,
+            "extensions": "FTS and VECTOR built from the source of the pinned release",
+        })
     }
 }
 
@@ -78,10 +113,16 @@ impl LadybugInstance {
     }
 
     fn extension(&self, name: &str) -> Result<(), EngineError> {
-        self.execute(&format!("INSTALL {name}"))
-            .map_err(unsupported)?;
-        self.execute(&format!("LOAD EXTENSION {name}"))
-            .map_err(unsupported)
+        let path = extension_dir()
+            .join(name)
+            .join(format!("lib{name}.lbug_extension"));
+        if !path.is_file() {
+            return Err(EngineError::Unavailable(format!(
+                "{} is not built, run `mise run lbug-extensions`",
+                path.display()
+            )));
+        }
+        self.execute(&format!("LOAD EXTENSION '{}'", path.display()))
     }
 }
 
@@ -120,24 +161,39 @@ impl Instance for LadybugInstance {
         Ok(())
     }
 
-    fn create_keyword_index(&self) -> Result<(), EngineError> {
-        self.extension("FTS")?;
-        self.execute("CALL CREATE_FTS_INDEX('Person', 'bio_index', ['bio'])")
+    fn prepare_search(&self) -> Result<(), EngineError> {
+        self.search
+            .get_or_init(|| {
+                self.extension("fts")?;
+                self.extension("vector")
+            })
+            .clone()
     }
 
-    fn create_vector_index(&self) -> Result<(), EngineError> {
-        self.extension("VECTOR")?;
+    fn create_keyword_index(&self) -> Result<Built, EngineError> {
+        self.prepare_search()?;
+        self.execute("CALL CREATE_FTS_INDEX('Person', 'bio_index', ['bio'])")?;
+        Ok(Built::Index)
+    }
+
+    fn create_vector_index(&self) -> Result<Built, EngineError> {
+        self.prepare_search()?;
         self.execute(
             "CALL CREATE_VECTOR_INDEX('Person', 'embedding_index', 'embedding', metric := 'cosine')",
+        )?;
+        Ok(Built::Index)
+    }
+
+    fn keyword_search(&self) -> Result<&'static str, EngineError> {
+        Ok(
+            "CALL QUERY_FTS_INDEX('Person', 'bio_index', $term, top := 10) RETURN node.id AS id, score ORDER BY score DESC LIMIT 10",
         )
     }
 
-    fn keyword_search(&self) -> &'static str {
-        "CALL QUERY_FTS_INDEX('Person', 'bio_index', $term, top := 10) RETURN node.id AS id, score ORDER BY score DESC LIMIT 10"
-    }
-
-    fn vector_search(&self) -> &'static str {
-        "CALL QUERY_VECTOR_INDEX('Person', 'embedding_index', $vector, 10) RETURN node.id AS id, distance ORDER BY distance LIMIT 10"
+    fn vector_search(&self) -> Result<&'static str, EngineError> {
+        Ok(
+            "CALL QUERY_VECTOR_INDEX('Person', 'embedding_index', $vector, 10) RETURN node.id AS id, distance ORDER BY distance LIMIT 10",
+        )
     }
 }
 
@@ -151,24 +207,13 @@ impl Session for LadybugSession<'_> {
     }
 
     fn run(&mut self, query: &Query<'_>) -> Result<Fingerprint, EngineError> {
-        self.prepare(query.text)?;
-        let statement = self
-            .prepared
-            .get_mut(query.text)
-            .ok_or_else(|| EngineError::Failed("prepared statement is missing".to_owned()))?;
-        let params: Vec<(&str, Value)> = query
-            .params
-            .iter()
-            .map(|(name, param)| (*name, value(param)))
-            .collect();
-        let result = self.connection.execute(statement, params).map_err(failed)?;
-        let mut fingerprint = Fingerprint::default();
-        for row in result {
-            let mut hasher = RowHasher::default();
-            row.iter().for_each(|value| hash(&mut hasher, value));
-            fingerprint.absorb(hasher);
-        }
-        Ok(fingerprint)
+        self.walk(query, None)
+    }
+
+    fn ids(&mut self, query: &Query<'_>) -> Result<Vec<i64>, EngineError> {
+        let mut ids = Vec::new();
+        self.walk(query, Some(&mut ids))?;
+        Ok(ids)
     }
 
     fn begin(&mut self) -> Result<(), EngineError> {
@@ -183,15 +228,38 @@ impl Session for LadybugSession<'_> {
     }
 }
 
-fn failed(error: lbug::Error) -> EngineError {
-    EngineError::Failed(error.to_string())
+impl LadybugSession<'_> {
+    fn walk(
+        &mut self,
+        query: &Query<'_>,
+        mut ids: Option<&mut Vec<i64>>,
+    ) -> Result<Fingerprint, EngineError> {
+        self.prepare(query.text)?;
+        let statement = self
+            .prepared
+            .get_mut(query.text)
+            .ok_or_else(|| EngineError::Failed("prepared statement is missing".to_owned()))?;
+        let params: Vec<(&str, Value)> = query
+            .params
+            .iter()
+            .map(|(name, param)| (*name, value(param)))
+            .collect();
+        let result = self.connection.execute(statement, params).map_err(failed)?;
+        let mut fingerprint = Fingerprint::default();
+        for row in result {
+            if let (Some(ids), Some(Value::Int64(id))) = (ids.as_deref_mut(), row.first()) {
+                ids.push(*id);
+            }
+            let mut hasher = RowHasher::default();
+            row.iter().for_each(|value| hash(&mut hasher, value));
+            fingerprint.absorb(hasher);
+        }
+        Ok(fingerprint)
+    }
 }
 
-fn unsupported(error: EngineError) -> EngineError {
-    match error {
-        EngineError::Failed(message) => EngineError::Unsupported(message),
-        other => other,
-    }
+fn failed(error: lbug::Error) -> EngineError {
+    EngineError::Failed(error.to_string())
 }
 
 fn value(param: &Param) -> Value {

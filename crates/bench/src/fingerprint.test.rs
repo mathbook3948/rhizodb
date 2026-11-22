@@ -64,3 +64,29 @@ fn merging_adds_rows_and_checksums() {
 
     assert_eq!(a.merge(b), of(vec![row(|h| h.int(1)), row(|h| h.int(2))]));
 }
+
+#[test]
+fn which_query_gave_which_result_is_part_of_the_merged_fingerprint() {
+    let a = of(vec![row(|h| h.int(1))]);
+    let b = of(vec![row(|h| h.int(2))]);
+
+    let in_order = Fingerprint::default().merge_at(0, a).merge_at(1, b);
+    let swapped = Fingerprint::default().merge_at(0, b).merge_at(1, a);
+
+    assert_eq!(in_order.rows, swapped.rows);
+    assert_ne!(in_order, swapped);
+    assert_eq!(
+        in_order,
+        Fingerprint::default().merge_at(1, b).merge_at(0, a)
+    );
+}
+
+#[test]
+fn a_value_on_the_rounding_midpoint_hashes_alike_from_either_side() {
+    let below = of(vec![row(|h| h.float(0.123_456_499_999_999_9))]);
+    let above = of(vec![row(|h| h.float(0.123_456_500_000_000_1))]);
+    let exact = of(vec![row(|h| h.float(0.123_456_5))]);
+
+    assert_eq!(below, above);
+    assert_eq!(below, exact);
+}

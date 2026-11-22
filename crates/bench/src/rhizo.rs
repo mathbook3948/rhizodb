@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use rhizodb::Database;
 use rhizodb::IndexTarget;
@@ -10,6 +11,7 @@ use rhizodb::VectorMetric;
 use rhizodb::WriteTransaction;
 
 use crate::data::Dataset;
+use crate::engine::Built;
 use crate::engine::Dialect;
 use crate::engine::Engine;
 use crate::engine::EngineError;
@@ -36,8 +38,17 @@ const CREATE_LIVES_IN: &str =
 pub struct RhizoEngine;
 
 #[derive(Debug)]
+struct Prepared {
+    persons: Vec<Parameters>,
+    cities: Vec<Parameters>,
+    knows: Vec<(usize, usize, i64)>,
+    lives_in: Vec<(usize, usize)>,
+}
+
+#[derive(Debug)]
 struct RhizoInstance {
     database: Database,
+    prepared: Mutex<Option<Prepared>>,
 }
 
 struct RhizoSession<'a> {
@@ -56,7 +67,20 @@ impl Engine for RhizoEngine {
 
     fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
         let database = Database::open(dir.join(FILE_NAME)).map_err(failed)?;
-        Ok(Box::new(RhizoInstance { database }))
+        Ok(Box::new(RhizoInstance {
+            database,
+            prepared: Mutex::new(None),
+        }))
+    }
+
+    fn config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "version": env!("PIN_RHIZODB"),
+            "pinned": "path dependency on crates/rhizodb",
+            "storage": "file",
+            "threads": "readers in parallel, one writer",
+            "buffer_pool": "library default",
+        })
     }
 }
 
@@ -77,39 +101,68 @@ impl Instance for RhizoInstance {
             .map_err(failed)
     }
 
-    fn prepare_bulk_load(&self, _data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
+    fn prepare_bulk_load(&self, data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
+        let index_of = |id: i64| usize::try_from(id - 1).unwrap_or(usize::MAX);
+        let prepared = Prepared {
+            persons: person_rows(data)
+                .chunks(NODE_BATCH)
+                .map(|batch| rows_parameter(batch.to_vec()))
+                .collect(),
+            cities: city_rows(data)
+                .chunks(NODE_BATCH)
+                .map(|batch| rows_parameter(batch.to_vec()))
+                .collect(),
+            knows: data
+                .knows
+                .iter()
+                .map(|edge| (index_of(edge.from), index_of(edge.to), edge.since))
+                .collect(),
+            lives_in: data
+                .lives_in
+                .iter()
+                .map(|edge| (index_of(edge.person), index_of(edge.city)))
+                .collect(),
+        };
+        *self.prepared.lock().map_err(|_| poisoned())? = Some(prepared);
         Ok(())
     }
 
-    fn bulk_load(&self, data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
+    fn bulk_load(&self, _data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
+        let prepared = self
+            .prepared
+            .lock()
+            .map_err(|_| poisoned())?
+            .take()
+            .ok_or_else(|| EngineError::Failed("prepare_bulk_load was not called".to_owned()))?;
         let mut transaction = self.database.begin_write().map_err(failed)?;
-        let persons = create_nodes(&mut transaction, CREATE_PERSONS, &person_rows(data))?;
-        let cities = create_nodes(&mut transaction, CREATE_CITIES, &city_rows(data))?;
-        let knows = data.knows.iter().map(|edge| {
+        let persons = create_nodes(&mut transaction, CREATE_PERSONS, &prepared.persons)?;
+        let cities = create_nodes(&mut transaction, CREATE_CITIES, &prepared.cities)?;
+        let knows = prepared.knows.iter().map(|&(from, to, since)| {
             vec![
-                ("a", handle(&persons, edge.from)),
-                ("b", handle(&persons, edge.to)),
-                ("since", Value::Integer(edge.since)),
+                ("a", persons.get(from).cloned().unwrap_or(Value::Null)),
+                ("b", persons.get(to).cloned().unwrap_or(Value::Null)),
+                ("since", Value::Integer(since)),
             ]
         });
         create_edges(&mut transaction, CREATE_KNOWS, knows)?;
-        let lives_in = data.lives_in.iter().map(|edge| {
+        let lives_in = prepared.lives_in.iter().map(|&(person, city)| {
             vec![
-                ("a", handle(&persons, edge.person)),
-                ("b", handle(&cities, edge.city)),
+                ("a", persons.get(person).cloned().unwrap_or(Value::Null)),
+                ("b", cities.get(city).cloned().unwrap_or(Value::Null)),
             ]
         });
         create_edges(&mut transaction, CREATE_LIVES_IN, lives_in)?;
         transaction.commit().map_err(failed)
     }
 
-    fn create_keyword_index(&self) -> Result<(), EngineError> {
+    fn create_keyword_index(&self) -> Result<Built, EngineError> {
         self.database
             .create_keyword_index("bio", IndexTarget::Label("Person"), &["bio"])
-            .map_err(failed)
+            .map_err(failed)?;
+        Ok(Built::Index)
     }
 
-    fn create_vector_index(&self) -> Result<(), EngineError> {
+    fn create_vector_index(&self) -> Result<Built, EngineError> {
         self.database
             .create_vector_index(
                 "embedding",
@@ -118,15 +171,20 @@ impl Instance for RhizoInstance {
                 64,
                 VectorMetric::Cosine,
             )
-            .map_err(failed)
+            .map_err(failed)?;
+        Ok(Built::Index)
     }
 
-    fn keyword_search(&self) -> &'static str {
-        "CALL db.index.keyword.queryNodes('bio', $term, 10) YIELD node, score RETURN node.id AS id"
+    fn keyword_search(&self) -> Result<&'static str, EngineError> {
+        Ok(
+            "CALL db.index.keyword.queryNodes('bio', $term, 10) YIELD node, score RETURN node.id AS id",
+        )
     }
 
-    fn vector_search(&self) -> &'static str {
-        "CALL db.index.vector.queryNodes('embedding', $vector, 10) YIELD node, score RETURN node.id AS id"
+    fn vector_search(&self) -> Result<&'static str, EngineError> {
+        Ok(
+            "CALL db.index.vector.queryNodes('embedding', $vector, 10) YIELD node, score RETURN node.id AS id",
+        )
     }
 }
 
@@ -136,19 +194,13 @@ impl Session for RhizoSession<'_> {
     }
 
     fn run(&mut self, query: &Query<'_>) -> Result<Fingerprint, EngineError> {
-        let parameters = parameters(query);
-        let result = match self.transaction.as_mut() {
-            Some(transaction) => transaction.execute(query.text, &parameters),
-            None => self.database.execute(query.text, &parameters),
-        }
-        .map_err(failed)?;
-        let mut fingerprint = Fingerprint::default();
-        for row in result.rows() {
-            let mut hasher = RowHasher::default();
-            row.iter().for_each(|value| hash(&mut hasher, value));
-            fingerprint.absorb(hasher);
-        }
-        Ok(fingerprint)
+        self.walk(query, None)
+    }
+
+    fn ids(&mut self, query: &Query<'_>) -> Result<Vec<i64>, EngineError> {
+        let mut ids = Vec::new();
+        self.walk(query, Some(&mut ids))?;
+        Ok(ids)
     }
 
     fn begin(&mut self) -> Result<(), EngineError> {
@@ -162,6 +214,35 @@ impl Session for RhizoSession<'_> {
             None => Ok(()),
         }
     }
+}
+
+impl RhizoSession<'_> {
+    fn walk(
+        &mut self,
+        query: &Query<'_>,
+        mut ids: Option<&mut Vec<i64>>,
+    ) -> Result<Fingerprint, EngineError> {
+        let parameters = parameters(query);
+        let result = match self.transaction.as_mut() {
+            Some(transaction) => transaction.execute(query.text, &parameters),
+            None => self.database.execute(query.text, &parameters),
+        }
+        .map_err(failed)?;
+        let mut fingerprint = Fingerprint::default();
+        for row in result.rows() {
+            if let (Some(ids), Some(Value::Integer(id))) = (ids.as_deref_mut(), row.first()) {
+                ids.push(*id);
+            }
+            let mut hasher = RowHasher::default();
+            row.iter().for_each(|value| hash(&mut hasher, value));
+            fingerprint.absorb(hasher);
+        }
+        Ok(fingerprint)
+    }
+}
+
+fn poisoned() -> EngineError {
+    EngineError::Failed("the prepared input lock is poisoned".to_owned())
 }
 
 fn failed(error: rhizodb::Error) -> EngineError {
@@ -260,13 +341,11 @@ fn rows_parameter(rows: Vec<Vec<(&'static str, Value)>>) -> Parameters {
 fn create_nodes(
     transaction: &mut WriteTransaction<'_>,
     statement: &str,
-    rows: &[Vec<(&'static str, Value)>],
+    batches: &[Parameters],
 ) -> Result<Vec<Value>, EngineError> {
-    let mut handles = Vec::with_capacity(rows.len());
-    for batch in rows.chunks(NODE_BATCH) {
-        let result = transaction
-            .execute(statement, &rows_parameter(batch.to_vec()))
-            .map_err(failed)?;
+    let mut handles = Vec::new();
+    for batch in batches {
+        let result = transaction.execute(statement, batch).map_err(failed)?;
         for row in result.rows() {
             if let Some(Value::Node(node)) = row.first() {
                 handles.push(Value::Node(Node {
@@ -299,14 +378,6 @@ fn create_edges(
             .map_err(failed)?;
     }
     Ok(())
-}
-
-fn handle(handles: &[Value], id: i64) -> Value {
-    usize::try_from(id - 1)
-        .ok()
-        .and_then(|index| handles.get(index))
-        .cloned()
-        .unwrap_or(Value::Null)
 }
 
 #[cfg(test)]

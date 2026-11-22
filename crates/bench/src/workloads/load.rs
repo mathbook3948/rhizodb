@@ -2,6 +2,7 @@ use crate::data::Facts;
 use crate::data::Loaded;
 use crate::engine::Dialect;
 use crate::engine::EngineError;
+use crate::engine::EngineKind;
 use crate::engine::Instance;
 use crate::engine::Param;
 use crate::engine::Query;
@@ -14,32 +15,89 @@ use crate::workloads::Comparison;
 use crate::workloads::Context;
 use crate::workloads::Needs;
 use crate::workloads::Workload;
+use crate::workloads::close;
 
 const BATCH: usize = 1_000;
 
 const CREATE_PERSONS: Texts = Texts::graph(
     "UNWIND $rows AS r CREATE (:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding})",
-);
+)
+.sql("INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, $age, $bio, $embedding)")
+.datalog("?[id, name, age, bio, embedding] <- $rows :put persons {id => name, age, bio, embedding}")
+.overriding(&[
+    (
+        EngineKind::Falkordb,
+        "UNWIND $rows AS r CREATE (:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: vecf32(r.embedding)})",
+    ),
+    (
+        EngineKind::Duckdb,
+        "INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, $age, $bio, CAST($embedding AS FLOAT[64]))",
+    ),
+]);
 const CREATE_CITIES: Texts =
-    Texts::graph("UNWIND $rows AS r CREATE (:City {id: r.id, name: r.name})");
+    Texts::graph("UNWIND $rows AS r CREATE (:City {id: r.id, name: r.name})")
+        .sql("INSERT INTO cities(id, name) VALUES ($id, $name)")
+        .datalog("?[id, name] <- $rows :put cities {id => name}");
 const CREATE_KNOWS: Texts = Texts::graph(
     "UNWIND $rows AS r MATCH (a:Person {id: r.src}), (b:Person {id: r.dst}) CREATE (a)-[:KNOWS {since: r.since}]->(b)",
-);
+)
+.sql("INSERT INTO knows(src, dst, since) VALUES ($src, $dst, $since)")
+.datalog("?[src, dst, since] <- $rows :put knows {src, dst => since}");
 const CREATE_LIVES_IN: Texts = Texts::graph(
     "UNWIND $rows AS r MATCH (a:Person {id: r.src}), (b:City {id: r.dst}) CREATE (a)-[:LIVES_IN]->(b)",
-);
-const CREATE_PERSON: Texts = Texts::graph(
+)
+.sql("INSERT INTO lives_in(src, dst) VALUES ($src, $dst)")
+.datalog("?[src, dst] <- $rows :put lives_in {src => dst}");
+pub(crate) const CREATE_PERSON: Texts = Texts::graph(
     "CREATE (:Person {id: $id, name: $name, age: $age, bio: $bio, embedding: $embedding})",
-);
+)
+.sql("INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, $age, $bio, $embedding)")
+.datalog("?[id, name, age, bio, embedding] <- [[$id, $name, $age, $bio, $embedding]] :put persons {id => name, age, bio, embedding}")
+.overriding(&[
+    (
+        EngineKind::Falkordb,
+        "CREATE (:Person {id: $id, name: $name, age: $age, bio: $bio, embedding: vecf32($embedding)})",
+    ),
+    (
+        EngineKind::Duckdb,
+        "INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, $age, $bio, CAST($embedding AS FLOAT[64]))",
+    ),
+]);
 const CREATE_PERSON_WITHOUT_AGE: Texts =
-    Texts::graph("CREATE (:Person {id: $id, name: $name, bio: $bio, embedding: $embedding})");
+    Texts::graph("CREATE (:Person {id: $id, name: $name, bio: $bio, embedding: $embedding})")
+        .sql("INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, NULL, $bio, $embedding)")
+        .datalog("?[id, name, age, bio, embedding] <- [[$id, $name, null, $bio, $embedding]] :put persons {id => name, age, bio, embedding}")
+        .overriding(&[
+            (
+                EngineKind::Falkordb,
+                "CREATE (:Person {id: $id, name: $name, bio: $bio, embedding: vecf32($embedding)})",
+            ),
+            (
+                EngineKind::Duckdb,
+                "INSERT INTO persons(id, name, age, bio, embedding) VALUES ($id, $name, NULL, $bio, CAST($embedding AS FLOAT[64]))",
+            ),
+        ]);
 
 pub(crate) const PERSON_STATS: Texts =
-    Texts::graph("MATCH (p:Person) RETURN count(*), count(p.age), sum(p.age)");
-const CITY_COUNT: Texts = Texts::graph("MATCH (c:City) RETURN count(*)");
-const KNOWS_COUNT: Texts = Texts::graph("MATCH ()-[k:KNOWS]->() RETURN count(*)");
-const LIVES_IN_COUNT: Texts = Texts::graph("MATCH ()-[l:LIVES_IN]->() RETURN count(*)");
-const FIRST_QUERY: Texts = Texts::graph("MATCH (p:Person) RETURN count(*)");
+    Texts::graph("MATCH (p:Person) RETURN count(*), count(p.age), sum(p.age)")
+        .sql("SELECT count(*), count(age), sum(age) FROM persons")
+        .datalog(
+            "total[count(id)] := *persons{id}
+             aged[count(id), sum(age)] := *persons{id, age}, age != null
+             ?[t, c, whole] := total[t], aged[c, s], whole = to_int(s)",
+        );
+const CITY_COUNT: Texts = Texts::graph("MATCH (c:City) RETURN count(*)")
+    .sql("SELECT count(*) FROM cities")
+    .datalog("?[count(id)] := *cities{id}");
+const KNOWS_COUNT: Texts = Texts::graph("MATCH ()-[k:KNOWS]->() RETURN count(*)")
+    .sql("SELECT count(*) FROM knows")
+    .datalog("?[count(dst)] := *knows{src, dst}");
+const LIVES_IN_COUNT: Texts = Texts::graph("MATCH ()-[l:LIVES_IN]->() RETURN count(*)")
+    .sql("SELECT count(*) FROM lives_in")
+    .datalog("?[count(src)] := *lives_in{src}");
+pub(crate) const COUNT_PERSONS: Texts = Texts::graph("MATCH (p:Person) RETURN count(*)")
+    .sql("SELECT count(*) FROM persons")
+    .datalog("?[count(id)] := *persons{id}");
 
 pub fn workloads() -> Vec<Workload> {
     vec![
@@ -60,35 +118,51 @@ fn workload(
         name,
         needs,
         comparison: Comparison::Exact,
+        file_only: name.starts_with("reopen/"),
         run,
     }
 }
 
 pub(crate) fn read_state(
     session: &mut dyn crate::engine::Session,
+    kind: EngineKind,
     dialect: Dialect,
 ) -> Result<Fingerprint, EngineError> {
     let mut state = Fingerprint::default();
-    for texts in [PERSON_STATS, CITY_COUNT, KNOWS_COUNT, LIVES_IN_COUNT] {
-        let text = texts.for_dialect(dialect)?;
-        state = state.merge(session.run(&Query::new(text))?);
+    for (position, texts) in [PERSON_STATS, CITY_COUNT, KNOWS_COUNT, LIVES_IN_COUNT]
+        .into_iter()
+        .enumerate()
+    {
+        let text = texts.for_engine(kind, dialect)?;
+        state = state.merge_at(position as u64, session.run(&Query::new(text))?);
     }
     Ok(state)
 }
 
 fn expected_state(facts: Facts) -> Fingerprint {
     let counts = [facts.cities, facts.knows, facts.lives_in];
-    let mut expected = Fingerprint::default();
     let mut persons = RowHasher::default();
     persons.int(facts.persons as i64);
     persons.int(facts.aged as i64);
     persons.int(facts.age_sum);
-    expected.absorb(persons);
-    for count in counts {
+    let mut first = Fingerprint::default();
+    first.absorb(persons);
+    let mut expected = Fingerprint::default().merge_at(0, first);
+    for (position, count) in counts.into_iter().enumerate() {
         let mut row = RowHasher::default();
         row.int(count as i64);
-        expected.absorb(row);
+        let mut one = Fingerprint::default();
+        one.absorb(row);
+        expected = expected.merge_at(position as u64 + 1, one);
     }
+    expected
+}
+
+fn expected_count(count: usize) -> Fingerprint {
+    let mut row = RowHasher::default();
+    row.int(count as i64);
+    let mut expected = Fingerprint::default();
+    expected.absorb(row);
     expected
 }
 
@@ -106,19 +180,24 @@ fn run_load(
         load(&*instance)
     });
     result?;
-    let actual = read_state(&mut *instance.session()?, ctx.engine.dialect())?;
-    let (closing, bytes) = timed(|| instance.finish(ctx.dir));
-    let bytes = bytes?;
+    let actual = read_state(
+        &mut *instance.session()?,
+        ctx.engine.kind(),
+        ctx.engine.dialect(),
+    )?;
+    let (closing, bytes) = close(ctx, instance)?;
     let expected = expected_state(ctx.data.facts(loaded));
     let mismatch = actual != expected;
     Ok(Measurement {
         elapsed: loading + closing,
+        close: closing,
         ops: work,
         rows: work,
         errors: u64::from(mismatch),
         fingerprint: actual,
         bytes,
         failure: mismatch.then(|| "the loaded graph differs from the dataset".to_owned()),
+        ..Measurement::default()
     })
 }
 
@@ -151,68 +230,80 @@ fn statements(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
     let create_cities = ctx.text(&CREATE_CITIES)?;
     let create_knows = ctx.text(&CREATE_KNOWS)?;
     let create_lives_in = ctx.text(&CREATE_LIVES_IN)?;
-    run_load(
+    let person_batches: Vec<Vec<Vec<(&'static str, Param)>>> = data
+        .people
+        .chunks(BATCH)
+        .map(|batch| {
+            batch
+                .iter()
+                .map(|person| {
+                    vec![
+                        ("id", Param::Int(person.id)),
+                        ("name", Param::Text(person.name.clone())),
+                        ("age", person.age.map_or(Param::NullInt, Param::Int)),
+                        ("bio", Param::Text(person.bio.clone())),
+                        ("embedding", Param::Floats(person.embedding.clone())),
+                    ]
+                })
+                .collect()
+        })
+        .collect();
+    let cities: Vec<Vec<(&'static str, Param)>> = data
+        .cities
+        .iter()
+        .map(|city| {
+            vec![
+                ("id", Param::Int(city.id)),
+                ("name", Param::Text(city.name.clone())),
+            ]
+        })
+        .collect();
+    let knows: Vec<Vec<(&'static str, Param)>> = data
+        .knows
+        .iter()
+        .take(edges)
+        .map(|edge| {
+            vec![
+                ("src", Param::Int(edge.from)),
+                ("dst", Param::Int(edge.to)),
+                ("since", Param::Int(edge.since)),
+            ]
+        })
+        .collect();
+    let lives_in: Vec<Vec<(&'static str, Param)>> = data
+        .lives_in
+        .iter()
+        .take(edges)
+        .map(|edge| {
+            vec![
+                ("src", Param::Int(edge.person)),
+                ("dst", Param::Int(edge.city)),
+            ]
+        })
+        .collect();
+    let mut measurement = run_load(
         ctx,
         loaded,
         work,
         |_| Ok(()),
-        |instance| {
+        move |instance| {
             let mut session = instance.session()?;
             session.begin()?;
-            for batch in data.people.chunks(BATCH) {
-                let rows = batch
-                    .iter()
-                    .map(|person| {
-                        vec![
-                            ("id", Param::Int(person.id)),
-                            ("name", Param::Text(person.name.clone())),
-                            ("age", person.age.map_or(Param::NullInt, Param::Int)),
-                            ("bio", Param::Text(person.bio.clone())),
-                            ("embedding", Param::Floats(person.embedding.clone())),
-                        ]
-                    })
-                    .collect();
+            for rows in person_batches {
                 session.run(&Query::new(create_persons).rows("rows", rows))?;
             }
-            let cities = data
-                .cities
-                .iter()
-                .map(|city| {
-                    vec![
-                        ("id", Param::Int(city.id)),
-                        ("name", Param::Text(city.name.clone())),
-                    ]
-                })
-                .collect();
             session.run(&Query::new(create_cities).rows("rows", cities))?;
-            let knows = data
-                .knows
-                .iter()
-                .take(edges)
-                .map(|edge| {
-                    vec![
-                        ("src", Param::Int(edge.from)),
-                        ("dst", Param::Int(edge.to)),
-                        ("since", Param::Int(edge.since)),
-                    ]
-                })
-                .collect();
             session.run(&Query::new(create_knows).rows("rows", knows))?;
-            let lives_in = data
-                .lives_in
-                .iter()
-                .take(edges)
-                .map(|edge| {
-                    vec![
-                        ("src", Param::Int(edge.person)),
-                        ("dst", Param::Int(edge.city)),
-                    ]
-                })
-                .collect();
             session.run(&Query::new(create_lives_in).rows("rows", lives_in))?;
             session.commit()
         },
-    )
+    )?;
+    measurement.note = Some(format!(
+        "{} KNOWS and {} LIVES_IN edges",
+        edges.min(data.knows.len()),
+        edges.min(data.lives_in.len())
+    ));
+    Ok(measurement)
 }
 
 fn per_row_commit(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
@@ -251,28 +342,41 @@ fn per_row_commit(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
 }
 
 fn open_only(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
+    let count = ctx.text(&COUNT_PERSONS)?;
     let (elapsed, instance) = timed(|| ctx.engine.open(ctx.dir));
-    drop(instance?);
+    let instance = instance?;
+    let fingerprint = instance.session()?.run(&Query::new(count))?;
+    drop(instance);
+    let expected = expected_count(ctx.data.people.len());
+    let mismatch = fingerprint != expected;
     Ok(Measurement {
         elapsed,
         ops: 1,
+        rows: fingerprint.rows,
+        errors: u64::from(mismatch),
+        fingerprint,
+        failure: mismatch.then(|| "the reopened database lost persons".to_owned()),
         ..Measurement::default()
     })
 }
 
 fn open_and_query(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
-    let first = ctx.text(&FIRST_QUERY)?;
+    let first = ctx.text(&COUNT_PERSONS)?;
     let (elapsed, result) = timed(|| {
         let instance = ctx.engine.open(ctx.dir)?;
         let fingerprint = instance.session()?.run(&Query::new(first))?;
         Ok::<_, EngineError>(fingerprint)
     });
     let fingerprint = result?;
+    let expected = expected_count(ctx.data.people.len());
+    let mismatch = fingerprint != expected;
     Ok(Measurement {
         elapsed,
         ops: 1,
         rows: fingerprint.rows,
+        errors: u64::from(mismatch),
         fingerprint,
+        failure: mismatch.then(|| "the reopened database lost persons".to_owned()),
         ..Measurement::default()
     })
 }
