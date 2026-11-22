@@ -148,6 +148,10 @@ impl WriteTransaction for RedbWrite {
     fn commit(self) -> Result<(), StorageError> {
         self.transaction.commit().map_err(StorageError::new)
     }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.transaction.abort().map_err(StorageError::new)
+    }
 }
 
 #[cfg(test)]

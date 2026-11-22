@@ -105,6 +105,10 @@ pub enum ErrorKind {
     DeleteConnectedNode,
     /// A node or relationship deleted earlier in the query was read.
     DeletedEntityAccess,
+    /// A query that updates the graph ran in a read transaction.
+    ReadOnlyTransaction,
+    /// A write transaction was used after a query that failed in it rolled it back.
+    TransactionAborted,
     /// A feature this version does not support.
     Unsupported,
     /// The storage engine failed.

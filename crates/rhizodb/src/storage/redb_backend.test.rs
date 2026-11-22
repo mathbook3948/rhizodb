@@ -51,6 +51,23 @@ fn dropping_a_write_transaction_discards_its_writes() {
 }
 
 #[test]
+fn a_rolled_back_write_transaction_discards_its_writes() {
+    let storage = RedbStorage::in_memory().unwrap();
+    let mut write = storage.begin_write().unwrap();
+    write.put(Table::Nodes, b"a", b"1").unwrap();
+    write.rollback().unwrap();
+
+    assert_eq!(
+        storage
+            .begin_read()
+            .unwrap()
+            .get(Table::Nodes, b"a")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn prefix_scan_returns_only_matching_keys_in_ascending_order() {
     let storage = RedbStorage::in_memory().unwrap();
     put_all(

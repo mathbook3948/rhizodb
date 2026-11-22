@@ -99,4 +99,6 @@ pub(crate) trait WriteTransaction: ReadTransaction {
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError>;
 
     fn commit(self) -> Result<(), StorageError>;
+
+    fn rollback(self) -> Result<(), StorageError>;
 }

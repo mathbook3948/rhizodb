@@ -283,6 +283,10 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(self.transaction.commit()?)
     }
 
+    pub(crate) fn rollback(self) -> Result<(), GraphError> {
+        Ok(self.transaction.rollback()?)
+    }
+
     pub(crate) fn intern_token<K: TokenKind>(
         &mut self,
         name: &str,

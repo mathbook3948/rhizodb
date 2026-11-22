@@ -19,6 +19,20 @@ let result = db.execute(
 )?;
 ```
 
+Each `execute` call is its own transaction. To make several queries take effect together, run them in a write transaction. It commits only when asked, and rolls back when dropped or when one of its queries fails.
+
+```rust
+let mut tx = db.begin_write()?;
+tx.execute("INSERT (:Person {name: 'Alan'})", &Parameters::new())?;
+tx.execute(
+    "MATCH (a:Person {name: 'Alan'}), (b:Person {name: 'Ada'}) INSERT (a)-[:KNOWS]->(b)",
+    &Parameters::new(),
+)?;
+tx.commit()?;
+```
+
+`db.begin_read()` gives a snapshot that several queries read, unchanged by commits made after it began. One write transaction is open at a time, and `begin_write` waits for the open one to end.
+
 ## Testing
 
 `mise run check` runs formatting, lints, tests, and the repository guards. The tests include the openCypher TCK, run against the engine with a checked-in list of scenarios that must pass (`crates/tck/passing.txt`), and a crash test that kills a writing process and checks the reopened store. To record newly passing TCK scenarios, run `TCK_BLESS=1 cargo test -p tck --test tck`. To fuzz the parser, run `cargo +nightly fuzz run parse`.
