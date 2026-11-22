@@ -133,11 +133,53 @@ pub enum IndexTarget<'a> {
     RelationshipType(&'a str),
 }
 
-/// Whether an index is searched by text or by vector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SearchKind {
-    Keyword,
-    Vector,
+/// The fields a search reads from the definition of the index it searches, which also fix
+/// which kind of index it searches.
+pub(crate) trait Searched: Sized {
+    /// How an error names the index this search reads over nodes.
+    const OVER_NODES: &'static str;
+
+    /// How an error names the index this search reads over relationships.
+    const OVER_RELATIONSHIPS: &'static str;
+
+    /// The fields, or `None` when `kind` is another kind of index.
+    fn fields(kind: &IndexKind) -> Option<Self>;
+}
+
+pub(crate) struct KeywordFields;
+
+impl Searched for KeywordFields {
+    const OVER_NODES: &'static str = "keyword index over nodes";
+    const OVER_RELATIONSHIPS: &'static str = "keyword index over relationships";
+
+    fn fields(kind: &IndexKind) -> Option<Self> {
+        match kind {
+            IndexKind::Keyword { .. } => Some(Self),
+            IndexKind::Vector { .. } => None,
+        }
+    }
+}
+
+pub(crate) struct VectorFields {
+    dimension: u32,
+    metric: VectorMetric,
+}
+
+impl Searched for VectorFields {
+    const OVER_NODES: &'static str = "vector index over nodes";
+    const OVER_RELATIONSHIPS: &'static str = "vector index over relationships";
+
+    fn fields(kind: &IndexKind) -> Option<Self> {
+        match kind {
+            IndexKind::Vector {
+                dimension, metric, ..
+            } => Some(Self {
+                dimension: *dimension,
+                metric: *metric,
+            }),
+            IndexKind::Keyword { .. } => None,
+        }
+    }
 }
 
 /// Whether an index holds nodes or relationships.
@@ -563,22 +605,18 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(bytes.map(|bytes| Index::decode(&bytes)).transpose()?)
     }
 
-    fn searched_index<F>(
+    fn searched_index<F: Searched>(
         &self,
         name: &str,
-        search: SearchKind,
         element: ElementKind,
-        fields: impl FnOnce(&IndexKind) -> Option<F>,
     ) -> Result<(u32, F), GraphError> {
-        let what = match (search, element) {
-            (SearchKind::Keyword, ElementKind::Node) => "keyword index over nodes",
-            (SearchKind::Keyword, ElementKind::Relationship) => "keyword index over relationships",
-            (SearchKind::Vector, ElementKind::Node) => "vector index over nodes",
-            (SearchKind::Vector, ElementKind::Relationship) => "vector index over relationships",
+        let what = match element {
+            ElementKind::Node => F::OVER_NODES,
+            ElementKind::Relationship => F::OVER_RELATIONSHIPS,
         };
         self.index(name)?
             .filter(|index| index.definition.target.element_kind() == element)
-            .and_then(|index| Some((index.id, fields(&index.definition.kind)?)))
+            .and_then(|index| Some((index.id, F::fields(&index.definition.kind)?)))
             .ok_or_else(|| GraphError::IndexNotFound(name.to_owned(), what))
     }
 
@@ -593,11 +631,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         text: &str,
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let (id, ()) =
-            self.searched_index(name, SearchKind::Keyword, element, |kind| match kind {
-                IndexKind::Keyword { .. } => Some(()),
-                IndexKind::Vector { .. } => None,
-            })?;
+        let (id, KeywordFields) = self.searched_index(name, element)?;
         let totals = self
             .transaction
             .get(Table::KeywordTotals, &keys::index_prefix(id))?
@@ -725,13 +759,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         query: &[f64],
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let (id, (dimension, metric)) =
-            self.searched_index(name, SearchKind::Vector, element, |kind| match kind {
-                IndexKind::Vector {
-                    dimension, metric, ..
-                } => Some((*dimension, *metric)),
-                IndexKind::Keyword { .. } => None,
-            })?;
+        let (id, VectorFields { dimension, metric }) = self.searched_index(name, element)?;
         if usize::try_from(dimension).ok() != Some(query.len()) {
             return Err(GraphError::InvalidQueryVector(format!(
                 "index `{name}` holds vectors of {dimension} numbers, not {}",
