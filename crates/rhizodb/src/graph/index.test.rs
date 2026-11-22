@@ -682,3 +682,78 @@ fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone()
     let violations = graph.read().unwrap().check_integrity().unwrap();
     assert_eq!(violations, vec![]);
 }
+
+#[test]
+fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let link = write.intern_token("LINK").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let words = |write: &GraphTx<_>, element| {
+        write
+            .keyword_search("words", element, "shared", 10)
+            .unwrap()
+            .len()
+    };
+    let doc = NodeRecord {
+        labels: [label].into(),
+        properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
+    };
+    let first = write.create_node(&doc).unwrap();
+    let relationship = |source| RelationshipRecord {
+        rel_type: link,
+        source,
+        target: first,
+        properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
+    };
+    write.create_relationship(&relationship(first)).unwrap();
+
+    write
+        .create_keyword_index("words", IndexTarget::RelationshipType("LINK"), &["text"])
+        .unwrap();
+    let second = write.create_node(&doc).unwrap();
+    let linked = write.create_relationship(&relationship(second)).unwrap();
+    assert_eq!(words(&write, ElementKind::Relationship), 2);
+    write.drop_index("words").unwrap();
+    write
+        .set_relationship_property(linked, text, PropertyValue::String("other".to_owned()))
+        .unwrap();
+    write.delete_relationship(linked).unwrap();
+
+    write
+        .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    write.create_relationship(&relationship(second)).unwrap();
+    write.create_node(&doc).unwrap();
+    write.remove_node_property(first, text).unwrap();
+    assert_eq!(words(&write, ElementKind::Node), 2);
+    write.drop_index("words").unwrap();
+    write.create_node(&doc).unwrap();
+
+    write
+        .create_vector_index(
+            "words",
+            IndexTarget::RelationshipType("LINK"),
+            "at",
+            1,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    let pointed = write.create_relationship(&relationship(first)).unwrap();
+    let at = write.intern_token("at").unwrap();
+    write
+        .set_relationship_property(
+            pointed,
+            at,
+            PropertyValue::List(vec![PropertyValue::Integer(3)]),
+        )
+        .unwrap();
+    let found = write
+        .vector_search("words", ElementKind::Relationship, &[1.0], 10)
+        .unwrap();
+    assert_eq!(found, vec![(pointed.0, 3.0)]);
+    write.commit().unwrap();
+    let violations = graph.read().unwrap().check_integrity().unwrap();
+    assert_eq!(violations, vec![]);
+}

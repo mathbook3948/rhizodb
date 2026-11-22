@@ -261,6 +261,11 @@ impl Index {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (id, target, reader) = Self::decode_target(bytes)?;
+        Self::decode_kind(id, target, reader)
+    }
+
+    fn decode_target(bytes: &[u8]) -> Result<(u32, Target, Reader<'_>), DecodeError> {
         let mut reader = Reader::new(bytes);
         let id = reader.u32()?;
         let target = match reader.u8()? {
@@ -268,7 +273,7 @@ impl Index {
             TARGET_RELATIONSHIP_TYPE => Target::RelationshipType(Token::new(reader.u32()?)),
             other => return Err(DecodeError::UnknownTag(other)),
         };
-        Self::decode_kind(id, target, reader)
+        Ok((id, target, reader))
     }
 
     /// Reads a definition stored before format version 5, which names a label and no target
@@ -962,21 +967,24 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     /// Brings every index in line with the element with ID `element` that changed from
     /// `before` to `after`, both records of one node or of one relationship. `None` stands for
-    /// an element that did not exist or no longer does.
+    /// an element that did not exist or no longer does. Only the definitions whose target
+    /// covers `before` or `after` are decoded past their target.
     pub(crate) fn reindex(
         &mut self,
         element: u64,
         before: Option<Element<'_>>,
         after: Option<Element<'_>>,
     ) -> Result<(), GraphError> {
-        for (_, index) in self.indexes()? {
-            let definition = &index.definition;
-            let covers = |record: &Element<'_>| definition.target.covered(*record).is_some();
+        for (_, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
+            let (id, target, reader) = Index::decode_target(&bytes)?;
+            let covers = |record: &Element<'_>| target.covered(*record).is_some();
             let before = before.filter(covers);
             let after = after.filter(covers);
             if before.is_none() && after.is_none() {
                 continue;
             }
+            let index = Index::decode_kind(id, target, reader)?;
+            let definition = &index.definition;
             let rows = |entry: &Entry| index.rows(element, entry);
             let old = before.and_then(|record| definition.entry(record));
             let new = after.and_then(|record| definition.entry(record));
