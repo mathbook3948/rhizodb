@@ -18,10 +18,14 @@ use super::ids::PropertyKey;
 use super::ids::Token;
 use super::keys;
 use super::tokenize;
+use super::tokenize::Clause;
 use super::tokenize::Purpose;
+use super::tokenize::Term;
 
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
+
+const VALUE_DISTANCE: u32 = 3;
 
 const LARGEST_SQUARED_LENGTH: f64 = f64::MAX / 4.0;
 const SMALLEST_COSINE_SQUARED_LENGTH: f64 = f64::MIN_POSITIVE;
@@ -138,8 +142,9 @@ pub(crate) struct Index {
     pub(crate) definition: IndexDefinition,
 }
 
-/// A keyword document: how often each term occurs in the indexed properties of one node.
-pub(crate) type Document = BTreeMap<String, u32>;
+/// A keyword document: the positions, in ascending order, at which each term occurs in the
+/// indexed properties of one node. How often a term occurs is how many positions it has.
+pub(crate) type Document = BTreeMap<String, Vec<u32>>;
 
 /// What one node contributes to one index.
 #[derive(Clone, Debug, PartialEq)]
@@ -213,13 +218,11 @@ impl Index {
                 let length = document_length(document);
                 let mut rows: Vec<Row> = document
                     .iter()
-                    .map(|(term, frequency)| {
-                        let mut value = frequency.to_be_bytes().to_vec();
-                        value.extend_from_slice(&length.to_be_bytes());
+                    .map(|(term, positions)| {
                         (
                             Table::KeywordPostings,
                             keys::posting_key(self.id, term, node),
-                            value,
+                            encode_posting(positions, length),
                         )
                     })
                     .collect();
@@ -241,6 +244,10 @@ impl Index {
 
 impl IndexDefinition {
     /// What `record` contributes, or `None` when it lacks the label or holds nothing to index.
+    /// A keyword document numbers the terms of its string values in property order, list items
+    /// in list order, and starts each value three positions past the last term of the one
+    /// before. Neighbouring query terms are at most two positions apart, so a phrase never
+    /// matches across two values.
     pub(crate) fn entry(&self, record: &NodeRecord) -> Option<Entry> {
         if !record.labels.contains(&self.label) {
             return None;
@@ -248,11 +255,19 @@ impl IndexDefinition {
         match &self.kind {
             IndexKind::Keyword { properties } => {
                 let mut document = Document::new();
+                let mut start = 0u32;
                 let mut add = |text: &str| {
-                    for term in tokenize::terms(text, Purpose::Document) {
-                        let frequency = document.entry(term).or_insert(0);
-                        *frequency = frequency.saturating_add(1);
+                    let terms = tokenize::terms(text, Purpose::Document);
+                    let Some(last) = terms.iter().map(|term| term.position).max() else {
+                        return;
+                    };
+                    for term in terms {
+                        document
+                            .entry(term.text)
+                            .or_default()
+                            .push(start.saturating_add(term.position));
                     }
+                    start = start.saturating_add(last).saturating_add(VALUE_DISTANCE);
                 };
                 for property in properties {
                     match record.properties.get(property) {
@@ -266,6 +281,9 @@ impl IndexDefinition {
                         }
                         _ => {}
                     }
+                }
+                for positions in document.values_mut() {
+                    positions.sort_unstable();
                 }
                 (!document.is_empty()).then_some(Entry::Keyword(document))
             }
@@ -296,9 +314,13 @@ impl IndexDefinition {
 
 /// The number of terms in a document, counting repeats.
 pub(crate) fn document_length(document: &Document) -> u32 {
-    document
-        .values()
-        .fold(0u32, |total, frequency| total.saturating_add(*frequency))
+    document.values().fold(0u32, |total, positions| {
+        total.saturating_add(frequency(positions))
+    })
+}
+
+fn frequency(positions: &[u32]) -> u32 {
+    u32::try_from(positions.len()).unwrap_or(u32::MAX)
 }
 
 /// The keyword totals row value: how many nodes the index holds and their summed length.
@@ -318,34 +340,64 @@ fn decode_totals(bytes: &[u8]) -> Result<(u64, u64), DecodeError> {
 fn encode_document(document: &Document) -> Vec<u8> {
     let mut out = Vec::new();
     put_varint(&mut out, document.len());
-    for (term, frequency) in document {
+    for (term, positions) in document {
         put_varint(&mut out, term.len());
         out.extend_from_slice(term.as_bytes());
-        out.extend_from_slice(&frequency.to_be_bytes());
+        out.extend_from_slice(&frequency(positions).to_be_bytes());
     }
     out
 }
 
-fn decode_document(bytes: &[u8]) -> Result<Document, DecodeError> {
+fn decode_document(bytes: &[u8]) -> Result<Vec<(String, u32)>, DecodeError> {
     let mut reader = Reader::new(bytes);
     let count = reader.varint()?;
-    let mut document = Document::new();
+    let mut document = Vec::new();
     for _ in 0..count {
         let length = reader.varint()?;
         let term = std::str::from_utf8(reader.take(length)?)
             .map_err(|_| DecodeError::InvalidUtf8)?
             .to_owned();
-        document.insert(term, reader.u32()?);
+        document.push((term, reader.u32()?));
     }
     reader.finish()?;
     Ok(document)
 }
 
-fn decode_posting(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+#[derive(Debug)]
+struct Posting {
+    positions: Vec<u32>,
+    length: u32,
+}
+
+fn encode_posting(positions: &[u32], length: u32) -> Vec<u8> {
+    let mut out = frequency(positions).to_be_bytes().to_vec();
+    out.extend_from_slice(&length.to_be_bytes());
+    let mut previous = 0u32;
+    for position in positions {
+        put_varint(
+            &mut out,
+            usize::try_from(position.saturating_sub(previous)).unwrap_or(usize::MAX),
+        );
+        previous = *position;
+    }
+    out
+}
+
+fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
     let mut reader = Reader::new(bytes);
-    let posting = (reader.u32()?, reader.u32()?);
+    let frequency = reader.u32()?;
+    let length = reader.u32()?;
+    let mut positions = Vec::new();
+    let mut position = 0u32;
+    for _ in 0..frequency {
+        let step = u32::try_from(reader.varint()?).map_err(|_| DecodeError::LengthOverflow)?;
+        position = position
+            .checked_add(step)
+            .ok_or(DecodeError::LengthOverflow)?;
+        positions.push(position);
+    }
     reader.finish()?;
-    Ok(posting)
+    Ok(Posting { positions, length })
 }
 
 fn decode_vector(bytes: &[u8], dimension: u32) -> Result<Vec<f64>, GraphError> {
@@ -401,7 +453,8 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     /// The nodes that best match `text` in the keyword index `name`, ranked by BM25. A node
-    /// matches when it holds any term of the text.
+    /// matches when it matches any clause of the text. A phrase is ranked as one term whose
+    /// occurrences are the phrase's.
     pub(crate) fn keyword_search(
         &self,
         name: &str,
@@ -421,24 +474,71 @@ impl<T: ReadTransaction> GraphTx<T> {
             return Ok(Vec::new());
         }
         let average_length = length as f64 / documents as f64;
-        let mut terms = tokenize::terms(text, Purpose::Query);
-        terms.sort();
-        terms.dedup();
         let mut scores: BTreeMap<NodeId, f64> = BTreeMap::new();
-        for term in terms {
-            let postings = self.transaction.scan_prefix(
-                Table::KeywordPostings,
-                &keys::posting_prefix(index.id, &term),
-            )?;
-            let matching = postings.len() as f64;
+        for clause in tokenize::clauses(text) {
+            let matches = match &clause {
+                Clause::Term(term) => self
+                    .postings(index.id, term)?
+                    .into_iter()
+                    .map(|(node, posting)| (node, (frequency(&posting.positions), posting.length)))
+                    .collect(),
+                Clause::Phrase(terms) => self.phrase_matches(index.id, terms)?,
+            };
+            let matching = matches.len() as f64;
             let idf = (1.0 + (documents as f64 - matching + 0.5) / (matching + 0.5)).ln();
-            for (key, value) in postings {
-                let (frequency, length) = decode_posting(&value)?;
-                *scores.entry(keys::parse_posting_node(&key)?).or_insert(0.0) +=
-                    bm25(idf, frequency, length, average_length);
+            for (node, (frequency, length)) in matches {
+                *scores.entry(node).or_insert(0.0) += bm25(idf, frequency, length, average_length);
             }
         }
         Ok(best(scores.into_iter().collect(), limit))
+    }
+
+    fn postings(&self, index: u32, term: &str) -> Result<BTreeMap<NodeId, Posting>, GraphError> {
+        self.transaction
+            .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(index, term))?
+            .into_iter()
+            .map(|(key, value)| Ok((keys::parse_posting_node(&key)?, decode_posting(&value)?)))
+            .collect()
+    }
+
+    fn phrase_matches(
+        &self,
+        index: u32,
+        terms: &[Term],
+    ) -> Result<BTreeMap<NodeId, (u32, u32)>, GraphError> {
+        let mut lists = Vec::new();
+        for term in terms {
+            lists.push((term.position, self.postings(index, &term.text)?));
+        }
+        let mut matches = BTreeMap::new();
+        let Some(((first_offset, first), rest)) = lists.split_first() else {
+            return Ok(matches);
+        };
+        for (node, posting) in first {
+            let Some(others) = rest
+                .iter()
+                .map(|(offset, postings)| Some((*offset, postings.get(node)?)))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            let occurrences = posting
+                .positions
+                .iter()
+                .filter_map(|start| start.checked_sub(*first_offset))
+                .filter(|base| {
+                    others.iter().all(|(offset, other)| {
+                        base.checked_add(*offset)
+                            .is_some_and(|at| other.positions.binary_search(&at).is_ok())
+                    })
+                })
+                .count();
+            if occurrences > 0 {
+                let occurrences = u32::try_from(occurrences).unwrap_or(u32::MAX);
+                matches.insert(*node, (occurrences, posting.length));
+            }
+        }
+        Ok(matches)
     }
 
     /// The nodes whose vectors in the vector index `name` are closest to `query`, found by
@@ -585,11 +685,12 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     /// Records the current tokenizer, first rebuilding every keyword index from the nodes when
-    /// the stored entries came from another one. Returns whether anything was written.
-    pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
+    /// `stale` is set or the stored entries came from another tokenizer. Returns whether
+    /// anything was written.
+    pub(crate) fn adopt_current_tokenizer(&mut self, stale: bool) -> Result<bool, GraphError> {
         let fingerprint = tokenize::fingerprint();
         let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
-        if stored.as_deref() == Some(fingerprint.as_slice()) {
+        if !stale && stored.as_deref() == Some(fingerprint.as_slice()) {
             return Ok(false);
         }
         for (_, index) in self.indexes()? {
@@ -680,16 +781,17 @@ impl<T: WriteTransaction> GraphTx<T> {
                 let Some(bytes) = self.transaction.get(Table::KeywordDocuments, &entry_key)? else {
                     return Ok(());
                 };
-                let document = decode_document(&bytes)?;
-                for term in document.keys() {
+                let mut length = 0u32;
+                for (term, frequency) in decode_document(&bytes)? {
                     self.transaction.delete(
                         Table::KeywordPostings,
-                        &keys::posting_key(index.id, term, node),
+                        &keys::posting_key(index.id, &term, node),
                     )?;
+                    length = length.saturating_add(frequency);
                 }
                 self.transaction
                     .delete(Table::KeywordDocuments, &entry_key)?;
-                self.adjust_totals(index.id, document_length(&document), false)
+                self.adjust_totals(index.id, length, false)
             }
             IndexKind::Vector { .. } => Ok(self.transaction.delete(Table::Vectors, &entry_key)?),
         }

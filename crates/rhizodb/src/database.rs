@@ -91,7 +91,9 @@ impl Database {
     /// between words, such as Thai, are indexed as overlapping pairs of grapheme clusters, so a
     /// query finds a word inside a longer run. A property that holds a list of strings is
     /// indexed string by string. Search it with
-    /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`.
+    /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, which matches a node
+    /// that holds any term of `text`. Text between double quotes, as in `"new york" pizza`, is a
+    /// phrase, which matches only its terms in order and next to each other inside one string.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of

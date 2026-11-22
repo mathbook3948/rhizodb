@@ -264,6 +264,54 @@ fn composed_and_decomposed_text_find_each_other() {
 }
 
 #[test]
+fn a_quoted_phrase_matches_its_words_in_order_and_next_to_each_other() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'exact', body: 'read the New York times'}), \
+                (:Note {name: 'apart', body: 'new books from york'}), \
+                (:Note {name: 'reversed', body: 'york new'}), \
+                (:Note {name: 'twice', body: 'new york or new york'})",
+    );
+    assert_eq!(keyword(&db, "notes", "\"new york\""), ["twice", "exact"]);
+    let mut either = keyword(&db, "notes", "\"new york\" books");
+    either.sort();
+    assert_eq!(either, ["apart", "exact", "twice"]);
+    assert_eq!(keyword(&db, "notes", "\"york new\""), ["reversed"]);
+    assert_eq!(keyword(&db, "notes", "\"the new york"), ["exact"]);
+    assert!(keyword(&db, "notes", "\"new times\"").is_empty());
+}
+
+#[test]
+fn a_phrase_never_matches_across_two_values() {
+    let db = notes_db();
+    db.create_keyword_index("tags", "Note", &["tags"]).unwrap();
+    run(
+        &db,
+        "INSERT (:Note {name: 'graph', body: 'store'}), \
+                (:Note {name: 'split', tags: ['graph', 'store']}), \
+                (:Note {name: 'joined', tags: ['graph store']})",
+    );
+    assert!(keyword(&db, "notes", "\"graph store\"").is_empty());
+    assert_eq!(keyword(&db, "tags", "\"graph store\""), ["joined"]);
+}
+
+#[test]
+fn a_phrase_of_korean_or_japanese_matches_the_run_in_order() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'ko', body: '내일 서울에서 만나요'}), \
+                (:Note {name: 'swapped', body: '만나요 서울에서'}), \
+                (:Note {name: 'ja', body: '東京都に行く'})",
+    );
+    assert_eq!(keyword(&db, "notes", "\"서울에서 만나요\""), ["ko"]);
+    assert_eq!(keyword(&db, "notes", "서울에서 만나요").len(), 2);
+    assert_eq!(keyword(&db, "notes", "\"東京都\""), ["ja"]);
+    assert!(keyword(&db, "notes", "\"京東\"").is_empty());
+}
+
+#[test]
 fn a_search_can_feed_the_rest_of_a_query() {
     let db = notes_db();
     run(
@@ -621,5 +669,42 @@ proptest! {
         }
         let found = vector(&db, "v", &query, limit as i64);
         prop_assert_eq!(found, brute_force(&vectors, &query, metric, limit));
+    }
+
+    #[test]
+    fn a_phrase_finds_exactly_the_nodes_with_a_string_that_holds_its_words_in_a_row(
+        documents in prop::collection::vec(
+            prop::collection::vec(prop::collection::vec(0usize..3, 0..6), 0..4),
+            0..12,
+        ),
+        phrase in prop::collection::vec(0usize..3, 1..4),
+    ) {
+        let words = ["red", "green", "blue"];
+        let sentence = |picks: &[usize]| {
+            picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>().join(" ")
+        };
+        let db = db();
+        db.create_keyword_index("tags", "T", &["tags"]).unwrap();
+        for (position, strings) in documents.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            parameters.insert(
+                "tags".to_owned(),
+                list(strings.iter().map(|picks| string(&sentence(picks)))),
+            );
+            db.execute("INSERT (:T {name: $name, tags: $tags})", &parameters).unwrap();
+        }
+        let mut found = keyword(&db, "tags", &format!("\"{}\"", sentence(&phrase)));
+        found.sort();
+        let mut expected: Vec<String> = documents
+            .iter()
+            .enumerate()
+            .filter(|(_, strings)| {
+                strings.iter().any(|picks| picks.windows(phrase.len()).any(|window| window == phrase))
+            })
+            .map(|(position, _)| position.to_string())
+            .collect();
+        expected.sort();
+        prop_assert_eq!(found, expected);
     }
 }

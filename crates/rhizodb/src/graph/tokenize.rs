@@ -1,7 +1,7 @@
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -16,16 +16,17 @@ const PROBE: &str = concat!(
     "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60}",
 );
 
-/// The tokenizer's version and its terms for a fixed probe text. The probe exercises the Unicode
-/// tables the tokenizer depends on, including recently assigned and still unassigned code points,
-/// so a change to those tables that touches the probe changes the fingerprint even when the
-/// version does not.
+/// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
+/// exercises the Unicode tables the tokenizer depends on, including recently assigned and still
+/// unassigned code points, so a change to those tables that touches the probe changes the
+/// fingerprint even when the version does not.
 pub(crate) fn fingerprint() -> Vec<u8> {
     let mut out = VERSION.to_be_bytes().to_vec();
     for purpose in [Purpose::Document, Purpose::Query] {
         for term in terms(PROBE, purpose) {
-            out.extend_from_slice(term.as_bytes());
+            out.extend_from_slice(term.text.as_bytes());
             out.push(0);
+            out.extend_from_slice(&term.position.to_be_bytes());
         }
         out.push(0);
     }
@@ -40,6 +41,45 @@ pub(crate) enum Purpose {
     Query,
 }
 
+/// A term and where it occurs in its text. A word takes one position. A paired-script run takes
+/// one position per grapheme cluster, and each pair and each single cluster sits at the position
+/// of its first cluster. Neighbouring query terms are therefore at most two positions apart.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Term {
+    pub(crate) text: String,
+    pub(crate) position: u32,
+}
+
+/// One part of a keyword query.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Clause {
+    /// Matches a node that holds the term.
+    Term(String),
+    /// Matches a node that holds every term at the same distances from one another as in the
+    /// query. The first term is at position zero.
+    Phrase(Vec<Term>),
+}
+
+/// Parses a keyword query into its clauses, sorted and without repeats. Text between two
+/// double quotes is a phrase, and an unclosed quote runs to the end of the text. A phrase of one
+/// term is that term, and a phrase of none is nothing. Every term outside quotes is a clause of
+/// its own.
+pub(crate) fn clauses(text: &str) -> Vec<Clause> {
+    let text: String = text.nfkc().collect();
+    let mut clauses = Vec::new();
+    for (index, piece) in text.split('"').enumerate() {
+        let terms = scan(piece, Purpose::Query);
+        if index % 2 == 0 || terms.len() == 1 {
+            clauses.extend(terms.into_iter().map(|term| Clause::Term(term.text)));
+        } else if !terms.is_empty() {
+            clauses.push(Clause::Phrase(terms));
+        }
+    }
+    clauses.sort();
+    clauses.dedup();
+    clauses
+}
+
 /// Splits `text` into lowercase terms at Unicode word boundaries, dropping control characters,
 /// so no term holds a zero byte. Text and terms are in Unicode normalization form NFKC, so
 /// canonically equivalent text gives the same terms, and so do compatibility forms such as
@@ -47,50 +87,89 @@ pub(crate) enum Purpose {
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
 /// grapheme clusters, because those scripts attach particles to words or leave out spaces
 /// between words. A run starts at a letter that is not a digit. The same text always gives the
-/// same terms, in the same order.
-pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
-    let mut terms = Vec::new();
-    let mut run = String::new();
-    let text: String = text.nfkc().collect();
+/// same terms, in the same order, with positions counted from zero.
+pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
+    scan(&text.nfkc().collect::<String>(), purpose)
+}
+
+fn scan(text: &str, purpose: Purpose) -> Vec<Term> {
+    let mut scan = Scan {
+        purpose,
+        terms: Vec::new(),
+        run: String::new(),
+        next: 0,
+    };
     for segment in text.split_word_bounds() {
         if !segment.chars().any(char::is_alphanumeric) {
-            flush_run(&mut run, purpose, &mut terms);
+            scan.flush_run();
             continue;
         }
         let mut word = String::new();
         for character in segment.chars().filter(|character| !character.is_control()) {
-            if joins_run(character, &run) {
-                push_word(&mut word, &mut terms);
-                run.push(character);
+            if joins_run(character, &scan.run) {
+                scan.push_word(&mut word);
+                scan.run.push(character);
             } else {
-                flush_run(&mut run, purpose, &mut terms);
+                scan.flush_run();
                 word.push(character);
             }
         }
-        push_word(&mut word, &mut terms);
+        scan.push_word(&mut word);
     }
-    flush_run(&mut run, purpose, &mut terms);
-    terms
+    scan.flush_run();
+    scan.terms
 }
 
-fn push_word(word: &mut String, terms: &mut Vec<String>) {
-    if word.chars().any(char::is_alphanumeric) {
-        terms.push(word.to_lowercase().nfkc().collect());
-    }
-    word.clear();
+struct Scan {
+    purpose: Purpose,
+    terms: Vec<Term>,
+    run: String,
+    next: u32,
 }
 
-fn flush_run(run: &mut String, purpose: Purpose, terms: &mut Vec<String>) {
-    let units: Vec<&str> = run.graphemes(true).collect();
-    if let [single] = units.as_slice() {
-        terms.push((*single).to_owned());
-    } else {
-        terms.extend(units.windows(2).map(|pair| pair.concat()));
-        if purpose == Purpose::Document {
-            terms.extend(units.iter().map(|unit| (*unit).to_owned()));
+impl Scan {
+    fn at(&self, offset: usize) -> u32 {
+        self.next
+            .saturating_add(u32::try_from(offset).unwrap_or(u32::MAX))
+    }
+
+    fn push_word(&mut self, word: &mut String) {
+        if word.chars().any(char::is_alphanumeric) {
+            self.terms.push(Term {
+                text: word.to_lowercase().nfkc().collect(),
+                position: self.next,
+            });
+            self.next = self.at(1);
         }
+        word.clear();
     }
-    run.clear();
+
+    fn flush_run(&mut self) {
+        let run = std::mem::take(&mut self.run);
+        let units: Vec<&str> = run.graphemes(true).collect();
+        if let [single] = units.as_slice() {
+            self.terms.push(Term {
+                text: (*single).to_owned(),
+                position: self.next,
+            });
+        } else {
+            for (offset, pair) in units.windows(2).enumerate() {
+                self.terms.push(Term {
+                    text: pair.concat(),
+                    position: self.at(offset),
+                });
+            }
+            if self.purpose == Purpose::Document {
+                for (offset, unit) in units.iter().enumerate() {
+                    self.terms.push(Term {
+                        text: (*unit).to_owned(),
+                        position: self.at(offset),
+                    });
+                }
+            }
+        }
+        self.next = self.at(units.len());
+    }
 }
 
 fn joins_run(character: char, run: &str) -> bool {

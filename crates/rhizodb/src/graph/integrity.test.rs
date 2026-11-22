@@ -742,6 +742,24 @@ fn a_posting_for_a_term_the_node_lacks_is_caught() {
 }
 
 #[test]
+fn a_posting_with_the_wrong_positions_is_caught() {
+    let key = keys::posting_key(NAMES_INDEX, "bobson", BOB);
+    let mut moved = 1u32.to_be_bytes().to_vec();
+    moved.extend_from_slice(&2u32.to_be_bytes());
+    moved.push(5);
+    for value in [moved, [0, 0, 0, 1, 0, 0, 0, 2].to_vec()] {
+        let key = key.clone();
+        assert_index_damage_caught(
+            |write| write.put(Table::KeywordPostings, &key, &value).unwrap(),
+            IntegrityViolation::WrongIndexEntry {
+                table: Table::KeywordPostings,
+                key: key.clone(),
+            },
+        );
+    }
+}
+
+#[test]
 fn keyword_totals_that_disagree_with_the_documents_are_caught() {
     assert_index_damage_caught(
         |write| {

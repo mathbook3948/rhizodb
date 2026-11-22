@@ -1,11 +1,29 @@
 use super::*;
 
+fn texts(terms: Vec<Term>) -> Vec<String> {
+    terms.into_iter().map(|term| term.text).collect()
+}
+
 fn document(text: &str) -> Vec<String> {
-    terms(text, Purpose::Document)
+    texts(terms(text, Purpose::Document))
 }
 
 fn query(text: &str) -> Vec<String> {
-    terms(text, Purpose::Query)
+    texts(terms(text, Purpose::Query))
+}
+
+fn positioned(text: &str, purpose: Purpose) -> Vec<(String, u32)> {
+    terms(text, purpose)
+        .into_iter()
+        .map(|term| (term.text, term.position))
+        .collect()
+}
+
+fn term(text: &str, position: u32) -> Term {
+    Term {
+        text: text.to_owned(),
+        position,
+    }
 }
 
 #[test]
@@ -127,5 +145,65 @@ fn compatibility_forms_fold_to_their_plain_letters() {
     assert_eq!(
         document("ﬁle ＲｈｉｚｏＤＢ ｶﾀｶﾅ"),
         document("file RhizoDB カタカナ")
+    );
+}
+
+#[test]
+fn a_word_takes_one_position_and_a_run_one_per_cluster() {
+    assert_eq!(
+        positioned("big 서울에 x", Purpose::Document),
+        [
+            ("big".to_owned(), 0),
+            ("서울".to_owned(), 1),
+            ("울에".to_owned(), 2),
+            ("서".to_owned(), 1),
+            ("울".to_owned(), 2),
+            ("에".to_owned(), 3),
+            ("x".to_owned(), 4),
+        ]
+    );
+    assert_eq!(
+        positioned("집 서울 x", Purpose::Query),
+        [
+            ("집".to_owned(), 0),
+            ("서울".to_owned(), 1),
+            ("x".to_owned(), 3),
+        ]
+    );
+}
+
+#[test]
+fn quoted_text_is_a_phrase_and_other_terms_stand_alone() {
+    assert_eq!(
+        clauses("graph \"Store  of\" data graph"),
+        [
+            Clause::Term("data".to_owned()),
+            Clause::Term("graph".to_owned()),
+            Clause::Phrase(vec![term("store", 0), term("of", 1)]),
+        ]
+    );
+}
+
+#[test]
+fn a_phrase_of_one_term_is_the_term_and_an_unclosed_quote_runs_to_the_end() {
+    assert_eq!(
+        clauses("\"graph\" \"\" \"!!\" \"open phrase"),
+        [
+            Clause::Term("graph".to_owned()),
+            Clause::Phrase(vec![term("open", 0), term("phrase", 1)]),
+        ]
+    );
+}
+
+#[test]
+fn a_phrase_keeps_the_positions_of_a_run() {
+    assert_eq!(
+        clauses("\"서울에서 만나\""),
+        [Clause::Phrase(vec![
+            term("서울", 0),
+            term("울에", 1),
+            term("에서", 2),
+            term("만나", 4),
+        ])]
     );
 }

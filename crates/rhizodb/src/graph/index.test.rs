@@ -236,7 +236,7 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
                 },
             },
         };
-        let old_output = Entry::Keyword(Document::from([("stale".to_owned(), 3)]));
+        let old_output = Entry::Keyword(Document::from([("stale".to_owned(), vec![0, 1, 2])]));
         for (table, key, value) in index.rows(NodeId(0), &old_output) {
             stale.put(table, &key, &value).unwrap();
         }
@@ -262,6 +262,56 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         1
     );
     assert_eq!(read.vector_search("points", &[1.0], 10).unwrap().len(), 1);
+}
+
+#[test]
+fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("previous.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", "Doc", &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("graph store graph".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+
+        let mut previous = graph.storage.begin_write().unwrap();
+        for (key, value) in previous.scan_prefix(Table::KeywordPostings, &[]).unwrap() {
+            previous
+                .put(Table::KeywordPostings, &key, &value[..8])
+                .unwrap();
+        }
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &3u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+        assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("words", "\"graph store\"", 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

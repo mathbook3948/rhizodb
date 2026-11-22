@@ -36,9 +36,13 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Such a run starts at a letter, and digits stay words of their own.
 - A query run of such clusters looks for its pairs, or for its one cluster when it has one.
 - No text is split with a word dictionary.
-- A keyword query matches a node that holds any of its terms.
+- Text between double quotes in a keyword query is a phrase, and an unclosed quote runs to the end of the text.
+- A phrase matches a node that holds its terms at the same distances from one another as in the query, inside one string value.
+- A keyword query matches a node that holds any of its terms or phrases.
 - Keyword matches are ranked by BM25.
+- A phrase is ranked as one term whose occurrences are the phrase's.
 - Each keyword index keeps its node count and total term count, and each posting keeps its node's term count, so ranking reads only the postings of the query terms.
+- Each posting keeps the positions of its term in the node, so a phrase is matched from the postings of its terms alone.
 - Each indexed node keeps the terms it was indexed under, and removing it from the index deletes those terms rather than tokenizing again.
 - The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms for a fixed probe text that exercises the Unicode tables it depends on.
 - Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction and records the current tokenizer.
@@ -57,4 +61,4 @@ A host that keeps people, places, and tasks for years must find them by words an
 
 - An approximate vector structure, such as HNSW, for indexes too large to scan
 - Indexes over relationship properties
-- Phrase, prefix, and fuzzy keyword queries
+- Prefix and fuzzy keyword queries
