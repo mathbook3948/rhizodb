@@ -1,5 +1,9 @@
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread;
+use std::thread::ThreadId;
 
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
@@ -40,6 +44,7 @@ pub(crate) enum GraphError {
     NodeNotFound(NodeId),
     RelationshipNotFound(RelationshipId),
     NodeHasRelationships(NodeId),
+    WriterOnThisThread,
 }
 
 impl fmt::Display for GraphError {
@@ -59,6 +64,10 @@ impl fmt::Display for GraphError {
             Self::NodeHasRelationships(node) => {
                 write!(formatter, "node {} still has relationships", node.0)
             }
+            Self::WriterOnThisThread => write!(
+                formatter,
+                "this thread already holds the open write transaction, so another would wait forever"
+            ),
         }
     }
 }
@@ -102,6 +111,7 @@ pub(crate) struct Adjacent {
 #[derive(Debug)]
 pub(crate) struct Graph<S> {
     storage: S,
+    writer: Arc<Mutex<Option<ThreadId>>>,
 }
 
 impl<S: Storage> Graph<S> {
@@ -129,18 +139,31 @@ impl<S: Storage> Graph<S> {
                 }
             }
         }
-        Ok(Self { storage })
+        Ok(Self {
+            storage,
+            writer: Arc::default(),
+        })
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
         Ok(GraphTx {
             transaction: self.storage.begin_read()?,
+            _writer: None,
         })
     }
 
+    /// Opens the one write transaction, waiting for another thread's to end. Fails instead of
+    /// waiting forever when the calling thread already holds it.
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+        let current = thread::current().id();
+        if *lock(&self.writer) == Some(current) {
+            return Err(GraphError::WriterOnThisThread);
+        }
+        let transaction = self.storage.begin_write()?;
+        *lock(&self.writer) = Some(current);
         Ok(GraphTx {
-            transaction: self.storage.begin_write()?,
+            transaction,
+            _writer: Some(WriterClaim(Arc::clone(&self.writer))),
         })
     }
 }
@@ -149,6 +172,22 @@ impl<S: Storage> Graph<S> {
 #[derive(Debug)]
 pub(crate) struct GraphTx<T> {
     transaction: T,
+    _writer: Option<WriterClaim>,
+}
+
+#[derive(Debug)]
+struct WriterClaim(Arc<Mutex<Option<ThreadId>>>);
+
+impl Drop for WriterClaim {
+    fn drop(&mut self) {
+        *lock(&self.0) = None;
+    }
+}
+
+fn lock(writer: &Mutex<Option<ThreadId>>) -> std::sync::MutexGuard<'_, Option<ThreadId>> {
+    writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn decode_u32(bytes: &[u8]) -> Result<u32, DecodeError> {

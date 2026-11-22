@@ -31,7 +31,7 @@ tx.execute(
 tx.commit()?;
 ```
 
-`db.begin_read()` gives a snapshot that several queries read, unchanged by commits made after it began. One write transaction is open at a time, and `begin_write` waits for the open one to end.
+`db.begin_read()` gives a snapshot that several queries read, unchanged by commits made after it began. One write transaction is open at a time, and `begin_write` waits for the open one to end. A writing query or `begin_write` on the thread that already holds the open write transaction fails instead of waiting for itself.
 
 ## Testing
 

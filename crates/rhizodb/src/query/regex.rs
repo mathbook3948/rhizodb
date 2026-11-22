@@ -39,7 +39,7 @@ impl Patterns {
 fn compile(pattern: &str) -> Result<Regex, Error> {
     let hir = Parser::new()
         .parse(pattern)
-        .map_err(|error| invalid(pattern, error))?;
+        .map_err(|error| invalid(pattern, syntax_reason(&error)))?;
     let whole = Hir::concat(vec![Hir::look(Look::Start), hir, Hir::look(Look::End)]);
     Regex::builder()
         .configure(Regex::config().nfa_size_limit(Some(COMPILED_SIZE_LIMIT)))
@@ -51,6 +51,14 @@ fn compile(pattern: &str) -> Result<Regex, Error> {
             ),
             None => invalid(pattern, error),
         })
+}
+
+fn syntax_reason(error: &regex_syntax::Error) -> String {
+    match error {
+        regex_syntax::Error::Parse(error) => error.kind().to_string(),
+        regex_syntax::Error::Translate(error) => error.kind().to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn invalid(pattern: &str, reason: impl Display) -> Error {

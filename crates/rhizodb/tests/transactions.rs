@@ -164,3 +164,24 @@ fn a_committed_write_transaction_survives_reopening() {
     let db = Database::open(&path).unwrap();
     assert_eq!(count(&db), 2);
 }
+
+#[test]
+fn a_write_on_the_thread_that_holds_the_write_transaction_fails_instead_of_waiting() {
+    let db = db();
+    let mut tx = db.begin_write().unwrap();
+    tx.execute("CREATE (:A)", &Parameters::new()).unwrap();
+    assert_eq!(
+        db.execute("CREATE (:B)", &Parameters::new())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::WriteTransactionOnThisThread
+    );
+    assert_eq!(
+        db.begin_write().unwrap_err().kind(),
+        ErrorKind::WriteTransactionOnThisThread
+    );
+    assert_eq!(count(&db), 0);
+    tx.commit().unwrap();
+    run(&db, "CREATE (:B)");
+    assert_eq!(count(&db), 2);
+}

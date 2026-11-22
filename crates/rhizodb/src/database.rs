@@ -41,7 +41,10 @@ impl Database {
     /// one transaction, use [`Database::begin_read`] or [`Database::begin_write`].
     ///
     /// A query without updating clauses reads a snapshot. A query with updating clauses commits
-    /// when it succeeds and leaves no trace when it fails.
+    /// when it succeeds and leaves no trace when it fails. It waits for an open write
+    /// transaction on another thread, and fails with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds one.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         query::execute(&self.graph, &self.procedures, query, parameters)
     }
@@ -53,8 +56,10 @@ impl Database {
     }
 
     /// Begins a write transaction. Only one is open at a time, so this waits until any open write
-    /// transaction ends, including the one a writing [`Database::execute`] call opens. Beginning a
-    /// second one on the thread that holds the first never returns.
+    /// transaction ends, including the one a writing [`Database::execute`] call opens. On the
+    /// thread that already holds the open write transaction it fails with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// instead of waiting for itself.
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, Error> {
         Ok(WriteTransaction::new(self.graph.write()?, &self.procedures))
     }
