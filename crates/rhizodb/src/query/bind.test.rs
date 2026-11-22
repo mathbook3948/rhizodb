@@ -93,6 +93,28 @@ fn a_delete_whose_result_can_hold_an_element_retains_records() {
         delete_retains("MATCH (n) DELETE n RETURN count(n) AS c"),
         [true]
     );
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (n)-->() } AS e"),
+        [true]
+    );
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { UNWIND [n] AS x RETURN x } AS e"),
+        [true]
+    );
+}
+
+#[test]
+fn a_delete_followed_by_a_subquery_of_its_own_variables_retains_no_records() {
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (m)-->() } AS e"),
+        [false]
+    );
+    assert_eq!(
+        delete_retains(
+            "MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (m) WITH m AS n RETURN n } AS e"
+        ),
+        [false]
+    );
 }
 
 #[test]

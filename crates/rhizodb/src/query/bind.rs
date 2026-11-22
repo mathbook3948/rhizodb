@@ -313,7 +313,7 @@ impl Binder<'_> {
                     let (projection, _, columns) =
                         self.projection(returned, &scope, false, None)?;
                     result_reads_variables =
-                        reads_variables(returned) || self.parameter_reads > reads_before;
+                        reads_variables(returned, &scope) || self.parameter_reads > reads_before;
                     output = Some((projection.outputs.clone(), columns));
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
@@ -1436,7 +1436,8 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::Pattern(element) => {
-                let scope = &self.pattern_scope(scope, pattern_variables(element), mode)?;
+                let scope =
+                    &self.pattern_scope(scope, names_of(pattern_variables(element)), mode)?;
                 if let Some(name) =
                     pattern_variables(element).find(|name| scope.get(&name.0).is_none())
                 {
@@ -1464,7 +1465,7 @@ impl Binder<'_> {
                     let names = patterns
                         .iter()
                         .flat_map(|part| pattern_variables(&part.element));
-                    let scope = &self.pattern_scope(scope, names, mode)?;
+                    let scope = &self.pattern_scope(scope, names_of(names), mode)?;
                     Expr::Exists(Box::new(self.pattern_query(
                         patterns,
                         filter.as_ref(),
@@ -1501,7 +1502,7 @@ impl Binder<'_> {
                     element: comprehension.element.clone(),
                 };
                 let mut inner =
-                    self.pattern_scope(scope, pattern_variables(&part.element), mode)?;
+                    self.pattern_scope(scope, names_of(pattern_variables(&part.element)), mode)?;
                 let mut introduced = Vec::new();
                 let pattern =
                     self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
@@ -1524,12 +1525,12 @@ impl Binder<'_> {
     fn pattern_scope<'n>(
         &self,
         scope: &Scope,
-        names: impl Iterator<Item = &'n ast::Name>,
+        names: impl Iterator<Item = &'n str>,
         mode: &Mode<'_>,
     ) -> Result<Scope, Error> {
         let mut visible = scope.clone();
-        let hidden = |name: &ast::Name| match mode {
-            Mode::Grouped(grouping) => grouping.input.get(&name.0).map(|_| {
+        let hidden = |name: &str| match mode {
+            Mode::Grouped(grouping) => grouping.input.get(name).map(|_| {
                 if grouping.ordering {
                     ErrorKind::UndefinedVariable
                 } else {
@@ -1538,7 +1539,7 @@ impl Binder<'_> {
             }),
             Mode::Projected(projected) => projected
                 .scope
-                .get(&name.0)
+                .get(name)
                 .map(|_| ErrorKind::UndefinedVariable),
             Mode::Plain | Mode::Constant => None,
         };
@@ -1554,12 +1555,12 @@ impl Binder<'_> {
             }
         }
         for name in names {
-            if visible.get(&name.0).is_none()
+            if visible.get(name).is_none()
                 && let Some(kind) = hidden(name)
             {
                 return Err(error(
                     kind,
-                    format!("`{}` is not visible next to this projection", name.0),
+                    format!("`{name}` is not visible next to this projection"),
                 ));
             }
         }
@@ -1862,12 +1863,14 @@ fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::E
     }
 }
 
-fn reads_variables(projection: &ast::Projection) -> bool {
+fn reads_variables(projection: &ast::Projection, scope: &Scope) -> bool {
     match &projection.items {
         ast::ProjectionItems::Star(_) => true,
-        ast::ProjectionItems::Items(items) => items
-            .iter()
-            .any(|item| !free_variables(&item.expr).is_empty()),
+        ast::ProjectionItems::Items(items) => items.iter().any(|item| {
+            free_variables(&item.expr)
+                .iter()
+                .any(|name| scope.get(name).is_some())
+        }),
     }
 }
 
@@ -1910,8 +1913,8 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             bound.pop();
         }
         ast::Expr::Pattern(element) => collect_pattern_free(element, bound, free),
-        ast::Expr::Exists(subquery) => {
-            if let ast::ExistsSubquery::Pattern { patterns, filter } = subquery.as_ref() {
+        ast::Expr::Exists(subquery) => match subquery.as_ref() {
+            ast::ExistsSubquery::Pattern { patterns, filter } => {
                 for part in patterns {
                     collect_pattern_free(&part.element, bound, free);
                 }
@@ -1919,7 +1922,8 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
                     collect_free(filter, bound, free);
                 }
             }
-        }
+            ast::ExistsSubquery::Query(query) => collect_query_free(query, bound, free),
+        },
         ast::Expr::PatternComprehension(comprehension) => {
             collect_pattern_free(&comprehension.element, bound, free);
             for body in comprehension
@@ -1936,6 +1940,103 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             }
         }
     }
+}
+
+fn names_of<'n>(names: impl Iterator<Item = &'n ast::Name>) -> impl Iterator<Item = &'n str> {
+    names.map(|name| name.0.as_str())
+}
+
+fn collect_query_free<'a>(
+    query: &'a ast::SingleQuery,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    let depth = bound.len();
+    for clause in &query.clauses {
+        match clause {
+            ast::Clause::Match(clause) => {
+                for part in &clause.patterns {
+                    collect_pattern_free(&part.element, bound, free);
+                }
+                for part in &clause.patterns {
+                    bound.extend(names_of(pattern_variables(&part.element)));
+                    bound.extend(names_of(part.path_variable.iter()));
+                }
+                if let Some(filter) = &clause.filter {
+                    collect_free(filter, bound, free);
+                }
+            }
+            ast::Clause::Unwind(unwind) => {
+                collect_free(&unwind.expr, bound, free);
+                bound.push(&unwind.variable.0);
+            }
+            ast::Clause::Call(call) => {
+                for arg in call.args.iter().flatten() {
+                    collect_free(arg, bound, free);
+                }
+                if let Some(ast::Yield::Items { items, filter }) = &call.yields {
+                    bound.extend(
+                        items
+                            .iter()
+                            .map(|item| item.alias.as_ref().unwrap_or(&item.output).0.as_str()),
+                    );
+                    if let Some(filter) = filter {
+                        collect_free(filter, bound, free);
+                    }
+                }
+            }
+            ast::Clause::With(with) => {
+                if !collect_projection_free(&with.projection, with.filter.as_ref(), bound, free) {
+                    break;
+                }
+            }
+            ast::Clause::Return(projection) => {
+                collect_projection_free(projection, None, bound, free);
+                break;
+            }
+            ast::Clause::Merge(_)
+            | ast::Clause::Insert(_)
+            | ast::Clause::Set(_)
+            | ast::Clause::Remove(_)
+            | ast::Clause::Delete(_) => {}
+        }
+    }
+    bound.truncate(depth);
+}
+
+fn collect_projection_free<'a>(
+    projection: &'a ast::Projection,
+    filter: Option<&'a ast::Expr>,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) -> bool {
+    let (items, keeps_scope) = match &projection.items {
+        ast::ProjectionItems::Star(items) => (items, true),
+        ast::ProjectionItems::Items(items) => (items, false),
+    };
+    for item in items {
+        collect_free(&item.expr, bound, free);
+    }
+    bound.extend(
+        items
+            .iter()
+            .filter_map(|item| match (&item.alias, &item.expr) {
+                (Some(alias), _) => Some(alias.0.as_str()),
+                (None, ast::Expr::Variable(name)) => Some(name.0.as_str()),
+                (None, _) => None,
+            }),
+    );
+    let rest = projection
+        .order_by
+        .iter()
+        .map(|item| &item.expr)
+        .chain(&projection.skip)
+        .chain(&projection.limit)
+        .chain(filter);
+    for expr in rest {
+        collect_free(expr, bound, free);
+    }
+    keeps_scope
 }
 
 fn collect_pattern_free<'a>(
