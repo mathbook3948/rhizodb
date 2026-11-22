@@ -802,6 +802,7 @@ clauses/return/Return6.feature: [11] Counting matches
 clauses/return/Return6.feature: [12] Counting matches per group
 clauses/return/Return6.feature: [13] Returning the minimum length of paths
 clauses/return/Return6.feature: [14] Aggregates in aggregates
+clauses/return/Return6.feature: [15] Using `rand()` in aggregations
 clauses/return/Return6.feature: [16] Aggregation on complex expressions
 clauses/return/Return6.feature: [17] Handle constants and parameters inside an expression which contains an aggregation expression
 clauses/return/Return6.feature: [18] Handle returned variables inside an expression which contains an aggregation expression

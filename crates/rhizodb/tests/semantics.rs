@@ -228,6 +228,22 @@ fn next_to_an_aggregate_only_simple_keys_and_projected_names_are_visible() {
 }
 
 #[test]
+fn an_aggregate_argument_cannot_call_rand() {
+    let db = db();
+    for query in [
+        "RETURN count(rand())",
+        "MATCH (n:Missing) RETURN collect(n.x + rand())",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::NonConstantExpression,
+            "{query}"
+        );
+    }
+    assert_eq!(ints(&run(&db, "RETURN count(*) + toInteger(rand())")), [1]);
+}
+
+#[test]
 fn skip_and_limit_must_be_non_negative_integer_constants() {
     let db = db();
     assert_eq!(

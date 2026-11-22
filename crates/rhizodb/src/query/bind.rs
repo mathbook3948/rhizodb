@@ -1598,6 +1598,12 @@ impl Binder<'_> {
                     "an aggregate cannot contain another aggregate",
                 ));
             }
+            if calls_rand(arg) {
+                return Err(error(
+                    ErrorKind::NonConstantExpression,
+                    "an aggregate cannot take a random value",
+                ));
+            }
         }
         let expected = match function {
             AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc => 2,
@@ -1949,6 +1955,11 @@ fn collect_pattern_free<'a>(
 
 fn contains_aggregate(expr: &ast::Expr) -> bool {
     aggregate_call(expr).is_some() || children(expr).into_iter().any(contains_aggregate)
+}
+
+fn calls_rand(expr: &ast::Expr) -> bool {
+    matches!(expr, ast::Expr::Function(call) if Function::lookup(&qualified_name(call)) == Some(Function::Rand))
+        || children(expr).into_iter().any(calls_rand)
 }
 
 fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {

@@ -35,7 +35,7 @@ pub enum ErrorKind {
     NestedAggregation,
     /// An aggregating projection uses a variable that is neither a grouping key nor aggregated.
     AmbiguousAggregationExpression,
-    /// `SKIP` or `LIMIT` refers to a variable.
+    /// `SKIP` or `LIMIT` refers to a variable, or an aggregate argument calls `rand()`.
     NonConstantExpression,
     /// `SKIP` or `LIMIT` is negative.
     NegativeIntegerArgument,
