@@ -33,7 +33,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.
-- `toInteger()` and `toFloat()` read text only in the decimal number literal syntax with an optional sign, and give null for anything else.
+- `toInteger()` and `toFloat()` read text only in the decimal number literal syntax with an optional sign and optional surrounding whitespace, and give null for anything else.
 
 ## Open
 
