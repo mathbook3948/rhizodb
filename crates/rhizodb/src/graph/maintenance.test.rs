@@ -209,7 +209,7 @@ fn op() -> impl Strategy<Value = Op> {
         6 => (on(), 0usize..3, value())
             .prop_map(|(on, key, value)| Op::SetProperty { on, key, value }),
         2 => (on(), 0usize..3).prop_map(|(on, key)| Op::RemoveProperty { on, key }),
-        3 => (on(), Just(2usize)).prop_map(|(on, key)| Op::FlipZeros { on, key }),
+        8 => (on(), Just(2usize)).prop_map(|(on, key)| Op::FlipZeros { on, key }),
         2 => (0usize..8, 0usize..2).prop_map(|(node, label)| Op::AddLabel { node, label }),
         2 => (0usize..8, 0usize..2).prop_map(|(node, label)| Op::RemoveLabel { node, label }),
         1 => (0usize..8).prop_map(|relationship| Op::DeleteRelationship { relationship }),
@@ -683,8 +683,16 @@ proptest! {
 
     #[test]
     fn indexes_stay_exact_across_writes_rollbacks_drops_and_reopens(
+        initial in prop::collection::vec(0usize..20, SLOTS),
         steps in prop::collection::vec(step(), 1..10),
     ) {
-        run(&steps)?;
+        let ops = initial
+            .into_iter()
+            .enumerate()
+            .map(|(slot, spec)| Op::CreateIndex { slot, spec })
+            .collect();
+        let mut all = vec![Step::Transaction { ops, commit: true }];
+        all.extend(steps);
+        run(&all)?;
     }
 }
