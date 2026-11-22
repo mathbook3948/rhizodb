@@ -92,10 +92,10 @@ pub(crate) fn bind(
         }
         parts.push(pipeline);
     }
-    if !results_read_variables {
+    if results_read_variables {
         for clause in parts.iter_mut().flat_map(|part| &mut part.clauses) {
             if let Clause::Update(UpdateClause::Delete { retain, .. }) = clause {
-                *retain = false;
+                *retain = true;
             }
         }
     }
@@ -425,8 +425,14 @@ impl Binder<'_> {
                         }
                         targets.push(bound);
                     }
+                    let mut later_reads = Vec::new();
+                    collect_clauses_free(
+                        &query.clauses[index + 1..],
+                        &mut Vec::new(),
+                        &mut later_reads,
+                    );
                     clauses.push(Clause::Update(UpdateClause::Delete {
-                        retain: true,
+                        retain: later_reads.iter().any(|name| scope.get(name).is_some()),
                         detach: delete.detach,
                         targets,
                     }));
@@ -1538,7 +1544,7 @@ impl Binder<'_> {
                 }
                 ast::ExistsSubquery::Query(query) => {
                     let mut free = Vec::new();
-                    collect_query_free(query, &mut Vec::new(), &mut free);
+                    collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
                     let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
                     let (pipeline, _, _) =
                         self.root(|binder| binder.single_query(query, scope, true))?;
@@ -1958,11 +1964,7 @@ fn free_variables(expr: &ast::Expr) -> Vec<&str> {
 
 fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Vec<&'a str>) {
     match expr {
-        ast::Expr::Variable(name) => {
-            if !bound.contains(&name.0.as_str()) {
-                free.push(&name.0);
-            }
-        }
+        ast::Expr::Variable(name) => collect_free_name(name, bound, free),
         ast::Expr::ListComprehension(comprehension) => {
             collect_free(&comprehension.source, bound, free);
             bound.push(&comprehension.variable.0);
@@ -1987,7 +1989,7 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
                     collect_free(filter, bound, free);
                 }
             }
-            ast::ExistsSubquery::Query(query) => collect_query_free(query, bound, free),
+            ast::ExistsSubquery::Query(query) => collect_clauses_free(&query.clauses, bound, free),
         },
         ast::Expr::PatternComprehension(comprehension) => {
             collect_pattern_free(&comprehension.element, bound, free);
@@ -2011,24 +2013,45 @@ fn names_of<'n>(names: impl Iterator<Item = &'n ast::Name>) -> impl Iterator<Ite
     names.map(|name| name.0.as_str())
 }
 
-fn collect_query_free<'a>(
-    query: &'a ast::SingleQuery,
+fn collect_clauses_free<'a>(
+    clauses: &'a [ast::Clause],
     bound: &mut Vec<&'a str>,
     free: &mut Vec<&'a str>,
 ) {
     let depth = bound.len();
-    for clause in &query.clauses {
+    for clause in clauses {
         match clause {
             ast::Clause::Match(clause) => {
-                for part in &clause.patterns {
-                    collect_pattern_free(&part.element, bound, free);
-                }
-                for part in &clause.patterns {
-                    bound.extend(names_of(pattern_variables(&part.element)));
-                    bound.extend(names_of(part.path_variable.iter()));
-                }
+                collect_patterns_free(&clause.patterns, bound, free);
                 if let Some(filter) = &clause.filter {
                     collect_free(filter, bound, free);
+                }
+            }
+            ast::Clause::Insert(patterns) => collect_patterns_free(patterns, bound, free),
+            ast::Clause::Merge(merge) => {
+                collect_patterns_free(std::slice::from_ref(&merge.pattern), bound, free);
+                for item in merge.on_create.iter().chain(&merge.on_match) {
+                    collect_set_item_free(item, bound, free);
+                }
+            }
+            ast::Clause::Set(items) => {
+                for item in items {
+                    collect_set_item_free(item, bound, free);
+                }
+            }
+            ast::Clause::Remove(items) => {
+                for item in items {
+                    match item {
+                        ast::RemoveItem::Property { base, .. } => collect_free(base, bound, free),
+                        ast::RemoveItem::Labels { variable, .. } => {
+                            collect_free_name(variable, bound, free);
+                        }
+                    }
+                }
+            }
+            ast::Clause::Delete(delete) => {
+                for target in &delete.targets {
+                    collect_free(target, bound, free);
                 }
             }
             ast::Clause::Unwind(unwind) => {
@@ -2066,14 +2089,48 @@ fn collect_query_free<'a>(
                 collect_projection_free(projection, None, bound, free);
                 break;
             }
-            ast::Clause::Merge(_)
-            | ast::Clause::Insert(_)
-            | ast::Clause::Set(_)
-            | ast::Clause::Remove(_)
-            | ast::Clause::Delete(_) => {}
         }
     }
     bound.truncate(depth);
+}
+
+fn collect_patterns_free<'a>(
+    patterns: &'a [ast::PatternPart],
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    for part in patterns {
+        collect_pattern_free(&part.element, bound, free);
+    }
+    for part in patterns {
+        bound.extend(names_of(pattern_variables(&part.element)));
+        bound.extend(names_of(part.path_variable.iter()));
+    }
+}
+
+fn collect_set_item_free<'a>(
+    item: &'a ast::SetItem,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    match item {
+        ast::SetItem::Property { base, value, .. } => {
+            collect_free(base, bound, free);
+            collect_free(value, bound, free);
+        }
+        ast::SetItem::ReplaceProperties { variable, value }
+        | ast::SetItem::MergeProperties { variable, value } => {
+            collect_free_name(variable, bound, free);
+            collect_free(value, bound, free);
+        }
+        ast::SetItem::Labels { variable, .. } => collect_free_name(variable, bound, free),
+    }
+}
+
+fn collect_free_name<'a>(name: &'a ast::Name, bound: &[&'a str], free: &mut Vec<&'a str>) {
+    if !bound.contains(&name.0.as_str()) {
+        free.push(&name.0);
+    }
 }
 
 fn collect_projection_free<'a>(
