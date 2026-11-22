@@ -17,7 +17,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
 - Procedures and `CALL` are not supported.
-- Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`. Inside an expression, a single `-` between parenthesized terms is always subtraction.
+- Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
+- Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - Parameters are data. They never take part in the type checks made on the query text.
 - An element deleted earlier in the same query is returned as it was when deleted, and reading its properties fails.
 - A `MERGE` property that evaluates to null is an error.

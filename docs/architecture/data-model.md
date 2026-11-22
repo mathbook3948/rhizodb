@@ -18,7 +18,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A stored value is a boolean, integer, float, string, byte string, or a list of stored values. Maps, nodes, relationships, and paths exist only while a query runs.
 - Stored lists have a fixed nesting limit, enforced on write as well as on read.
 - The database records one format version in a metadata table, and opening a database with an unknown version fails.
-- Each query runs in its own transaction. redb allows one writer and many concurrent readers.
+- Each query runs in its own transaction.
 
 ## Open
 
