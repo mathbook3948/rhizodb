@@ -527,9 +527,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
-                Datum::Relationship(id) => Ok(Datum::String(
-                    self.tx.token_name(self.relationship(id)?.rel_type)?,
-                )),
+                Datum::Relationship(id) => Ok(Datum::String(self.relationship_type(id)?)),
                 other => Err(invalid(&other)),
             },
             Function::Keys | Function::Properties => {

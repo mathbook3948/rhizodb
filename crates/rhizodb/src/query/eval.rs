@@ -22,6 +22,7 @@ use super::datum::Datum;
 use super::plan::Expr;
 use super::plan::Slot;
 use super::temporals;
+use super::update::Graveyard;
 
 /// One row: a value for every slot of the query.
 pub(crate) type Row = Vec<Datum>;
@@ -33,6 +34,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) slots: usize,
     /// The instant the query started, which the clock functions other than `realtime` read.
     pub(crate) now: &'a DateTime,
+    /// What the query deleted so far.
+    pub(crate) graveyard: &'a Graveyard,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -73,6 +76,15 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn relationship(&self, id: RelationshipId) -> Result<RelationshipRecord, Error> {
         self.tx.relationship(id)?.ok_or_else(deleted)
+    }
+
+    /// The type of a relationship, which stays readable after the query deleted it.
+    pub(crate) fn relationship_type(&self, id: RelationshipId) -> Result<String, Error> {
+        let rel_type = match self.graveyard.relationships.get(&id) {
+            Some(record) => record.rel_type,
+            None => self.relationship(id)?.rel_type,
+        };
+        Ok(self.tx.token_name(rel_type)?)
     }
 
     pub(crate) fn label_names(&self, record: &NodeRecord) -> Result<Vec<String>, Error> {
@@ -165,8 +177,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             Expr::HasLabels(operand, labels) => match self.eval(operand, row)? {
                 Datum::Null => Ok(Datum::Null),
                 Datum::Node(id) => Ok(Datum::Boolean(self.has_labels(id, labels)?)),
+                Datum::Relationship(id) => {
+                    let rel_type = self.relationship_type(id)?;
+                    Ok(Datum::Boolean(
+                        labels.iter().all(|label| *label == rel_type),
+                    ))
+                }
                 other => Err(type_error(format!(
-                    "labels can only be tested on a node, not a {}",
+                    "labels can only be tested on a node or a relationship, not a {}",
                     other.type_name()
                 ))),
             },

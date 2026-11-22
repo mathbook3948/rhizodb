@@ -112,6 +112,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             tx: &*self.tx,
             slots: self.slots,
             now: self.now,
+            graveyard: &*self.graveyard,
         }
     }
 

@@ -40,14 +40,16 @@ pub(crate) fn run_read<T: ReadTransaction>(
     program: &Program<ReadClause>,
     now: &DateTime,
 ) -> Result<QueryResult, Error> {
+    let graveyard = Graveyard::default();
     let env = Env {
         tx,
         slots: program.slot_count,
         now,
+        graveyard: &graveyard,
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
-    materialize(&env, &Graveyard::default(), &program.columns, rows)
+    materialize(&env, &graveyard, &program.columns, rows)
 }
 
 /// Runs a program with updating clauses on a write transaction. The caller commits.
@@ -57,18 +59,20 @@ pub(crate) fn run_write<W: WriteTransaction>(
     now: &DateTime,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
+    let mut graveyard = Graveyard::default();
     Env {
         tx: &*tx,
         slots,
         now,
+        graveyard: &graveyard,
     }
     .check_closed(&program.closed)?;
-    let mut graveyard = Graveyard::default();
     let rows = run(program, |clause, rows| match clause {
         Clause::Read(clause) => Env {
             tx: &*tx,
             slots,
             now,
+            graveyard: &graveyard,
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => {
@@ -82,6 +86,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         tx: &*tx,
         slots,
         now,
+        graveyard: &graveyard,
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -185,7 +190,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                         ),
                     ));
                 }
-                args.push(self.value(value, &Graveyard::default())?);
+                args.push(self.value(value, self.graveyard)?);
             }
             let results = (procedure.body)(&args).map_err(|source| {
                 Error::caused_by(

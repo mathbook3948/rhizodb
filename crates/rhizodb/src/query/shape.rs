@@ -140,7 +140,7 @@ pub(crate) fn slice_bound_error(bound: Shape) -> Option<ErrorKind> {
 
 /// The error a label test raises on an operand of `operand`, or none when it takes it.
 pub(crate) fn label_test_error(operand: Shape) -> Option<ErrorKind> {
-    (operand != Shape::Node).then_some(ErrorKind::TypeMismatch)
+    (operand != Shape::Node && operand != Shape::Relationship).then_some(ErrorKind::TypeMismatch)
 }
 
 /// The shapes a procedure parameter of type `accepts` takes.

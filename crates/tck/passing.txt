@@ -764,6 +764,7 @@ clauses/return/Return2.feature: [10] Return count aggregation over an empty grap
 clauses/return/Return2.feature: [11] RETURN does not lose precision on large integers
 clauses/return/Return2.feature: [12] Projecting a list of nodes and relationships
 clauses/return/Return2.feature: [13] Projecting a map of nodes and relationships
+clauses/return/Return2.feature: [14] Do not fail when returning type of deleted relationships
 clauses/return/Return2.feature: [15] Fail when returning properties of deleted nodes
 clauses/return/Return2.feature: [16] Fail when returning labels of deleted nodes
 clauses/return/Return2.feature: [17] Fail when returning properties of deleted relationships

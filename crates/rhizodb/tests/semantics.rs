@@ -418,12 +418,43 @@ fn properties_reject_values_that_cannot_be_stored() {
 }
 
 #[test]
-fn reading_a_deleted_element_fails() {
+fn reading_a_deleted_element_fails_except_for_the_type_of_a_relationship() {
     let db = db();
-    run(&db, "CREATE ({x: 1})");
+    run(&db, "CREATE (:L {x: 1})-[:T {y: 2}]->()");
+    for query in [
+        "MATCH (n:L) DETACH DELETE n RETURN n.x",
+        "MATCH (n:L) DETACH DELETE n RETURN labels(n)",
+        "MATCH ()-[r]->() DELETE r RETURN r.y",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::DeletedEntityAccess,
+            "{query}"
+        );
+    }
     assert_eq!(
-        error_kind(&db, "MATCH (n) DELETE n RETURN n.x"),
-        ErrorKind::DeletedEntityAccess
+        run(&db, "MATCH ()-[r]->() DELETE r RETURN type(r), r:T"),
+        [vec![string("T"), boolean(true)]]
+    );
+}
+
+#[test]
+fn a_label_test_on_a_relationship_tests_its_type() {
+    let db = db();
+    run(&db, "CREATE ()-[:T]->(), ()-[:U]->()");
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r]->() RETURN type(r), r:T, r:T:T, r:T:U ORDER BY type(r)"
+        ),
+        [
+            vec![string("T"), boolean(true), boolean(true), boolean(false)],
+            vec![string("U"), boolean(false), boolean(false), boolean(false)],
+        ]
+    );
+    assert_eq!(
+        error_kind(&db, "MATCH p = ()-->() RETURN p:T"),
+        ErrorKind::InvalidArgumentType
     );
 }
 
@@ -1171,7 +1202,6 @@ fn an_operator_on_a_variable_of_a_kind_the_text_fixes_fails_before_reading_data(
         "MATCH (n) RETURN -n",
         "MATCH (n) RETURN n + 1",
         "MATCH (n) RETURN NOT n",
-        "MATCH ()-[r]->() RETURN r:T",
         "MATCH p = ()-->() RETURN p:T",
         "MATCH p = ()-->() RETURN p[0..1]",
     ] {
