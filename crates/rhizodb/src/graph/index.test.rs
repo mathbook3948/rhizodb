@@ -577,10 +577,41 @@ fn a_definition_reads_back_as_it_was_written() {
                 metric: VectorMetric::DotProduct,
             },
         },
+        IndexDefinition {
+            target: Target::RelationshipType(Token::new(3)),
+            kind: IndexKind::Keyword {
+                properties: vec![Token::new(2)],
+            },
+        },
+        IndexDefinition {
+            target: Target::RelationshipType(Token::new(5)),
+            kind: IndexKind::Vector {
+                property: Token::new(1),
+                dimension: 2,
+                metric: VectorMetric::Euclidean,
+            },
+        },
     ] {
         let index = Index { id: 7, definition };
         assert_eq!(Index::decode(&index.encode()).unwrap(), index);
     }
+    let over_label = Index {
+        id: 7,
+        definition: IndexDefinition {
+            target: Target::Label(Token::new(3)),
+            kind: IndexKind::Keyword {
+                properties: vec![Token::new(2)],
+            },
+        },
+    };
+    let over_type = Index {
+        id: 7,
+        definition: IndexDefinition {
+            target: Target::RelationshipType(Token::new(3)),
+            ..over_label.definition.clone()
+        },
+    };
+    assert_ne!(over_label.encode(), over_type.encode());
 }
 
 #[test]

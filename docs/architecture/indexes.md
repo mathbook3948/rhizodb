@@ -14,7 +14,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - A search inside a write transaction sees that transaction's own writes.
 - An index covers the nodes that carry one label or the relationships of one type.
 - An index entry is keyed by its element's ID alone, because no index covers both nodes and relationships.
-- Index names are case-sensitive and unique across both kinds.
+- Index names are case-sensitive and unique across both kinds and both kinds of element.
 - The host creates and drops indexes with `Database` methods, each in a write transaction of its own.
 - The same `Database` method creates an index of one kind over a label or over a relationship type, named by an `IndexTarget`.
 - Creating an index fills it from the nodes or relationships already there, in the transaction that records it.

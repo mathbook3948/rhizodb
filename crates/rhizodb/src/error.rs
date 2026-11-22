@@ -115,7 +115,8 @@ pub enum ErrorKind {
     /// A write was started on a thread that already holds the open write transaction, which
     /// would otherwise wait for itself forever.
     WriteTransactionOnThisThread,
-    /// An index search names an index that does not exist, or one of another kind.
+    /// An index search names an index that does not exist, one of another kind, or one over the
+    /// other kind of element.
     IndexNotFound,
     /// An index is created under a name that an index with another definition already holds.
     IndexAlreadyExists,
