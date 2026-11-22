@@ -16,6 +16,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A pattern used as a predicate is accepted only inside a `WHERE`.
 - `EXISTS { query }` runs the query from the current row with the outer variables in scope, and is true when the query gives a row.
 - A query inside `EXISTS` may end without `RETURN`, cannot update the graph, and keeps its own variables to itself.
+- A variable that a projection hides from the expressions next to it is hidden inside both forms of `EXISTS` there.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
 - The check on the query text reads a value error as null and goes on, so a value error earlier in an expression never hides a type error after it.

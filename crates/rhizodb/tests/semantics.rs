@@ -1321,3 +1321,36 @@ fn an_operand_that_may_be_null_still_fails_early_when_no_value_of_its_type_fits(
         Value::Null
     );
 }
+
+#[test]
+fn both_exists_forms_reject_a_variable_hidden_by_the_projection_next_to_them() {
+    let db = db();
+    run(&db, "CREATE (:C {x: 1})-[:R]->()");
+    for query in [
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { (n)-->() } RETURN k",
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { MATCH (n)-->() } RETURN k",
+        "MATCH (n:C) RETURN count(*) AS c ORDER BY EXISTS { MATCH (n)-->() }",
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { UNWIND [n] AS m RETURN m } RETURN k",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::UndefinedVariable,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { MATCH (m)-->() } RETURN k"
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:C) WITH DISTINCT n.x AS k \
+             ORDER BY EXISTS { MATCH (m) WITH m AS n MATCH (n)-->() } RETURN k"
+        ),
+        [vec![int(1)]]
+    );
+}

@@ -1474,7 +1474,9 @@ impl Binder<'_> {
                     )?))
                 }
                 ast::ExistsSubquery::Query(query) => {
-                    let scope = self.pattern_scope(scope, std::iter::empty(), mode)?;
+                    let mut free = Vec::new();
+                    collect_query_free(query, &mut Vec::new(), &mut free);
+                    let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
                     let (pipeline, _, _) =
                         self.root(|binder| binder.single_query(query, scope, true))?;
                     let clauses = pipeline
