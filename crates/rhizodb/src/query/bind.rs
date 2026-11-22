@@ -58,6 +58,7 @@ pub(crate) fn bind(
         closed: Vec::new(),
         expression_depth: 0,
         parameter_reads: 0,
+        type_error: None,
     };
     let (singles, distinct) = match query {
         ast::Query::Single(single) => (vec![single], false),
@@ -89,6 +90,9 @@ pub(crate) fn bind(
                 *retain = false;
             }
         }
+    }
+    if let Some(type_error) = binder.type_error {
+        return Err(type_error);
     }
     let columns = columns.unwrap_or_default();
     let slot_count = binder.slot_count;
@@ -207,6 +211,7 @@ struct Binder<'a> {
     closed: Vec<Expr>,
     expression_depth: usize,
     parameter_reads: usize,
+    type_error: Option<Error>,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
@@ -346,7 +351,7 @@ impl Binder<'_> {
                             target,
                             &scope,
                             &[Shape::Node, Shape::Relationship, Shape::Path, Shape::List],
-                        )?;
+                        );
                         let bound = self.expr(target, &scope, &mut Mode::Plain)?;
                         if let ast::Expr::Variable(name) = target
                             && self.lookup(&name.0, &scope)?.kind == Kind::Value
@@ -669,22 +674,31 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
-        self.expect_shape(filter, scope, &[Shape::Boolean])?;
-        self.expr(filter, scope, mode)
+        let bound = self.expr(filter, scope, mode)?;
+        self.expect_shape(filter, scope, &[Shape::Boolean]);
+        Ok(bound)
     }
 
-    fn expect_shape(
-        &self,
-        expr: &ast::Expr,
-        scope: &Scope,
-        accepted: &[Shape],
-    ) -> Result<(), Error> {
-        match self.shape(expr, scope) {
-            Some(shape) if !admits(accepted, shape) => Err(error(
-                ErrorKind::InvalidArgumentType,
-                format!("a {shape:?} cannot be used here; expected one of {accepted:?}"),
-            )),
-            _ => Ok(()),
+    fn expect_shape(&mut self, expr: &ast::Expr, scope: &Scope, accepted: &[Shape]) {
+        if let Some(shape) = self.shape(expr, scope)
+            && !admits(accepted, shape)
+        {
+            self.reject(Some(ErrorKind::InvalidArgumentType), || {
+                format!("a {shape:?} cannot be used here; expected one of {accepted:?}")
+            });
+        }
+    }
+
+    fn reject(&mut self, kind: Option<ErrorKind>, message: impl FnOnce() -> String) {
+        let Some(kind) = kind else {
+            return;
+        };
+        if self.type_error.is_none() {
+            let kind = match kind {
+                ErrorKind::TypeMismatch => ErrorKind::InvalidArgumentType,
+                kind => kind,
+            };
+            self.type_error = Some(error(kind, message()));
         }
     }
 
@@ -1085,61 +1099,65 @@ impl Binder<'_> {
                 Expr::Map(bound)
             }
             ast::Expr::Property { base, key } => {
-                self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map])?;
-                Expr::Property(self.boxed(base, scope, mode)?, key.0.clone())
+                let bound = self.boxed(base, scope, mode)?;
+                self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map]);
+                Expr::Property(bound, key.0.clone())
             }
             ast::Expr::Index { base, index } => {
+                let bound_base = self.boxed(base, scope, mode)?;
+                let bound_index = self.boxed(index, scope, mode)?;
                 if let (Some(base), Some(index)) =
                     (self.shape(base, scope), self.shape(index, scope))
                 {
-                    reject(index_error(base, index), || {
+                    self.reject(index_error(base, index), || {
                         format!("a {base:?} cannot be indexed with a {index:?}")
-                    })?;
+                    });
                 }
-                Expr::Index(
-                    self.boxed(base, scope, mode)?,
-                    self.boxed(index, scope, mode)?,
-                )
+                Expr::Index(bound_base, bound_index)
             }
             ast::Expr::Slice { base, from, to } => {
-                if let Some(shape) = self.shape(base, scope) {
-                    reject(slice_error(shape), || {
-                        format!("a {shape:?} cannot be sliced")
-                    })?;
-                    for bound in [from, to].into_iter().flatten() {
-                        if let Some(bound) = self.shape(bound, scope) {
-                            reject(slice_bound_error(bound), || {
-                                format!("a slice bound cannot be a {bound:?}")
-                            })?;
-                        }
-                    }
-                }
-                let base = self.boxed(base, scope, mode)?;
-                let from = match from {
+                let bound_base = self.boxed(base, scope, mode)?;
+                let bound_from = match from {
                     Some(from) => Some(self.boxed(from, scope, mode)?),
                     None => None,
                 };
-                let to = match to {
+                let bound_to = match to {
                     Some(to) => Some(self.boxed(to, scope, mode)?),
                     None => None,
                 };
-                Expr::Slice(base, from, to)
+                if let Some(shape) = self.shape(base, scope) {
+                    self.reject(slice_error(shape), || {
+                        format!("a {shape:?} cannot be sliced")
+                    });
+                    for bound in [from, to].into_iter().flatten() {
+                        if let Some(bound) = self.shape(bound, scope) {
+                            self.reject(slice_bound_error(bound), || {
+                                format!("a slice bound cannot be a {bound:?}")
+                            });
+                        }
+                    }
+                }
+                Expr::Slice(bound_base, bound_from, bound_to)
             }
             ast::Expr::HasLabels { operand, labels } => {
+                let bound = self.boxed(operand, scope, mode)?;
                 if let Some(shape) = self.shape(operand, scope) {
-                    reject(label_test_error(shape), || {
+                    self.reject(label_test_error(shape), || {
                         format!("labels cannot be tested on a {shape:?}")
-                    })?;
+                    });
                 }
-                Expr::HasLabels(self.boxed(operand, scope, mode)?, names(labels))
+                Expr::HasLabels(bound, names(labels))
             }
-            ast::Expr::Unary { op, operand } => {
-                if let Some(shape) = self.shape(operand, scope) {
-                    reject(unary_error(*op, shape), || {
+            ast::Expr::Unary {
+                op,
+                operand: ast_operand,
+            } => {
+                let operand = self.boxed(ast_operand, scope, mode)?;
+                if let Some(shape) = self.shape(ast_operand, scope) {
+                    self.reject(unary_error(*op, shape), || {
                         format!("{op:?} cannot take a {shape:?}")
-                    })?;
+                    });
                 }
-                let operand = self.boxed(operand, scope, mode)?;
                 match op {
                     ast::UnaryOp::Not => Expr::Not(operand),
                     ast::UnaryOp::Negate => Expr::Negate(operand),
@@ -1147,17 +1165,15 @@ impl Binder<'_> {
                 }
             }
             ast::Expr::Binary { op, lhs, rhs } => {
+                let bound_lhs = self.boxed(lhs, scope, mode)?;
+                let bound_rhs = self.boxed(rhs, scope, mode)?;
                 if let (Some(left), Some(right)) = (self.shape(lhs, scope), self.shape(rhs, scope))
                 {
-                    reject(binary_error(*op, left, right), || {
+                    self.reject(binary_error(*op, left, right), || {
                         format!("{op:?} cannot take a {left:?} and a {right:?}")
-                    })?;
+                    });
                 }
-                Expr::Binary(
-                    *op,
-                    self.boxed(lhs, scope, mode)?,
-                    self.boxed(rhs, scope, mode)?,
-                )
+                Expr::Binary(*op, bound_lhs, bound_rhs)
             }
             ast::Expr::Comparison { first, rest } => {
                 let first = self.boxed(first, scope, mode)?;
@@ -1188,10 +1204,11 @@ impl Binder<'_> {
                         format!("function `{name}` got {} arguments", call.args.len()),
                     ));
                 }
+                let bound = self.exprs(&call.args, scope, mode)?;
                 for (index, arg) in call.args.iter().enumerate() {
-                    self.expect_shape(arg, scope, function.parameter(index))?;
+                    self.expect_shape(arg, scope, function.parameter(index));
                 }
-                Expr::Call(function, self.exprs(&call.args, scope, mode)?)
+                Expr::Call(function, bound)
             }
             ast::Expr::CountStar => return Err(aggregate_not_allowed(mode)),
             ast::Expr::Case(case) => {
@@ -1201,13 +1218,11 @@ impl Binder<'_> {
                 };
                 let mut branches = Vec::new();
                 for branch in &case.branches {
+                    let when = self.expr(&branch.when, scope, mode)?;
                     if case.scrutinee.is_none() {
-                        self.expect_shape(&branch.when, scope, &[Shape::Boolean])?;
+                        self.expect_shape(&branch.when, scope, &[Shape::Boolean]);
                     }
-                    branches.push((
-                        self.expr(&branch.when, scope, mode)?,
-                        self.expr(&branch.then, scope, mode)?,
-                    ));
+                    branches.push((when, self.expr(&branch.then, scope, mode)?));
                 }
                 let otherwise = match &case.otherwise {
                     Some(otherwise) => Some(self.expr(otherwise, scope, mode)?),
@@ -1440,9 +1455,6 @@ impl Binder<'_> {
                 "wrong number of arguments to an aggregate",
             ));
         }
-        for arg in args {
-            self.expect_shape(arg, input, function.accepted())?;
-        }
         let (argument, extra) = self.root(|binder| {
             let argument = match args.first() {
                 Some(arg) => Some(binder.expr(arg, input, &mut Mode::Plain)?),
@@ -1454,6 +1466,9 @@ impl Binder<'_> {
             };
             Ok::<_, Error>((argument, extra))
         })?;
+        for arg in args {
+            self.expect_shape(arg, input, function.accepted());
+        }
         Ok(Aggregate {
             function,
             distinct,
@@ -1636,14 +1651,6 @@ fn is_simple_key(key: &ast::Expr) -> bool {
 
 fn names(names: &[ast::Name]) -> Vec<String> {
     names.iter().map(|name| name.0.clone()).collect()
-}
-
-fn reject(kind: Option<ErrorKind>, message: impl FnOnce() -> String) -> Result<(), Error> {
-    match kind {
-        None => Ok(()),
-        Some(ErrorKind::TypeMismatch) => Err(error(ErrorKind::InvalidArgumentType, message())),
-        Some(kind) => Err(error(kind, message())),
-    }
 }
 
 fn qualified_name(call: &ast::FunctionCall) -> String {

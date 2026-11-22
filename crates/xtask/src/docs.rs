@@ -108,7 +108,7 @@ fn collect(workspace_root: &Path) -> Result<(Vec<Doc>, Vec<String>), Box<dyn Err
                 .strip_prefix(&root)?
                 .to_string_lossy()
                 .replace('\\', "/");
-            if !entry.file_type()?.is_file() || file.extension().is_none_or(|ext| ext != "md") {
+            if !fs::metadata(&file)?.is_file() || file.extension().is_none_or(|ext| ext != "md") {
                 violations.push(format!("docs/{path}: a domain folder holds only .md docs"));
                 continue;
             }

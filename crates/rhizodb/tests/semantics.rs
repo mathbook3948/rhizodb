@@ -857,6 +857,35 @@ fn a_type_error_in_the_query_text_fails_before_any_row_reaches_it() {
 }
 
 #[test]
+fn an_error_in_an_operand_is_reported_before_the_type_check_on_it() {
+    let db = db();
+    for (query, kind) in [
+        ("RETURN [x][true]", ErrorKind::UndefinedVariable),
+        ("RETURN 1 + true + x", ErrorKind::UndefinedVariable),
+        ("RETURN -(x + true)", ErrorKind::UndefinedVariable),
+        ("RETURN (x + true)[0..1]", ErrorKind::UndefinedVariable),
+        ("RETURN (x + true):A", ErrorKind::UndefinedVariable),
+        ("RETURN (x + true).k", ErrorKind::UndefinedVariable),
+        ("RETURN size(x + true)", ErrorKind::UndefinedVariable),
+        (
+            "RETURN CASE WHEN x + true THEN 1 END",
+            ErrorKind::UndefinedVariable,
+        ),
+        (
+            "MATCH (n) WHERE x + true RETURN n",
+            ErrorKind::UndefinedVariable,
+        ),
+        (
+            "UNWIND [1] AS y RETURN sum(x + true)",
+            ErrorKind::UndefinedVariable,
+        ),
+        ("RETURN 1 SKIP [x][true]", ErrorKind::NonConstantExpression),
+    ] {
+        assert_eq!(error_kind(&db, query), kind, "{query}");
+    }
+}
+
+#[test]
 fn a_reading_clause_cannot_follow_an_updating_clause_without_with() {
     let db = db();
     run(&db, "CREATE (:Q)");

@@ -64,8 +64,9 @@ pub enum ErrorKind {
     InvalidArgumentType,
     /// An operator or clause got a value of a type it does not accept from the data it read.
     TypeMismatch,
-    /// A function got an argument of a type it does not accept, computed by evaluating the query
-    /// rather than read off its text: `toUpper(x)` for a number `x`, or `toUpper([1][0])`.
+    /// A function or aggregate got an argument it cannot use, found by evaluating the query
+    /// rather than read off its text: an argument of the wrong type, such as `toUpper(x)` for a
+    /// number `x`, or a percentile that differs between the rows of one group.
     InvalidArgumentValue,
     /// A property was read from a value that is not a node, relationship, or map.
     PropertyAccessOnNonEntity,
