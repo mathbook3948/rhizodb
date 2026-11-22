@@ -238,17 +238,18 @@ pub(crate) fn between(from: &Temporal, to: &Temporal, span: Span) -> Option<Dura
             Span::Whole | Span::Seconds => Duration::from_parts(0, 0, 0, elapsed(start)?),
         };
     }
-    let end_seen = match (&zones, &instants) {
+    let end_seen = || match (&zones, &instants) {
         (Some((zone, _)), Some((_, last))) => {
-            DateTime::from_instant(last.epoch_second, last.nanosecond, zone)?.local()
+            Some(DateTime::from_instant(last.epoch_second, last.nanosecond, zone)?.local())
         }
-        _ => end,
+        _ => Some(end),
     };
     match span {
-        Span::Months => Duration::from_parts(i128::from(months_until(start, end_seen)), 0, 0, 0),
-        Span::Days => Duration::from_parts(0, i128::from(days_until(start, end_seen)), 0, 0),
+        Span::Months => Duration::from_parts(i128::from(months_until(start, end_seen()?)), 0, 0, 0),
+        Span::Days => Duration::from_parts(0, i128::from(days_until(start, end_seen()?)), 0, 0),
         Span::Seconds => Duration::from_parts(0, 0, 0, elapsed(start)?),
         Span::Whole => {
+            let end_seen = end_seen()?;
             let months = months_until(start, end_seen);
             let shifted = LocalDateTime::new(plus_months(start.date, months)?, start.time);
             let days = days_until(shifted, end_seen);

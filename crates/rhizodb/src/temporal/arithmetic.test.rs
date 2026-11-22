@@ -53,3 +53,17 @@ fn between_measures_months_then_days_then_time() {
         "P-1YT-4M-50S"
     );
 }
+
+#[test]
+fn the_seconds_between_instants_at_the_edge_of_the_date_range_are_measured() {
+    let edge = LocalDateTime::new(
+        Date::from_ymd(-999_999_999, 1, 1).unwrap(),
+        LocalTime::MIDNIGHT,
+    );
+    let utc = Temporal::DateTime(DateTime::with_offset(edge, 0).unwrap());
+    let kolkata = Temporal::DateTime(DateTime::in_zone(edge, "Asia/Kolkata").unwrap());
+    assert_eq!(
+        between(&utc, &kolkata, Span::Seconds).unwrap().to_string(),
+        "PT-5H-53M-28S"
+    );
+}
