@@ -1836,6 +1836,7 @@ expressions/literals/Literals5.feature: [23] Return a negative float with negati
 expressions/literals/Literals5.feature: [24] Return a negative float with negative upper case exponent without integer digits
 expressions/literals/Literals5.feature: [25] Return a positive float with one integer digit and maximum positive exponent
 expressions/literals/Literals5.feature: [26] Return a positive float with nine integer digit and maximum positive exponent
+expressions/literals/Literals5.feature: [27] Fail when float value is too large
 expressions/literals/Literals5.feature: [2] Return a short positive float without integer digits
 expressions/literals/Literals5.feature: [3] Return a long positive float
 expressions/literals/Literals5.feature: [4] Return a long positive float without integer digits
@@ -1886,6 +1887,7 @@ expressions/literals/Literals8.feature: [15] Return 20-deep nested maps
 expressions/literals/Literals8.feature: [16] Return 40-deep nested maps
 expressions/literals/Literals8.feature: [17] Return a map containing real and fake nested maps
 expressions/literals/Literals8.feature: [18] Return a complex map containing multiple mixed and nested values
+expressions/literals/Literals8.feature: [19] Fail on a map containing key starting with a number
 expressions/literals/Literals8.feature: [1] Return an empty map
 expressions/literals/Literals8.feature: [20] Fail on a map containing key with symbol
 expressions/literals/Literals8.feature: [21] Fail on a map containing key with dot
@@ -1950,6 +1952,7 @@ expressions/map/Map3.feature: [5] Using `keys()` and `IN` to check field existen
 expressions/mathematical/Mathematical11.feature: [1] Absolute function
 expressions/mathematical/Mathematical13.feature: [1] `sqrt()` returning float values
 expressions/mathematical/Mathematical2.feature: [1] Allow addition
+expressions/mathematical/Mathematical3.feature: [1] Fail for invalid Unicode hyphen in subtraction
 expressions/mathematical/Mathematical8.feature: [1] Arithmetic precedence test
 expressions/mathematical/Mathematical8.feature: [2] Arithmetic precedence with parenthesis test
 expressions/null/Null1.feature: [1] Property null check on non-null node

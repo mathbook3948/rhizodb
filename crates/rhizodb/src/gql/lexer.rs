@@ -41,6 +41,9 @@ pub(crate) enum TokenKind {
     /// The magnitude of an integer literal. The sign is a separate token.
     Integer(u64),
     Float(f64),
+    /// A malformed number literal, such as `12abc` or `0x`, kept as one token so the parser
+    /// reports it as an invalid number where it expects a value and as unexpected elsewhere.
+    InvalidNumber,
     String(String),
     Parameter(String),
     Punct(Punct),
@@ -203,6 +206,9 @@ impl Lexer<'_> {
             '<' => Punct::Lt,
             '>' if self.eat('=') => Punct::Ge,
             '>' => Punct::Gt,
+            _ if !first.is_ascii() => {
+                return Err(Self::error(start, SyntaxErrorKind::InvalidUnicodeCharacter));
+            }
             _ => {
                 return Err(Self::error(start, SyntaxErrorKind::UnexpectedCharacter));
             }
@@ -294,7 +300,16 @@ impl Lexer<'_> {
     }
 
     fn number(&mut self, start: usize) -> Result<TokenKind, SyntaxError> {
-        let invalid = Self::error(start, SyntaxErrorKind::InvalidNumberLiteral);
+        match self.number_literal(start)? {
+            Some(kind) => Ok(kind),
+            None => {
+                self.take_while(is_word_continue);
+                Ok(TokenKind::InvalidNumber)
+            }
+        }
+    }
+
+    fn number_literal(&mut self, start: usize) -> Result<Option<TokenKind>, SyntaxError> {
         let radix = match self.rest().as_bytes() {
             [b'0', b'x' | b'X', ..] => Some(16),
             [b'0', b'o' | b'O', ..] => Some(8),
@@ -304,9 +319,9 @@ impl Lexer<'_> {
             self.pos += 2;
             let digits = self.take_while(|c| c.is_digit(radix)).to_owned();
             if digits.is_empty() || self.peek().is_some_and(is_word_continue) {
-                return Err(invalid);
+                return Ok(None);
             }
-            return Self::integer(&digits, radix, start);
+            return Self::integer(&digits, radix, start).map(Some);
         }
         let mut is_float = false;
         self.take_while(|c| c.is_ascii_digit());
@@ -322,20 +337,21 @@ impl Lexer<'_> {
                 self.bump();
             }
             if self.take_while(|c| c.is_ascii_digit()).is_empty() {
-                return Err(invalid);
+                return Ok(None);
             }
         }
         if self.peek().is_some_and(is_word_continue) {
-            return Err(invalid);
+            return Ok(None);
         }
         let text = &self.input[start..self.pos];
         if is_float {
             return match text.parse::<f64>() {
-                Ok(value) if value.is_finite() => Ok(TokenKind::Float(value)),
-                _ => Err(invalid),
+                Ok(value) if value.is_finite() => Ok(Some(TokenKind::Float(value))),
+                Ok(_) => Err(Self::error(start, SyntaxErrorKind::FloatOverflow)),
+                Err(_) => Ok(None),
             };
         }
-        Self::integer(text, 10, start)
+        Self::integer(text, 10, start).map(Some)
     }
 
     fn integer(digits: &str, radix: u32, start: usize) -> Result<TokenKind, SyntaxError> {

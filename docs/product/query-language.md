@@ -31,6 +31,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
 - A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
+- A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data. They never take part in the type checks made on the query text.
 - An element deleted earlier in the same query is returned as it was when deleted, and reading its properties fails.
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests, while the labels of a deleted node do not.

@@ -16,11 +16,13 @@ const QUERY_STEPS: [&str; 3] = [
     "When executing control query:",
 ];
 
-const PARSE_LEVEL_ERRORS: [&str; 4] = [
+const PARSE_LEVEL_ERRORS: [&str; 6] = [
     "UnexpectedSyntax",
     "InvalidNumberLiteral",
     "InvalidUnicodeLiteral",
+    "InvalidUnicodeCharacter",
     "IntegerOverflow",
+    "FloatingPointOverflow",
 ];
 
 struct CorpusQuery {

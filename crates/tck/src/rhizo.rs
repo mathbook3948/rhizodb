@@ -194,6 +194,8 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::Syntax(syntax) => match syntax {
             SyntaxErrorKind::InvalidNumberLiteral => ("SyntaxError", "InvalidNumberLiteral"),
             SyntaxErrorKind::IntegerOverflow => ("SyntaxError", "IntegerOverflow"),
+            SyntaxErrorKind::FloatOverflow => ("SyntaxError", "FloatingPointOverflow"),
+            SyntaxErrorKind::InvalidUnicodeCharacter => ("SyntaxError", "InvalidUnicodeCharacter"),
             SyntaxErrorKind::InvalidUnicodeEscape => ("SyntaxError", "InvalidUnicodeLiteral"),
             SyntaxErrorKind::MixedUnion => ("SyntaxError", "InvalidClauseComposition"),
             SyntaxErrorKind::InvalidRelationshipPattern => {
