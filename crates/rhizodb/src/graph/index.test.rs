@@ -355,3 +355,11 @@ fn counts_read_the_frequency_and_length_of_a_posting_without_its_positions() {
     assert_eq!(decode_counts(&posting).unwrap(), (3, 12));
     assert_eq!(decode_posting(&posting).unwrap().positions, [0, 5, 9]);
 }
+
+#[test]
+fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
+    let posting = encode_posting(&[0, 5, 9], 12);
+    assert!(decode_counts(&posting[..10]).is_err());
+    assert!(decode_counts(&posting[..8]).is_err());
+    assert!(decode_counts(&posting[..7]).is_err());
+}

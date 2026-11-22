@@ -385,7 +385,9 @@ fn encode_posting(positions: &[u32], length: u32) -> Vec<u8> {
 
 fn decode_counts(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     let mut reader = Reader::new(bytes);
-    Ok((reader.u32()?, reader.u32()?))
+    let counts = (reader.u32()?, reader.u32()?);
+    reader.take(usize::try_from(counts.0).map_err(|_| DecodeError::LengthOverflow)?)?;
+    Ok(counts)
 }
 
 fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
