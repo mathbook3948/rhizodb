@@ -208,6 +208,27 @@ fn equal_scores_come_in_node_order() {
 }
 
 #[test]
+fn loose_hangul_jamo_are_found_one_by_one() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'laugh', body: 'ㅋㅋㅋㅋ'}), \
+                (:Note {name: 'cry', body: 'ㅠㅠ'}), \
+                (:Note {name: 'initials', body: 'ㄱㅅ'}), \
+                (:Note {name: 'mixed', body: 'ㄱ가나'}), \
+                (:Note {name: 'halfwidth', body: 'ﾡﾡ'})",
+    );
+    assert_eq!(keyword(&db, "notes", "ㅋ"), ["laugh"]);
+    assert_eq!(keyword(&db, "notes", "ㅋㅋ"), ["laugh"]);
+    assert_eq!(keyword(&db, "notes", "ㅠ"), ["cry"]);
+    assert_eq!(keyword(&db, "notes", "가나"), ["mixed"]);
+    assert_eq!(keyword(&db, "notes", "ㄱㄱ"), ["halfwidth"]);
+    let mut initial = keyword(&db, "notes", "ㄱ");
+    initial.sort();
+    assert_eq!(initial, ["halfwidth", "initials", "mixed"]);
+}
+
+#[test]
 fn korean_text_is_found_by_a_word_its_stem_or_one_syllable() {
     let db = notes_db();
     run(

@@ -34,6 +34,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Text splits into words at Unicode word boundaries and is lowercased.
 - A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of grapheme clusters and its single grapheme clusters.
 - Such a run starts at a letter, and digits stay words of their own.
+- In a Hangul run, each syllable and each jamo left over after normalization is a unit of its own instead of a grapheme cluster.
 - A query run of such clusters looks for its pairs, or for its one cluster when it has one.
 - No text is split with a word dictionary.
 - Text between two `"` characters in a keyword query is a phrase, and an unclosed quote runs to the end of the text.

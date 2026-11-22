@@ -1,7 +1,7 @@
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -13,7 +13,8 @@ const PROBE: &str = concat!(
     "Cafe\u{301} A\u{30a}\u{323} ﬁ Ｘ² ① ㎏ \u{1109}\u{1165} \u{0928}\u{093c} \u{2126} \u{fb2c} ",
     "\u{1d15f} \u{2adc} \u{11099}\u{110ba} \u{1133b}\u{1133e} \u{0f73} \u{1e9b}\u{323} ",
     "ก่อน ๒๕๖๗ a\u{e48} ພາສາລາວ ភាសាខ្មែរ မြန်မာဘာသာ \u{1a20}\u{1a60}\u{1a21} \u{aa80}\u{aab0} ",
-    "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60}",
+    "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60} ",
+    "ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0}",
 );
 
 /// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
@@ -97,7 +98,9 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// ligatures and full-width letters. Runs of Hangul, Han, Hiragana, Katakana, and the scripts
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
 /// grapheme clusters, because those scripts attach particles to words or leave out spaces
-/// between words. A run starts at a letter that is not a digit. The same text always gives the
+/// between words. In Hangul the unit is each syllable and each jamo left over after
+/// normalization, since a grapheme cluster of loose jamo such as "ㅋㅋㅋ" holds several
+/// letters a reader types and searches one at a time. A run starts at a letter that is not a digit. The same text always gives the
 /// same terms, in the same order, with positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
     scan(&text.nfkc().collect::<String>(), purpose).terms
@@ -164,7 +167,16 @@ impl Scan {
 
     fn flush_run(&mut self) {
         let run = std::mem::take(&mut self.run);
-        let units: Vec<&str> = run.graphemes(true).collect();
+        let units: Vec<&str> = run
+            .graphemes(true)
+            .flat_map(|cluster| {
+                if cluster.chars().any(is_hangul) {
+                    cluster.split_inclusive(|_| true).collect()
+                } else {
+                    vec![cluster]
+                }
+            })
+            .collect();
         if let [single] = units.as_slice() {
             self.terms.push(Term {
                 text: (*single).to_owned(),
@@ -194,6 +206,13 @@ fn joins_run(character: char, run: &str) -> bool {
     is_paired_script(character)
         && !character.is_numeric()
         && (character.is_alphabetic() || !run.is_empty())
+}
+
+fn is_hangul(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xFFA0..=0xFFDC
+    )
 }
 
 fn is_paired_script(character: char) -> bool {

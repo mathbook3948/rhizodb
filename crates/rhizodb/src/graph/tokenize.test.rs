@@ -90,6 +90,20 @@ fn numbers_and_a_stray_mark_do_not_start_a_run() {
 }
 
 #[test]
+fn each_hangul_syllable_and_each_loose_jamo_is_a_unit_of_its_own() {
+    let khieukh = "\u{110f}";
+    assert_eq!(query("ㅋㅋㅋ"), [khieukh.repeat(2), khieukh.repeat(2)]);
+    assert_eq!(query("ㅋ"), [khieukh]);
+    assert_eq!(query("ㅠㅠ"), ["\u{1172}\u{1172}"]);
+    assert_eq!(query("ㄱ가나"), ["\u{1100}가", "가나"]);
+    assert_eq!(query("ﾡﾡ"), query("ㄱㄱ"));
+    assert_eq!(
+        document("ㄱㅅ"),
+        ["\u{1100}\u{1109}", "\u{1100}", "\u{1109}"]
+    );
+}
+
+#[test]
 fn latin_next_to_hangul_splits_into_a_word_and_a_run() {
     assert_eq!(query("RhizoDB에서"), ["rhizodb", "에서"]);
 }
