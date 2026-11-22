@@ -170,14 +170,14 @@ pub(crate) enum SetItem {
     ReplaceProperties { variable: Name, value: Expr },
     /// `variable += map`
     MergeProperties { variable: Name, value: Expr },
-    /// `variable:A:B`
-    Labels { variable: Name, labels: Vec<Name> },
+    /// `variable:A:B`, `variable:A&B`, or `variable IS A&B`
+    Labels { variable: Name, labels: LabelExpr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RemoveItem {
     Property { base: Expr, key: Name },
-    Labels { variable: Name, labels: Vec<Name> },
+    Labels { variable: Name, labels: LabelExpr },
 }
 
 /// A comma-separated pattern, optionally bound to a path variable.
@@ -288,13 +288,13 @@ impl LabelExpr {
     pub(crate) fn label_set(&self) -> Option<Vec<&Name>> {
         match self {
             Self::Name(name) => Some(vec![name]),
-            Self::And(operands) => operands
-                .iter()
-                .map(|operand| match operand {
-                    Self::Name(name) => Some(name),
-                    _ => None,
-                })
-                .collect(),
+            Self::And(operands) => {
+                let mut names = Vec::new();
+                for operand in operands {
+                    names.extend(operand.label_set()?);
+                }
+                Some(names)
+            }
             Self::Wildcard | Self::Not(_) | Self::Or(_) => None,
         }
     }

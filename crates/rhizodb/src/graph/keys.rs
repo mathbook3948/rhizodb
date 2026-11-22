@@ -113,10 +113,28 @@ pub(crate) fn posting_prefix(index: u32, term: &str) -> Vec<u8> {
     key
 }
 
+/// The start of the posting keys of every term that begins with `prefix`, the term itself
+/// included.
+pub(crate) fn term_prefix(index: u32, prefix: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + prefix.len());
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(prefix.as_bytes());
+    key
+}
+
 pub(crate) fn posting_key(index: u32, term: &str, node: NodeId) -> Vec<u8> {
     let mut key = posting_prefix(index, term);
     key.extend_from_slice(&node.0.to_be_bytes());
     key
+}
+
+pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
+    let end = key.len().checked_sub(9).ok_or(DecodeError::UnexpectedEnd)?;
+    let term = key
+        .get(4..end)
+        .filter(|_| key.get(end) == Some(&0))
+        .ok_or(DecodeError::UnexpectedEnd)?;
+    std::str::from_utf8(term).map_err(|_| DecodeError::InvalidUtf8)
 }
 
 pub(crate) fn parse_posting_node(key: &[u8]) -> Result<NodeId, DecodeError> {

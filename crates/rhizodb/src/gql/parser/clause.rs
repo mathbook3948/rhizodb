@@ -4,6 +4,7 @@ use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Match;
 use crate::gql::ast::Merge;
 use crate::gql::ast::Name;
@@ -85,10 +86,11 @@ impl Parser {
             let targets = self.comma_separated(Self::expression)?;
             return Ok(Clause::Delete(Delete { detach, targets }));
         }
-        if self.eat_keyword("CALL") {
-            if self.at_punct(Punct::LBrace) {
+        if self.at_keyword("CALL") {
+            if self.punct_at(1, Punct::LBrace) || self.punct_at(1, Punct::LParen) {
                 return Err(self.unsupported());
             }
+            self.pos += 1;
             return self.call_clause();
         }
         if UNSUPPORTED_CLAUSE_KEYWORDS
@@ -254,22 +256,31 @@ impl Parser {
         Ok(SortItem { expr, direction })
     }
 
-    fn label_list(&mut self) -> ParseResult<Vec<Name>> {
-        let mut labels = Vec::new();
-        while self.eat_punct(Punct::Colon) {
-            labels.push(self.name()?);
-        }
-        Ok(labels)
-    }
-
     fn at_variable_followed_by(&self, punct: Punct) -> bool {
         matches!(self.kind_at(0), Some(TokenKind::Word { .. })) && self.punct_at(1, punct)
     }
 
+    fn at_label_item(&self) -> bool {
+        self.at_variable_followed_by(Punct::Colon)
+            || (matches!(self.kind_at(0), Some(TokenKind::Word { .. }))
+                && self.keyword_at(1, "IS")
+                && self.label_starts_at(2)
+                && !["NULL", "NOT", "LABELED"]
+                    .iter()
+                    .any(|keyword| self.keyword_at(2, keyword)))
+    }
+
+    fn label_item(&mut self) -> ParseResult<(Name, LabelExpr)> {
+        let variable = self.name()?;
+        match self.pattern_labels(true)? {
+            Some(labels) => Ok((variable, labels)),
+            None => Err(self.unexpected()),
+        }
+    }
+
     fn set_item(&mut self) -> ParseResult<SetItem> {
-        if self.at_variable_followed_by(Punct::Colon) {
-            let variable = self.name()?;
-            let labels = self.label_list()?;
+        if self.at_label_item() {
+            let (variable, labels) = self.label_item()?;
             return Ok(SetItem::Labels { variable, labels });
         }
         if self.at_variable_followed_by(Punct::Eq) {
@@ -291,9 +302,8 @@ impl Parser {
     }
 
     fn remove_item(&mut self) -> ParseResult<RemoveItem> {
-        if self.at_variable_followed_by(Punct::Colon) {
-            let variable = self.name()?;
-            let labels = self.label_list()?;
+        if self.at_label_item() {
+            let (variable, labels) = self.label_item()?;
             return Ok(RemoveItem::Labels { variable, labels });
         }
         let (base, key) = self.property_target()?;

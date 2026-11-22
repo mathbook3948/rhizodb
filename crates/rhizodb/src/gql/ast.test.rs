@@ -80,11 +80,24 @@ fn only_names_and_their_conjunctions_form_a_label_set() {
         LabelExpr::And(vec![label("A"), label("B")]).label_set(),
         Some(vec![&a, &b])
     );
+    let c = Name::new("C");
+    assert_eq!(
+        LabelExpr::And(vec![
+            LabelExpr::And(vec![label("A"), label("B")]),
+            label("C")
+        ])
+        .label_set(),
+        Some(vec![&a, &b, &c])
+    );
     for expr in [
         LabelExpr::Wildcard,
         not(label("A")),
         LabelExpr::Or(vec![label("A"), label("B")]),
         LabelExpr::And(vec![label("A"), not(label("B"))]),
+        LabelExpr::And(vec![
+            LabelExpr::Or(vec![label("A"), label("B")]),
+            label("C"),
+        ]),
     ] {
         assert_eq!(expr.label_set(), None, "{expr:?}");
     }

@@ -471,6 +471,36 @@ fn reading_a_deleted_element_fails_except_for_the_type_of_a_relationship() {
 }
 
 #[test]
+fn the_type_of_a_deleted_relationship_stays_readable_in_every_clause_after_the_delete() {
+    for query in [
+        "MATCH ()-[r]->() DELETE r RETURN 1 AS one ORDER BY type(r)",
+        "MATCH ()-[r]->() DELETE r WITH r ORDER BY type(r) RETURN 1 AS one",
+        "MATCH ()-[r]->() DELETE r WITH r WHERE type(r) = 'T' RETURN 1 AS one",
+        "MATCH ()-[r]->() DELETE r WITH type(r) AS t RETURN 1 AS one",
+        "MATCH ()-[r]->() DELETE r FILTER r:T RETURN 1 AS one",
+        "MATCH ()-[r]->() DELETE r LET t = type(r) RETURN 1 AS one",
+    ] {
+        let db = db();
+        run(&db, "CREATE ()-[:T]->()");
+        assert_eq!(run(&db, query), [vec![int(1)]], "{query}");
+    }
+    for query in [
+        "MATCH (a)-[r]->() DELETE r SET a.t = type(r)",
+        "MATCH ()-[r]->() DELETE r WITH r CREATE ({t: type(r)})",
+        "MATCH ()-[r]->() DELETE r WITH r MERGE ({t: type(r)})",
+    ] {
+        let db = db();
+        run(&db, "CREATE ()-[:T]->()");
+        run(&db, query);
+        assert_eq!(
+            single(&db, "MATCH (n) WHERE n.t = 'T' RETURN count(*)"),
+            int(1),
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn a_label_test_on_a_relationship_tests_its_type() {
     let db = db();
     run(&db, "CREATE ()-[:T]->(), ()-[:U]->()");

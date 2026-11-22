@@ -30,17 +30,38 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Equal scores come in ascending node ID order.
 - A keyword index covers one or more properties, and a node's document is the terms of all of them together.
 - A keyword index reads strings and lists of strings, and ignores values of other types.
-- Text splits into words at Unicode word boundaries and is lowercased.
-- A run of Hangul, Han, Hiragana, or Katakana is indexed as its overlapping character pairs and its single characters.
-- A query run of such characters looks for its character pairs, or for its one character when it has one.
-- A keyword query matches a node that holds any of its terms.
+- Text is put in Unicode normalization form NFKC before it is split.
+- Text splits into words at Unicode word boundaries.
+- Words are lowercased.
+- A grapheme cluster that starts with whitespace, or with a character that Unicode grapheme rules join to the character before it, separates words.
+- A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of units and its single units.
+- A unit of such a run is a grapheme cluster, except in Hangul.
+- Such a run starts at a grapheme cluster whose first character is a letter.
+- Digits of such a script are words, not part of a run.
+- A unit of a Hangul run is a syllable or a jamo left over after normalization, with the marks and joiners of its grapheme cluster that follow it.
+- A query run looks for its pairs of units, or for its one unit when it has one.
+- No text is split with a word dictionary.
+- Text between two `"` characters in a keyword query is a phrase.
+- An unclosed `"` starts a phrase that runs to the end of the query.
+- A phrase matches a node that holds its terms at the same distances from one another as in the query, inside one string value.
+- A word directly followed by `*` outside a phrase is a prefix.
+- A prefix matches every term that starts with it.
+- A `*` after a run of Hangul, Han, kana, or another paired script changes nothing.
+- A keyword query matches a node that holds any of its terms, prefixes, or phrases.
+- Keyword queries offer no fuzzy matching of misspelled terms.
 - Keyword matches are ranked by BM25.
-- Each keyword index keeps its node count and total term count, and each posting keeps its node's term count, so ranking reads only the postings of the query terms.
-- Each indexed node keeps the terms it was indexed under, and removing it from the index deletes those terms rather than tokenizing again.
-- The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms for a fixed probe text that exercises the Unicode tables it depends on.
-- Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction and records the current tokenizer.
+- A phrase is ranked as one term whose occurrences are the phrase's.
+- A prefix is ranked in each node by the best of the terms it matches there.
+- Each keyword index keeps its node count and total term count.
+- Each posting keeps its node's term count.
+- Each posting keeps the positions of its term in the node.
+- Each indexed node keeps the terms it was indexed under.
+- Removing a node from a keyword index deletes the terms it kept, without tokenizing again.
+- The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms and their positions for a fixed probe text that exercises the Unicode tables it depends on.
+- Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction.
+- That rebuild records the current tokenizer.
 - Changing what the tokenizer produces on purpose raises its version.
-- The word segmentation crate is pinned to one exact version, so a host's lockfile cannot change the tokenizer.
+- The word segmentation and normalization crates are each pinned to one exact version.
 - A vector index covers one property and has a fixed dimension and one metric: cosine, euclidean, or dot product.
 - A node is in a vector index when the property is a list of finite numbers of the index's dimension whose length is small enough that no score can overflow, and under cosine large enough that no product of lengths can underflow.
 - Any other value leaves the node out of the vector index without an error.
@@ -54,6 +75,3 @@ A host that keeps people, places, and tasks for years must find them by words an
 
 - An approximate vector structure, such as HNSW, for indexes too large to scan
 - Indexes over relationship properties
-- Unicode normalization of indexed text, so composed and decomposed forms of the same text match
-- Word segmentation for scripts written without spaces outside Hangul, Han, and kana, such as Thai
-- Phrase, prefix, and fuzzy keyword queries

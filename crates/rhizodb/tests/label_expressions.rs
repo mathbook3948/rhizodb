@@ -229,6 +229,58 @@ fn a_pattern_that_creates_rejects_any_other_label_expression() {
 }
 
 #[test]
+fn set_and_remove_take_a_label_set_after_is_or_colon() {
+    let db = db();
+    run(&db, "INSERT ({k: 1})");
+    run(&db, "MATCH (n) SET n IS A");
+    run(&db, "MATCH (n) SET n:B&C, n IS D&E");
+    assert_eq!(
+        run(&db, "MATCH (n) RETURN labels(n)"),
+        [vec![list(["A", "B", "C", "D", "E"].map(string))]]
+    );
+    run(&db, "MATCH (n) REMOVE n IS A, n:B&C");
+    run(&db, "MATCH (n) REMOVE n IS D&E");
+    assert_eq!(run(&db, "MATCH (n) RETURN labels(n)"), [vec![list([])]]);
+    run(&db, "MERGE (n {k: 1}) ON MATCH SET n IS F&G");
+    assert_eq!(keys(&db, "MATCH (n:F:G) RETURN n.k"), [1]);
+    run(&db, "MATCH (n) SET n:(H&I)&J");
+    assert_eq!(keys(&db, "MATCH (n:H:I:J) RETURN n.k"), [1]);
+}
+
+#[test]
+fn set_and_remove_do_not_read_a_keyword_after_is_as_a_label() {
+    let db = db();
+    run(&db, "INSERT ({k: 1})");
+    for query in [
+        "MATCH (n) SET n IS NULL",
+        "MATCH (n) REMOVE n IS NULL",
+        "MATCH (n) SET n IS NOT A",
+        "MATCH (n) REMOVE n IS LABELED A",
+    ] {
+        assert!(
+            matches!(error_kind(&db, query), ErrorKind::Syntax(_)),
+            "{query}"
+        );
+    }
+    run(&db, "MATCH (n) SET n IS `NULL`");
+    assert_eq!(keys(&db, "MATCH (n:`NULL`) RETURN n.k"), [1]);
+}
+
+#[test]
+fn set_and_remove_reject_any_other_label_expression() {
+    let db = labeled();
+    for query in [
+        "MATCH (n) SET n:A|B",
+        "MATCH (n) SET n IS !A",
+        "MATCH (n) SET n IS %",
+        "MATCH (n) REMOVE n:A|B",
+        "MATCH (n) REMOVE n IS A&!B",
+    ] {
+        assert_eq!(error_kind(&db, query), ErrorKind::NoLabelSet, "{query}");
+    }
+}
+
+#[test]
 fn merge_matches_a_conjunction_like_a_label_list() {
     let db = labeled();
     let rows = run(&db, "MERGE (n:A&B {k: 3}) RETURN n.k");
@@ -247,14 +299,22 @@ fn a_deleted_relationship_keeps_its_type_for_a_label_expression() {
 }
 
 #[test]
-fn delete_rejects_a_label_test_and_its_negation() {
+fn delete_rejects_a_label_test_under_any_boolean_operators() {
     let db = labeled();
     for query in [
         "MATCH (n) DELETE n:A",
         "MATCH (n) DELETE n:A|B",
         "MATCH (n) DELETE n IS LABELED A",
         "MATCH (n) DELETE n IS NOT LABELED A",
+        "MATCH (n) DELETE NOT NOT n:A",
+        "MATCH (n) DELETE (n:A) AND true",
+        "MATCH (n) DELETE true OR n:A",
+        "MATCH (n) DELETE NOT (n:A XOR n:B)",
     ] {
         assert_eq!(error_kind(&db, query), ErrorKind::InvalidDelete, "{query}");
     }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) DELETE true AND false"),
+        ErrorKind::InvalidArgumentType
+    );
 }

@@ -208,6 +208,27 @@ fn equal_scores_come_in_node_order() {
 }
 
 #[test]
+fn loose_hangul_jamo_are_found_one_by_one() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'laugh', body: 'ㅋㅋㅋㅋ'}), \
+                (:Note {name: 'cry', body: 'ㅠㅠ'}), \
+                (:Note {name: 'initials', body: 'ㄱㅅ'}), \
+                (:Note {name: 'mixed', body: 'ㄱ가나'}), \
+                (:Note {name: 'halfwidth', body: 'ﾡﾡ'})",
+    );
+    assert_eq!(keyword(&db, "notes", "ㅋ"), ["laugh"]);
+    assert_eq!(keyword(&db, "notes", "ㅋㅋ"), ["laugh"]);
+    assert_eq!(keyword(&db, "notes", "ㅠ"), ["cry"]);
+    assert_eq!(keyword(&db, "notes", "가나"), ["mixed"]);
+    assert_eq!(keyword(&db, "notes", "ㄱㄱ"), ["halfwidth"]);
+    let mut initial = keyword(&db, "notes", "ㄱ");
+    initial.sort();
+    assert_eq!(initial, ["halfwidth", "initials", "mixed"]);
+}
+
+#[test]
 fn korean_text_is_found_by_a_word_its_stem_or_one_syllable() {
     let db = notes_db();
     run(
@@ -232,6 +253,107 @@ fn japanese_and_chinese_text_is_found_without_spaces() {
     );
     assert_eq!(keyword(&db, "notes", "東京"), ["ja"]);
     assert_eq!(keyword(&db, "notes", "欢迎"), ["zh"]);
+}
+
+#[test]
+fn thai_text_is_found_by_a_word_inside_it_and_not_by_shared_letters() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'th', body: 'ภาษาไทยง่ายมาก'}), (:Note {name: 'come', body: 'มาเร็ว'})",
+    );
+    assert_eq!(keyword(&db, "notes", "ภาษา"), ["th"]);
+    assert_eq!(keyword(&db, "notes", "ง่าย"), ["th"]);
+    assert_eq!(keyword(&db, "notes", "มา")[0], "come");
+}
+
+#[test]
+fn composed_and_decomposed_text_find_each_other() {
+    let db = notes_db();
+    let mut parameters = Parameters::new();
+    parameters.insert("decomposed".to_owned(), string("Cafe\u{301} on the corner"));
+    parameters.insert("composed".to_owned(), string("Crème brûlée"));
+    db.execute(
+        "INSERT (:Note {name: 'decomposed', body: $decomposed}), \
+                (:Note {name: 'composed', body: $composed})",
+        &parameters,
+    )
+    .unwrap();
+    assert_eq!(keyword(&db, "notes", "café"), ["decomposed"]);
+    assert_eq!(keyword(&db, "notes", "bru\u{302}le\u{301}e"), ["composed"]);
+    assert_eq!(keyword(&db, "notes", "ＣＡＦÉ"), ["decomposed"]);
+}
+
+#[test]
+fn a_quoted_phrase_matches_its_words_in_order_and_next_to_each_other() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'exact', body: 'read the New York times'}), \
+                (:Note {name: 'apart', body: 'new books from york'}), \
+                (:Note {name: 'reversed', body: 'york new'}), \
+                (:Note {name: 'twice', body: 'new york or new york'})",
+    );
+    assert_eq!(keyword(&db, "notes", "\"new york\""), ["twice", "exact"]);
+    let mut either = keyword(&db, "notes", "\"new york\" books");
+    either.sort();
+    assert_eq!(either, ["apart", "exact", "twice"]);
+    assert_eq!(keyword(&db, "notes", "\"york new\""), ["reversed"]);
+    assert_eq!(keyword(&db, "notes", "\"the new york"), ["exact"]);
+    assert!(keyword(&db, "notes", "\"new times\"").is_empty());
+}
+
+#[test]
+fn a_trailing_star_matches_every_term_that_starts_with_the_word() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'plural', body: 'graphs everywhere'}), \
+                (:Note {name: 'both', body: 'graphs and graphql'}), \
+                (:Note {name: 'exact', body: 'a graph'}), \
+                (:Note {name: 'inside', body: 'paragraph'})",
+    );
+    let mut found = keyword(&db, "notes", "Graph*");
+    found.sort();
+    assert_eq!(found, ["both", "exact", "plural"]);
+    assert_eq!(keyword(&db, "notes", "graph *"), ["exact"]);
+    let score = |query: &str| {
+        keyword_hits(&db, "notes", query, 100)
+            .into_iter()
+            .find(|(name, _)| name == "both")
+            .map(|(_, score)| score)
+            .unwrap()
+    };
+    assert_eq!(score("graph*"), score("graphs").max(score("graphql")));
+}
+
+#[test]
+fn a_phrase_never_matches_across_two_values() {
+    let db = notes_db();
+    db.create_keyword_index("tags", "Note", &["tags"]).unwrap();
+    run(
+        &db,
+        "INSERT (:Note {name: 'graph', body: 'store'}), \
+                (:Note {name: 'split', tags: ['graph', 'store']}), \
+                (:Note {name: 'joined', tags: ['graph store']})",
+    );
+    assert!(keyword(&db, "notes", "\"graph store\"").is_empty());
+    assert_eq!(keyword(&db, "tags", "\"graph store\""), ["joined"]);
+}
+
+#[test]
+fn a_phrase_of_korean_or_japanese_matches_the_run_in_order() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'ko', body: '내일 서울에서 만나요'}), \
+                (:Note {name: 'swapped', body: '만나요 서울에서'}), \
+                (:Note {name: 'ja', body: '東京都に行く'})",
+    );
+    assert_eq!(keyword(&db, "notes", "\"서울에서 만나요\""), ["ko"]);
+    assert_eq!(keyword(&db, "notes", "서울에서 만나요").len(), 2);
+    assert_eq!(keyword(&db, "notes", "\"東京都\""), ["ja"]);
+    assert!(keyword(&db, "notes", "\"京東\"").is_empty());
 }
 
 #[test]
@@ -592,5 +714,69 @@ proptest! {
         }
         let found = vector(&db, "v", &query, limit as i64);
         prop_assert_eq!(found, brute_force(&vectors, &query, metric, limit));
+    }
+
+    #[test]
+    fn a_phrase_finds_exactly_the_nodes_with_a_string_that_holds_its_words_in_a_row(
+        documents in prop::collection::vec(
+            prop::collection::vec(prop::collection::vec(0usize..3, 0..6), 0..4),
+            0..12,
+        ),
+        phrase in prop::collection::vec(0usize..3, 1..4),
+    ) {
+        let words = ["red", "green", "blue"];
+        let sentence = |picks: &[usize]| {
+            picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>().join(" ")
+        };
+        let db = db();
+        db.create_keyword_index("tags", "T", &["tags"]).unwrap();
+        for (position, strings) in documents.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            parameters.insert(
+                "tags".to_owned(),
+                list(strings.iter().map(|picks| string(&sentence(picks)))),
+            );
+            db.execute("INSERT (:T {name: $name, tags: $tags})", &parameters).unwrap();
+        }
+        let mut found = keyword(&db, "tags", &format!("\"{}\"", sentence(&phrase)));
+        found.sort();
+        let mut expected: Vec<String> = documents
+            .iter()
+            .enumerate()
+            .filter(|(_, strings)| {
+                strings.iter().any(|picks| picks.windows(phrase.len()).any(|window| window == phrase))
+            })
+            .map(|(position, _)| position.to_string())
+            .collect();
+        expected.sort();
+        prop_assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_prefix_finds_exactly_the_nodes_with_a_word_that_starts_with_it(
+        documents in prop::collection::vec(prop::collection::vec(0usize..4, 0..5), 0..12),
+        prefix in prop::sample::select(vec!["r", "re", "rea", "read", "reader", "b", "x"]),
+    ) {
+        let words = ["red", "read", "reader", "blue"];
+        let db = db();
+        for (position, picks) in documents.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            let body = picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>().join(" ");
+            parameters.insert("body".to_owned(), string(&body));
+            db.execute("INSERT (:Note {name: $name, body: $body})", &parameters).unwrap();
+        }
+        db.create_keyword_index("notes", "Note", &["body"]).unwrap();
+        let mut found = keyword(&db, "notes", &format!("{prefix}*"));
+        found.sort();
+        let mut expected: Vec<String> = documents
+            .iter()
+            .enumerate()
+            .filter(|(_, picks)| picks.iter().any(|pick| words[*pick].starts_with(prefix)))
+            .map(|(position, _)| position.to_string())
+            .collect();
+        expected.sort();
+        prop_assert_eq!(found, expected);
     }
 }
