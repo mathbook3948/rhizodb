@@ -1344,6 +1344,47 @@ fn a_value_error_in_the_query_text_does_not_hide_a_later_type_error() {
 }
 
 #[test]
+fn a_value_error_inside_a_list_or_map_hides_only_the_type_errors_that_read_it() {
+    let db = db();
+    for query in [
+        "MATCH (n:Missing) RETURN [1 / 0, 'a'][1] - 1 AS v",
+        "MATCH (n:Missing) RETURN [1 / 0, 'a'][-1] - 1 AS v",
+        "MATCH (n:Missing) RETURN {a: 1 / 0, b: 'x'}.b - 1 AS v",
+        "MATCH (n:Missing) RETURN {a: 1 / 0, b: 'x'}['b'] - 1 AS v",
+        "MATCH (n:Missing) RETURN {a: 1 / 0, a: 'x'}.a - 1 AS v",
+        "MATCH (n:Missing) RETURN [1 / 0, 'a'][1..][0] - 1 AS v",
+        "MATCH (n:Missing) RETURN [1 / 0, ['a'][0] - 1] AS v",
+        "MATCH (n:Missing) RETURN size([1 / 0]) - 'a' AS v",
+        "MATCH (n:Missing) RETURN keys({a: 1 / 0})[0] - 1 AS v",
+        "MATCH (n:Missing) RETURN head(tail([1 / 0, 'a'])) - 1 AS v",
+        "MATCH (n:Missing) RETURN last([1 / 0, 'a']) - 1 AS v",
+        "MATCH (n:Missing) RETURN reverse([1 / 0, 'a'])[0] - 1 AS v",
+        "MATCH (n:Missing) RETURN coalesce('a', 1 / 0) - 1 AS v",
+        "MATCH (n:Missing) RETURN [x IN [1 / 0, 'a'] | x - 1] AS v",
+        "MATCH (n:Missing) RETURN (CASE WHEN true THEN [1 / 0, 'a'] END)[1] - 1 AS v",
+        "MATCH (n:Missing) RETURN [x IN ['a'] | CASE WHEN [1 / 0] IS NULL THEN 1 ELSE x - 1 END] AS v",
+        "MATCH (n:Missing) RETURN [x IN ['a'] WHERE [1 / 0] IS NOT NULL | x - 1] AS v",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    for query in [
+        "MATCH (n:Missing) RETURN coalesce(1 / 0, 'a') - 1 AS v",
+        "MATCH (n:Missing) RETURN head([coalesce(1 / 0, 'a')]) - 1 AS v",
+        "MATCH (n:Missing) RETURN {a: coalesce(1 / 0, 'a')}.a - 1 AS v",
+        "MATCH (n:Missing) RETURN (CASE WHEN (1 / 0) IS NULL THEN 'a' END) - 1 AS v",
+        "MATCH (n:Missing) RETURN [x IN ['a'] | CASE WHEN (1 / 0) IS NULL THEN x - 1 END] AS v",
+        "MATCH (n:Missing) RETURN [x IN ['a'] WHERE (1 / 0) IS NULL | x - 1] AS v",
+        "MATCH (n:Missing) RETURN [x IN [1 / 0, 1] WHERE x IS NULL | 'a'][0] - 1 AS v",
+    ] {
+        assert!(run(&db, query).is_empty(), "{query}");
+    }
+    assert_eq!(
+        error_kind(&db, "RETURN [1 / 0, 'a'][1] - 1 AS v"),
+        ErrorKind::InvalidArgumentType
+    );
+}
+
+#[test]
 fn an_operand_that_may_be_null_still_fails_early_when_no_value_of_its_type_fits() {
     let db = db();
     run(&db, "CREATE (:A)");

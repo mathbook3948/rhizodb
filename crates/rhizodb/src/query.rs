@@ -10,6 +10,7 @@ mod matcher;
 mod plan;
 mod regex;
 mod shape;
+mod taint;
 mod temporals;
 mod update;
 

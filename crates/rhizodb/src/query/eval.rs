@@ -25,6 +25,8 @@ use super::datum::Datum;
 use super::plan::Expr;
 use super::plan::Slot;
 use super::regex::Patterns;
+use super::taint;
+use super::taint::Taint;
 use super::temporals;
 use super::update::Graveyard;
 
@@ -47,13 +49,13 @@ pub(crate) struct Env<'a, T> {
     pub(crate) check: Option<&'a Check>,
 }
 
-/// The state of an evaluation that only looks for type errors. A step that fails with a value
-/// error gives null instead, so the steps after it are still checked, and a type error counts
-/// only when no such null went into the step that raised it.
-#[derive(Debug, Default)]
+/// The state of an evaluation that only looks for the type errors the query text fixes. A step
+/// that fails with a value error gives null instead, so the steps after it are still checked, and
+/// each value carries a [`Taint`] that marks the parts read as null this way. A type error counts
+/// only when no such part decides it.
+#[derive(Default)]
 pub(crate) struct Check {
-    substituted: Cell<usize>,
-    found: Cell<bool>,
+    bound: Cell<Vec<(Slot, Taint)>>,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -173,189 +175,299 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
-        let Some(check) = self.check else {
-            return self.eval_node(expr, row);
-        };
-        let before = check.substituted.get();
+        Ok(self.tracked(expr, row)?.0)
+    }
+
+    fn tracked(&self, expr: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         match self.eval_node(expr, row) {
-            Err(error)
-                if error.is_type_error()
-                    && (check.found.get() || check.substituted.get() == before) =>
-            {
-                check.found.set(true);
-                Err(error)
-            }
-            Err(_) => {
-                check.substituted.set(check.substituted.get() + 1);
-                Ok(Datum::Null)
+            Err(error) if self.check.is_some() && !error.is_type_error() => {
+                Ok((Datum::Null, Taint::Whole))
             }
             result => result,
         }
     }
 
-    fn substituted_since(&self, before: usize) -> bool {
-        self.check
-            .is_some_and(|check| check.substituted.get() != before)
+    fn condition(&self, expr: &Expr, row: &Row) -> Result<(Option<bool>, bool), Error> {
+        let (value, taint) = self.tracked(expr, row)?;
+        match truth(&value) {
+            Ok(truth) => Ok((truth, taint.is_tainted())),
+            Err(_) if taint.is_whole() => Ok((None, true)),
+            Err(error) => Err(error),
+        }
     }
 
-    fn substitutions(&self) -> usize {
-        self.check.map_or(0, |check| check.substituted.get())
+    fn bound<R>(&self, slot: Slot, taint: Taint, body: impl FnOnce() -> R) -> R {
+        let Some(check) = self.check else {
+            return body();
+        };
+        let mut bound = check.bound.take();
+        bound.push((slot, taint));
+        check.bound.set(bound);
+        let result = body();
+        let mut bound = check.bound.take();
+        bound.pop();
+        check.bound.set(bound);
+        result
     }
 
-    fn eval_node(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
-        match expr {
-            Expr::Constant(value) | Expr::Parameter(value) => Ok(value.clone()),
-            Expr::Slot(slot) => Ok(row.get(*slot).cloned().unwrap_or(Datum::Null)),
-            Expr::List(items) => items
-                .iter()
-                .map(|item| self.eval(item, row))
-                .collect::<Result<_, _>>()
-                .map(Datum::List),
-            Expr::Map(entries) => entries
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), self.eval(value, row)?)))
-                .collect::<Result<_, Error>>()
-                .map(Datum::Map),
-            Expr::Property(base, key) => self.property(&self.eval(base, row)?, key),
-            Expr::Index(base, index) => self.index(self.eval(base, row)?, self.eval(index, row)?),
-            Expr::Slice(base, from, to) => {
-                let base = self.eval(base, row)?;
-                let from = from.as_ref().map(|from| self.eval(from, row)).transpose()?;
-                let to = to.as_ref().map(|to| self.eval(to, row)).transpose()?;
-                slice(base, from, to)
+    fn tracked_all(&self, exprs: &[Expr], row: &Row) -> Result<(Vec<Datum>, Vec<Taint>), Error> {
+        let mut values = Vec::with_capacity(exprs.len());
+        let mut taints = Vec::new();
+        for expr in exprs {
+            let (value, taint) = self.tracked(expr, row)?;
+            values.push(value);
+            if self.check.is_some() {
+                taints.push(taint);
             }
-            Expr::HasLabels(operand, labels) => match self.eval(operand, row)? {
-                Datum::Null => Ok(Datum::Null),
-                Datum::Node(id) => Ok(Datum::Boolean(
-                    self.node_has_labels(&self.node(id)?, labels)?,
-                )),
-                Datum::Relationship(id) => {
-                    let rel_type = self.relationship_type(id)?;
-                    let Ok(found) =
-                        labels.matches::<Infallible>(true, &mut |name| Ok(name == rel_type));
-                    Ok(Datum::Boolean(found))
+        }
+        Ok((values, taints))
+    }
+
+    fn slot_taint(&self, slot: Slot) -> Taint {
+        let Some(check) = self.check else {
+            return Taint::Clean;
+        };
+        let bound = check.bound.take();
+        let taint = bound
+            .iter()
+            .rev()
+            .find(|(bound, _)| *bound == slot)
+            .map(|(_, taint)| taint.clone())
+            .unwrap_or_default();
+        check.bound.set(bound);
+        taint
+    }
+
+    fn eval_node(&self, expr: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        match expr {
+            Expr::Constant(value) | Expr::Parameter(value) => Ok((value.clone(), Taint::Clean)),
+            Expr::Slot(slot) => Ok((
+                row.get(*slot).cloned().unwrap_or(Datum::Null),
+                self.slot_taint(*slot),
+            )),
+            Expr::List(items) => {
+                let (values, taints) = self.tracked_all(items, row)?;
+                Ok((Datum::List(values), Taint::list(taints)))
+            }
+            Expr::Map(entries) => {
+                let mut values = BTreeMap::new();
+                let mut taints = BTreeMap::new();
+                for (key, value) in entries {
+                    let (value, taint) = self.tracked(value, row)?;
+                    if taint.is_tainted() {
+                        taints.insert(key.clone(), taint);
+                    } else {
+                        taints.remove(key);
+                    }
+                    values.insert(key.clone(), value);
                 }
-                other => Err(type_error(format!(
-                    "labels can only be tested on a node or a relationship, not a {}",
-                    other.type_name()
-                ))),
-            },
-            Expr::Not(operand) => Ok(from_truth(truth(&self.eval(operand, row)?)?.map(|b| !b))),
-            Expr::Negate(operand) => match self.eval(operand, row)? {
-                Datum::Null => Ok(Datum::Null),
-                Datum::Integer(value) => {
-                    value.checked_neg().map(Datum::Integer).ok_or_else(overflow)
-                }
-                Datum::Float(value) => Ok(Datum::Float(-value)),
-                other => Err(type_error(format!("cannot negate a {}", other.type_name()))),
-            },
-            Expr::UnaryPlus(operand) => match self.eval(operand, row)? {
-                value @ (Datum::Null | Datum::Integer(_) | Datum::Float(_)) => Ok(value),
-                other => Err(type_error(format!(
-                    "unary plus needs a number, not a {}",
-                    other.type_name()
-                ))),
-            },
+                Ok((Datum::Map(values), Taint::map(taints)))
+            }
+            Expr::Property(base, key) => {
+                let (base, taint) = self.tracked(base, row)?;
+                settle(
+                    self.property(&base, key),
+                    taint.is_whole(),
+                    taint.entry(key),
+                )
+            }
+            Expr::Index(base, index) => {
+                let (base, base_taint) = self.tracked(base, row)?;
+                let (index, index_taint) = self.tracked(index, row)?;
+                let taint = if index_taint.is_tainted() {
+                    Taint::Whole
+                } else {
+                    base_taint.at(&base, &index)
+                };
+                settle(
+                    self.index(base, index),
+                    base_taint.is_whole() || index_taint.is_whole(),
+                    taint,
+                )
+            }
+            Expr::Slice(base, from, to) => {
+                let (base, base_taint) = self.tracked(base, row)?;
+                let (from, from_taint) = self.slice_bound(from.as_deref(), row)?;
+                let (to, to_taint) = self.slice_bound(to.as_deref(), row)?;
+                let doubtful =
+                    base_taint.is_whole() || from_taint.is_whole() || to_taint.is_whole();
+                let taint = match base_taint {
+                    _ if from_taint.is_tainted() || to_taint.is_tainted() => Taint::Whole,
+                    Taint::List(items) => Taint::list(
+                        sliced(items, from.as_ref(), to.as_ref())
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default(),
+                    ),
+                    other => other.flatten(),
+                };
+                settle(slice(base, from.as_ref(), to.as_ref()), doubtful, taint)
+            }
+            Expr::HasLabels(operand, labels) => {
+                let (operand, taint) = self.tracked(operand, row)?;
+                settle(
+                    self.has_labels(operand, labels),
+                    taint.is_whole(),
+                    taint.flatten(),
+                )
+            }
+            Expr::Not(operand) => {
+                let (operand, taint) = self.tracked(operand, row)?;
+                settle(
+                    truth(&operand).map(|value| from_truth(value.map(|value| !value))),
+                    taint.is_whole(),
+                    taint.flatten(),
+                )
+            }
+            Expr::Negate(operand) => {
+                let (operand, taint) = self.tracked(operand, row)?;
+                settle(negate(operand), taint.is_whole(), taint.flatten())
+            }
+            Expr::UnaryPlus(operand) => {
+                let (operand, taint) = self.tracked(operand, row)?;
+                settle(unary_plus(operand), taint.is_whole(), taint.flatten())
+            }
             Expr::Binary(op, lhs, rhs) => {
-                let lhs = self.eval(lhs, row)?;
-                let rhs = self.eval(rhs, row)?;
-                match (op, &lhs, &rhs) {
+                let (lhs, lhs_taint) = self.tracked(lhs, row)?;
+                let (rhs, rhs_taint) = self.tracked(rhs, row)?;
+                let result = match (op, &lhs, &rhs) {
                     (BinaryOp::RegexMatch, Datum::String(text), Datum::String(pattern)) => {
-                        Ok(Datum::Boolean(self.patterns.matches(text, pattern)?))
+                        self.patterns.matches(text, pattern).map(Datum::Boolean)
                     }
                     _ => binary(*op, lhs, rhs),
-                }
+                };
+                settle(
+                    result,
+                    lhs_taint.is_whole() || rhs_taint.is_whole(),
+                    Taint::when(lhs_taint.is_tainted() || rhs_taint.is_tainted()),
+                )
             }
             Expr::Comparison(first, rest) => {
-                let mut left = self.eval(first, row)?;
+                let (mut left, first_taint) = self.tracked(first, row)?;
+                let mut tainted = first_taint.is_tainted();
                 let mut result = Some(true);
                 for (op, operand) in rest {
-                    let right = self.eval(operand, row)?;
-                    let step = comparison(*op, &left, &right);
-                    result = and(result, step);
+                    let (right, taint) = self.tracked(operand, row)?;
+                    tainted |= taint.is_tainted();
+                    result = and(result, comparison(*op, &left, &right));
                     left = right;
                 }
-                Ok(from_truth(result))
+                Ok((from_truth(result), Taint::when(tainted)))
             }
-            Expr::IsNull { operand, negated } => Ok(Datum::Boolean(
-                self.eval(operand, row)?.is_null() != *negated,
-            )),
+            Expr::IsNull { operand, negated } => {
+                let (operand, taint) = self.tracked(operand, row)?;
+                Ok((
+                    Datum::Boolean(operand.is_null() != *negated),
+                    Taint::when(taint.is_whole()),
+                ))
+            }
             Expr::Call(function, args) => {
-                let args = args
-                    .iter()
-                    .map(|arg| self.eval(arg, row))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.call(*function, args)
+                let (args, taints) = self.tracked_all(args, row)?;
+                let (taint, doubtful) = taint::call(*function, &args, taints);
+                settle(self.call(*function, args), doubtful, taint)
             }
             Expr::Case(case) => {
                 let scrutinee = case
                     .scrutinee
                     .as_ref()
-                    .map(|scrutinee| self.eval(scrutinee, row))
+                    .map(|scrutinee| self.tracked(scrutinee, row))
                     .transpose()?;
                 for (when, then) in &case.branches {
-                    let when = self.eval(when, row)?;
-                    let hit = match &scrutinee {
-                        Some(scrutinee) => equals(scrutinee, &when) == Some(true),
-                        None => truth(&when)? == Some(true),
+                    let (hit, doubtful) = match &scrutinee {
+                        Some((scrutinee, scrutinee_taint)) => {
+                            let (when, when_taint) = self.tracked(when, row)?;
+                            (
+                                equals(scrutinee, &when) == Some(true),
+                                scrutinee_taint.is_tainted() || when_taint.is_tainted(),
+                            )
+                        }
+                        None => {
+                            let (truth, doubtful) = self.condition(when, row)?;
+                            (truth == Some(true), doubtful)
+                        }
                     };
+                    if doubtful {
+                        return Ok((Datum::Null, Taint::Whole));
+                    }
                     if hit {
-                        return self.eval(then, row);
+                        return self.tracked(then, row);
                     }
                 }
                 match &case.otherwise {
-                    Some(otherwise) => self.eval(otherwise, row),
-                    None => Ok(Datum::Null),
+                    Some(otherwise) => self.tracked(otherwise, row),
+                    None => Ok((Datum::Null, Taint::Clean)),
                 }
             }
             Expr::ListComprehension(comprehension) => {
-                let before = self.substitutions();
-                let source = self.eval(&comprehension.source, row)?;
-                if self.substituted_since(before) {
-                    return Ok(Datum::Null);
+                let (source, source_taint) = self.tracked(&comprehension.source, row)?;
+                if source_taint.is_whole() {
+                    return Ok((Datum::Null, Taint::Whole));
                 }
                 let Some(items) = list_operand(source)? else {
-                    return Ok(Datum::Null);
+                    return Ok((Datum::Null, Taint::Clean));
                 };
+                let taints = source_taint.items();
                 let mut local = row.clone();
-                let mut out = Vec::new();
-                for item in items {
+                let mut values = Vec::new();
+                let mut value_taints = Vec::new();
+                let mut doubtful = false;
+                for (item, taint) in items.into_iter().zip(taints) {
                     set(&mut local, comprehension.slot, item.clone());
-                    if let Some(filter) = &comprehension.filter
-                        && !self.predicate(filter, &local)?
-                    {
-                        continue;
+                    let kept = self.bound(comprehension.slot, taint, || {
+                        if let Some(filter) = &comprehension.filter {
+                            let (keep, unsure) = self.condition(filter, &local)?;
+                            doubtful |= unsure;
+                            if unsure || keep != Some(true) {
+                                return Ok(None);
+                            }
+                        }
+                        match &comprehension.projection {
+                            Some(projection) => self.tracked(projection, &local).map(Some),
+                            None => Ok(Some((item, self.slot_taint(comprehension.slot)))),
+                        }
+                    })?;
+                    if let Some((value, taint)) = kept {
+                        values.push(value);
+                        if self.check.is_some() {
+                            value_taints.push(taint);
+                        }
                     }
-                    out.push(match &comprehension.projection {
-                        Some(projection) => self.eval(projection, &local)?,
-                        None => item,
-                    });
                 }
-                Ok(Datum::List(out))
+                let taint = if doubtful {
+                    Taint::Whole
+                } else {
+                    Taint::list(value_taints)
+                };
+                Ok((Datum::List(values), taint))
             }
             Expr::Quantified(quantified) => {
-                let before = self.substitutions();
-                let source = self.eval(&quantified.source, row)?;
-                if self.substituted_since(before) {
-                    return Ok(Datum::Null);
+                let (source, source_taint) = self.tracked(&quantified.source, row)?;
+                if source_taint.is_whole() {
+                    return Ok((Datum::Null, Taint::Whole));
                 }
                 let Some(items) = list_operand(source)? else {
-                    return Ok(Datum::Null);
+                    return Ok((Datum::Null, Taint::Clean));
                 };
+                let taints = source_taint.items();
                 let mut local = row.clone();
                 let mut trues = 0usize;
                 let mut falses = 0usize;
                 let mut nulls = 0usize;
-                for item in items {
+                let mut doubtful = false;
+                for (item, taint) in items.into_iter().zip(taints) {
                     set(&mut local, quantified.slot, item);
-                    match truth(&self.eval(&quantified.predicate, &local)?)? {
+                    let (truth, unsure) = self.bound(quantified.slot, taint, || {
+                        self.condition(&quantified.predicate, &local)
+                    })?;
+                    doubtful |= unsure;
+                    match truth {
                         Some(true) => trues += 1,
                         Some(false) => falses += 1,
                         None => nulls += 1,
                     }
                 }
                 let unknown = nulls > 0;
-                Ok(from_truth(match quantified.quantifier {
+                let result = from_truth(match quantified.quantifier {
                     Quantifier::All if falses > 0 => Some(false),
                     Quantifier::All => (!unknown).then_some(true),
                     Quantifier::Any if trues > 0 => Some(true),
@@ -365,7 +477,8 @@ impl<T: ReadTransaction> Env<'_, T> {
                     Quantifier::Single if trues > 1 => Some(false),
                     Quantifier::Single if unknown => None,
                     Quantifier::Single => Some(trues == 1),
-                }))
+                });
+                Ok((result, Taint::when(doubtful)))
             }
             Expr::Exists(query) => {
                 let mut found = false;
@@ -373,14 +486,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                     found = true;
                     Ok(false)
                 })?;
-                Ok(Datum::Boolean(found))
+                Ok((Datum::Boolean(found), Taint::Clean))
             }
             Expr::Subquery(clauses) => {
                 let mut rows = vec![row.clone()];
                 for clause in clauses {
                     rows = self.read_clause(clause, rows)?;
                 }
-                Ok(Datum::Boolean(!rows.is_empty()))
+                Ok((Datum::Boolean(!rows.is_empty()), Taint::Clean))
             }
             Expr::PatternComprehension(query, projection) => {
                 let mut out = Vec::new();
@@ -388,8 +501,41 @@ impl<T: ReadTransaction> Env<'_, T> {
                     out.push(self.eval(projection, matched)?);
                     Ok(true)
                 })?;
-                Ok(Datum::List(out))
+                Ok((Datum::List(out), Taint::Clean))
             }
+        }
+    }
+
+    fn slice_bound(
+        &self,
+        bound: Option<&Expr>,
+        row: &Row,
+    ) -> Result<(Option<Datum>, Taint), Error> {
+        match bound {
+            None => Ok((None, Taint::Clean)),
+            Some(bound) => {
+                let (value, taint) = self.tracked(bound, row)?;
+                Ok((Some(value), taint))
+            }
+        }
+    }
+
+    fn has_labels(&self, operand: Datum, labels: &LabelExpr) -> Result<Datum, Error> {
+        match operand {
+            Datum::Null => Ok(Datum::Null),
+            Datum::Node(id) => Ok(Datum::Boolean(
+                self.node_has_labels(&self.node(id)?, labels)?,
+            )),
+            Datum::Relationship(id) => {
+                let rel_type = self.relationship_type(id)?;
+                let Ok(found) =
+                    labels.matches::<Infallible>(true, &mut |name| Ok(name == rel_type));
+                Ok(Datum::Boolean(found))
+            }
+            other => Err(type_error(format!(
+                "labels can only be tested on a node or a relationship, not a {}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -438,7 +584,7 @@ fn list_operand(value: Datum) -> Result<Option<Vec<Datum>>, Error> {
     }
 }
 
-fn list_position(length: usize, index: i64) -> Option<usize> {
+pub(crate) fn list_position(length: usize, index: i64) -> Option<usize> {
     let length = i64::try_from(length).ok()?;
     let position = if index < 0 { length + index } else { index };
     if (0..length).contains(&position) {
@@ -448,19 +594,27 @@ fn list_position(length: usize, index: i64) -> Option<usize> {
     }
 }
 
-fn slice(base: Datum, from: Option<Datum>, to: Option<Datum>) -> Result<Datum, Error> {
+fn slice(base: Datum, from: Option<&Datum>, to: Option<&Datum>) -> Result<Datum, Error> {
     let items = match base {
         Datum::Null => return Ok(Datum::Null),
         Datum::List(items) => items,
         other => return Err(type_error(format!("cannot slice a {}", other.type_name()))),
     };
+    Ok(sliced(items, from, to)?.map_or(Datum::Null, Datum::List))
+}
+
+fn sliced<T>(
+    items: Vec<T>,
+    from: Option<&Datum>,
+    to: Option<&Datum>,
+) -> Result<Option<Vec<T>>, Error> {
     let length = i64::try_from(items.len()).unwrap_or(i64::MAX);
-    let bound = |bound: Option<Datum>, default: i64| -> Result<Option<i64>, Error> {
+    let bound = |bound: Option<&Datum>, default: i64| -> Result<Option<i64>, Error> {
         match bound {
             None => Ok(Some(default)),
             Some(Datum::Null) => Ok(None),
             Some(Datum::Integer(value)) => {
-                let value = if value < 0 { length + value } else { value };
+                let value = if *value < 0 { length + value } else { *value };
                 Ok(Some(value.clamp(0, length)))
             }
             Some(other) => Err(type_error(format!(
@@ -470,16 +624,45 @@ fn slice(base: Datum, from: Option<Datum>, to: Option<Datum>) -> Result<Datum, E
         }
     };
     let (Some(from), Some(to)) = (bound(from, 0)?, bound(to, length)?) else {
-        return Ok(Datum::Null);
+        return Ok(None);
     };
     if from >= to {
-        return Ok(Datum::List(Vec::new()));
+        return Ok(Some(Vec::new()));
     }
     let from = usize::try_from(from).unwrap_or(0);
     let to = usize::try_from(to).unwrap_or(0);
-    Ok(Datum::List(
-        items.into_iter().skip(from).take(to - from).collect(),
-    ))
+    Ok(Some(items.into_iter().skip(from).take(to - from).collect()))
+}
+
+fn negate(operand: Datum) -> Result<Datum, Error> {
+    match operand {
+        Datum::Null => Ok(Datum::Null),
+        Datum::Integer(value) => value.checked_neg().map(Datum::Integer).ok_or_else(overflow),
+        Datum::Float(value) => Ok(Datum::Float(-value)),
+        other => Err(type_error(format!("cannot negate a {}", other.type_name()))),
+    }
+}
+
+fn unary_plus(operand: Datum) -> Result<Datum, Error> {
+    match operand {
+        value @ (Datum::Null | Datum::Integer(_) | Datum::Float(_)) => Ok(value),
+        other => Err(type_error(format!(
+            "unary plus needs a number, not a {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn settle(
+    result: Result<Datum, Error>,
+    doubtful: bool,
+    taint: Taint,
+) -> Result<(Datum, Taint), Error> {
+    match result {
+        Ok(value) => Ok((value, taint)),
+        Err(_) if doubtful => Ok((Datum::Null, Taint::Whole)),
+        Err(error) => Err(error),
+    }
 }
 
 fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
