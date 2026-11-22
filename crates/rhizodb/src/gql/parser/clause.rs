@@ -85,10 +85,11 @@ impl Parser {
             let targets = self.comma_separated(Self::expression)?;
             return Ok(Clause::Delete(Delete { detach, targets }));
         }
-        if self.eat_keyword("CALL") {
-            if self.at_punct(Punct::LBrace) {
+        if self.at_keyword("CALL") {
+            if self.punct_at(1, Punct::LBrace) || self.punct_at(1, Punct::LParen) {
                 return Err(self.unsupported());
             }
+            self.pos += 1;
             return self.call_clause();
         }
         if UNSUPPORTED_CLAUSE_KEYWORDS

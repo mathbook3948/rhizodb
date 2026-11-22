@@ -436,10 +436,18 @@ fn clauses_outside_the_supported_set_are_reported_as_unsupported() {
             "{source}"
         );
     }
-    assert_eq!(
-        error("MATCH (n) CALL { RETURN 1 AS x } RETURN x"),
-        (15, SyntaxErrorKind::UnsupportedFeature)
-    );
+    for source in [
+        "MATCH (n) CALL { RETURN 1 AS x } RETURN x",
+        "MATCH (n) CALL (n) { RETURN 1 AS x } RETURN x",
+        "MATCH (n) CALL () { RETURN 1 AS x } RETURN x",
+        "MATCH (n) CALL (*) { RETURN 1 AS x } RETURN x",
+    ] {
+        assert_eq!(
+            error(source),
+            (10, SyntaxErrorKind::UnsupportedFeature),
+            "{source}"
+        );
+    }
 }
 
 #[test]
