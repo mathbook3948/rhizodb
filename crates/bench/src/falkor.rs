@@ -272,6 +272,19 @@ impl Instance for FalkorInstance {
 
     fn create_vector_index(&self) -> Result<Built, EngineError> {
         self.feature("CREATE VECTOR INDEX FOR (p:Person) ON (p.embedding) OPTIONS {dimension: 64, similarityFunction: 'cosine'}")?;
+        let zeros = literal(&Param::Floats(vec![0.0; 64]));
+        let probe = format!(
+            "CALL db.idx.vector.queryNodes('Person', 'embedding', 1, vecf32({zeros})) YIELD node RETURN count(node)"
+        );
+        let mut ready = self.run(&probe);
+        for _ in 0..500 {
+            if ready.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            ready = self.run(&probe);
+        }
+        ready?;
         Ok(Built::Index)
     }
 

@@ -38,6 +38,7 @@ const HOP_2: Texts = Texts::graph(
 )
 .sql("SELECT count(DISTINCT k2.dst) FROM knows k1 JOIN knows k2 ON k2.src = k1.dst WHERE k1.src = $id")
 .datalog("?[count_unique(c)] := *knows{src: $id, dst: b}, *knows{src: b, dst: c}");
+const DISTINCT_EDGES_3_HOP: &str = "MATCH (a:Person {id: $id})-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) WHERE c.id <> a.id OR d.id <> b.id RETURN count(DISTINCT d)";
 const HOP_3: Texts = Texts::graph(
     "MATCH (a:Person {id: $id})-[:KNOWS]->(:Person)-[:KNOWS]->(:Person)-[:KNOWS]->(d:Person) RETURN count(DISTINCT d)",
 )
@@ -47,10 +48,10 @@ const HOP_3: Texts = Texts::graph(
 .datalog(
     "?[count_unique(d)] := *knows{src: $id, dst: b}, *knows{src: b, dst: c}, *knows{src: c, dst: d}, (c != $id or d != b)",
 )
-.overriding(&[(
-    EngineKind::Ladybugdb,
-    "MATCH (a:Person {id: $id})-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) WHERE c.id <> a.id OR d.id <> b.id RETURN count(DISTINCT d)",
-)]);
+.overriding(&[
+    (EngineKind::Ladybugdb, DISTINCT_EDGES_3_HOP),
+    (EngineKind::Falkordb, DISTINCT_EDGES_3_HOP),
+]);
 const VARIABLE_LENGTH: Texts =
     Texts::graph("MATCH (a:Person {id: $id})-[:KNOWS*1..3]->(b:Person) RETURN count(DISTINCT b)")
         .sql(

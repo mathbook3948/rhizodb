@@ -85,7 +85,11 @@ pub(crate) const PERSON_STATS: Texts =
             "total[count(id)] := *persons{id}
              aged[count(id), sum(age)] := *persons{id, age}, age != null
              ?[t, c, whole] := total[t], aged[c, s], whole = to_int(s)",
-        );
+        )
+        .overriding(&[(
+            EngineKind::Falkordb,
+            "MATCH (p:Person) RETURN count(*), count(p.age), toInteger(sum(p.age))",
+        )]);
 const CITY_COUNT: Texts = Texts::graph("MATCH (c:City) RETURN count(*)")
     .sql("SELECT count(*) FROM cities")
     .datalog("?[count(id)] := *cities{id}");
