@@ -47,6 +47,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A percentile aggregate over a group with no rows is null and does not evaluate its percentile.
 - A null percentile makes a percentile aggregate null.
 - Operators, indexing, slicing, and label tests fall under the early type-error rule for every operand whose type the query text fixes, including node, relationship, and path variables.
+- The type the query text fixes leaves out null, so an operand that may be null, such as a comparison or an `OPTIONAL MATCH` variable, still fails early when no value of its type fits.
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
 - A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.

@@ -1293,3 +1293,20 @@ fn a_value_error_in_the_query_text_does_not_hide_a_later_type_error() {
         ErrorKind::InvalidArgumentType
     );
 }
+
+#[test]
+fn an_operand_that_may_be_null_still_fails_early_when_no_value_of_its_type_fits() {
+    let db = db();
+    run(&db, "CREATE (:A)");
+    for query in [
+        "MATCH (n:A) RETURN (n.x = 1) + 1",
+        "MATCH (n:A) RETURN (n.x STARTS WITH 'a') AND 1",
+        "OPTIONAL MATCH (n:Missing) RETURN n + 1",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    assert_eq!(
+        single(&db, "MATCH (n:A) WITH n.x = 1 AS b RETURN b + 1"),
+        Value::Null
+    );
+}
