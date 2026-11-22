@@ -654,3 +654,26 @@ fn clearing_a_property_that_does_not_exist_changes_nothing() {
         relationships
     );
 }
+
+#[test]
+fn an_aggregate_argument_the_query_text_decides_fails_before_any_row_is_read() {
+    let db = db();
+    for query in [
+        "MATCH (n:Missing) RETURN sum(toString(1))",
+        "MATCH (n:Missing) RETURN avg('a' + 'b')",
+        "MATCH (n:Missing) RETURN stDev(head(['a']))",
+        "MATCH (n:Missing) RETURN sum(CASE WHEN false THEN 0 ELSE '' END)",
+        "MATCH (n:Missing) RETURN percentileDisc(1, toString(1))",
+        "MATCH (n:Missing) RETURN sum(CASE WHEN true THEN all(x IN [1] WHERE true) END)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        single(&db, "MATCH (n:Missing) RETURN sum(toInteger('x'))"),
+        int(0)
+    );
+}

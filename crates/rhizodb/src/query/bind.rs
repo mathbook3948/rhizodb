@@ -9,7 +9,6 @@ use crate::result::Parameters;
 
 use super::builtin::Builtin;
 use super::datum::Datum;
-use super::datum::from_parameter;
 use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
@@ -38,6 +37,7 @@ use super::plan::SetAction;
 use super::plan::Slot;
 use super::plan::Step;
 use super::plan::UpdateClause;
+use super::seek;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
@@ -65,6 +65,7 @@ pub(crate) fn bind(
         closed: Vec::new(),
         expression_depth: 0,
         parameter_reads: 0,
+        parameter_names: Vec::new(),
         type_error: None,
     };
     let (singles, distinct) = match query {
@@ -105,6 +106,7 @@ pub(crate) fn bind(
     let columns = columns.unwrap_or_default();
     let slot_count = binder.slot_count;
     let closed = binder.closed;
+    let parameters = binder.parameter_names;
     let updating = parts.iter().any(|part| {
         part.clauses
             .iter()
@@ -117,6 +119,7 @@ pub(crate) fn bind(
             columns,
             slot_count,
             closed,
+            parameters,
         }));
     }
     let parts = parts
@@ -139,6 +142,7 @@ pub(crate) fn bind(
         columns,
         slot_count,
         closed,
+        parameters,
     }))
 }
 
@@ -220,11 +224,20 @@ struct Binder<'a> {
     closed: Vec<Expr>,
     expression_depth: usize,
     parameter_reads: usize,
+    parameter_names: Vec<String>,
     type_error: Option<Error>,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
     Error::new(kind, message)
+}
+
+/// The error for a query that reads the parameter `name` when it was not supplied.
+pub(crate) fn missing_parameter(name: &str) -> Error {
+    error(
+        ErrorKind::MissingParameter,
+        format!("parameter `${name}` was not supplied"),
+    )
 }
 
 impl Binder<'_> {
@@ -358,12 +371,13 @@ impl Binder<'_> {
                 }
                 ast::Clause::Merge(merge) => {
                     let mut introduced = Vec::new();
-                    let pattern = self.pattern_part(
+                    let mut pattern = self.pattern_part(
                         &merge.pattern,
                         &mut scope,
                         PatternUse::Merge,
                         &mut introduced,
                     )?;
+                    pattern.seeks = seek::derive(&pattern, None, &introduced);
                     let on_create = self.set_items(&merge.on_create, &scope)?;
                     let on_match = self.set_items(&merge.on_match, &scope)?;
                     clauses.push(Clause::Update(UpdateClause::Merge(Box::new(MergeClause {
@@ -611,7 +625,9 @@ impl Binder<'_> {
     fn match_clause(&mut self, found: &ast::Match, scope: &mut Scope) -> Result<ReadClause, Error> {
         let mut introduced = Vec::new();
         let mut patterns = Vec::new();
+        let mut firsts = Vec::new();
         for part in &found.patterns {
+            firsts.push(introduced.len());
             patterns.push(self.pattern_part(part, scope, PatternUse::Match, &mut introduced)?);
         }
         let filter = found
@@ -619,6 +635,9 @@ impl Binder<'_> {
             .as_ref()
             .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
+        for (part, first) in patterns.iter_mut().zip(firsts) {
+            part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
+        }
         Ok(ReadClause::Match(MatchClause {
             optional: found.optional,
             patterns,
@@ -674,7 +693,12 @@ impl Binder<'_> {
             }
             None => None,
         };
-        Ok(PatternPart { path, start, steps })
+        Ok(PatternPart {
+            path,
+            start,
+            steps,
+            seeks: Vec::new(),
+        })
     }
 
     fn pattern_properties(
@@ -857,6 +881,7 @@ impl Binder<'_> {
         Ok(RelationshipPattern {
             slot,
             bound,
+            anonymous: relationship.variable.is_none(),
             labels: relationship.labels.clone(),
             direction: relationship.direction,
             length,
@@ -971,17 +996,20 @@ impl Binder<'_> {
         }
     }
 
-    fn parameter(&mut self, name: &str) -> Result<Datum, Error> {
+    fn parameter(&mut self, name: &str) -> Result<usize, Error> {
         self.parameter_reads += 1;
-        self.parameters
-            .get(name)
-            .map(from_parameter)
-            .ok_or_else(|| {
-                error(
-                    ErrorKind::MissingParameter,
-                    format!("parameter `${name}` was not supplied"),
-                )
-            })
+        if !self.parameters.contains_key(name) {
+            return Err(missing_parameter(name));
+        }
+        Ok(
+            match self.parameter_names.iter().position(|known| known == name) {
+                Some(index) => index,
+                None => {
+                    self.parameter_names.push(name.to_owned());
+                    self.parameter_names.len() - 1
+                }
+            },
+        )
     }
 
     fn column_name(&self, item: &ast::ProjectionItem) -> String {
@@ -1705,6 +1733,12 @@ impl Binder<'_> {
         for arg in args {
             self.expect_shape(arg, input, function.accepted());
         }
+        for bound in argument.iter().chain(&extra) {
+            if is_closed(bound) {
+                self.closed
+                    .push(Expr::Admit(function, Box::new(bound.clone())));
+            }
+        }
         Ok(Aggregate {
             function,
             distinct,
@@ -1781,7 +1815,8 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
     Some(match expr {
         Expr::List(items) | Expr::Call(_, items) => Parts::always(items.iter().collect()),
         Expr::Map(entries) => Parts::always(entries.iter().map(|(_, value)| value).collect()),
-        Expr::Property(operand, _)
+        Expr::Admit(_, operand)
+        | Expr::Property(operand, _)
         | Expr::HasLabels(operand, _)
         | Expr::Not(operand)
         | Expr::Negate(operand)
@@ -1875,6 +1910,10 @@ fn collect_closed<'a>(
         out.push(expr);
     }
     outermost
+}
+
+fn is_closed(expr: &Expr) -> bool {
+    collect_closed(expr, &mut Vec::new(), &mut Vec::new()).is_some()
 }
 
 fn join(a: Option<usize>, b: Option<usize>) -> Option<usize> {

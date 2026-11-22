@@ -298,7 +298,8 @@ pub trait Instance: Sync {
     /// Opens a session. Each thread opens its own.
     fn session(&self) -> Result<Box<dyn Session + '_>, EngineError>;
 
-    /// Declares what the engine needs before data loads. RhizoDB is schemaless and does nothing.
+    /// Declares what the engine needs before data loads, such as RhizoDB's property indexes on the
+    /// ids that LadybugDB keys its tables by.
     fn create_schema(&self) -> Result<(), EngineError>;
 
     /// Builds the engine's own input for [`Instance::bulk_load`] from the dataset, outside any

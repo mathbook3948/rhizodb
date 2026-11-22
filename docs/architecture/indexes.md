@@ -1,26 +1,27 @@
 # Indexes
 
-Decides how keyword and vector indexes are stored, kept current, and searched.
+Decides how keyword, vector, and property indexes are stored, kept current, and searched.
 
 ## Background
 
-A host that keeps people, places, and tasks for years must find them by words and by meaning, not only by label and pattern. An index kept outside the graph can drift from the data it describes, so the indexes live in the database and follow its transactions.
+A host that keeps people, places, and tasks for years must find them by words, by meaning, and by property value, not only by label and pattern. An index kept outside the graph can drift from the data it describes, so the indexes live in the database and follow its transactions.
 
 ## Decisions
 
-- Keyword and vector indexes live inside the graph, in the same storage as the data they index.
+- Every index lives inside the graph, in the same storage as the data it indexes.
 - An index is updated in the same write transaction as the labels and properties it covers, so a search never sees an entry that disagrees with committed data.
 - A rolled-back transaction leaves every index as it was.
 - A search inside a write transaction sees that transaction's own writes.
 - An index covers the nodes that carry one label or the relationships of one type.
-- An index entry is keyed by its element's ID alone.
-- Index names are case-sensitive and unique across both kinds and both kinds of element.
+- A keyword or vector index entry is keyed by its element's ID alone.
+- Index names are case-sensitive and unique across every kind of index and both kinds of element.
 - The host creates and drops indexes with `Database` methods, each in a write transaction of its own.
 - The same `Database` method creates an index of one kind over a label or over a relationship type, named by an `IndexTarget`.
 - Creating an index fills it from the nodes or relationships already there, in the transaction that records it.
 - Creating an index that exists with the same definition changes nothing.
 - Creating an index under a name that another definition holds fails with its own error kind.
 - Dropping an index removes its definition and every entry in one transaction.
+- The database keeps the committed index definitions in memory, and a commit that changes them replaces that copy before any later transaction begins.
 - Dropping an index that does not exist succeeds and reports that nothing was dropped.
 - Each index has an internal ID that keys its entries, so a dropped index's name can be reused at once.
 - Queries search an index over a label with the built-in procedures `db.index.keyword.queryNodes(index, query, limit)` and `db.index.vector.queryNodes(index, vector, limit)`.
@@ -36,6 +37,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Text is put in Unicode normalization form NFKC before it is split.
 - Text splits into words at Unicode word boundaries.
 - Words are lowercased.
+- A word starts and ends at a grapheme cluster whose first character is a letter or digit, so punctuation that a script change leaves at its edge, and a mark after punctuation, are not part of it.
 - A grapheme cluster that starts with whitespace, or with a character that Unicode grapheme rules join to the character before it, separates words.
 - A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of units and its single units.
 - A unit of such a run is a grapheme cluster, except in Hangul.
@@ -75,6 +77,29 @@ A host that keeps people, places, and tasks for years must find them by words an
 - A host with more vectors than one query can scan keeps an approximate index of its own outside the database and reads the elements it returns by ID.
 - The score is higher for closer vectors: the cosine similarity, the dot product, or the negative euclidean distance.
 - The integrity check derives every index entry from the nodes and relationships and compares it with the stored entries byte for byte.
+- A property index covers one property, and the host creates it with `Database::create_property_index`.
+- A property index entry is keyed by the index ID, the key of the property value, and the element ID.
+- Two property values have the same key exactly when `=` holds between them.
+- An integer and a float of the same number have the same key.
+- A number in the range of integers is keyed by its whole part and the exact fraction left over.
+- A float outside the range of integers is keyed by its bits, below or above every number in that range.
+- NaN, and a list that holds NaN, is left out of a property index.
+- Keys of values that `<` orders sort in that order, inside one family of comparable types.
+- A string or byte string is keyed by its bytes with zeros escaped and a terminator after them.
+- A time is keyed by its instant and then its offset, and a datetime by its instant, then its offset, then its zone.
+- A list is keyed by the keys of its items and an end marker.
+- Queries never name a property index, and a query uses one whenever its conditions allow.
+- A `MATCH` or `MERGE` pattern part uses a property index over the label of its start node or the type of its first relationship.
+- A pattern part that uses an index over a relationship type starts at the ends of the relationships the index returns.
+- The conditions a property index serves are a property in the pattern's map and `=`, `IN`, `<`, `<=`, `>`, and `>=` on the property in the `WHERE` of the `MATCH`, alone or joined by `AND`.
+- A served condition compares the property with an expression that reads no variable the pattern part or a later one binds.
+- `id()` compared with `=` or `IN` in the `WHERE` of a `MATCH` reads the node, or the ends of the relationship, by ID.
+- A pattern part tries an ID lookup first, then an index lookup by `=` or `IN`, then an index range, then the label scan.
+- A comparison that is never true, such as one with null, NaN, a byte string, or a duration, makes an index lookup return nothing.
+- A comparison with a list, or a value that fails to evaluate, leaves the lookup to the label scan.
+- A query applies every condition to each element an index or ID lookup returns.
+- Elements that an index or ID lookup returns are matched in ascending ID order, as a label scan matches them.
+- A value error in a condition is raised only for the elements a lookup returns, not for the elements it skips.
 
 ## Open
 

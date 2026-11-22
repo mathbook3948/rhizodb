@@ -1,9 +1,12 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::NodeId;
+use crate::graph::RelationshipId;
 use crate::storage::ReadTransaction;
 
 use super::compare::Key;
@@ -20,6 +23,23 @@ use super::plan::Slot;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
+
+#[derive(Default)]
+struct Seen {
+    nodes: HashSet<NodeId>,
+    relationships: HashSet<RelationshipId>,
+    others: BTreeSet<Key>,
+}
+
+impl Seen {
+    fn insert(&mut self, value: &Datum) -> bool {
+        match value {
+            Datum::Node(id) => self.nodes.insert(*id),
+            Datum::Relationship(id) => self.relationships.insert(*id),
+            other => self.others.insert(Key(vec![other.clone()])),
+        }
+    }
+}
 
 impl<T: ReadTransaction> Env<'_, T> {
     /// Groups `rows` by the key values and yields one row per group with keys, aggregates, and
@@ -100,14 +120,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             ));
         };
         let mut values = Vec::new();
-        let mut seen = BTreeSet::new();
+        let mut seen = Seen::default();
         for row in rows {
             let value = self.eval(argument, row)?;
             if value.is_null() {
                 continue;
             }
             aggregate.function.admit(&value)?;
-            if aggregate.distinct && !seen.insert(Key(vec![value.clone()])) {
+            if aggregate.distinct && !seen.insert(&value) {
                 continue;
             }
             values.push(value);
@@ -174,7 +194,7 @@ impl AggregateFunction {
         }
     }
 
-    fn admit(self, value: &Datum) -> Result<(), Error> {
+    pub(crate) fn admit(self, value: &Datum) -> Result<(), Error> {
         match Shape::of(value) {
             Some(shape) if !admits(self.accepted(), shape) => Err(type_error(format!(
                 "{self:?} cannot take a {}",

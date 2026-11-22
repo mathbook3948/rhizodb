@@ -132,3 +132,32 @@ fn a_file_database_keeps_committed_data_across_reopen() {
         Some(b"1".to_vec())
     );
 }
+
+#[test]
+fn a_range_scan_returns_the_keys_from_its_start_up_to_its_end() {
+    let storage = RedbStorage::in_memory().unwrap();
+    put_all(
+        &storage,
+        Table::PropertyEntries,
+        &[(b"a", b"1"), (b"b", b"2"), (b"ba", b"3"), (b"c", b"4")],
+    );
+    let read = storage.begin_read().unwrap();
+    let keys = |start: &[u8], end: &[u8]| -> Vec<Vec<u8>> {
+        read.scan_range(Table::PropertyEntries, start, end)
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    };
+    assert_eq!(keys(b"b", b"c"), vec![b"b".to_vec(), b"ba".to_vec()]);
+    assert_eq!(keys(b"a", b"b"), vec![b"a".to_vec()]);
+    assert_eq!(keys(b"c", b"b"), Vec::<Vec<u8>>::new());
+    let write = storage.begin_write().unwrap();
+    assert_eq!(
+        write
+            .scan_range(Table::PropertyEntries, b"", b"z")
+            .unwrap()
+            .len(),
+        4
+    );
+}

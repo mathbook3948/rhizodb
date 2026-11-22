@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -7,8 +6,8 @@ use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
-use crate::procedure::Procedures;
 use crate::query;
+use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::redb_backend::RedbStorage;
@@ -20,7 +19,7 @@ use crate::transaction::WriteTransaction;
 #[derive(Debug)]
 pub struct Database {
     graph: Graph<RedbStorage>,
-    procedures: Procedures,
+    statements: Statements,
 }
 
 impl Database {
@@ -28,7 +27,7 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::open(path)?)?,
-            procedures: Procedures::new(),
+            statements: Statements::default(),
         })
     }
 
@@ -36,7 +35,7 @@ impl Database {
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::in_memory()?)?,
-            procedures: Procedures::new(),
+            statements: Statements::default(),
         })
     }
 
@@ -49,13 +48,13 @@ impl Database {
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// when the calling thread holds one.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute(&self.graph, &self.procedures, query, parameters)
+        query::execute(&self.graph, &self.statements, query, parameters)
     }
 
     /// Begins a read transaction, which sees the graph as it was committed at this moment for as
     /// long as it lives. Read transactions run alongside each other and alongside a writer.
     pub fn begin_read(&self) -> Result<ReadTransaction<'_>, Error> {
-        Ok(ReadTransaction::new(self.graph.read()?, &self.procedures))
+        Ok(ReadTransaction::new(self.graph.read()?, &self.statements))
     }
 
     /// Begins a write transaction. Only one is open at a time, so this waits until any open write
@@ -64,7 +63,7 @@ impl Database {
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// instead of waiting for itself.
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, Error> {
-        Ok(WriteTransaction::new(self.graph.write()?, &self.procedures))
+        Ok(WriteTransaction::new(self.graph.write()?, &self.statements))
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
@@ -80,7 +79,7 @@ impl Database {
                 format!("procedure `{name}` is in the reserved `db` namespace"),
             ));
         }
-        self.procedures.insert(name.clone(), Arc::new(procedure));
+        self.statements.register(procedure);
         Ok(())
     }
 
@@ -170,6 +169,51 @@ impl Database {
     ) -> Result<(), Error> {
         let mut tx = self.graph.write()?;
         tx.create_vector_index(name, target, property, dimension, metric)?;
+        Ok(tx.commit()?)
+    }
+
+    /// Creates the property index `name` over the property `property` of every node or
+    /// relationship that `target` covers, and fills it from the ones already there, in one
+    /// write transaction. A query that looks a property up by value reads the elements the
+    /// index holds for that value instead of every element of the label or type, when it names
+    /// the property in the pattern, as in `MATCH (p:Person {id: $id})`, or compares it in the
+    /// `WHERE` of the `MATCH` with `=`, `IN`, `<`, `<=`, `>`, or `>=`, as in
+    /// `MATCH (p:Person) WHERE p.age >= 18 AND p.age < 30`, against a value that the pattern
+    /// does not bind. A pattern that starts at a node of the label, or at a relationship of the
+    /// type, uses it.
+    ///
+    /// Values are found under the same rules as `=` and `<`: an integer finds the float of the
+    /// same number, a string sorts by its bytes, and a time or datetime compares by its instant.
+    /// NaN, which equals nothing, is not indexed.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::IndexTarget;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.create_property_index("person_id", IndexTarget::Label("Person"), "id")?;
+    /// db.execute("INSERT (:Person {id: 1, name: 'Ada'}), (:Person {id: 2.0, name: 'Grace'})", &Parameters::new())?;
+    /// let parameters = Parameters::from([("id".to_owned(), Value::Integer(2))]);
+    /// let result = db.execute("MATCH (p:Person {id: $id}) RETURN p.name", &parameters)?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    ///
+    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
+    /// another definition holds the name, and with
+    /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
+    /// empty name.
+    pub fn create_property_index(
+        &self,
+        name: &str,
+        target: IndexTarget<'_>,
+        property: &str,
+    ) -> Result<(), Error> {
+        let mut tx = self.graph.write()?;
+        tx.create_property_index(name, target, property)?;
         Ok(tx.commit()?)
     }
 

@@ -527,7 +527,9 @@ impl<T: ReadTransaction> GraphTx<T> {
 fn covered_properties(kind: &IndexKind) -> &[Token<PropertyKey>] {
     match kind {
         IndexKind::Keyword { properties } => properties,
-        IndexKind::Vector { property, .. } => std::slice::from_ref(property),
+        IndexKind::Vector { property, .. } | IndexKind::Property { property } => {
+            std::slice::from_ref(property)
+        }
     }
 }
 

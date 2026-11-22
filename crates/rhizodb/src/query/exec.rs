@@ -37,11 +37,13 @@ use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
 use super::update::Graveyard;
+use super::update::Writer;
 
 /// Runs a read-only program. It only needs a read transaction.
 pub(crate) fn run_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
+    parameters: &[Datum],
     now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
@@ -49,6 +51,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
     let env = Env {
         tx,
         slots: program.slot_count,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
@@ -63,6 +66,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
 pub(crate) fn run_write<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     program: &Program<Clause>,
+    parameters: &[Datum],
     now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
@@ -71,6 +75,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
     Env {
         tx: &*tx,
         slots,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
@@ -81,15 +86,22 @@ pub(crate) fn run_write<W: WriteTransaction>(
         Clause::Read(clause) => Env {
             tx: &*tx,
             slots,
+            parameters,
             now,
             graveyard: &graveyard,
             patterns: &patterns,
             check: None,
         }
         .read_clause(clause, rows),
-        Clause::Update(clause) => {
-            super::update::apply(tx, slots, now, &patterns, &mut graveyard, clause, rows)
+        Clause::Update(clause) => Writer {
+            tx,
+            slots,
+            parameters,
+            now,
+            patterns: &patterns,
+            graveyard: &mut graveyard,
         }
+        .apply(clause, rows),
     })?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
@@ -97,6 +109,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
     let env = Env {
         tx: &*tx,
         slots,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
@@ -363,6 +376,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let checker = Env {
             tx: self.tx,
             slots: self.slots,
+            parameters: self.parameters,
             now: self.now,
             graveyard: self.graveyard,
             patterns: self.patterns,

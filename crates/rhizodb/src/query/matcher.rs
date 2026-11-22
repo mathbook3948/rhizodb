@@ -5,12 +5,15 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::graph;
 use crate::graph::Adjacent;
+use crate::graph::EncodedNode;
 use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipType;
+use crate::graph::Token;
 use crate::storage::ReadTransaction;
+use crate::value::PropertyValue;
 
 use super::compare::equals;
 use super::datum::Datum;
@@ -29,6 +32,8 @@ use super::plan::Step;
 
 /// Receives each complete match. Returning `false` stops the search.
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
+
+type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
 
 struct Search<'s, 'e, T> {
     env: &'s Env<'e, T>,
@@ -67,15 +72,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         })
     }
 
-    fn properties_match(
-        &self,
-        properties: &graph::Properties,
-        expected: Option<&Expr>,
-        row: &Row,
-    ) -> Result<bool, Error> {
-        let Some(expected) = expected else {
-            return Ok(true);
-        };
+    fn expected_properties(&self, expected: &Expr, row: &Row) -> Result<ExpectedProperties, Error> {
         let entries = match self.eval(expected, row)? {
             Datum::Map(entries) => entries,
             other => {
@@ -85,29 +82,61 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )));
             }
         };
-        for (key, value) in &entries {
-            let stored = match self.tx.lookup_token::<PropertyKey>(key)? {
-                Some(token) => properties.get(&token).cloned().map(Datum::from),
-                None => None,
-            };
-            let stored = stored.unwrap_or(Datum::Null);
-            if equals(&stored, value) != Some(true) {
+        entries
+            .into_iter()
+            .map(|(key, value)| Ok((self.tx.lookup_token::<PropertyKey>(&key)?, value)))
+            .collect()
+    }
+
+    fn properties_match(
+        &self,
+        stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
+        expected: Option<&Expr>,
+        row: &Row,
+    ) -> Result<bool, Error> {
+        match expected {
+            Some(expected) => holds(&self.expected_properties(expected, row)?, stored),
+            None => Ok(true),
+        }
+    }
+
+    fn node_labelled(&self, node: &EncodedNode<'_>, labels: &LabelExpr) -> Result<bool, Error> {
+        match labels {
+            LabelExpr::Name(name) => match self.tx.lookup_token::<Label>(&name.0)? {
+                Some(label) => Ok(node.has_label(label)?),
+                None => Ok(false),
+            },
+            labels => self.node_has_labels(&node.labels()?, labels),
+        }
+    }
+
+    fn node_matches(
+        &self,
+        id: NodeId,
+        pattern: &NodePattern,
+        labels_known: bool,
+        row: &Row,
+    ) -> Result<bool, Error> {
+        if labels_known && pattern.properties.is_none() {
+            return Ok(true);
+        }
+        if !labels_known {
+            let labelled = self.tx.with_node(id, |node| match &pattern.labels {
+                Some(labels) => self.node_labelled(&node, labels),
+                None => Ok(true),
+            })?;
+            if labelled != Some(true) {
                 return Ok(false);
             }
         }
-        Ok(true)
-    }
-
-    fn node_matches(&self, id: NodeId, pattern: &NodePattern, row: &Row) -> Result<bool, Error> {
-        let Some(record) = self.tx.node(id)? else {
-            return Ok(false);
+        let Some(expected) = &pattern.properties else {
+            return Ok(true);
         };
-        if let Some(labels) = &pattern.labels
-            && !self.node_has_labels(&record, labels)?
-        {
-            return Ok(false);
-        }
-        self.properties_match(&record.properties, pattern.properties.as_ref(), row)
+        let expected = self.expected_properties(expected, row)?;
+        let matches = self
+            .tx
+            .with_node(id, |node| holds(&expected, |key| Ok(node.property(key)?)))?;
+        Ok(matches == Some(true))
     }
 
     fn relationship_matches(
@@ -122,23 +151,40 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(record) = self.tx.relationship(id)? else {
             return Ok(false);
         };
-        self.properties_match(&record.properties, pattern.properties.as_ref(), row)
+        self.properties_match(
+            |key| Ok(record.properties.get(&key).cloned()),
+            pattern.properties.as_ref(),
+            row,
+        )
     }
 
-    fn start_candidates(&self, pattern: &NodePattern, row: &Row) -> Result<Vec<NodeId>, Error> {
+    fn start_candidates(
+        &self,
+        part: &PatternPart,
+        row: &Row,
+    ) -> Result<(Vec<NodeId>, bool), Error> {
+        let pattern = &part.start;
         if pattern.bound {
-            return Ok(match row.get(pattern.slot) {
-                Some(Datum::Node(id)) => vec![*id],
-                _ => Vec::new(),
-            });
+            return Ok((
+                match row.get(pattern.slot) {
+                    Some(Datum::Node(id)) => vec![*id],
+                    _ => Vec::new(),
+                },
+                false,
+            ));
         }
-        match pattern.labels.as_ref().and_then(LabelExpr::required) {
+        let labels_known = label_scan_decides(pattern);
+        if let Some(sought) = self.seek_start(part, row)? {
+            return Ok((sought.nodes, labels_known && sought.labelled));
+        }
+        let nodes = match pattern.labels.as_ref().and_then(LabelExpr::required) {
             Some(label) => match self.tx.lookup_token::<Label>(&label.0)? {
-                Some(token) => Ok(self.tx.node_ids_with_label(token)?),
-                None => Ok(Vec::new()),
+                Some(token) => self.tx.node_ids_with_label(token)?,
+                None => Vec::new(),
             },
-            None => Ok(self.tx.node_ids()?),
-        }
+            None => self.tx.node_ids()?,
+        };
+        Ok((nodes, labels_known))
     }
 
     fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
@@ -180,14 +226,35 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 }
 
+fn holds(
+    expected: &ExpectedProperties,
+    stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
+) -> Result<bool, Error> {
+    for (key, value) in expected {
+        let stored = match key {
+            Some(key) => stored(*key)?.map_or(Datum::Null, Datum::from),
+            None => Datum::Null,
+        };
+        if equals(&stored, value) != Some(true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn label_scan_decides(pattern: &NodePattern) -> bool {
+    !pattern.bound && matches!(pattern.labels, Some(LabelExpr::Name(_)))
+}
+
 impl<T: ReadTransaction> Search<'_, '_, T> {
     fn part(&mut self, index: usize, row: &mut Row, emit: &mut Emit<'_>) -> Result<bool, Error> {
         let patterns = self.patterns;
         let Some(part) = patterns.get(index) else {
             return emit(row);
         };
-        for id in self.env.start_candidates(&part.start, row)? {
-            if !self.env.node_matches(id, &part.start, row)? {
+        let (candidates, labels_known) = self.env.start_candidates(part, row)?;
+        for id in candidates {
+            if !self.env.node_matches(id, &part.start, labels_known, row)? {
                 continue;
             }
             set(row, part.start.slot, Datum::Node(id));
@@ -292,14 +359,19 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
     ) -> Result<bool, Error> {
         let depth = walked.len() as u64;
         if depth >= hops.min {
-            let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
-            let accepted =
-                !step.relationship.bound || row.get(step.relationship.slot) == Some(&value);
-            if accepted {
-                set(row, step.relationship.slot, value);
-                if !self.arrive(index, step_index, step, current, row, trail, emit)? {
-                    return Ok(false);
+            let relationship = &step.relationship;
+            let accepted = if relationship.anonymous {
+                true
+            } else {
+                let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
+                let accepted = !relationship.bound || row.get(relationship.slot) == Some(&value);
+                if accepted {
+                    set(row, relationship.slot, value);
                 }
+                accepted
+            };
+            if accepted && !self.arrive(index, step_index, step, current, row, trail, emit)? {
+                return Ok(false);
             }
         }
         if hops.max.is_some_and(|max| depth >= max) {
@@ -360,7 +432,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         } else {
             set(row, step.node.slot, Datum::Node(node));
         }
-        if !self.env.node_matches(node, &step.node, row)? {
+        if !self.env.node_matches(node, &step.node, false, row)? {
             return Ok(true);
         }
         self.step(index, step_index + 1, node, row, trail, emit)

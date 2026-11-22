@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use crate::error::Error;
@@ -15,6 +16,7 @@ use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
+use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::temporal::Clocks;
 
@@ -38,6 +40,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) tx: &'a GraphTx<T>,
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
+    /// The values of [`Program::parameters`](super::plan::Program::parameters), in order.
+    pub(crate) parameters: &'a [Datum],
     /// The statement and transaction instants, which the clock functions other than `realtime`
     /// read.
     pub(crate) now: &'a Clocks,
@@ -126,19 +130,18 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
-        let properties = match value {
-            Datum::Node(id) => self.node(*id)?.properties,
-            Datum::Relationship(id) => self.relationship(*id)?.properties,
+        let token = self.tx.lookup_token::<PropertyKey>(key)?;
+        let stored = match (value, token) {
+            (Datum::Node(id), Some(token)) => {
+                self.tx.with_node(*id, |node| node.property(token))?
+            }
+            (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
+            (Datum::Node(id), None) => self.tx.node(*id)?.map(|_| None),
+            (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
             _ => return Ok(None),
         };
-        let Some(token) = self.tx.lookup_token::<PropertyKey>(key)? else {
-            return Ok(Some(Datum::Null));
-        };
         Ok(Some(
-            properties
-                .get(&token)
-                .cloned()
-                .map_or(Datum::Null, Datum::from),
+            stored.ok_or_else(deleted)?.map_or(Datum::Null, Datum::from),
         ))
     }
 
@@ -159,14 +162,14 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn node_has_labels(
         &self,
-        record: &NodeRecord,
+        found: &BTreeSet<Token<Label>>,
         labels: &LabelExpr,
     ) -> Result<bool, Error> {
-        labels.matches(!record.labels.is_empty(), &mut |name| {
+        labels.matches(!found.is_empty(), &mut |name| {
             Ok(self
                 .tx
                 .lookup_token::<Label>(name)?
-                .is_some_and(|token| record.labels.contains(&token)))
+                .is_some_and(|token| found.contains(&token)))
         })
     }
 
@@ -240,7 +243,11 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn eval_node(&self, expr: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         match expr {
-            Expr::Constant(value) | Expr::Parameter(value) => Ok((value.clone(), Taint::Clean)),
+            Expr::Constant(value) => Ok((value.clone(), Taint::Clean)),
+            Expr::Parameter(index) => Ok((
+                self.parameters.get(*index).cloned().unwrap_or(Datum::Null),
+                Taint::Clean,
+            )),
             Expr::Slot(slot) => Ok((
                 row.get(*slot).cloned().unwrap_or(Datum::Null),
                 self.slot_taint(*slot),
@@ -365,6 +372,15 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let (args, taints) = self.tracked_all(args, row)?;
                 let (taint, doubtful) = taint::call(*function, &args, taints);
                 settle(self.call(*function, args), doubtful, taint)
+            }
+            Expr::Admit(function, argument) => {
+                let (value, taint) = self.tracked(argument, row)?;
+                let doubtful = taint.is_tainted();
+                settle(
+                    function.admit(&value).map(|()| value),
+                    doubtful,
+                    Taint::Whole,
+                )
             }
             Expr::Case(case) => {
                 let scrutinee = case
@@ -524,7 +540,9 @@ impl<T: ReadTransaction> Env<'_, T> {
         match operand {
             Datum::Null => Ok(Datum::Null),
             Datum::Node(id) => Ok(Datum::Boolean(
-                self.node_has_labels(&self.node(id)?, labels)?,
+                self.tx
+                    .with_node(id, |node| self.node_has_labels(&node.labels()?, labels))?
+                    .ok_or_else(deleted)?,
             )),
             Datum::Relationship(id) => {
                 let rel_type = self.relationship_type(id)?;

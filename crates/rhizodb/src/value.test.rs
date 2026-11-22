@@ -57,7 +57,7 @@ fn temporal() -> impl Strategy<Value = Temporal> {
     ]
 }
 
-fn property_value() -> impl Strategy<Value = PropertyValue> {
+pub(crate) fn property_value() -> impl Strategy<Value = PropertyValue> {
     let leaf = prop_oneof![
         any::<bool>().prop_map(PropertyValue::Boolean),
         any::<i64>().prop_map(PropertyValue::Integer),
@@ -71,7 +71,7 @@ fn property_value() -> impl Strategy<Value = PropertyValue> {
     })
 }
 
-fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
+pub(crate) fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
     match (left, right) {
         (PropertyValue::Float(a), PropertyValue::Float(b)) => a.to_bits() == b.to_bits(),
         (PropertyValue::List(a), PropertyValue::List(b)) => {

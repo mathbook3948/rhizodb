@@ -146,3 +146,42 @@ fn a_deleted_node_passed_as_a_parameter_can_still_be_returned() {
     assert_eq!(result.rows(), [vec![node]]);
     assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(0));
 }
+
+#[test]
+fn a_query_run_again_reads_the_parameters_of_each_run() {
+    let db = db();
+    let query = "UNWIND $xs AS x RETURN x + $y AS z, $y AS y";
+    let run_with = |xs: Vec<i64>, y: i64| {
+        let mut parameters = rhizodb::Parameters::new();
+        parameters.insert("xs".to_owned(), list(xs.into_iter().map(int)));
+        parameters.insert("y".to_owned(), int(y));
+        db.execute(query, &parameters).unwrap().rows().to_vec()
+    };
+    assert_eq!(
+        run_with(vec![1, 2], 10),
+        [vec![int(11), int(10)], vec![int(12), int(10)]]
+    );
+    assert_eq!(run_with(vec![5], 1), [vec![int(6), int(1)]]);
+    let transaction = db.begin_read().unwrap();
+    let mut parameters = rhizodb::Parameters::new();
+    parameters.insert("xs".to_owned(), list([int(0)]));
+    parameters.insert("y".to_owned(), int(3));
+    assert_eq!(
+        transaction.execute(query, &parameters).unwrap().rows(),
+        [vec![int(3), int(3)]]
+    );
+}
+
+#[test]
+fn a_query_run_again_without_a_parameter_it_reads_fails() {
+    let db = db();
+    let mut parameters = rhizodb::Parameters::new();
+    parameters.insert("y".to_owned(), int(1));
+    let query = "RETURN $y AS y";
+    assert_eq!(
+        db.execute(query, &parameters).unwrap().rows(),
+        [vec![int(1)]]
+    );
+    let error = db.execute(query, &rhizodb::Parameters::new()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::MissingParameter);
+}

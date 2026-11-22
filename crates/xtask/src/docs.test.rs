@@ -81,3 +81,65 @@ fn reports_entries_of_a_domain_folder_that_are_not_docs() {
         ]
     );
 }
+
+#[test]
+fn reports_a_decision_line_with_two_sentences() {
+    let text = VALID.replace(
+        "- A decision.\n",
+        "- A decision.\n- IDs only grow. A deleted ID is never reused.\n",
+    );
+
+    assert_eq!(
+        parse_doc("architecture/storage.md", &text),
+        Err(vec![
+            "line 12: a Decisions line holds one decision in one sentence".into()
+        ])
+    );
+}
+
+#[test]
+fn reports_decisions_joined_by_a_semicolon() {
+    let text = VALID.replace(
+        "- A decision.\n",
+        "- IDs only grow; IDs are never reused.\n",
+    );
+
+    assert_eq!(
+        parse_doc("architecture/storage.md", &text),
+        Err(vec![
+            "line 11: a Decisions line holds one decision in one sentence".into()
+        ])
+    );
+}
+
+#[test]
+fn reports_reasoning_in_a_decision_line() {
+    let text = VALID.replace(
+        "- A decision.\n",
+        "- Durations keep months apart, because months have no fixed length.\n",
+    );
+
+    assert_eq!(
+        parse_doc("architecture/storage.md", &text),
+        Err(vec![
+            "line 11: a Decisions line leaves its reasoning to the commit message".into()
+        ])
+    );
+}
+
+#[test]
+fn accepts_code_spans_and_abbreviations_inside_one_sentence() {
+    let text = VALID.replace(
+        "- A decision.\n",
+        "- `n.name` reads a property, and `a.b.c` reads nested ones.\n",
+    );
+
+    assert!(parse_doc("architecture/storage.md", &text).is_ok());
+}
+
+#[test]
+fn leaves_background_prose_alone() {
+    let text = VALID.replace("Reason.\n", "Reason one. Reason two, because it matters.\n");
+
+    assert!(parse_doc("architecture/storage.md", &text).is_ok());
+}

@@ -1,6 +1,8 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use redb::Database;
+use redb::ReadOnlyTable;
 use redb::ReadableDatabase;
 use redb::ReadableTable;
 use redb::TableDefinition;
@@ -14,6 +16,8 @@ use super::Table;
 use super::WriteTransaction;
 
 type RedbTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
+
+type OpenTable = ReadOnlyTable<&'static [u8], &'static [u8]>;
 
 const fn definition(table: Table) -> RedbTable {
     TableDefinition::new(table.name())
@@ -55,7 +59,10 @@ impl Storage for RedbStorage {
 
     fn begin_read(&self) -> Result<RedbRead, StorageError> {
         let transaction = self.database.begin_read().map_err(StorageError::new)?;
-        Ok(RedbRead { transaction })
+        Ok(RedbRead {
+            transaction,
+            tables: std::array::from_fn(|_| OnceLock::new()),
+        })
     }
 
     fn begin_write(&self) -> Result<RedbWrite, StorageError> {
@@ -64,9 +71,25 @@ impl Storage for RedbStorage {
     }
 }
 
+/// A read transaction that opens each table once, on its first use.
 #[derive(Debug)]
 pub(crate) struct RedbRead {
     transaction: redb::ReadTransaction,
+    tables: [OnceLock<OpenTable>; Table::ALL.len()],
+}
+
+impl RedbRead {
+    fn table(&self, table: Table) -> Result<&OpenTable, StorageError> {
+        let cell = &self.tables[table as usize];
+        if let Some(open) = cell.get() {
+            return Ok(open);
+        }
+        let open = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        Ok(cell.get_or_init(|| open))
+    }
 }
 
 pub(crate) struct RedbWrite {
@@ -88,22 +111,83 @@ fn collect_prefix<T: ReadableTable<&'static [u8], &'static [u8]>>(
     Ok(entries)
 }
 
+fn read_value<T: ReadableTable<&'static [u8], &'static [u8]>, R, E: From<StorageError>>(
+    table: &T,
+    key: &[u8],
+    read: impl FnOnce(&[u8]) -> Result<R, E>,
+) -> Result<Option<R>, E> {
+    match table.get(key).map_err(StorageError::new)? {
+        Some(guard) => read(guard.value()).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn visit_entries<T: ReadableTable<&'static [u8], &'static [u8]>, E: From<StorageError>>(
+    table: &T,
+    prefix: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    for item in table.range(prefix..).map_err(StorageError::new)? {
+        let (key, value) = item.map_err(StorageError::new)?;
+        if !key.value().starts_with(prefix) {
+            break;
+        }
+        visit(key.value(), value.value())?;
+    }
+    Ok(())
+}
+
+fn collect_range<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    table: &T,
+    start: &[u8],
+    end: &[u8],
+) -> Result<Vec<Entry>, StorageError> {
+    let mut entries = Vec::new();
+    if start >= end {
+        return Ok(entries);
+    }
+    for item in table.range(start..end).map_err(StorageError::new)? {
+        let (key, value) = item.map_err(StorageError::new)?;
+        entries.push((key.value().to_vec(), value.value().to_vec()));
+    }
+    Ok(entries)
+}
+
 impl ReadTransaction for RedbRead {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        let value = table.get(key).map_err(StorageError::new)?;
+        let value = self.table(table)?.get(key).map_err(StorageError::new)?;
         Ok(value.map(|guard| guard.value().to_vec()))
     }
 
     fn scan_prefix(&self, table: Table, prefix: &[u8]) -> Result<Vec<Entry>, StorageError> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        collect_prefix(&table, prefix)
+        collect_prefix(self.table(table)?, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Entry>, StorageError> {
+        collect_range(self.table(table)?, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        read_value(self.table(table)?, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        visit_entries(self.table(table)?, prefix, visit)
     }
 }
 
@@ -123,6 +207,45 @@ impl ReadTransaction for RedbWrite {
             .open_table(definition(table))
             .map_err(StorageError::new)?;
         collect_prefix(&table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Entry>, StorageError> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        collect_range(&table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        read_value(&table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        visit_entries(&table, prefix, visit)
     }
 }
 

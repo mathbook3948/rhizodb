@@ -6,6 +6,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
 
@@ -23,6 +24,16 @@ pub(crate) enum Plan {
     Updating(Program<Clause>),
 }
 
+impl Plan {
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) fn parameters(&self) -> &[String] {
+        match self {
+            Self::ReadOnly(program) => &program.parameters,
+            Self::Updating(program) => &program.parameters,
+        }
+    }
+}
+
 /// One or more pipelines whose results are concatenated, as `UNION` does.
 #[derive(Clone, Debug)]
 pub(crate) struct Program<C> {
@@ -34,6 +45,8 @@ pub(crate) struct Program<C> {
     /// pattern. Each is evaluated once before the first clause runs, so a type error in the
     /// query text is reported whatever the data.
     pub(crate) closed: Vec<Expr>,
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) parameters: Vec<String>,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.
@@ -124,6 +137,41 @@ pub(crate) struct PatternPart {
     pub(crate) path: Option<Slot>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<Step>,
+    /// Ways to find the start nodes without reading every node of the label, tried in order.
+    pub(crate) seeks: Vec<Seek>,
+}
+
+/// Conditions that every match puts on one value of the start node or of the first
+/// relationship, which an ID lookup or a property index turns into the start nodes to try.
+#[derive(Clone, Debug)]
+pub(crate) struct Seek {
+    pub(crate) element: SeekElement,
+    pub(crate) key: SeekKey,
+    /// Each holds for every match, and none reads a variable that the pattern part or a later
+    /// one binds.
+    pub(crate) tests: Vec<SeekTest>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeekElement {
+    Start,
+    FirstRelationship,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SeekKey {
+    Id,
+    Property(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SeekTest {
+    /// The value equals the expression.
+    Equal(Expr),
+    /// The value equals an item of the list the expression gives.
+    In(Expr),
+    /// The value compares to the expression as the bound says.
+    Compare(Bound, Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +194,8 @@ pub(crate) struct NodePattern {
 pub(crate) struct RelationshipPattern {
     pub(crate) slot: Slot,
     pub(crate) bound: bool,
+    /// Set when no variable names the relationship, so nothing reads its slot.
+    pub(crate) anonymous: bool,
     /// In a pattern that creates, a single name.
     pub(crate) labels: Option<LabelExpr>,
     pub(crate) direction: Direction,
@@ -235,9 +285,9 @@ pub(crate) enum AggregateFunction {
 #[derive(Clone, Debug)]
 pub(crate) enum Expr {
     Constant(Datum),
-    /// A supplied parameter's value. It is data, not query text, so it never makes an
-    /// expression closed.
-    Parameter(Datum),
+    /// The value of the supplied parameter that [`Program::parameters`] names at this index. It
+    /// is data, not query text, so it never makes an expression closed.
+    Parameter(usize),
     Slot(Slot),
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
@@ -255,6 +305,8 @@ pub(crate) enum Expr {
         negated: bool,
     },
     Call(Function, Vec<Expr>),
+    /// An aggregate argument that no row can change, checked against the types the aggregate takes.
+    Admit(AggregateFunction, Box<Expr>),
     Case(Box<Case>),
     ListComprehension(Box<ListComprehension>),
     Quantified(Box<Quantified>),

@@ -1,7 +1,7 @@
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -106,7 +106,9 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// whitespace, or with a character the Unicode grapheme rules join to the character before it
 /// (Grapheme_Cluster_Break Extend, SpacingMark, or ZWJ), has no base letter and separates words
 /// like a space; a mark with Grapheme_Cluster_Break Other, such as a few spacing marks of
-/// Brahmic scripts, is still taken for a letter. Control characters are dropped. Hangul units
+/// Brahmic scripts, is still taken for a letter. A word starts and ends at a grapheme cluster whose
+/// first character is a letter or digit, so punctuation that a script change leaves at its edge,
+/// and a mark that follows punctuation, are not part of it. Control characters are dropped. Hangul units
 /// are smaller than grapheme clusters because a cluster of loose jamo such as "ㅋㅋㅋ" holds
 /// several letters a reader types and searches one at a time. The same text always gives the
 /// same terms, in the same order, with positions counted from zero.
@@ -167,10 +169,11 @@ impl Scan {
     }
 
     fn push_word(&mut self, word: &mut String) -> bool {
-        let pushed = word.chars().any(char::is_alphanumeric);
+        let trimmed = between_alphanumeric_bases(word);
+        let pushed = !trimmed.is_empty();
         if pushed {
             self.terms.push(Term {
-                text: word.to_lowercase().nfkc().collect(),
+                text: trimmed.to_lowercase().nfkc().collect(),
                 position: self.next,
             });
             self.next = self.at(1);
@@ -205,6 +208,19 @@ impl Scan {
         }
         self.next = self.at(units.len());
     }
+}
+
+fn between_alphanumeric_bases(word: &str) -> &str {
+    let mut bounds: Option<(usize, usize)> = None;
+    for (at, cluster) in word.grapheme_indices(true) {
+        if cluster.chars().next().is_some_and(char::is_alphanumeric) {
+            let start = bounds.map_or(at, |(start, _)| start);
+            bounds = Some((start, at + cluster.len()));
+        }
+    }
+    bounds
+        .and_then(|(start, end)| word.get(start..end))
+        .unwrap_or("")
 }
 
 fn has_no_base(cluster: &str) -> bool {

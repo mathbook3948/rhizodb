@@ -140,6 +140,18 @@ fn create_relationship_indexes(write: &mut GraphTx<impl WriteTransaction>) {
         .unwrap();
 }
 
+fn create_property_indexes(write: &mut GraphTx<impl WriteTransaction>) {
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write
+        .create_property_index("doc at", IndexTarget::Label("Doc"), "at")
+        .unwrap();
+    write
+        .create_property_index("link text", IndexTarget::RelationshipType("LINK"), "text")
+        .unwrap();
+}
+
 fn relationship_ids(write: &GraphTx<impl ReadTransaction>) -> Vec<RelationshipId> {
     let mut ids: Vec<RelationshipId> = write
         .node_ids()
@@ -262,11 +274,20 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             }
         }
         Op::Rebuild => {
-            for name in ["words", "points", "link words", "link points"] {
+            for name in [
+                "words",
+                "points",
+                "link words",
+                "link points",
+                "doc text",
+                "doc at",
+                "link text",
+            ] {
                 write.drop_index(name).unwrap();
             }
             create_indexes(write);
             create_relationship_indexes(write);
+            create_property_indexes(write);
         }
     }
 }
@@ -298,6 +319,7 @@ proptest! {
             if position == indexed_after {
                 create_indexes(&mut write);
                 create_relationship_indexes(&mut write);
+                create_property_indexes(&mut write);
                 write.commit().unwrap();
                 write = graph.write().unwrap();
             }
@@ -503,6 +525,125 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     );
 }
 
+#[test]
+fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("five.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(text, PropertyValue::String("five".to_owned()))]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &5u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let stored = graph
+        .storage
+        .begin_read()
+        .unwrap()
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(6u32.to_be_bytes().to_vec()));
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    let label = read.lookup_token::<Label>("Doc").unwrap().unwrap();
+    let text = read.lookup_token::<PropertyKey>("text").unwrap().unwrap();
+    let index = read
+        .property_index(Target::Label(label), text)
+        .unwrap()
+        .unwrap();
+    let five = KeyRange::equal_to(&PropertyValue::String("five".to_owned())).unwrap();
+    assert_eq!(read.property_seek(index, &[five]).unwrap().len(), 1);
+}
+
+#[test]
+fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_writes() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let doc = || NodeRecord {
+        labels: [label].into(),
+        properties: Properties::from([(text, PropertyValue::String("a".to_owned()))]),
+    };
+    write.create_node(&doc()).unwrap();
+    let target = Target::Label(label);
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    let index = write.property_index(target, text).unwrap().unwrap();
+    write.create_node(&doc()).unwrap();
+    let a = KeyRange::equal_to(&PropertyValue::String("a".to_owned())).unwrap();
+    assert_eq!(write.property_seek(index, &[a]).unwrap().len(), 2);
+    assert!(write.drop_index("doc text").unwrap());
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write.create_node(&doc()).unwrap();
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token::<Label>("Doc").unwrap();
+    let text = write.intern_token::<PropertyKey>("text").unwrap();
+    write.commit().unwrap();
+    let target = Target::Label(label);
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.rollback().unwrap();
+    assert_eq!(
+        graph.read().unwrap().property_index(target, text).unwrap(),
+        None
+    );
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    assert!(
+        graph
+            .read()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        graph
+            .write()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[derive(Debug)]
 struct CountingStorage {
     inner: RedbStorage,
@@ -549,6 +690,33 @@ impl ReadTransaction for CountingWrite {
         prefix: &[u8],
     ) -> Result<Vec<crate::storage::Entry>, StorageError> {
         self.inner.scan_prefix(table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
     }
 }
 

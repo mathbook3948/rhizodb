@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -21,6 +25,7 @@ pub(crate) mod integrity;
 mod keys;
 mod records;
 mod tokenize;
+mod value_key;
 
 pub(crate) use ids::Label;
 pub use ids::NodeId;
@@ -31,14 +36,20 @@ pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
 pub use index::IndexTarget;
+pub(crate) use index::Target;
 pub use index::VectorMetric;
+pub(crate) use records::EncodedNode;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
+pub(crate) use value_key::Bound;
+pub(crate) use value_key::Compared;
+pub(crate) use value_key::KeyRange;
+pub(crate) use value_key::compared;
 
 use index::Element;
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
@@ -134,6 +145,32 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writer: Arc<Mutex<Option<ThreadId>>>,
+    committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    committed_tokens: Arc<CommittedTokens>,
+}
+
+/// The tokens of every name space by name, as committed. A committed token never changes, and
+/// no element of a snapshot taken before a token was committed refers to it.
+#[derive(Debug, Default)]
+pub(crate) struct CommittedTokens {
+    by_name: RwLock<[HashMap<String, u32>; 3]>,
+}
+
+impl CommittedTokens {
+    fn get<K: TokenKind>(&self, name: &str) -> Option<Token<K>> {
+        let by_name = self.by_name.read().unwrap_or_else(PoisonError::into_inner);
+        by_name
+            .get(usize::from(K::TAG))?
+            .get(name)
+            .map(|id| Token::new(*id))
+    }
+
+    fn insert<K: TokenKind>(&self, name: &str, token: Token<K>) {
+        let mut by_name = self.by_name.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(names) = by_name.get_mut(usize::from(K::TAG)) {
+            names.insert(name.to_owned(), token.id());
+        }
+    }
 }
 
 impl<S: Storage> Graph<S> {
@@ -147,6 +184,10 @@ impl<S: Storage> Graph<S> {
             let mut tx = GraphTx {
                 transaction: storage.begin_write()?,
                 _writer: None,
+                index_definitions: OnceLock::new(),
+                catalog: None,
+                tokens: Arc::default(),
+                reads_committed_tokens: false,
             };
             let found = match tx
                 .transaction
@@ -178,16 +219,33 @@ impl<S: Storage> Graph<S> {
                 tx.commit()?;
             }
         }
+        let definitions = GraphTx {
+            transaction: storage.begin_read()?,
+            _writer: None,
+            index_definitions: OnceLock::new(),
+            catalog: None,
+            tokens: Arc::default(),
+            reads_committed_tokens: false,
+        }
+        .index_definitions()?;
         Ok(Self {
             storage,
             writer: Arc::default(),
+            committed_index_definitions: Arc::new(Mutex::new(definitions)),
+            committed_tokens: Arc::default(),
         })
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        let catalog = lock(&self.committed_index_definitions);
+        let transaction = self.storage.begin_read()?;
         Ok(GraphTx {
-            transaction: self.storage.begin_read()?,
+            transaction,
             _writer: None,
+            index_definitions: OnceLock::from(Arc::clone(&catalog)),
+            catalog: None,
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: true,
         })
     }
 
@@ -200,9 +258,17 @@ impl<S: Storage> Graph<S> {
         }
         let transaction = self.storage.begin_write()?;
         *lock(&self.writer) = Some(current);
+        let definitions = Arc::clone(&lock(&self.committed_index_definitions));
         Ok(GraphTx {
             transaction,
             _writer: Some(WriterClaim(Arc::clone(&self.writer))),
+            index_definitions: OnceLock::from(definitions),
+            catalog: Some(Catalog {
+                shared: Arc::clone(&self.committed_index_definitions),
+                changed: false,
+            }),
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: false,
         })
     }
 }
@@ -212,6 +278,16 @@ impl<S: Storage> Graph<S> {
 pub(crate) struct GraphTx<T> {
     transaction: T,
     _writer: Option<WriterClaim>,
+    index_definitions: OnceLock<Arc<[Vec<u8>]>>,
+    catalog: Option<Catalog>,
+    tokens: Arc<CommittedTokens>,
+    reads_committed_tokens: bool,
+}
+
+#[derive(Debug)]
+struct Catalog {
+    shared: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    changed: bool,
 }
 
 #[derive(Debug)]
@@ -223,8 +299,8 @@ impl Drop for WriterClaim {
     }
 }
 
-fn lock(writer: &Mutex<Option<ThreadId>>) -> std::sync::MutexGuard<'_, Option<ThreadId>> {
-    writer
+fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+    value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -245,10 +321,37 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 
 impl<T: ReadTransaction> GraphTx<T> {
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
+        self.with_node(id, |node| node.decode())
+    }
+
+    /// A node's stored record, left encoded so the caller decodes only the parts it reads.
+    /// Calls `read` with the stored record of the node with ID `id`, if there is one.
+    pub(crate) fn with_node<R, E: From<GraphError>>(
+        &self,
+        id: NodeId,
+        read: impl FnOnce(EncodedNode<'_>) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.transaction
+            .get_with(Table::Nodes, &keys::element_key(id.0), |bytes| {
+                Ok::<_, GraphError>(read(EncodedNode(bytes)))
+            })
+            .map_err(E::from)?
+            .transpose()
+    }
+
+    /// One property of a relationship, decoding none of the others. The outer `None` means the
+    /// relationship does not exist.
+    pub(crate) fn relationship_property(
+        &self,
+        id: RelationshipId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
         let bytes = self
             .transaction
-            .get(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(bytes.map(|bytes| NodeRecord::decode(&bytes)).transpose()?)
+            .get(Table::Relationships, &keys::element_key(id.0))?;
+        Ok(bytes
+            .map(|bytes| RelationshipRecord::property(&bytes, key))
+            .transpose()?)
     }
 
     pub(crate) fn relationship(
@@ -320,18 +423,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         node: NodeId,
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
-        self.transaction
-            .scan_prefix(table, &keys::adjacency_prefix(node, rel_type))?
-            .iter()
-            .map(|(key, value)| {
+        let mut found = Vec::new();
+        self.transaction.visit_prefix(
+            table,
+            &keys::adjacency_prefix(node, rel_type),
+            |key, value| {
                 let (rel_type, relationship) = keys::parse_adjacency_key(key)?;
-                Ok(Adjacent {
+                found.push(Adjacent {
                     relationship,
                     rel_type,
                     other: NodeId(decode_u64(value)?),
-                })
-            })
-            .collect()
+                });
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(found)
     }
 
     /// Looks a name up without creating it, so a read never writes.
@@ -339,12 +445,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        if let Some(token) = self.tokens.get(name) {
+            return Ok(Some(token));
+        }
         let bytes = self
             .transaction
             .get(Table::TokenByName, &keys::token_name_key(K::TAG, name))?;
-        Ok(bytes
+        let token = bytes
             .map(|bytes| decode_u32(&bytes).map(Token::new))
-            .transpose()?)
+            .transpose()?;
+        if let Some(token) = token
+            && self.reads_committed_tokens
+        {
+            self.tokens.insert(name, token);
+        }
+        Ok(token)
     }
 
     pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<String, GraphError> {
@@ -358,7 +473,18 @@ impl<T: ReadTransaction> GraphTx<T> {
 
 impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn commit(self) -> Result<(), GraphError> {
-        Ok(self.transaction.commit()?)
+        let Some(Catalog {
+            shared,
+            changed: true,
+        }) = &self.catalog
+        else {
+            return Ok(self.transaction.commit()?);
+        };
+        let definitions = self.index_definitions()?;
+        let mut current = lock(shared);
+        self.transaction.commit()?;
+        *current = definitions;
+        Ok(())
     }
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {
@@ -591,3 +717,7 @@ mod tests;
 #[cfg(test)]
 #[path = "graph/crash.test.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+#[path = "graph/maintenance.test.rs"]
+mod maintenance_tests;

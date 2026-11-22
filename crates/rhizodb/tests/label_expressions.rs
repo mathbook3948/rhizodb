@@ -48,6 +48,34 @@ fn label_expressions_combine_with_property_maps() {
     assert!(run(&db, "MATCH (n:!A {k: 1}) RETURN n.k").is_empty());
 }
 
+#[test]
+fn a_label_scan_sees_labels_removed_and_nodes_deleted_earlier_in_the_query() {
+    let db = labeled();
+    assert_eq!(
+        keys(
+            &db,
+            "MATCH (n:A {k: 1}) REMOVE n:A WITH count(*) AS done \
+             MATCH (m:A) RETURN m.k ORDER BY m.k"
+        ),
+        [3, 6]
+    );
+    assert_eq!(
+        keys(
+            &db,
+            "MATCH (n:A {k: 6}) DELETE n WITH count(*) AS done \
+             MATCH (m:A) RETURN m.k ORDER BY m.k"
+        ),
+        [3]
+    );
+    assert_eq!(
+        keys(
+            &db,
+            "MATCH (n:C) SET n:A WITH count(*) AS done MATCH (m:A) RETURN m.k ORDER BY m.k"
+        ),
+        [3, 4]
+    );
+}
+
 fn typed() -> rhizodb::Database {
     let db = db();
     run(
