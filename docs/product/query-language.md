@@ -97,7 +97,15 @@ GQL is the reference language, but the only public conformance suite is the open
 - Within a temporal type, `ORDER BY` sorts by instant or by value, and then by offset and zone.
 - A temporal argument that does not parse, a map key a temporal function does not know or cannot combine, and a component outside its range fail with their own error kind.
 - That error kind depends on values and never on the query text alone.
+- `=~` is true when the regular expression on its right matches the whole string on its left.
+- Regular expressions follow the syntax of the Rust `regex` crate, so lookaround and backreferences are not accepted.
+- Matching takes time linear in the length of the string, whatever the pattern.
+- `=~` gives null when either operand is null or not a string, like `STARTS WITH`, so it raises no type error.
+- A pattern is compiled only when both operands are strings.
+- A pattern that is not a valid regular expression fails with its own error kind.
+- A pattern whose compiled form passes a size limit set in code fails with the same error kind.
+- That error kind depends on values and never on the query text alone.
 
 ## Open
 
-- Regular expression matching with `=~`
+None
