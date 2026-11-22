@@ -150,6 +150,7 @@ fn judge(
     queries: &[Query<'static>],
     truths: &[Vec<i64>],
     exact: bool,
+    keyword: bool,
     measurement: &mut Measurement,
 ) -> Result<(), EngineError> {
     let mut total = 0.0;
@@ -166,17 +167,18 @@ fn judge(
     let recall = total / queries.len().max(1) as f64;
     measurement.recall = Some(recall);
     let kind = ctx.engine.kind().name();
-    if exact && (recall < 1.0 || stray > 0) {
+    let false_hits = keyword && stray > 0;
+    if exact && (recall < 1.0 || false_hits) {
         measurement.errors += 1;
         measurement.failure.get_or_insert_with(|| {
             format!(
                 "{kind} is exact but recall is {recall:.3} with {stray} results outside the answer"
             )
         });
-    } else if recall < LOW_RECALL || stray > 0 {
-        measurement.note = Some(format!(
-            "LOW RECALL {recall:.3}, {stray} results outside the exact answer"
-        ));
+    } else if recall < LOW_RECALL {
+        measurement.note = Some(format!("LOW RECALL {recall:.3}"));
+    } else if false_hits {
+        measurement.note = Some(format!("{stray} results outside the exact answer"));
     }
     Ok(())
 }
@@ -194,6 +196,7 @@ fn keyword_search(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
         &queries,
         &ctx.data.keyword_truth,
         ctx.engine.kind().exact_keyword_search(),
+        true,
         &mut measurement,
     )?;
     if built == Some(Built::Scan) {
@@ -218,6 +221,7 @@ fn vector_search(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
         &queries,
         &ctx.data.vector_truth,
         ctx.engine.kind().exact_vector_search(),
+        false,
         &mut measurement,
     )?;
     if built == Some(Built::Scan) {

@@ -45,6 +45,7 @@ pub struct Arguments {
     pub scale: Scale,
     pub reps: usize,
     pub only: Option<String>,
+    pub skip: Option<String>,
     pub out: Option<PathBuf>,
     pub engines: Option<Vec<EngineKind>>,
     pub servers: Servers,
@@ -58,7 +59,7 @@ impl fmt::Display for UsageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT]",
+            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT]",
             self.0
         )
     }
@@ -73,6 +74,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
         scale: Scale::Small,
         reps: MIN_REPS,
         only: None,
+        skip: None,
         out: None,
         engines: None,
         servers: Servers::default(),
@@ -99,6 +101,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
                     .ok_or_else(|| UsageError(format!("`{text}` is not a positive count")))?;
             }
             "--only" => parsed.only = Some(value()?),
+            "--skip" => parsed.skip = Some(value()?),
             "--out" => parsed.out = Some(PathBuf::from(value()?)),
             "--engines" => {
                 let text = value()?;
@@ -122,6 +125,7 @@ pub struct Options {
     pub scale: Scale,
     pub reps: usize,
     pub only: Option<String>,
+    pub skip: Option<String>,
     pub engines: Option<Vec<EngineKind>>,
     pub servers: Servers,
 }
@@ -212,6 +216,7 @@ pub fn benchmark(options: &Options, progress: impl FnMut(&str)) -> Result<Outcom
     let settings = Settings {
         reps: options.reps,
         only: options.only.clone(),
+        skip: options.skip.clone(),
     };
     let reports = run_all(
         &mut environment,
@@ -266,6 +271,7 @@ pub fn main() -> ExitCode {
         scale: arguments.scale,
         reps: arguments.reps,
         only: arguments.only.clone(),
+        skip: arguments.skip.clone(),
         engines: arguments.engines.clone(),
         servers: arguments.servers.clone(),
     };
