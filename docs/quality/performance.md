@@ -52,7 +52,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - A float in a fingerprint is rounded to six decimals with the rounding boundary moved off the midpoint.
 - Every engine that ran a workload must agree with RhizoDB, the reference.
 - A disagreement with the reference, or between repetitions of one engine, is printed as a failure and fails the run.
-- A difference that comes from an engine's semantics is listed in the output with its reason.
+- A difference that comes from an engine's semantics is removed with a per-engine query override.
 - Index search results are compared with the exact answer computed from the dataset, not with each other.
 - A keyword query with fewer than ten hits must return exactly those hits.
 - A vector query is compared with the exact nearest ten by cosine distance.
