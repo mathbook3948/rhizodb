@@ -786,10 +786,20 @@ impl Binder<'_> {
                     "a relationship to create needs exactly one type",
                 ));
             }
-            if usage == PatternUse::Create && relationship.direction == Direction::Undirected {
+            let undirected = matches!(
+                relationship.direction,
+                Direction::Undirected
+                    | Direction::IncomingOrUndirected
+                    | Direction::UndirectedOrOutgoing
+            );
+            let either_way = matches!(
+                relationship.direction,
+                Direction::Any | Direction::IncomingOrOutgoing
+            );
+            if undirected || (usage == PatternUse::Create && either_way) {
                 return Err(error(
                     ErrorKind::RequiresDirectedRelationship,
-                    "a relationship to create needs a direction",
+                    "a relationship to create needs a direction, since every stored edge has one",
                 ));
             }
         }

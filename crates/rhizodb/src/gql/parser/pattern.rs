@@ -41,7 +41,10 @@ impl Parser {
     pub(super) fn pattern_element(&mut self) -> ParseResult<PatternElement> {
         let start = self.node_pattern()?;
         let mut steps = Vec::new();
-        while self.at_punct(Punct::Minus) || self.at_punct(Punct::Lt) {
+        while [Punct::Minus, Punct::Lt, Punct::Tilde]
+            .iter()
+            .any(|punct| self.at_punct(*punct))
+        {
             let relationship = self.relationship_pattern()?;
             let node = self.node_pattern()?;
             steps.push(PatternStep { relationship, node });
@@ -104,27 +107,41 @@ impl Parser {
 
     fn relationship_pattern(&mut self) -> ParseResult<RelationshipPattern> {
         let points_left = self.eat_punct(Punct::Lt);
-        self.expect_punct(Punct::Minus)?;
+        let undirected = self.eat_punct(Punct::Tilde);
+        if !undirected {
+            self.expect_punct(Punct::Minus)?;
+        }
         let mut relationship = RelationshipPattern {
             variable: None,
             labels: None,
             length: None,
             properties: None,
-            direction: Direction::Undirected,
+            direction: Direction::Any,
         };
-        let points_right = if self.eat_punct(Punct::LBracket) {
+        if self.eat_punct(Punct::LBracket) {
             self.relationship_detail(&mut relationship)?;
             self.expect_punct(Punct::RBracket)?;
-            self.expect_punct(Punct::Minus)?;
-            self.eat_punct(Punct::Gt)
-        } else {
+            self.expect_punct(if undirected {
+                Punct::Tilde
+            } else {
+                Punct::Minus
+            })?;
+        } else if !undirected {
             self.eat_punct(Punct::Minus);
-            self.eat_punct(Punct::Gt)
-        };
-        relationship.direction = match (points_left, points_right) {
-            (true, false) => Direction::Incoming,
-            (false, true) => Direction::Outgoing,
-            _ => Direction::Undirected,
+        }
+        let arrow = self.offset();
+        let points_right = self.eat_punct(Punct::Gt);
+        relationship.direction = match (undirected, points_left, points_right) {
+            (false, false, true) => Direction::Outgoing,
+            (false, true, false) => Direction::Incoming,
+            (false, true, true) => Direction::IncomingOrOutgoing,
+            (false, false, false) => Direction::Any,
+            (true, false, false) => Direction::Undirected,
+            (true, true, false) => Direction::IncomingOrUndirected,
+            (true, false, true) => Direction::UndirectedOrOutgoing,
+            (true, true, true) => {
+                return Err(SyntaxError::new(arrow, SyntaxErrorKind::UnexpectedToken));
+            }
         };
         Ok(relationship)
     }
@@ -181,6 +198,9 @@ impl Parser {
                 (Some(left), Some(right)) if left.end == right.start
             )
         };
+        if is(0, Punct::Tilde) || (is(0, Punct::Lt) && is(1, Punct::Tilde)) {
+            return true;
+        }
         if is(0, Punct::Minus) {
             return is(1, Punct::LBracket)
                 || (touches_next(0) && (is(1, Punct::Minus) || is(1, Punct::Gt)));

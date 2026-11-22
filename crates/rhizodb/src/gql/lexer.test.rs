@@ -228,16 +228,31 @@ fn unknown_characters_are_rejected_with_their_offset() {
 }
 
 #[test]
-fn label_operators_are_single_characters() {
+fn a_tilde_is_its_own_token_except_after_an_equals_sign() {
     assert_eq!(
-        kinds("&!%|!="),
+        kinds("<~ ~> = ~"),
+        vec![
+            TokenKind::Punct(Punct::Lt),
+            TokenKind::Punct(Punct::Tilde),
+            TokenKind::Punct(Punct::Tilde),
+            TokenKind::Punct(Punct::Gt),
+            TokenKind::Punct(Punct::Eq),
+            TokenKind::Punct(Punct::Tilde),
+        ]
+    );
+}
+
+#[test]
+fn label_and_edge_operators_are_single_characters() {
+    assert_eq!(
+        kinds("&!%|!=~"),
         vec![
             TokenKind::Punct(Punct::Ampersand),
             TokenKind::Punct(Punct::Bang),
             TokenKind::Punct(Punct::Percent),
             TokenKind::Punct(Punct::Pipe),
             TokenKind::Punct(Punct::Bang),
-            TokenKind::Punct(Punct::Eq),
+            TokenKind::Punct(Punct::RegexMatch),
         ]
     );
 }

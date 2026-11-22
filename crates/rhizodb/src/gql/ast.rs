@@ -313,12 +313,24 @@ pub(crate) struct Length {
     pub max: Option<u64>,
 }
 
-/// `<-->` is parsed as `Undirected`.
+/// The orientations of edge a relationship pattern accepts, one variant per edge pattern form.
+/// Cypher's `--` is `Any` and its `<-->` is `IncomingOrOutgoing`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Direction {
+    /// `-[]->` and `->`.
     Outgoing,
+    /// `<-[]-` and `<-`.
     Incoming,
+    /// `~[]~` and `~`.
     Undirected,
+    /// `<~[]~` and `<~`.
+    IncomingOrUndirected,
+    /// `~[]~>` and `~>`.
+    UndirectedOrOutgoing,
+    /// `<-[]->` and `<->`.
+    IncomingOrOutgoing,
+    /// `-[]-` and `-`.
+    Any,
 }
 
 #[derive(Clone, Debug, PartialEq)]

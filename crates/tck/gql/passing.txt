@@ -16,6 +16,7 @@
 16.19-offset-clause/Offset1.feature: [5] OFFSET zero keeps every row
 16.19-offset-clause/Offset1.feature: [6] A negative OFFSET fails
 16.19-offset-clause/Offset1.feature: [7] A float OFFSET fails
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [10] An undirected edge does not match a directed edge
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [1] An edge pointing right matches outgoing edges only
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [2] An edge pointing left matches incoming edges only
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [3] An edge in any direction matches both orientations

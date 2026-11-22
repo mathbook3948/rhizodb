@@ -11,6 +11,7 @@ use crate::gql::ast::RelationshipPattern;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::testing::error;
 use crate::gql::testing::patterns;
+use crate::gql::testing::predicate;
 
 fn name(text: &str) -> Name {
     Name::new(text)
@@ -90,15 +91,23 @@ fn every_arrow_form_has_its_direction() {
     for (pattern, direction) in [
         ("(a)-->(b)", Direction::Outgoing),
         ("(a)<--(b)", Direction::Incoming),
-        ("(a)--(b)", Direction::Undirected),
-        ("(a)<-->(b)", Direction::Undirected),
+        ("(a)--(b)", Direction::Any),
+        ("(a)<-->(b)", Direction::IncomingOrOutgoing),
         ("(a)-[]->(b)", Direction::Outgoing),
         ("(a)<-[]-(b)", Direction::Incoming),
-        ("(a)-[]-(b)", Direction::Undirected),
-        ("(a)<-[]->(b)", Direction::Undirected),
+        ("(a)-[]-(b)", Direction::Any),
+        ("(a)<-[]->(b)", Direction::IncomingOrOutgoing),
         ("(a)->(b)", Direction::Outgoing),
         ("(a)<-(b)", Direction::Incoming),
-        ("(a)-(b)", Direction::Undirected),
+        ("(a)-(b)", Direction::Any),
+        ("(a)<->(b)", Direction::IncomingOrOutgoing),
+        ("(a)~[]~(b)", Direction::Undirected),
+        ("(a)<~[]~(b)", Direction::IncomingOrUndirected),
+        ("(a)~[]~>(b)", Direction::UndirectedOrOutgoing),
+        ("(a)~(b)", Direction::Undirected),
+        ("(a)<~(b)", Direction::IncomingOrUndirected),
+        ("(a)~>(b)", Direction::UndirectedOrOutgoing),
+        ("(a)~[r:T*1..2 {k: 1}]~(b)", Direction::Undirected),
     ] {
         assert_eq!(only_relationship(pattern).direction, direction, "{pattern}");
     }
@@ -206,11 +215,7 @@ fn chains_keep_every_step_in_order() {
         .collect();
     assert_eq!(
         directions,
-        vec![
-            Direction::Outgoing,
-            Direction::Incoming,
-            Direction::Undirected
-        ]
+        vec![Direction::Outgoing, Direction::Incoming, Direction::Any]
     );
     let found: Vec<Option<LabelExpr>> = part
         .element
@@ -251,6 +256,31 @@ fn length_bounds_need_the_star_and_cannot_be_negative() {
             (offset, SyntaxErrorKind::InvalidRelationshipPattern),
             "{source}"
         );
+    }
+}
+
+#[test]
+fn malformed_undirected_edges_report_offsets() {
+    for (source, offset) in [
+        ("MATCH (a)<~>(b) RETURN a", 11),
+        ("MATCH (a)<~[]~>(b) RETURN a", 14),
+        ("MATCH (a)~[r]-(b) RETURN a", 13),
+        ("MATCH (a)-[r]~(b) RETURN a", 13),
+        ("MATCH (a)~~(b) RETURN a", 10),
+        ("MATCH (a)~-(b) RETURN a", 10),
+    ] {
+        assert_eq!(
+            error(source),
+            (offset, SyntaxErrorKind::UnexpectedToken),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn an_undirected_edge_after_a_parenthesis_starts_a_pattern_predicate() {
+    for source in ["(a)~(b)", "(a)<~(b)", "(a)~>(b)", "(a)~[:T]~(b)"] {
+        assert!(matches!(predicate(source), Expr::Pattern(_)), "{source}");
     }
 }
 

@@ -143,9 +143,10 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
         let direction = match pattern.direction {
-            Direction::Outgoing => graph::Direction::Outgoing,
-            Direction::Incoming => graph::Direction::Incoming,
-            Direction::Undirected => graph::Direction::Both,
+            Direction::Outgoing | Direction::UndirectedOrOutgoing => graph::Direction::Outgoing,
+            Direction::Incoming | Direction::IncomingOrUndirected => graph::Direction::Incoming,
+            Direction::IncomingOrOutgoing | Direction::Any => graph::Direction::Both,
+            Direction::Undirected => return Ok(Vec::new()),
         };
         let labels = match &pattern.labels {
             None => return Ok(self.tx.adjacent(node, direction, None)?),

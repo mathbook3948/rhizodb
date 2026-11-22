@@ -208,8 +208,12 @@ impl<W: WriteTransaction> Writer<'_, W> {
             let next = self.node(&step.node, row, merging)?;
             let relationship = &step.relationship;
             let (source, target) = match relationship.direction {
-                Direction::Incoming => (next, current),
-                Direction::Outgoing | Direction::Undirected => (current, next),
+                Direction::Incoming | Direction::IncomingOrUndirected => (next, current),
+                Direction::Outgoing
+                | Direction::UndirectedOrOutgoing
+                | Direction::IncomingOrOutgoing
+                | Direction::Any
+                | Direction::Undirected => (current, next),
             };
             let rel_type = match &relationship.labels {
                 Some(LabelExpr::Name(name)) => self.tx.intern_token::<RelationshipType>(&name.0)?,

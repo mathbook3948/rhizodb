@@ -43,7 +43,11 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `CALL` inside a larger query rejects `YIELD *`.
 - A `CALL` gives one row per row the procedure returns.
 - A `CALL` of a procedure without outputs keeps each row once.
-- Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
+- Patterns accept every GQL edge form, full and abbreviated: `<-`, `->`, `-`, `<->`, `~`, `<~`, and `~>`.
+- Every stored relationship is directed, so `~` matches no relationship, and `<~` and `~>` match what `<-` and `->` match.
+- A variable-length `~` edge still matches a path of zero hops.
+- `<~>` and `<~[]~>` are syntax errors.
+- A pattern that creates rejects the edge forms with `~` as missing a direction, and `INSERT` also rejects `-` and `<->`.
 - A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
 - Label expressions take `|`, `&`, `!`, `%`, and parentheses, with `|` binding weakest and `!` tightest.
 - `!` applies to a label, `%`, or a parenthesized expression, so `!!A` is a syntax error.
