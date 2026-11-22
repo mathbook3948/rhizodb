@@ -15,6 +15,8 @@ run = [
   "cargo deny check licenses",
   "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
   "cargo deny --manifest-path crates/differential/Cargo.toml check licenses",
+  "cargo fmt --manifest-path crates/bench/Cargo.toml --check",
+  "cargo deny --manifest-path crates/bench/Cargo.toml check licenses",
 ]
 
 [tasks.differential]
@@ -28,3 +30,16 @@ run = [
 [tasks.docs]
 description = "Regenerate the docs index"
 run = "cargo run --quiet --package xtask -- docs-write"
+
+[tasks.bench-test]
+description = "Run every benchmark workload at tiny scale on both engines, which builds LadybugDB from C++ source"
+dir = "crates/bench"
+run = [
+  "cargo clippy --all-targets -- -D warnings",
+  "cargo test",
+]
+
+[tasks.bench]
+description = "Measure RhizoDB and LadybugDB, for example: mise run bench --scale small --reps 5 --out result.json"
+dir = "crates/bench"
+run = "cargo run --release --"

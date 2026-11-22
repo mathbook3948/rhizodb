@@ -24,3 +24,6 @@ jobs:
         with:
           workspaces: crates/differential
       - run: mise run differential
+      - run: mise run bench-test
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/crates/differential/target
