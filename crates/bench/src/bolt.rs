@@ -9,6 +9,7 @@ use neo4rs::BoltMap;
 use neo4rs::BoltNull;
 use neo4rs::BoltString;
 use neo4rs::BoltType;
+use neo4rs::ConfigBuilder;
 use neo4rs::Graph;
 use neo4rs::Query as BoltQuery;
 use neo4rs::Txn;
@@ -59,6 +60,7 @@ impl BoltEngine {
 type Batches = Vec<(&'static str, BoltType)>;
 
 struct BoltInstance {
+    url: String,
     flavor: Flavor,
     runtime: Arc<Runtime>,
     graph: Graph,
@@ -93,10 +95,15 @@ fn runtime() -> Result<Arc<Runtime>, EngineError> {
         .map_err(failed)
 }
 
-fn connect(url: &str) -> Result<(Arc<Runtime>, Graph), EngineError> {
+fn connect(url: &str, flavor: Flavor) -> Result<(Arc<Runtime>, Graph), EngineError> {
     let runtime = runtime()?;
+    let mut config = ConfigBuilder::default().uri(url).user("").password("");
+    if flavor == Flavor::Memgraph {
+        config = config.db("memgraph");
+    }
+    let config = config.build().map_err(failed)?;
     let graph = runtime
-        .block_on(Graph::new(url, "", ""))
+        .block_on(Graph::connect(config))
         .map_err(|error| EngineError::Failed(format!("cannot connect to {url}: {error}")))?;
     Ok((runtime, graph))
 }
@@ -117,8 +124,9 @@ impl Engine for BoltEngine {
         let url = self.url.as_deref().ok_or_else(|| {
             EngineError::Unsupported(format!("no server URL given for {}", self.kind().name()))
         })?;
-        let (runtime, graph) = connect(url)?;
+        let (runtime, graph) = connect(url, self.flavor)?;
         Ok(Box::new(BoltInstance {
+            url: url.to_owned(),
             flavor: self.flavor,
             runtime,
             graph,
@@ -128,7 +136,7 @@ impl Engine for BoltEngine {
 
     fn config(&self) -> serde_json::Value {
         let version = self.url.as_deref().and_then(|url| {
-            let (runtime, graph) = connect(url).ok()?;
+            let (runtime, graph) = connect(url, self.flavor).ok()?;
             let query = match self.flavor {
                 Flavor::Neo4j => "CALL dbms.components() YIELD name, versions, edition RETURN name + ' ' + versions[0] + ' ' + edition AS c0",
                 Flavor::Memgraph => "SHOW VERSION",
@@ -227,8 +235,29 @@ impl BoltInstance {
         })
     }
 
+    fn rows(&self, statement: &str, keys: &[&str]) -> Result<Vec<Vec<BoltType>>, EngineError> {
+        self.runtime.block_on(async {
+            let mut stream = self
+                .graph
+                .execute(BoltQuery::new(statement.to_owned()))
+                .await
+                .map_err(failed)?;
+            let mut found = Vec::new();
+            while let Some(row) = stream.next().await.map_err(failed)? {
+                let values = keys
+                    .iter()
+                    .filter_map(|key| row.get::<BoltType>(key).ok())
+                    .collect();
+                found.push(values);
+            }
+            Ok(found)
+        })
+    }
+
     fn feature(&self, statement: &str) -> Result<(), EngineError> {
-        self.run(statement)
+        let (runtime, graph) = connect(&self.url, self.flavor)?;
+        runtime
+            .block_on(graph.run(BoltQuery::new(statement.to_owned())))
             .map_err(|error| EngineError::Unsupported(format!("{}: {error}", self.flavor.name())))
     }
 }
@@ -350,17 +379,26 @@ impl Instance for BoltInstance {
                 Ok(())
             }
             Flavor::Memgraph => {
-                if self.run("DROP GRAPH").is_ok() {
-                    return Ok(());
-                }
                 self.run("MATCH (n) DETACH DELETE n")?;
-                for statement in [
-                    "DROP INDEX ON :Person(id)",
-                    "DROP INDEX ON :City(id)",
-                    "DROP TEXT INDEX bio_text",
-                    "DROP VECTOR INDEX embedding_index",
-                ] {
-                    let _ = self.run(statement);
+                for row in self.rows("SHOW INDEX INFO", &["index type", "label", "property"])? {
+                    if let [BoltType::String(kind), BoltType::String(label), property] = &row[..] {
+                        let target = match (kind.value.as_str(), property) {
+                            ("label", _) => format!(":{}", label.value),
+                            (_, BoltType::List(names)) => match names.value.first() {
+                                Some(BoltType::String(name)) => {
+                                    format!(":{}({})", label.value, name.value)
+                                }
+                                _ => continue,
+                            },
+                            _ => continue,
+                        };
+                        self.run(&format!("DROP INDEX ON {target}"))?;
+                    }
+                }
+                for row in self.rows("SHOW VECTOR INDEX INFO", &["index_name"])? {
+                    if let [BoltType::String(name)] = &row[..] {
+                        self.run(&format!("DROP VECTOR INDEX {}", name.value))?;
+                    }
                 }
                 Ok(())
             }
