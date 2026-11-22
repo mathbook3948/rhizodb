@@ -17,6 +17,9 @@ use super::plan::Aggregate;
 use super::plan::AggregateFunction;
 use super::plan::Expr;
 use super::plan::Slot;
+use super::shape::NUMBER;
+use super::shape::Shape;
+use super::shape::admits;
 
 impl<T: ReadTransaction> Env<'_, T> {
     /// Groups `rows` by the key values and yields one row per group with keys, aggregates, and
@@ -66,10 +69,16 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(out)
     }
 
-    fn group_percentile(&self, extra: &Expr, rows: &[Row]) -> Result<Datum, Error> {
+    fn group_percentile(
+        &self,
+        function: AggregateFunction,
+        extra: &Expr,
+        rows: &[Row],
+    ) -> Result<Datum, Error> {
         let mut percentile: Option<Datum> = None;
         for row in rows {
             let value = self.eval(extra, row)?;
+            function.admit(&value)?;
             match &percentile {
                 Some(first) if order(first, &value) != Ordering::Equal => {
                     return Err(Error::new(
@@ -100,6 +109,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             if value.is_null() {
                 continue;
             }
+            aggregate.function.admit(&value)?;
             if aggregate.distinct && !seen.insert(Key(vec![value.clone()])) {
                 continue;
             }
@@ -136,11 +146,41 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc => {
                 let percentile = match &aggregate.extra {
-                    Some(extra) => self.group_percentile(extra, rows)?,
+                    Some(extra) => self.group_percentile(aggregate.function, extra, rows)?,
                     None => Datum::Null,
                 };
                 percentile_of(aggregate.function, values, &percentile)
             }
+        }
+    }
+}
+
+impl AggregateFunction {
+    /// The shapes every argument accepts, where none means any. The binder checks the arguments
+    /// whose shape the query text decides against them, and the computation checks the values it
+    /// gets against them, so an aggregate takes the same types whichever way they arrive.
+    pub(crate) fn accepted(self) -> &'static [Shape] {
+        match self {
+            AggregateFunction::Sum
+            | AggregateFunction::Avg
+            | AggregateFunction::StDev
+            | AggregateFunction::StDevP
+            | AggregateFunction::PercentileCont
+            | AggregateFunction::PercentileDisc => NUMBER,
+            AggregateFunction::Count
+            | AggregateFunction::Min
+            | AggregateFunction::Max
+            | AggregateFunction::Collect => &[],
+        }
+    }
+
+    fn admit(self, value: &Datum) -> Result<(), Error> {
+        match Shape::of(value) {
+            Some(shape) if !admits(self.accepted(), shape) => Err(type_error(format!(
+                "{self:?} cannot take a {}",
+                value.type_name()
+            ))),
+            _ => Ok(()),
         }
     }
 }

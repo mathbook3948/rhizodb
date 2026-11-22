@@ -964,6 +964,13 @@ impl Binder<'_> {
         Ok(bound)
     }
 
+    fn root<R>(&mut self, bind: impl FnOnce(&mut Self) -> R) -> R {
+        let enclosing = std::mem::replace(&mut self.expression_depth, 0);
+        let bound = bind(self);
+        self.expression_depth = enclosing;
+        bound
+    }
+
     fn open_expr(
         &mut self,
         expr: &ast::Expr,
@@ -995,7 +1002,9 @@ impl Binder<'_> {
             }
             if let Some((function, distinct, args)) = aggregate_call(expr) {
                 if grouping.ordering {
+                    let registered = self.closed.len();
                     self.aggregate(function, distinct, args, scope)?;
+                    self.closed.truncate(registered);
                 }
                 let aggregate = self.aggregate(function, distinct, args, &grouping.input)?;
                 let slot = self.slot();
@@ -1365,14 +1374,20 @@ impl Binder<'_> {
                 "wrong number of arguments to an aggregate",
             ));
         }
-        let argument = match args.first() {
-            Some(arg) => Some(self.expr(arg, input, &mut Mode::Plain)?),
-            None => None,
-        };
-        let extra = match args.get(1) {
-            Some(arg) => Some(self.expr(arg, input, &mut Mode::Plain)?),
-            None => None,
-        };
+        for arg in args {
+            self.expect_shape(arg, input, function.accepted())?;
+        }
+        let (argument, extra) = self.root(|binder| {
+            let argument = match args.first() {
+                Some(arg) => Some(binder.expr(arg, input, &mut Mode::Plain)?),
+                None => None,
+            };
+            let extra = match args.get(1) {
+                Some(arg) => Some(binder.expr(arg, input, &mut Mode::Plain)?),
+                None => None,
+            };
+            Ok::<_, Error>((argument, extra))
+        })?;
         Ok(Aggregate {
             function,
             distinct,
@@ -1411,36 +1426,60 @@ fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast
     )
 }
 
-fn evaluated_parts(expr: &Expr) -> Option<(Vec<&Expr>, Vec<&Expr>, Option<Slot>)> {
+#[derive(Default)]
+struct Parts<'a> {
+    always: Vec<&'a Expr>,
+    sometimes: Vec<&'a Expr>,
+    bound: Option<Slot>,
+    reads_graph: bool,
+}
+
+impl<'a> Parts<'a> {
+    fn always(always: Vec<&'a Expr>) -> Self {
+        Parts {
+            always,
+            ..Parts::default()
+        }
+    }
+
+    fn matching(query: &'a PatternQuery, projection: Option<&'a Expr>) -> Self {
+        let properties = query.patterns.iter().flat_map(|part| {
+            std::iter::once(&part.start.properties)
+                .chain(
+                    part.steps
+                        .iter()
+                        .flat_map(|step| [&step.relationship.properties, &step.node.properties]),
+                )
+                .flatten()
+        });
+        Parts {
+            sometimes: properties.chain(&query.filter).chain(projection).collect(),
+            reads_graph: true,
+            ..Parts::default()
+        }
+    }
+}
+
+fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
     Some(match expr {
-        Expr::List(items) | Expr::Call(_, items) => (items.iter().collect(), Vec::new(), None),
-        Expr::Map(entries) => (
-            entries.iter().map(|(_, value)| value).collect(),
-            Vec::new(),
-            None,
-        ),
+        Expr::List(items) | Expr::Call(_, items) => Parts::always(items.iter().collect()),
+        Expr::Map(entries) => Parts::always(entries.iter().map(|(_, value)| value).collect()),
         Expr::Property(operand, _)
         | Expr::HasLabels(operand, _)
         | Expr::Not(operand)
         | Expr::Negate(operand)
         | Expr::UnaryPlus(operand)
-        | Expr::IsNull { operand, .. } => (vec![operand], Vec::new(), None),
-        Expr::Index(base, index) | Expr::Binary(_, base, index) => {
-            (vec![base, index], Vec::new(), None)
-        }
-        Expr::Slice(base, from, to) => (
+        | Expr::IsNull { operand, .. } => Parts::always(vec![operand]),
+        Expr::Index(base, index) | Expr::Binary(_, base, index) => Parts::always(vec![base, index]),
+        Expr::Slice(base, from, to) => Parts::always(
             std::iter::once(&**base)
                 .chain([from, to].into_iter().flatten().map(|bound| &**bound))
                 .collect(),
-            Vec::new(),
-            None,
         ),
-        Expr::Comparison(first, rest) => (
+        Expr::Comparison(first, rest) => Parts::always(
             std::iter::once(&**first)
                 .chain(rest.iter().map(|(_, operand)| operand))
                 .collect(),
-            Vec::new(),
-            None,
         ),
         Expr::Case(case) => {
             let mut always: Vec<&Expr> = case.scrutinee.iter().collect();
@@ -1454,27 +1493,33 @@ fn evaluated_parts(expr: &Expr) -> Option<(Vec<&Expr>, Vec<&Expr>, Option<Slot>)
                 sometimes.push(then);
             }
             sometimes.extend(&case.otherwise);
-            (always, sometimes, None)
+            Parts {
+                always,
+                sometimes,
+                ..Parts::default()
+            }
         }
-        Expr::ListComprehension(comprehension) => (
-            vec![&comprehension.source],
-            comprehension
+        Expr::ListComprehension(comprehension) => Parts {
+            always: vec![&comprehension.source],
+            sometimes: comprehension
                 .filter
                 .iter()
                 .chain(&comprehension.projection)
                 .collect(),
-            Some(comprehension.slot),
-        ),
-        Expr::Quantified(quantified) => (
-            vec![&quantified.source],
-            vec![&quantified.predicate],
-            Some(quantified.slot),
-        ),
-        Expr::Constant(_)
-        | Expr::Parameter(_)
-        | Expr::Slot(_)
-        | Expr::Exists(_)
-        | Expr::PatternComprehension(..) => return None,
+            bound: Some(comprehension.slot),
+            ..Parts::default()
+        },
+        Expr::Quantified(quantified) => Parts {
+            always: vec![&quantified.source],
+            sometimes: vec![&quantified.predicate],
+            bound: Some(quantified.slot),
+            ..Parts::default()
+        },
+        Expr::Exists(query) => Parts::matching(query, None),
+        Expr::PatternComprehension(query, projection) => {
+            Parts::matching(query, Some(&**projection))
+        }
+        Expr::Constant(_) | Expr::Parameter(_) | Expr::Slot(_) => return None,
     })
 }
 
@@ -1484,7 +1529,7 @@ fn collect_closed<'a>(
     out: &mut Vec<&'a Expr>,
 ) -> Option<usize> {
     let base = local.len();
-    let Some((always, sometimes, bound)) = evaluated_parts(expr) else {
+    let Some(parts) = evaluated_parts(expr) else {
         return match expr {
             Expr::Constant(_) => Some(usize::MAX),
             Expr::Slot(slot) => local.iter().rposition(|bound| bound == slot),
@@ -1492,16 +1537,16 @@ fn collect_closed<'a>(
         };
     };
     let mark = out.len();
-    let mut outermost = Some(usize::MAX);
-    for child in always {
+    let mut outermost = (!parts.reads_graph).then_some(usize::MAX);
+    for child in parts.always {
         outermost = join(outermost, collect_closed(child, local, out));
     }
     let covered = out.len();
-    local.extend(bound);
-    for child in sometimes {
+    local.extend(parts.bound);
+    for child in parts.sometimes {
         outermost = join(outermost, collect_closed(child, local, out));
     }
-    if bound.is_some() {
+    if parts.bound.is_some() {
         local.pop();
     }
     if outermost.is_some_and(|reach| reach >= base) {

@@ -765,6 +765,110 @@ fn a_type_error_in_the_query_text_fails_before_any_row_reaches_it() {
 }
 
 #[test]
+fn a_type_error_fails_before_any_row_reaches_it_in_every_place_an_expression_can_stand() {
+    let db = db();
+    let mut escaped = Vec::new();
+    for (template, wrong, right) in [
+        ("MATCH (n) RETURN count({}) AS c", "1 - 'a'", "1 - 1"),
+        (
+            "MATCH (n) RETURN collect(DISTINCT {}) AS c",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) RETURN n.x AS x, max({}) AS c",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        ("MATCH (n) WITH count({}) AS c RETURN c", "1 - 'a'", "1 - 1"),
+        (
+            "MATCH (n) RETURN count(n.x + ({})) AS c",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) RETURN count(*) AS c ORDER BY sum({})",
+            "'a'",
+            "1",
+        ),
+        ("MATCH (n) RETURN sum({}) AS s", "'a'", "1"),
+        ("MATCH (n) RETURN avg({}) AS s", "'a'", "1"),
+        ("MATCH (n) RETURN stDev({}) AS s", "'a'", "1"),
+        ("MATCH (n) RETURN stDevP({}) AS s", "'a'", "1"),
+        (
+            "MATCH (n) RETURN percentileCont(n.x, {}) AS s",
+            "'a'",
+            "0.5",
+        ),
+        ("MATCH (n) RETURN percentileDisc({}, 0.5) AS s", "'a'", "1"),
+        ("MATCH (n) WHERE ({}) = 1 RETURN n", "1 - 'a'", "1 - 1"),
+        (
+            "MATCH (n) WHERE (n)-->({x: {}}) RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) WHERE exists((n)-->({x: {}})) RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-->({x: {}}) } RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) WHERE EXISTS { (n)-->(m) WHERE {} = 1 } RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
+            "MATCH (n) RETURN [(n)-->(m) WHERE {} = 1 | m] AS l",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        ("MATCH (n) RETURN [(n)-->(m) | {}] AS l", "1 - 'a'", "1 - 1"),
+        (
+            "MATCH (n) RETURN [(n)-->({x: {}}) | 1] AS l",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+    ] {
+        let query = template.replace("{}", wrong);
+        if !matches!(
+            db.execute(&query, &rhizodb::Parameters::new())
+                .map_err(|error| error.kind()),
+            Err(ErrorKind::InvalidArgumentType | ErrorKind::PropertyAccessOnNonEntity)
+        ) {
+            escaped.push(query);
+        }
+        let query = template.replace("{}", right);
+        assert!(
+            db.execute(&query, &rhizodb::Parameters::new()).is_ok(),
+            "{query}"
+        );
+    }
+    assert!(
+        escaped.is_empty(),
+        "these did not fail before reading data: {escaped:#?}"
+    );
+}
+
+#[test]
+fn an_error_inside_an_aggregate_that_depends_on_values_waits_for_a_row() {
+    let db = db();
+    assert_eq!(single(&db, "MATCH (n) RETURN sum(1 / 0) AS s"), int(0));
+    assert_eq!(
+        single(&db, "MATCH (n) RETURN count(n.x - 'a') AS c"),
+        int(0)
+    );
+    assert_eq!(
+        run(&db, "MATCH (n) WHERE exists((n)-->({x: 1 / 0})) RETURN n"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn a_type_error_in_a_merge_action_fails_even_when_the_action_is_not_run() {
     let db = db();
     run(&db, "CREATE (:A)");

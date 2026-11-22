@@ -23,6 +23,23 @@ fn only_the_closed_parts_of_an_open_expression_are_recorded() {
     assert_eq!(closed_count("MATCH (n) RETURN n.x + (1 + 2) + (3 + 4)"), 2);
 }
 
+#[test]
+fn the_closed_parts_of_an_aggregate_argument_are_recorded() {
+    assert_eq!(closed_count("MATCH (n) RETURN count(n.x + (1 + 2))"), 1);
+}
+
+#[test]
+fn the_closed_parts_inside_a_pattern_are_recorded_but_not_the_pattern() {
+    assert_eq!(
+        closed_count("MATCH (n) WHERE (n)-->({x: 1 + 2}) RETURN n"),
+        1
+    );
+    assert_eq!(
+        closed_count("MATCH (n) RETURN [(n)-->(m) | m.x + (1 + 2)]"),
+        1
+    );
+}
+
 fn delete_retains(query: &str) -> Vec<bool> {
     let Plan::Updating(program) = bind(&parse(query).unwrap(), query, &Parameters::new()).unwrap()
     else {

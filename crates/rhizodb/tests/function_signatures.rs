@@ -63,6 +63,19 @@ const FUNCTIONS: [(&str, &[&str]); 53] = [
     ("exists", &["1"]),
 ];
 
+const AGGREGATES: [(&str, &[&str]); 10] = [
+    ("count", &["1"]),
+    ("collect", &["1"]),
+    ("min", &["1"]),
+    ("max", &["1"]),
+    ("sum", &["1"]),
+    ("avg", &["1"]),
+    ("stDev", &["1"]),
+    ("stDevP", &["1"]),
+    ("percentileCont", &["1", "0.5"]),
+    ("percentileDisc", &["1", "0.5"]),
+];
+
 const PROBES: [&str; 10] = [
     "1", "1.5", "'a'", "true", "[1]", "{a: 1}", "a", "r", "p", "null",
 ];
@@ -87,7 +100,11 @@ fn rejects_the_type(db: &Database, query: &str) -> bool {
         db.execute(query, &Parameters::new())
             .err()
             .map(|error| error.kind()),
-        Some(ErrorKind::InvalidArgumentType | ErrorKind::InvalidArgumentValue)
+        Some(
+            ErrorKind::InvalidArgumentType
+                | ErrorKind::InvalidArgumentValue
+                | ErrorKind::TypeMismatch
+        )
     )
 }
 
@@ -96,7 +113,7 @@ fn a_function_accepts_the_same_argument_types_in_the_query_text_and_in_data() {
     let empty = db();
     let populated = graph();
     let mut disagreements = Vec::new();
-    for (name, valid) in FUNCTIONS {
+    for (name, valid) in FUNCTIONS.into_iter().chain(AGGREGATES) {
         for position in 0..valid.len() {
             for probe in PROBES {
                 let expression = call(name, valid, position, probe);
