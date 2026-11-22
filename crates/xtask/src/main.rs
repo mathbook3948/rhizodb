@@ -1,5 +1,6 @@
 mod docs;
 mod forbidden_chars;
+mod hooks;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -12,8 +13,9 @@ fn main() -> ExitCode {
         "forbidden-chars" => forbidden_chars::run(&workspace_root),
         "docs" => docs::check(&workspace_root),
         "docs-write" => docs::write(&workspace_root),
+        "hooks" => hooks::check(&workspace_root),
         _ => {
-            eprintln!("usage: xtask <forbidden-chars|docs|docs-write>");
+            eprintln!("usage: xtask <forbidden-chars|docs|docs-write|hooks>");
             return ExitCode::from(2);
         }
     };
