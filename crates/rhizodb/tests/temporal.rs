@@ -161,6 +161,32 @@ fn a_duration_divided_by_a_float_is_exact() {
 }
 
 #[test]
+fn dividing_by_a_tiny_float_gives_any_result_that_fits() {
+    let db = db();
+    for (query, expected) in [
+        (
+            "RETURN (duration('PT0.5S') / 1.2345678901234567e-15).seconds",
+            "Integer(405000003645000)",
+        ),
+        ("RETURN duration('PT0S') / 1e-40", "PT0S"),
+        ("RETURN duration('P1M') / 1e-300", "error"),
+    ] {
+        let result = db.execute(query, &Parameters::new());
+        let actual = match result {
+            Ok(result) => match &result.rows()[0][0] {
+                Value::Temporal(value) => value.to_string(),
+                other => format!("{other:?}"),
+            },
+            Err(error) => {
+                assert_eq!(error.kind(), ErrorKind::InvalidTemporalValue, "{query}");
+                "error".to_owned()
+            }
+        };
+        assert_eq!(actual, expected, "{query}");
+    }
+}
+
+#[test]
 fn a_date_moves_by_the_whole_days_of_the_time_truncated_toward_zero() {
     let db = db();
     for (query, expected) in [

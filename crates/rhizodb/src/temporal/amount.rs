@@ -148,8 +148,27 @@ impl Amount {
                     .map_or(Amount::ZERO, |divisor| Amount::quotient(count, divisor)),
             );
         }
-        let numerator = count.checked_mul(10i128.checked_pow(places)?)?;
-        Some(Amount::quotient(numerator, divisor.digits))
+        if count == 0 {
+            return Some(Amount::ZERO);
+        }
+        Amount::quotient(count, divisor.digits).times_power_of_ten(places)
+    }
+
+    fn times_power_of_ten(self, places: u32) -> Option<Amount> {
+        let mut whole = self.whole;
+        let mut numerator = self.numerator;
+        for _ in 0..places {
+            if numerator == 0 {
+                whole = whole.checked_mul(10)?;
+                continue;
+            }
+            let scaled = numerator * 10;
+            whole = whole
+                .checked_mul(10)?
+                .checked_add(scaled / self.denominator)?;
+            numerator = scaled % self.denominator;
+        }
+        Amount::whole(whole).plus(Amount::ratio(numerator, self.denominator)?)
     }
 
     /// `count` divided by `divisor`, which is not zero. A divisor above `10^24` keeps the
