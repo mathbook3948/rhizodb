@@ -1,0 +1,25 @@
+[package]
+name = "differential"
+description = "Runs the same queries on RhizoDB and LadybugDB and compares the results"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.clippy]
+allow_attributes_without_reason = "deny"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[dependencies]
+lbug = "=0.22.3"
+libtest-mimic = "0.8"
+rhizodb = { path = "../rhizodb" }
+tck = { path = "../tck" }
+
+[[test]]
+name = "differential"
+harness = false
+
+[workspace]

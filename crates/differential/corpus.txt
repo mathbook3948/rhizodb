@@ -1,0 +1,45 @@
+# One query per line, run on the generated graph. See src/corpus.rs.
+MATCH (n) RETURN count(*) AS nodes
+MATCH ()-[r]->() RETURN count(*) AS edges
+MATCH (p:Person) RETURN p ORDER BY p.id
+MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY name
+MATCH (p:Person) WHERE p.age IS NULL RETURN p.id AS id ORDER BY id
+MATCH (p:Person) RETURN p.age AS age ORDER BY age
+MATCH (p:Person) RETURN p.age AS age ORDER BY age DESC
+MATCH (p:Person) RETURN p.id AS id ORDER BY p.age, p.id
+MATCH (p:Person) RETURN p.id AS id ORDER BY id SKIP 5 LIMIT 5
+MATCH (p:Person) WITH p.name AS name, count(*) AS n WHERE n > 5 RETURN name, n
+MATCH (p:Person) WITH p ORDER BY p.id LIMIT 3 RETURN p.id AS id
+MATCH (p:Person)-[k:KNOWS]->(p) RETURN p.id AS id, k.since AS since
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(a) RETURN a.id AS x, b.id AS y
+MATCH (a:Person)-[r1:KNOWS]->(b:Person)-[r2:KNOWS]->(c:Person) RETURN count(*) AS n
+MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(*) AS n
+MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN count(*) AS n
+MATCH (a:Person {id: 1})-[:KNOWS*1..3]->(b:Person) RETURN DISTINCT b.id AS id
+MATCH (a:Person {id: 1})-[:KNOWS*0..1]->(b:Person) RETURN b.id AS id
+MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c:City) RETURN p.id AS id, c.name AS city
+MATCH (p:Person) OPTIONAL MATCH (p)-[:KNOWS]->(q:Person) RETURN p.id AS id, count(q) AS out
+MATCH (c:City)<-[:LIVES_IN]-(p:Person) RETURN c.name AS city, avg(p.age) AS age, count(p.age) AS known
+MATCH (c:City) RETURN c.name AS city, c.population / 1000 AS thousands, c.population % 7 AS rest
+MATCH (p:Person) RETURN CASE WHEN p.age < 30 THEN 'young' WHEN p.age < 60 THEN 'middle' ELSE 'old' END AS band, count(*) AS n
+MATCH (p:Person) RETURN p.id AS id, p.age > 30 AND p.age < 50 AS mid, p.age < 30 OR p.age IS NULL AS other
+MATCH (p:Person) RETURN p.id AS id, NOT p.age > 30 AS notOld
+MATCH (p:Person) WHERE p.name IN ['Ada', 'Grace'] RETURN p.id AS id
+MATCH (p:Person) WHERE p.name ENDS WITH 'e' RETURN p.name AS name
+MATCH (p:Person) RETURN collect(DISTINCT p.name) AS names
+MATCH (p:Person) RETURN size(collect(p.age)) AS ages
+MATCH (p:Person) RETURN min(p.name) AS first, max(p.name) AS last
+MATCH (p:Person) RETURN sum(p.age) AS total, count(*) AS n
+MATCH (p:Person) RETURN p.id AS id, [x IN [1, 2, 3] WHERE x > 1 | x * p.id] AS l
+MATCH (p:Person) WHERE p.id < 4 RETURN p.id AS id, range(1, p.id) AS r
+MATCH (p:Person)-[k:KNOWS]->(q:Person) RETURN p.id AS from, k, q.id AS to
+MATCH (p:Person)-[k:KNOWS]->(q:Person) RETURN type(k) AS t, count(*) AS n
+MATCH (p:Person) RETURN labels(p) AS l, count(*) AS n
+UNWIND [1, 2, 3] AS x MATCH (p:Person {id: x}) RETURN p.name AS name
+MATCH (p:Person) WITH p, p.age * 2 AS double WHERE double > 100 RETURN p.id AS id, double
+MATCH (p:Person) RETURN p.id AS id, toFloat(p.age) / 3 AS third
+MATCH (p:Person) RETURN DISTINCT p.age % 3 AS m
+MATCH (p:Person) WHERE exists { MATCH (p)-[:KNOWS]->(:Person) } RETURN count(*) AS n
+MATCH (p:Person) RETURN p.id AS id, abs(p.age - 50) AS d
+MATCH (p:Person) RETURN p.id AS id, substring(p.name, 1, 2) AS s
+MATCH (p:Person) RETURN p.id AS id, coalesce(p.age, 0) + 1 AS a

@@ -1,0 +1,2 @@
+[env]
+LBUG_BUILD_FROM_SOURCE = "1"
