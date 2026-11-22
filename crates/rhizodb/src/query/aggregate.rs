@@ -174,7 +174,7 @@ impl AggregateFunction {
         }
     }
 
-    fn admit(self, value: &Datum) -> Result<(), Error> {
+    pub(crate) fn admit(self, value: &Datum) -> Result<(), Error> {
         match Shape::of(value) {
             Some(shape) if !admits(self.accepted(), shape) => Err(type_error(format!(
                 "{self:?} cannot take a {}",

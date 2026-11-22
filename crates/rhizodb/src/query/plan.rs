@@ -255,6 +255,8 @@ pub(crate) enum Expr {
         negated: bool,
     },
     Call(Function, Vec<Expr>),
+    /// An aggregate argument that no row can change, checked against the types the aggregate takes.
+    Admit(AggregateFunction, Box<Expr>),
     Case(Box<Case>),
     ListComprehension(Box<ListComprehension>),
     Quantified(Box<Quantified>),

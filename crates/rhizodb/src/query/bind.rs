@@ -1705,6 +1705,12 @@ impl Binder<'_> {
         for arg in args {
             self.expect_shape(arg, input, function.accepted());
         }
+        for bound in argument.iter().chain(&extra) {
+            if is_closed(bound) {
+                self.closed
+                    .push(Expr::Admit(function, Box::new(bound.clone())));
+            }
+        }
         Ok(Aggregate {
             function,
             distinct,
@@ -1781,7 +1787,8 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
     Some(match expr {
         Expr::List(items) | Expr::Call(_, items) => Parts::always(items.iter().collect()),
         Expr::Map(entries) => Parts::always(entries.iter().map(|(_, value)| value).collect()),
-        Expr::Property(operand, _)
+        Expr::Admit(_, operand)
+        | Expr::Property(operand, _)
         | Expr::HasLabels(operand, _)
         | Expr::Not(operand)
         | Expr::Negate(operand)
@@ -1875,6 +1882,10 @@ fn collect_closed<'a>(
         out.push(expr);
     }
     outermost
+}
+
+fn is_closed(expr: &Expr) -> bool {
+    collect_closed(expr, &mut Vec::new(), &mut Vec::new()).is_some()
 }
 
 fn join(a: Option<usize>, b: Option<usize>) -> Option<usize> {
