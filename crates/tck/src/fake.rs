@@ -14,7 +14,7 @@ use crate::value::Value;
 pub struct Answer {
     pub query: String,
     pub result: Result<Rows, QueryError>,
-    pub snapshot: Option<GraphSnapshot>,
+    pub snapshot: Option<Result<GraphSnapshot, String>>,
 }
 
 impl Answer {
@@ -39,7 +39,12 @@ impl Answer {
     }
 
     pub fn then_graph(mut self, snapshot: GraphSnapshot) -> Answer {
-        self.snapshot = Some(snapshot);
+        self.snapshot = Some(Ok(snapshot));
+        self
+    }
+
+    pub fn then_unreadable_graph(mut self, reason: &str) -> Answer {
+        self.snapshot = Some(Err(reason.into()));
         self
     }
 }
@@ -77,7 +82,7 @@ impl Engine for FakeEngine {
         Box::new(FakeGraph {
             answers: Arc::clone(&self.answers),
             events: Arc::clone(&self.events),
-            state: GraphSnapshot::default(),
+            state: Ok(GraphSnapshot::default()),
         })
     }
 }
@@ -85,7 +90,7 @@ impl Engine for FakeEngine {
 struct FakeGraph {
     answers: Arc<Vec<Answer>>,
     events: Arc<Mutex<Vec<Event>>>,
-    state: GraphSnapshot,
+    state: Result<GraphSnapshot, String>,
 }
 
 impl Graph for FakeGraph {
@@ -113,7 +118,7 @@ impl Graph for FakeGraph {
         answer.result.clone()
     }
 
-    fn snapshot(&self) -> GraphSnapshot {
+    fn snapshot(&self) -> Result<GraphSnapshot, String> {
         self.state.clone()
     }
 }

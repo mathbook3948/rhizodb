@@ -53,8 +53,8 @@ impl Graph for BrokenGraph {
         Err(QueryError::Unsupported)
     }
 
-    fn snapshot(&self) -> GraphSnapshot {
-        GraphSnapshot::default()
+    fn snapshot(&self) -> Result<GraphSnapshot, String> {
+        Ok(GraphSnapshot::default())
     }
 }
 
@@ -85,38 +85,40 @@ impl Graph for RhizoGraph {
         })
     }
 
-    fn snapshot(&self) -> GraphSnapshot {
+    fn snapshot(&self) -> Result<GraphSnapshot, String> {
         let mut snapshot = GraphSnapshot::default();
-        let no_parameters = rhizodb::Parameters::new();
         let mut labels = BTreeSet::new();
-        if let Ok(result) = self.database.execute("MATCH (n) RETURN n", &no_parameters) {
-            for value in result.rows().iter().flatten() {
-                if let rhizodb::Value::Node(node) = value {
-                    let id = node.id.as_u64();
-                    snapshot.nodes.push(id);
-                    labels.extend(node.labels.iter().cloned());
-                    record_properties(&mut snapshot, Entity::Node(id), &node.properties);
-                }
+        for value in self.read_all("MATCH (n) RETURN n")? {
+            if let rhizodb::Value::Node(node) = value {
+                let id = node.id.as_u64();
+                snapshot.nodes.push(id);
+                labels.extend(node.labels.iter().cloned());
+                record_properties(&mut snapshot, Entity::Node(id), &node.properties)?;
             }
         }
-        if let Ok(result) = self
-            .database
-            .execute("MATCH ()-[r]->() RETURN r", &no_parameters)
-        {
-            for value in result.rows().iter().flatten() {
-                if let rhizodb::Value::Relationship(relationship) = value {
-                    let id = relationship.id.as_u64();
-                    snapshot.relationships.push(id);
-                    record_properties(
-                        &mut snapshot,
-                        Entity::Relationship(id),
-                        &relationship.properties,
-                    );
-                }
+        for value in self.read_all("MATCH ()-[r]->() RETURN r")? {
+            if let rhizodb::Value::Relationship(relationship) = value {
+                let id = relationship.id.as_u64();
+                snapshot.relationships.push(id);
+                record_properties(
+                    &mut snapshot,
+                    Entity::Relationship(id),
+                    &relationship.properties,
+                )?;
             }
         }
         snapshot.labels = labels.into_iter().collect();
-        snapshot
+        Ok(snapshot)
+    }
+}
+
+impl RhizoGraph {
+    fn read_all(&self, query: &str) -> Result<Vec<rhizodb::Value>, String> {
+        let result = self
+            .database
+            .execute(query, &rhizodb::Parameters::new())
+            .map_err(|error| format!("{query}: {error}"))?;
+        Ok(result.rows().iter().flatten().cloned().collect())
     }
 }
 
@@ -124,16 +126,16 @@ fn record_properties(
     snapshot: &mut GraphSnapshot,
     entity: Entity,
     properties: &BTreeMap<String, rhizodb::Value>,
-) {
+) -> Result<(), String> {
     for (key, value) in properties {
-        if let Ok(value) = from_rhizo(value) {
-            snapshot.properties.push(PropertyEntry {
-                entity,
-                key: key.clone(),
-                value,
-            });
-        }
+        let value = from_rhizo(value).map_err(|error| format!("property `{key}`: {error}"))?;
+        snapshot.properties.push(PropertyEntry {
+            entity,
+            key: key.clone(),
+            value,
+        });
     }
+    Ok(())
 }
 
 fn query_error(kind: ErrorKind) -> QueryError {

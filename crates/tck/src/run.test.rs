@@ -214,3 +214,43 @@ fn the_control_query_is_checked_after_the_main_query() {
     let message = run_scenario(&bad, &scenario, None).expect_err("control mismatch");
     assert!(message.contains("control query"), "{message}");
 }
+
+#[test]
+fn a_graph_that_cannot_be_read_fails_a_scenario_that_asserts_side_effects() {
+    let before_unreadable = FakeEngine::new(vec![
+        Answer::rows("CREATE setup", &[], vec![]).then_unreadable_graph("MATCH (n) failed"),
+        answer("RETURN 1 AS n", 1),
+    ]);
+    let after_unreadable = FakeEngine::new(vec![
+        answer("RETURN 1 AS n", 1).then_unreadable_graph("MATCH (n) failed"),
+    ]);
+    let setup = Scenario {
+        setup: vec!["CREATE setup".into()],
+        side_effects: nodes_added(0),
+        ..scenario()
+    };
+    let plain = Scenario {
+        side_effects: nodes_added(0),
+        ..scenario()
+    };
+
+    let message = run_scenario(&before_unreadable, &setup, None).expect_err("before");
+    assert!(
+        message.contains("before the query") && message.contains("MATCH (n) failed"),
+        "{message}"
+    );
+    let message = run_scenario(&after_unreadable, &plain, None).expect_err("after");
+    assert!(
+        message.contains("after the query") && message.contains("MATCH (n) failed"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_unreadable_graph_does_not_matter_when_side_effects_are_not_asserted() {
+    let engine = FakeEngine::new(vec![
+        answer("RETURN 1 AS n", 1).then_unreadable_graph("MATCH (n) failed"),
+    ]);
+
+    assert_eq!(run_scenario(&engine, &scenario(), None), Ok(()));
+}

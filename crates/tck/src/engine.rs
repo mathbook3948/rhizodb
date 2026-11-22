@@ -48,8 +48,9 @@ pub trait Graph {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<Rows, QueryError>;
 
-    /// Reports the observable state of the graph so the runner can diff side effects.
-    fn snapshot(&self) -> GraphSnapshot;
+    /// Reports the observable state of the graph so the runner can diff side effects, or why the
+    /// state could not be read.
+    fn snapshot(&self) -> Result<GraphSnapshot, String>;
 }
 
 /// A query engine under test.
@@ -82,7 +83,7 @@ impl Graph for UnimplementedGraph {
         Err(QueryError::Unsupported)
     }
 
-    fn snapshot(&self) -> GraphSnapshot {
-        GraphSnapshot::default()
+    fn snapshot(&self) -> Result<GraphSnapshot, String> {
+        Ok(GraphSnapshot::default())
     }
 }

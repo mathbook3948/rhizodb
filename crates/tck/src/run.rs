@@ -24,11 +24,18 @@ pub fn run_scenario(
             .execute(query, &no_parameters)
             .map_err(|error| format!("setup query failed with {error}: {query}"))?;
     }
-    let before = graph.snapshot();
+    let before = scenario
+        .side_effects
+        .map(|_| graph.snapshot())
+        .transpose()
+        .map_err(|reason| format!("could not read the graph before the query: {reason}"))?;
     let result = graph.execute(&scenario.query, &scenario.parameters);
     check_outcome(&scenario.expected, &result)?;
-    if let Some(expected) = scenario.side_effects {
-        let actual = before.diff(&graph.snapshot());
+    if let (Some(expected), Some(before)) = (scenario.side_effects, before) {
+        let after = graph
+            .snapshot()
+            .map_err(|reason| format!("could not read the graph after the query: {reason}"))?;
+        let actual = before.diff(&after);
         if actual != expected {
             return Err(format!(
                 "expected side effects {expected:?}, got {actual:?}"
