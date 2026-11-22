@@ -5,6 +5,7 @@ use crate::error::ErrorKind;
 use crate::graph::NodeId;
 use crate::graph::RelationshipId;
 use crate::result::Value;
+use crate::temporal::Temporal;
 use crate::value::MAX_DEPTH;
 use crate::value::PropertyValue;
 
@@ -22,6 +23,7 @@ pub(crate) enum Datum {
     Node(NodeId),
     Relationship(RelationshipId),
     Path(PathIds),
+    Temporal(Temporal),
 }
 
 /// A path by element IDs. `nodes` has one more entry than `relationships`.
@@ -49,6 +51,7 @@ impl Datum {
             Datum::Node(_) => "node",
             Datum::Relationship(_) => "relationship",
             Datum::Path(_) => "path",
+            Datum::Temporal(value) => value.type_name(),
         }
     }
 }
@@ -62,6 +65,7 @@ impl From<PropertyValue> for Datum {
             PropertyValue::String(value) => Datum::String(value),
             PropertyValue::Bytes(value) => Datum::Bytes(value),
             PropertyValue::List(items) => Datum::List(items.into_iter().map(Datum::from).collect()),
+            PropertyValue::Temporal(value) => Datum::Temporal(value),
         }
     }
 }
@@ -81,6 +85,7 @@ fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
         Datum::Float(value) => Ok(PropertyValue::Float(*value)),
         Datum::String(value) => Ok(PropertyValue::String(value.clone())),
         Datum::Bytes(value) => Ok(PropertyValue::Bytes(value.clone())),
+        Datum::Temporal(value) => Ok(PropertyValue::Temporal(value.clone())),
         Datum::List(items) => {
             if depth >= MAX_DEPTH {
                 return Err(Error::new(
@@ -110,6 +115,7 @@ pub(crate) fn from_parameter(value: &Value) -> Datum {
         Value::Float(value) => Datum::Float(*value),
         Value::String(value) => Datum::String(value.clone()),
         Value::Bytes(value) => Datum::Bytes(value.clone()),
+        Value::Temporal(value) => Datum::Temporal(value.clone()),
         Value::List(items) => Datum::List(items.iter().map(from_parameter).collect()),
         Value::Map(entries) => Datum::Map(
             entries

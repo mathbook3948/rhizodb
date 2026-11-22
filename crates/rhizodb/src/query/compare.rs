@@ -46,6 +46,7 @@ fn scalar_equal(a: &Datum, b: &Datum) -> bool {
         (Datum::Node(a), Datum::Node(b)) => a == b,
         (Datum::Relationship(a), Datum::Relationship(b)) => a == b,
         (Datum::Path(a), Datum::Path(b)) => a == b,
+        (Datum::Temporal(a), Datum::Temporal(b)) => a.order(b) == Ordering::Equal,
         _ => false,
     }
 }
@@ -57,6 +58,7 @@ pub(crate) fn compare(a: &Datum, b: &Datum) -> Option<Comparison> {
         (Datum::Null, _) | (_, Datum::Null) => None,
         (Datum::String(a), Datum::String(b)) => Some(Comparison::Ordered(a.cmp(b))),
         (Datum::Boolean(a), Datum::Boolean(b)) => Some(Comparison::Ordered(a.cmp(b))),
+        (Datum::Temporal(a), Datum::Temporal(b)) => a.compare(b).map(Comparison::Ordered),
         (Datum::List(a), Datum::List(b)) => {
             for (x, y) in a.iter().zip(b) {
                 match compare(x, y)? {
@@ -137,8 +139,8 @@ fn integer_float(integer: i64, float: f64) -> Option<Ordering> {
     }
 }
 
-/// The global sort order used by `ORDER BY`: maps, nodes, relationships, lists, paths, strings,
-/// byte strings, booleans, numbers, then null. NaN sorts above every other number.
+/// The global sort order used by `ORDER BY`: maps, nodes, relationships, lists, paths, temporal
+/// values, strings, byte strings, booleans, numbers, then null. NaN sorts above every other number.
 ///
 /// Two values are equivalent for `DISTINCT` and grouping exactly when this returns `Equal`.
 pub(crate) fn order(a: &Datum, b: &Datum) -> Ordering {
@@ -161,6 +163,7 @@ pub(crate) fn order(a: &Datum, b: &Datum) -> Ordering {
             .nodes
             .cmp(&b.nodes)
             .then_with(|| a.relationships.cmp(&b.relationships)),
+        (Datum::Temporal(a), Datum::Temporal(b)) => a.order(b),
         (Datum::String(a), Datum::String(b)) => a.cmp(b),
         (Datum::Bytes(a), Datum::Bytes(b)) => a.cmp(b),
         (Datum::Boolean(a), Datum::Boolean(b)) => a.cmp(b),
@@ -201,11 +204,12 @@ fn rank(value: &Datum) -> u8 {
         Datum::Relationship(_) => 2,
         Datum::List(_) => 3,
         Datum::Path(_) => 4,
-        Datum::String(_) => 5,
-        Datum::Bytes(_) => 6,
-        Datum::Boolean(_) => 7,
-        Datum::Integer(_) | Datum::Float(_) => 8,
-        Datum::Null => 9,
+        Datum::Temporal(_) => 5,
+        Datum::String(_) => 6,
+        Datum::Bytes(_) => 7,
+        Datum::Boolean(_) => 8,
+        Datum::Integer(_) | Datum::Float(_) => 9,
+        Datum::Null => 10,
     }
 }
 

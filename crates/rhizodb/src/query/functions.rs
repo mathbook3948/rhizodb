@@ -8,9 +8,14 @@ use crate::storage::ReadTransaction;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::float_text;
+use super::shape::INSTANT;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
+use super::temporals::Moment;
+use super::temporals::TemporalFunction;
+use crate::temporal::arithmetic::Span;
+use crate::temporal::build::Kind;
 
 /// A scalar function, resolved by name when the query is bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +73,7 @@ pub(crate) enum Function {
     Left,
     Right,
     Exists,
+    Temporal(TemporalFunction),
 }
 
 const MAX_RANGE_LENGTH: i128 = 10_000_000;
@@ -87,10 +93,67 @@ const LIST_OR_STRING: Accepted = &[Shape::List, Shape::String];
 const INTEGER_CONVERTIBLE: Accepted =
     &[Shape::Integer, Shape::Float, Shape::Boolean, Shape::String];
 const FLOAT_CONVERTIBLE: Accepted = &[Shape::Integer, Shape::Float, Shape::String];
-const STRING_CONVERTIBLE: Accepted = &[Shape::String, Shape::Integer, Shape::Float, Shape::Boolean];
 const BOOLEAN_CONVERTIBLE: Accepted = &[Shape::Boolean, Shape::Integer, Shape::String];
+const STRING_CONVERTIBLE: Accepted = &[
+    Shape::String,
+    Shape::Integer,
+    Shape::Float,
+    Shape::Boolean,
+    Shape::Date,
+    Shape::LocalTime,
+    Shape::Time,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+    Shape::Duration,
+];
+const MAP: Accepted = &[Shape::Map];
+const DATE_SOURCE: Accepted = &[
+    Shape::String,
+    Shape::Map,
+    Shape::Date,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+];
+const TIME_SOURCE: Accepted = &[
+    Shape::String,
+    Shape::Map,
+    Shape::LocalTime,
+    Shape::Time,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+];
+const DATETIME_SOURCE: Accepted = &[
+    Shape::String,
+    Shape::Map,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+];
+const DURATION_SOURCE: Accepted = &[Shape::String, Shape::Map];
+const DATED: Accepted = &[Shape::Date, Shape::LocalDateTime, Shape::DateTime];
+const TIMED: Accepted = &[
+    Shape::LocalTime,
+    Shape::Time,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+];
 
-const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 53] = [
+const fn construct(kind: Kind) -> Function {
+    Function::Temporal(TemporalFunction::Construct(kind))
+}
+
+const fn clock(kind: Kind, moment: Moment) -> Function {
+    Function::Temporal(TemporalFunction::Clock(kind, moment))
+}
+
+const fn truncate(kind: Kind) -> Function {
+    Function::Temporal(TemporalFunction::Truncate(kind))
+}
+
+const fn between(span: Span) -> Function {
+    Function::Temporal(TemporalFunction::Between(span))
+}
+
+const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
     ("id", Function::Id, 1, 1, &[ELEMENT]),
     ("labels", Function::Labels, 1, 1, &[NODE]),
     ("type", Function::Type, 1, 1, &[RELATIONSHIP]),
@@ -156,6 +219,200 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 53] = [
     ("left", Function::Left, 2, 2, &[STRING, INTEGER]),
     ("right", Function::Right, 2, 2, &[STRING, INTEGER]),
     ("exists", Function::Exists, 1, 1, &[ANY]),
+    ("date", construct(Kind::Date), 0, 1, &[DATE_SOURCE]),
+    (
+        "localtime",
+        construct(Kind::LocalTime),
+        0,
+        1,
+        &[TIME_SOURCE],
+    ),
+    ("time", construct(Kind::Time), 0, 1, &[TIME_SOURCE]),
+    (
+        "localdatetime",
+        construct(Kind::LocalDateTime),
+        0,
+        1,
+        &[DATETIME_SOURCE],
+    ),
+    (
+        "datetime",
+        construct(Kind::DateTime),
+        0,
+        1,
+        &[DATETIME_SOURCE],
+    ),
+    (
+        "date.transaction",
+        clock(Kind::Date, Moment::Transaction),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "date.statement",
+        clock(Kind::Date, Moment::Statement),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "date.realtime",
+        clock(Kind::Date, Moment::Realtime),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localtime.transaction",
+        clock(Kind::LocalTime, Moment::Transaction),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localtime.statement",
+        clock(Kind::LocalTime, Moment::Statement),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localtime.realtime",
+        clock(Kind::LocalTime, Moment::Realtime),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "time.transaction",
+        clock(Kind::Time, Moment::Transaction),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "time.statement",
+        clock(Kind::Time, Moment::Statement),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "time.realtime",
+        clock(Kind::Time, Moment::Realtime),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localdatetime.transaction",
+        clock(Kind::LocalDateTime, Moment::Transaction),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localdatetime.statement",
+        clock(Kind::LocalDateTime, Moment::Statement),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "localdatetime.realtime",
+        clock(Kind::LocalDateTime, Moment::Realtime),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "datetime.transaction",
+        clock(Kind::DateTime, Moment::Transaction),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "datetime.statement",
+        clock(Kind::DateTime, Moment::Statement),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "datetime.realtime",
+        clock(Kind::DateTime, Moment::Realtime),
+        0,
+        1,
+        &[STRING],
+    ),
+    (
+        "date.truncate",
+        truncate(Kind::Date),
+        2,
+        3,
+        &[STRING, DATED, MAP],
+    ),
+    (
+        "localtime.truncate",
+        truncate(Kind::LocalTime),
+        2,
+        3,
+        &[STRING, TIMED, MAP],
+    ),
+    (
+        "time.truncate",
+        truncate(Kind::Time),
+        2,
+        3,
+        &[STRING, TIMED, MAP],
+    ),
+    (
+        "localdatetime.truncate",
+        truncate(Kind::LocalDateTime),
+        2,
+        3,
+        &[STRING, DATED, MAP],
+    ),
+    (
+        "datetime.truncate",
+        truncate(Kind::DateTime),
+        2,
+        3,
+        &[STRING, DATED, MAP],
+    ),
+    (
+        "datetime.fromepoch",
+        Function::Temporal(TemporalFunction::FromEpoch),
+        2,
+        2,
+        &[INTEGER],
+    ),
+    (
+        "datetime.fromepochmillis",
+        Function::Temporal(TemporalFunction::FromEpochMillis),
+        1,
+        1,
+        &[INTEGER],
+    ),
+    (
+        "duration",
+        Function::Temporal(TemporalFunction::Duration),
+        1,
+        1,
+        &[DURATION_SOURCE],
+    ),
+    ("duration.between", between(Span::Whole), 2, 2, &[INSTANT]),
+    ("duration.inmonths", between(Span::Months), 2, 2, &[INSTANT]),
+    ("duration.indays", between(Span::Days), 2, 2, &[INSTANT]),
+    (
+        "duration.inseconds",
+        between(Span::Seconds),
+        2,
+        2,
+        &[INSTANT],
+    ),
 ];
 
 impl Function {
@@ -224,6 +481,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             {
                 return Err(invalid_value(function, value));
             }
+        }
+        if let Function::Temporal(temporal) = function {
+            return self.call_temporal(temporal, args);
         }
         let mut args = args.into_iter();
         let first = args.next().unwrap_or(Datum::Null);
@@ -450,6 +710,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 Ok(Datum::String(text.replace(from.as_str(), to)))
             }
+            Function::Temporal(temporal) => self.call_temporal(temporal, vec![first]),
             Function::Split => {
                 let text = string_argument(function, first)?;
                 match second {
@@ -632,6 +893,7 @@ fn to_string(value: Datum) -> Result<Datum, Error> {
         Datum::Integer(value) => Ok(Datum::String(value.to_string())),
         Datum::Float(value) => Ok(Datum::String(float_text(value))),
         Datum::Boolean(value) => Ok(Datum::String(value.to_string())),
+        Datum::Temporal(value) => Ok(Datum::String(value.to_string())),
         other => Err(invalid_value(Function::ToString, &other)),
     }
 }

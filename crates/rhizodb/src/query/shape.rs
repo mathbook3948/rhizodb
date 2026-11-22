@@ -1,6 +1,7 @@
 use crate::error::ErrorKind;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::UnaryOp;
+use crate::temporal::Temporal;
 
 use super::datum::Datum;
 
@@ -17,10 +18,25 @@ pub(crate) enum Shape {
     Float,
     Boolean,
     Bytes,
+    Date,
+    LocalTime,
+    Time,
+    LocalDateTime,
+    DateTime,
+    Duration,
 }
 
 /// Integers and floats.
 pub(crate) const NUMBER: &[Shape] = &[Shape::Integer, Shape::Float];
+
+/// The temporal values that are points in time rather than durations.
+pub(crate) const INSTANT: &[Shape] = &[
+    Shape::Date,
+    Shape::LocalTime,
+    Shape::Time,
+    Shape::LocalDateTime,
+    Shape::DateTime,
+];
 
 /// Whether a position that takes the `accepted` shapes takes `shape`. No shapes means any.
 pub(crate) fn admits(accepted: &[Shape], shape: Shape) -> bool {
@@ -42,6 +58,14 @@ impl Shape {
             Datum::Node(_) => Some(Shape::Node),
             Datum::Relationship(_) => Some(Shape::Relationship),
             Datum::Path(_) => Some(Shape::Path),
+            Datum::Temporal(value) => Some(match value {
+                Temporal::Date(_) => Shape::Date,
+                Temporal::LocalTime(_) => Shape::LocalTime,
+                Temporal::Time(_) => Shape::Time,
+                Temporal::LocalDateTime(_) => Shape::LocalDateTime,
+                Temporal::DateTime(_) => Shape::DateTime,
+                Temporal::Duration(_) => Shape::Duration,
+            }),
         }
     }
 }
@@ -59,6 +83,8 @@ pub(crate) fn unary_error(op: UnaryOp, operand: Shape) -> Option<ErrorKind> {
 /// The error a binary operator raises on operands of these shapes, or none when it takes them.
 pub(crate) fn binary_error(op: BinaryOp, lhs: Shape, rhs: Shape) -> Option<ErrorKind> {
     let number = |shape: Shape| NUMBER.contains(&shape);
+    let instant = |shape: Shape| INSTANT.contains(&shape);
+    let duration = |shape: Shape| shape == Shape::Duration;
     let takes = match op {
         BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
             lhs == Shape::Boolean && rhs == Shape::Boolean
@@ -71,12 +97,19 @@ pub(crate) fn binary_error(op: BinaryOp, lhs: Shape, rhs: Shape) -> Option<Error
             lhs == Shape::List
                 || rhs == Shape::List
                 || ((lhs == Shape::String || number(lhs)) && (rhs == Shape::String || number(rhs)))
+                || ((instant(lhs) || duration(lhs)) && duration(rhs))
+                || (duration(lhs) && instant(rhs))
         }
-        BinaryOp::Subtract
-        | BinaryOp::Multiply
-        | BinaryOp::Divide
-        | BinaryOp::Modulo
-        | BinaryOp::Power => number(lhs) && number(rhs),
+        BinaryOp::Subtract => {
+            (number(lhs) && number(rhs)) || ((instant(lhs) || duration(lhs)) && duration(rhs))
+        }
+        BinaryOp::Multiply => {
+            (number(lhs) && number(rhs))
+                || (duration(lhs) && number(rhs))
+                || (number(lhs) && duration(rhs))
+        }
+        BinaryOp::Divide => (number(lhs) || duration(lhs)) && number(rhs),
+        BinaryOp::Modulo | BinaryOp::Power => number(lhs) && number(rhs),
     };
     (!takes).then_some(ErrorKind::TypeMismatch)
 }

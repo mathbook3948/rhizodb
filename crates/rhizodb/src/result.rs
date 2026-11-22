@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::graph::NodeId;
 use crate::graph::RelationshipId;
+use crate::temporal::Temporal;
 
 /// Named query parameters, referred to as `$name` in the query text.
 pub type Parameters = BTreeMap<String, Value>;
@@ -34,6 +35,8 @@ pub enum Value {
     Relationship(Relationship),
     /// A path.
     Path(Path),
+    /// A date, a time, a datetime, or a duration.
+    Temporal(Temporal),
 }
 
 /// A node as it was when the query finished.

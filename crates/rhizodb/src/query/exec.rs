@@ -11,6 +11,7 @@ use crate::result::QueryResult;
 use crate::result::Value;
 use crate::storage::ReadTransaction;
 use crate::storage::WriteTransaction;
+use crate::temporal::DateTime;
 
 use super::compare::Key;
 use super::compare::order;
@@ -31,10 +32,12 @@ use super::update::Graveyard;
 pub(crate) fn run_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
+    now: &DateTime,
 ) -> Result<QueryResult, Error> {
     let env = Env {
         tx,
         slots: program.slot_count,
+        now,
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
@@ -45,18 +48,36 @@ pub(crate) fn run_read<T: ReadTransaction>(
 pub(crate) fn run_write<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     program: &Program<Clause>,
+    now: &DateTime,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
-    Env { tx: &*tx, slots }.check_closed(&program.closed)?;
+    Env {
+        tx: &*tx,
+        slots,
+        now,
+    }
+    .check_closed(&program.closed)?;
     let mut graveyard = Graveyard::default();
     let rows = run(program, |clause, rows| match clause {
-        Clause::Read(clause) => Env { tx: &*tx, slots }.read_clause(clause, rows),
-        Clause::Update(clause) => super::update::apply(tx, slots, &mut graveyard, clause, rows),
+        Clause::Read(clause) => Env {
+            tx: &*tx,
+            slots,
+            now,
+        }
+        .read_clause(clause, rows),
+        Clause::Update(clause) => {
+            super::update::apply(tx, slots, now, &mut graveyard, clause, rows)
+        }
     })?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
-    materialize(&Env { tx: &*tx, slots }, &graveyard, &program.columns, rows)
+    let env = Env {
+        tx: &*tx,
+        slots,
+        now,
+    };
+    materialize(&env, &graveyard, &program.columns, rows)
 }
 
 fn run<C>(
@@ -270,6 +291,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::Float(value) => Value::Float(value),
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
+            Datum::Temporal(value) => Value::Temporal(value),
             Datum::List(items) => Value::List(
                 items
                     .into_iter()

@@ -27,7 +27,7 @@ pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {

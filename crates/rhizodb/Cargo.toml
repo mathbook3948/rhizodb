@@ -14,4 +14,5 @@ proptest = "1.12.0"
 tempfile = "3.27.0"
 
 [dependencies]
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 redb = "5.0.0"

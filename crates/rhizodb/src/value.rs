@@ -1,6 +1,14 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::temporal::Date;
+use crate::temporal::DateTime;
+use crate::temporal::Duration;
+use crate::temporal::LocalDateTime;
+use crate::temporal::LocalTime;
+use crate::temporal::Temporal;
+use crate::temporal::Time;
+
 pub(crate) const MAX_DEPTH: usize = 64;
 
 const TAG_BOOLEAN: u8 = 0;
@@ -9,6 +17,13 @@ const TAG_FLOAT: u8 = 2;
 const TAG_STRING: u8 = 3;
 const TAG_BYTES: u8 = 4;
 const TAG_LIST: u8 = 5;
+const TAG_DATE: u8 = 6;
+const TAG_LOCAL_TIME: u8 = 7;
+const TAG_TIME: u8 = 8;
+const TAG_LOCAL_DATETIME: u8 = 9;
+const TAG_OFFSET_DATETIME: u8 = 10;
+const TAG_ZONED_DATETIME: u8 = 11;
+const TAG_DURATION: u8 = 12;
 
 /// A stored property value. Null is never stored: setting a property to null removes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +34,7 @@ pub(crate) enum PropertyValue {
     String(String),
     Bytes(Vec<u8>),
     List(Vec<PropertyValue>),
+    Temporal(Temporal),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +46,7 @@ pub(crate) enum DecodeError {
     LengthOverflow,
     NestingTooDeep,
     TrailingBytes,
+    InvalidTemporal,
 }
 
 impl fmt::Display for DecodeError {
@@ -42,6 +59,7 @@ impl fmt::Display for DecodeError {
             Self::LengthOverflow => write!(formatter, "length does not fit in memory"),
             Self::NestingTooDeep => write!(formatter, "lists nest deeper than {MAX_DEPTH}"),
             Self::TrailingBytes => write!(formatter, "bytes remain after the value"),
+            Self::InvalidTemporal => write!(formatter, "temporal value is out of range"),
         }
     }
 }
@@ -87,6 +105,7 @@ impl PropertyValue {
                     item.encode_into(out);
                 }
             }
+            Self::Temporal(value) => encode_temporal(value, out),
         }
     }
 
@@ -96,6 +115,53 @@ impl PropertyValue {
         let value = reader.value()?;
         reader.finish()?;
         Ok(value)
+    }
+}
+
+fn encode_temporal(value: &Temporal, out: &mut Vec<u8>) {
+    match value {
+        Temporal::Date(date) => {
+            out.push(TAG_DATE);
+            out.extend_from_slice(&date.days().to_be_bytes());
+        }
+        Temporal::LocalTime(time) => {
+            out.push(TAG_LOCAL_TIME);
+            out.extend_from_slice(&time.nanos().to_be_bytes());
+        }
+        Temporal::Time(time) => {
+            out.push(TAG_TIME);
+            out.extend_from_slice(&time.local_time().nanos().to_be_bytes());
+            out.extend_from_slice(&time.offset_seconds().to_be_bytes());
+        }
+        Temporal::LocalDateTime(local) => {
+            out.push(TAG_LOCAL_DATETIME);
+            out.extend_from_slice(&local.date().days().to_be_bytes());
+            out.extend_from_slice(&local.time().nanos().to_be_bytes());
+        }
+        Temporal::DateTime(datetime) => {
+            let zone = datetime.zone_name();
+            out.push(if zone.is_some() {
+                TAG_ZONED_DATETIME
+            } else {
+                TAG_OFFSET_DATETIME
+            });
+            out.extend_from_slice(&datetime.epoch_second().to_be_bytes());
+            out.extend_from_slice(&datetime.nanosecond().to_be_bytes());
+            match zone {
+                Some(name) => {
+                    put_varint(out, name.len());
+                    out.extend_from_slice(name.as_bytes());
+                }
+                None => out.extend_from_slice(&datetime.offset_seconds().to_be_bytes()),
+            }
+        }
+        Temporal::Duration(duration) => {
+            out.push(TAG_DURATION);
+            out.extend_from_slice(&duration.months().to_be_bytes());
+            out.extend_from_slice(&duration.days().to_be_bytes());
+            out.extend_from_slice(&duration.seconds().to_be_bytes());
+            out.extend_from_slice(&duration.nanoseconds().to_be_bytes());
+        }
     }
 }
 
@@ -203,8 +269,54 @@ impl<'a> Reader<'a> {
                 }
                 Ok(PropertyValue::List(items))
             }
+            tag @ TAG_DATE..=TAG_DURATION => self.temporal(tag).map(PropertyValue::Temporal),
             tag => Err(DecodeError::UnknownTag(tag)),
         }
+    }
+
+    fn i64(&mut self) -> Result<i64, DecodeError> {
+        Ok(self.u64()? as i64)
+    }
+
+    fn temporal(&mut self, tag: u8) -> Result<Temporal, DecodeError> {
+        let value = match tag {
+            TAG_DATE => Date::from_days(self.i64()?).map(Temporal::Date),
+            TAG_LOCAL_TIME => LocalTime::from_nanos(self.i64()?).map(Temporal::LocalTime),
+            TAG_TIME => {
+                let time = LocalTime::from_nanos(self.i64()?);
+                let offset = self.u32()? as i32;
+                time.and_then(|time| Time::new(time, offset))
+                    .map(Temporal::Time)
+            }
+            TAG_LOCAL_DATETIME => {
+                let date = Date::from_days(self.i64()?);
+                let time = LocalTime::from_nanos(self.i64()?);
+                date.zip(time)
+                    .map(|(date, time)| Temporal::LocalDateTime(LocalDateTime::new(date, time)))
+            }
+            TAG_OFFSET_DATETIME => {
+                let second = self.i64()?;
+                let nanosecond = self.u32()?;
+                let offset = self.u32()? as i32;
+                DateTime::from_stored(second, nanosecond, offset, None).map(Temporal::DateTime)
+            }
+            TAG_ZONED_DATETIME => {
+                let second = self.i64()?;
+                let nanosecond = self.u32()?;
+                let length = self.varint()?;
+                let name = std::str::from_utf8(self.take(length)?)
+                    .map_err(|_| DecodeError::InvalidUtf8)?;
+                DateTime::from_stored(second, nanosecond, 0, Some(name)).map(Temporal::DateTime)
+            }
+            _ => {
+                let months = self.i64()?;
+                let days = self.i64()?;
+                let seconds = self.i64()?;
+                let nanoseconds = self.u32()?;
+                Duration::from_stored(months, days, seconds, nanoseconds).map(Temporal::Duration)
+            }
+        };
+        value.ok_or(DecodeError::InvalidTemporal)
     }
 }
 

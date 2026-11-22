@@ -13,6 +13,7 @@ use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
 use crate::storage::ReadTransaction;
+use crate::temporal::DateTime;
 
 use super::compare::Comparison;
 use super::compare::compare;
@@ -20,6 +21,7 @@ use super::compare::equals;
 use super::datum::Datum;
 use super::plan::Expr;
 use super::plan::Slot;
+use super::temporals;
 
 /// One row: a value for every slot of the query.
 pub(crate) type Row = Vec<Datum>;
@@ -29,6 +31,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) tx: &'a GraphTx<T>,
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
+    /// The instant the query started, which the clock functions other than `realtime` read.
+    pub(crate) now: &'a DateTime,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -113,6 +117,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::Node(_) | Datum::Relationship(_) => {
                 Ok(self.element_property(value, key)?.unwrap_or(Datum::Null))
             }
+            Datum::Temporal(value) => temporals::component(value, key),
             other => Err(Error::new(
                 ErrorKind::PropertyAccessOnNonEntity,
                 format!("cannot read property `{key}` of a {}", other.type_name()),
@@ -533,6 +538,9 @@ fn with_fraction(text: String) -> String {
 }
 
 fn arithmetic(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+    if let Some(result) = temporals::arithmetic(op, &lhs, &rhs) {
+        return result;
+    }
     match (lhs, rhs) {
         (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
         (Datum::Integer(a), Datum::Integer(b)) => integer_arithmetic(op, a, b),

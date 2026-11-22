@@ -237,6 +237,7 @@ fn from_rhizo(value: &rhizodb::Value) -> Result<Value, QueryError> {
             Value::Relationship(from_relationship(relationship)?)
         }
         rhizodb::Value::Path(path) => Value::Path(from_path(path)?),
+        rhizodb::Value::Temporal(value) => Value::String(value.to_string()),
         _ => return Err(QueryError::Unsupported),
     })
 }
