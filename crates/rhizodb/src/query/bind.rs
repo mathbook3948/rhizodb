@@ -1112,6 +1112,9 @@ impl Binder<'_> {
                 };
                 let mut branches = Vec::new();
                 for branch in &case.branches {
+                    if case.scrutinee.is_none() {
+                        self.expect_shape(&branch.when, scope, &[Shape::Boolean])?;
+                    }
                     branches.push((
                         self.expr(&branch.when, scope, mode)?,
                         self.expr(&branch.then, scope, mode)?,

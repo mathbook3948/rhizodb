@@ -800,3 +800,28 @@ fn a_parameter_is_data_so_its_type_error_waits_for_a_row() {
         .unwrap();
     assert!(result.rows().is_empty());
 }
+
+#[test]
+fn a_searched_case_needs_a_boolean_or_null_condition() {
+    let db = db();
+    fails_before_reading_data(&db, "RETURN CASE WHEN 1 THEN 'x' ELSE 'y' END");
+    fails_before_reading_data(&db, "MATCH (n:Missing) RETURN CASE WHEN 'a' THEN 1 END");
+    assert_eq!(
+        error_kind(
+            &db,
+            "UNWIND [1] AS x RETURN CASE WHEN x THEN 'x' ELSE 'y' END"
+        ),
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [true, false, null] AS x RETURN CASE WHEN x THEN 'x' ELSE 'y' END"
+        ),
+        [vec![string("x")], vec![string("y")], vec![string("y")]]
+    );
+    assert_eq!(
+        single(&db, "RETURN CASE 1 WHEN 1 THEN 'x' ELSE 'y' END"),
+        string("x")
+    );
+}

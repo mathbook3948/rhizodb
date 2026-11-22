@@ -217,7 +217,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     let when = self.eval(when, row)?;
                     let hit = match &scrutinee {
                         Some(scrutinee) => equals(scrutinee, &when) == Some(true),
-                        None => matches!(when, Datum::Boolean(true)),
+                        None => truth(&when)? == Some(true),
                     };
                     if hit {
                         return self.eval(then, row);
