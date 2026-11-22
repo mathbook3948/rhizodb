@@ -11,6 +11,9 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - redb handles disk storage.
 - The storage layer sits behind a trait so it can be swapped.
 - Values are stored as bytes in a format RhizoDB defines, and the format carries a version.
+- Each format version can hold everything the older versions hold.
+- Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
+- Opening a database written in a newer format version fails.
 
 ## Open
 

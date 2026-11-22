@@ -393,3 +393,46 @@ fn the_current_format_version_is_written_on_first_open_and_accepted_after() {
     assert_eq!(stored, Some(FORMAT_VERSION.to_be_bytes().to_vec()));
     assert!(Graph::open(storage).is_ok());
 }
+
+#[test]
+fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
+    let storage = RedbStorage::in_memory().unwrap();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &1u32.to_be_bytes(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+
+    let graph = Graph::open(storage).unwrap();
+    let stored = graph
+        .storage
+        .begin_read()
+        .unwrap()
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(FORMAT_VERSION.to_be_bytes().to_vec()));
+}
+
+#[test]
+fn a_newer_format_version_is_rejected_on_open() {
+    let storage = RedbStorage::in_memory().unwrap();
+    let mut write = storage.begin_write().unwrap();
+    let newer = FORMAT_VERSION + 1;
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &newer.to_be_bytes(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+
+    assert!(matches!(
+        Graph::open(storage),
+        Err(GraphError::UnsupportedFormatVersion(found)) if found == newer
+    ));
+}

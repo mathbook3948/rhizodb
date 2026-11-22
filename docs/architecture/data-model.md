@@ -24,7 +24,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A temporal value is stored as its tag and fixed-width big-endian fields: a date as its day number from 1970-01-01, a time of day as nanoseconds since midnight, an offset as signed seconds, an instant as seconds from the Unix epoch and nanoseconds, a zone name as UTF-8 text.
 - Adding a stored value type changes the format version, so an older build refuses the database instead of failing on an unknown tag.
 - Stored lists have a fixed nesting limit, enforced on write as well as on read.
-- The database records one format version in a metadata table, and opening a database with an unknown version fails.
+- The database records one format version in a metadata table.
 - Each query runs in its own transaction.
 
 ## Open
