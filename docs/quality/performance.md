@@ -16,7 +16,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - The scale is chosen by name, from tiny for tests to large, and the operation counts per workload follow it.
 - Each engine is also measured on its own best path: LadybugDB loads with `COPY FROM`, and RhizoDB loads in one write transaction with node handles from the creating query.
 - The path both engines share, `UNWIND` with `CREATE`, is reported beside the tuned one as its own row.
-- A path that cannot finish at a scale because an engine lacks an index loads a fixed number of edges, and the row says how many.
+- A path one engine cannot finish at a scale loads a fixed number of edges, and the row says how many.
 - Loading one row per commit is its own workload on both engines.
 - The suite covers bulk load with on-disk size, reopen, many small commits, point lookups, scans, ordering, one to three hop traversals, variable-length paths, grouped aggregation, bulk update, detach delete, keyword and vector search with their index builds, and concurrent reads.
 - A workload that needs a feature one engine lacks reports that engine as unsupported instead of failing.
