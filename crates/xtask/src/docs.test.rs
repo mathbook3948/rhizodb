@@ -56,3 +56,28 @@ fn index_groups_docs_by_domain_in_path_order() {
         "\n## architecture\n\n- [query](architecture/query.md): query summary.\n- [storage](architecture/storage.md): storage summary.\n\n## product\n\n- [scope](product/scope.md): scope summary.\n"
     ));
 }
+
+#[test]
+fn reports_entries_of_a_domain_folder_that_are_not_docs() {
+    let root = std::env::temp_dir().join(format!("xtask-docs-{}", std::process::id()));
+    let domain = root.join(DOCS_DIR).join("architecture");
+    fs::create_dir_all(domain.join("nested")).unwrap();
+    fs::write(domain.join("storage.md"), VALID).unwrap();
+    fs::write(domain.join("diagram.png"), [0x89, 0xff, 0xfe]).unwrap();
+    fs::write(domain.join("broken.md"), [0x89, 0xff, 0xfe]).unwrap();
+
+    let result = collect(&root).map_err(|error| error.to_string());
+    fs::remove_dir_all(&root).unwrap();
+
+    let (docs, mut violations) = result.unwrap();
+    violations.sort();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        violations,
+        [
+            "docs/architecture/broken.md: a doc must be UTF-8 text",
+            "docs/architecture/diagram.png: a domain folder holds only .md docs",
+            "docs/architecture/nested: a domain folder holds only .md docs",
+        ]
+    );
+}
