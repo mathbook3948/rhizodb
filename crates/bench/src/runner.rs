@@ -28,6 +28,7 @@ use crate::workloads::io_failure;
 pub struct Settings {
     pub reps: usize,
     pub only: Option<String>,
+    pub skip: Option<String>,
 }
 
 struct Indexed {
@@ -351,6 +352,10 @@ pub fn run_all(
             .only
             .as_deref()
             .is_none_or(|only| workload.name.contains(only))
+            && settings
+                .skip
+                .as_deref()
+                .is_none_or(|skip| !workload.name.contains(skip))
     });
     let mut reports = Vec::new();
     for workload in selected {

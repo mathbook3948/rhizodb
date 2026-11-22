@@ -108,6 +108,7 @@ fn engines_alternate_after_an_unreported_warm_up_and_unsupported_work_is_recorde
     let settings = Settings {
         reps: 3,
         only: Some("alternate".to_owned()),
+        skip: None,
     };
     let workloads = [
         workload("x/alternate", logging),
@@ -137,6 +138,7 @@ fn engines_alternate_after_an_unreported_warm_up_and_unsupported_work_is_recorde
     let settings = Settings {
         reps: 2,
         only: Some("declined".to_owned()),
+        skip: None,
     };
     let reports = run_all(
         &mut environment,

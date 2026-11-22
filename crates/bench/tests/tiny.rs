@@ -34,6 +34,7 @@ fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing
         scale: Scale::Tiny,
         reps: 1,
         only: None,
+        skip: None,
         engines: Some(embedded()),
         servers: Servers::default(),
     };

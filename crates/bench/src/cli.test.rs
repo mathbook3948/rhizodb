@@ -12,6 +12,7 @@ fn no_arguments_give_the_defaults() {
             scale: Scale::Small,
             reps: 5,
             only: None,
+            skip: None,
             out: None,
             engines: None,
             servers: Servers::default(),
@@ -31,6 +32,7 @@ fn every_flag_is_read() {
             scale: Scale::Medium,
             reps: 3,
             only: Some("load".to_owned()),
+            skip: None,
             out: Some(PathBuf::from("r.json")),
             engines: None,
             servers: Servers::default(),
@@ -83,4 +85,15 @@ fn engines_and_server_urls_are_read() {
 fn fewer_than_five_repetitions_warn_loudly() {
     assert!(warnings(5).is_empty());
     assert!(warnings(3)[0].starts_with("WARNING"));
+}
+
+#[test]
+fn skip_is_read() {
+    assert_eq!(
+        parse(args(&["--skip", "index/vector"]))
+            .unwrap()
+            .skip
+            .as_deref(),
+        Some("index/vector")
+    );
 }
