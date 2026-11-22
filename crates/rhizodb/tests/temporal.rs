@@ -227,6 +227,8 @@ fn a_duration_divided_by_an_infinite_float_is_zero() {
     for query in [
         "RETURN duration('PT1S') / ((1.0 / 0.0) - (1.0 / 0.0))",
         "RETURN duration('PT1S') * (1.0 / 0.0)",
+        "RETURN duration('PT0S') * (1.0 / 0.0)",
+        "RETURN duration('PT0S') * ((1.0 / 0.0) - (1.0 / 0.0))",
     ] {
         assert_eq!(
             error_kind(&db, query),
