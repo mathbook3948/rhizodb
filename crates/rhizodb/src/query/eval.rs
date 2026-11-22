@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::error::Error;
@@ -36,9 +37,17 @@ pub(crate) struct Env<'a, T> {
     pub(crate) now: &'a DateTime,
     /// What the query deleted so far.
     pub(crate) graveyard: &'a Graveyard,
-    /// Whether evaluation only looks for type errors, reading every other failure as null so
-    /// it reaches the parts after it.
-    pub(crate) checking: bool,
+    /// Set when evaluation only looks for the type errors the query text fixes.
+    pub(crate) check: Option<&'a Check>,
+}
+
+/// The state of an evaluation that only looks for type errors. A step that fails with a value
+/// error gives null instead, so the steps after it are still checked, and a type error counts
+/// only when no such null went into the step that raised it.
+#[derive(Debug, Default)]
+pub(crate) struct Check {
+    substituted: Cell<usize>,
+    found: Cell<bool>,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -156,10 +165,33 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
+        let Some(check) = self.check else {
+            return self.eval_node(expr, row);
+        };
+        let before = check.substituted.get();
         match self.eval_node(expr, row) {
-            Err(error) if self.checking && !error.is_type_error() => Ok(Datum::Null),
+            Err(error)
+                if error.is_type_error()
+                    && (check.found.get() || check.substituted.get() == before) =>
+            {
+                check.found.set(true);
+                Err(error)
+            }
+            Err(_) => {
+                check.substituted.set(check.substituted.get() + 1);
+                Ok(Datum::Null)
+            }
             result => result,
         }
+    }
+
+    fn substituted_since(&self, before: usize) -> bool {
+        self.check
+            .is_some_and(|check| check.substituted.get() != before)
+    }
+
+    fn substitutions(&self) -> usize {
+        self.check.map_or(0, |check| check.substituted.get())
     }
 
     fn eval_node(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
@@ -262,7 +294,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
             }
             Expr::ListComprehension(comprehension) => {
-                let Some(items) = list_operand(self.eval(&comprehension.source, row)?)? else {
+                let before = self.substitutions();
+                let source = self.eval(&comprehension.source, row)?;
+                if self.substituted_since(before) {
+                    return Ok(Datum::Null);
+                }
+                let Some(items) = list_operand(source)? else {
                     return Ok(Datum::Null);
                 };
                 let mut local = row.clone();
@@ -282,7 +319,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(Datum::List(out))
             }
             Expr::Quantified(quantified) => {
-                let Some(items) = list_operand(self.eval(&quantified.source, row)?)? else {
+                let before = self.substitutions();
+                let source = self.eval(&quantified.source, row)?;
+                if self.substituted_since(before) {
+                    return Ok(Datum::Null);
+                }
+                let Some(items) = list_operand(source)? else {
                     return Ok(Datum::Null);
                 };
                 let mut local = row.clone();

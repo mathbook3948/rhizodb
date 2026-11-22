@@ -18,6 +18,7 @@ use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
 use super::datum::from_parameter;
+use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
@@ -46,7 +47,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         slots: program.slot_count,
         now,
         graveyard: &graveyard,
-        checking: false,
+        check: None,
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
@@ -66,7 +67,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         slots,
         now,
         graveyard: &graveyard,
-        checking: false,
+        check: None,
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| match clause {
@@ -75,7 +76,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             slots,
             now,
             graveyard: &graveyard,
-            checking: false,
+            check: None,
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => {
@@ -90,7 +91,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         slots,
         now,
         graveyard: &graveyard,
-        checking: false,
+        check: None,
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -315,12 +316,13 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn check_closed(&self, closed: &[Expr]) -> Result<(), Error> {
+        let check = Check::default();
         let checker = Env {
             tx: self.tx,
             slots: self.slots,
             now: self.now,
             graveyard: self.graveyard,
-            checking: true,
+            check: Some(&check),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {

@@ -1288,6 +1288,17 @@ fn a_value_error_in_the_query_text_does_not_hide_a_later_type_error() {
         fails_before_reading_data(&db, query);
     }
     assert!(run(&db, "MATCH (n:Missing) RETURN [x IN [0] | 1 / x] AS x").is_empty());
+    for query in [
+        "MATCH (n:Missing) RETURN coalesce(1 / 0, 'a') - 1 AS v",
+        "MATCH (n:Missing) RETURN [x IN [coalesce(1 / 0, 'a')] | x - 1] AS v",
+        "MATCH (n:Missing) RETURN CASE WHEN coalesce(1 / 0, 1) THEN 1 END AS v",
+    ] {
+        assert!(run(&db, query).is_empty(), "{query}");
+    }
+    assert_eq!(
+        error_kind(&db, "RETURN coalesce(1 / 0, 'a') - 1 AS v"),
+        ErrorKind::DivisionByZero
+    );
     assert_eq!(
         error_kind(&db, "RETURN [x IN [0, 'a'] | 1 / x] AS x"),
         ErrorKind::InvalidArgumentType

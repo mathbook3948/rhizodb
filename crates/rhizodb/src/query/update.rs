@@ -113,7 +113,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             slots: self.slots,
             now: self.now,
             graveyard: &*self.graveyard,
-            checking: false,
+            check: None,
         }
     }
 
