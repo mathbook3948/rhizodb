@@ -32,6 +32,7 @@ use super::plan::PatternPart;
 use super::plan::RemoveAction;
 use super::plan::SetAction;
 use super::plan::UpdateClause;
+use super::regex::Patterns;
 
 /// What a query deleted. The records are kept so the query can still return them, and the
 /// deleted nodes are checked for relationships left behind once the query has run.
@@ -47,6 +48,7 @@ pub(crate) fn apply<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     slots: usize,
     now: &DateTime,
+    patterns: &Patterns,
     graveyard: &mut Graveyard,
     clause: &UpdateClause,
     rows: Vec<Row>,
@@ -55,6 +57,7 @@ pub(crate) fn apply<W: WriteTransaction>(
         tx,
         slots,
         now,
+        patterns,
         graveyard,
     };
     match clause {
@@ -103,6 +106,7 @@ struct Writer<'a, W> {
     tx: &'a mut GraphTx<W>,
     slots: usize,
     now: &'a DateTime,
+    patterns: &'a Patterns,
     graveyard: &'a mut Graveyard,
 }
 
@@ -113,6 +117,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             slots: self.slots,
             now: self.now,
             graveyard: &*self.graveyard,
+            patterns: self.patterns,
             check: None,
         }
     }

@@ -94,6 +94,8 @@ pub enum ErrorKind {
     IntegerOverflow,
     /// Integer division or modulo by zero.
     DivisionByZero,
+    /// The pattern of `=~` is not a valid regular expression, or compiles past the size limit.
+    InvalidRegex,
     /// A numeric argument outside the range the function accepts.
     NumberOutOfRange,
     /// A temporal value that cannot be built or read: a malformed date or duration string, a

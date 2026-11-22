@@ -22,6 +22,7 @@ use super::compare::equals;
 use super::datum::Datum;
 use super::plan::Expr;
 use super::plan::Slot;
+use super::regex::Patterns;
 use super::temporals;
 use super::update::Graveyard;
 
@@ -37,6 +38,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) now: &'a DateTime,
     /// What the query deleted so far.
     pub(crate) graveyard: &'a Graveyard,
+    /// The regular expressions the query compiled so far.
+    pub(crate) patterns: &'a Patterns,
     /// Set when evaluation only looks for the type errors the query text fixes.
     pub(crate) check: Option<&'a Check>,
 }
@@ -249,7 +252,12 @@ impl<T: ReadTransaction> Env<'_, T> {
             Expr::Binary(op, lhs, rhs) => {
                 let lhs = self.eval(lhs, row)?;
                 let rhs = self.eval(rhs, row)?;
-                binary(*op, lhs, rhs)
+                match (op, &lhs, &rhs) {
+                    (BinaryOp::RegexMatch, Datum::String(text), Datum::String(pattern)) => {
+                        Ok(Datum::Boolean(self.patterns.matches(text, pattern)?))
+                    }
+                    _ => binary(*op, lhs, rhs),
+                }
             }
             Expr::Comparison(first, rest) => {
                 let mut left = self.eval(first, row)?;
@@ -508,6 +516,7 @@ fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
             Ok(from_truth(lhs.zip(rhs).map(|(a, b)| a != b)))
         }
         BinaryOp::In => membership(&lhs, rhs),
+        BinaryOp::RegexMatch => Ok(Datum::Null),
         BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains => Ok(match (&lhs, &rhs) {
             (Datum::String(text), Datum::String(part)) => Datum::Boolean(match op {
                 BinaryOp::StartsWith => text.starts_with(part.as_str()),
@@ -516,10 +525,6 @@ fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
             }),
             _ => Datum::Null,
         }),
-        BinaryOp::RegexMatch => Err(Error::new(
-            ErrorKind::Unsupported,
-            "regular expressions are not supported",
-        )),
         BinaryOp::Add => add(lhs, rhs),
         BinaryOp::Subtract
         | BinaryOp::Multiply

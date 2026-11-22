@@ -7,7 +7,7 @@ use support::*;
 
 const MATCH: &str = "MATCH p = (a)-[r:T]->(b)";
 
-const OPERATORS: [&str; 35] = [
+const OPERATORS: [&str; 37] = [
     "-{}",
     "+{}",
     "NOT {}",
@@ -32,6 +32,8 @@ const OPERATORS: [&str; 35] = [
     "{} IN [1]",
     "{} STARTS WITH 'a'",
     "'a' CONTAINS {}",
+    "{} =~ 'a'",
+    "'a' =~ {}",
     "{}[0]",
     "{}['a']",
     "[1][{}]",

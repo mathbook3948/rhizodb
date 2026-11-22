@@ -7,6 +7,7 @@ mod exec;
 mod functions;
 mod matcher;
 mod plan;
+mod regex;
 mod shape;
 mod temporals;
 mod update;
