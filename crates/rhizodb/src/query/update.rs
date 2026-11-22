@@ -14,6 +14,7 @@ use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
+use crate::graph::Token;
 use crate::storage::WriteTransaction;
 
 use super::datum::Datum;
@@ -291,6 +292,18 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
     }
 
+    fn property_token(
+        &mut self,
+        key: &str,
+        writing: bool,
+    ) -> Result<Option<Token<PropertyKey>>, Error> {
+        Ok(if writing {
+            Some(self.tx.intern_token(key)?)
+        } else {
+            self.tx.lookup_token(key)?
+        })
+    }
+
     fn write_property(
         &mut self,
         target: &Datum,
@@ -300,7 +313,9 @@ impl<W: WriteTransaction> Writer<'_, W> {
         match target {
             Datum::Null => Ok(()),
             Datum::Node(id) => {
-                let token = self.tx.intern_token::<PropertyKey>(key)?;
+                let Some(token) = self.property_token(key, value.is_some())? else {
+                    return Ok(());
+                };
                 match value {
                     Some(value) => self.tx.set_node_property(*id, token, value)?,
                     None => self.tx.remove_node_property(*id, token)?,
@@ -308,7 +323,9 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 Ok(())
             }
             Datum::Relationship(id) => {
-                let token = self.tx.intern_token::<PropertyKey>(key)?;
+                let Some(token) = self.property_token(key, value.is_some())? else {
+                    return Ok(());
+                };
                 match value {
                     Some(value) => self.tx.set_relationship_property(*id, token, value)?,
                     None => self.tx.remove_relationship_property(*id, token)?,

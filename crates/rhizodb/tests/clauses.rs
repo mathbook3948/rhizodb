@@ -630,3 +630,27 @@ fn a_node_may_be_deleted_before_the_relationships_that_touch_it() {
     );
     assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(*)"), int(0));
 }
+
+#[test]
+fn clearing_a_property_that_does_not_exist_changes_nothing() {
+    let db = db();
+    run(&db, "CREATE (:A {k: 1})-[:R {w: 2}]->(:B)");
+    let nodes = run(&db, "MATCH (n) RETURN labels(n), keys(n), properties(n)");
+    let relationships = run(&db, "MATCH ()-[r]->() RETURN keys(r), properties(r)");
+    for query in [
+        "MATCH (n) REMOVE n.typo",
+        "MATCH (n) SET n.typo = null",
+        "MATCH ()-[r]->() REMOVE r.typo",
+        "MATCH ()-[r]->() SET r.typo = null",
+    ] {
+        run(&db, query);
+    }
+    assert_eq!(
+        run(&db, "MATCH (n) RETURN labels(n), keys(n), properties(n)"),
+        nodes
+    );
+    assert_eq!(
+        run(&db, "MATCH ()-[r]->() RETURN keys(r), properties(r)"),
+        relationships
+    );
+}

@@ -595,3 +595,30 @@ fn a_graph_stays_consistent_after_queries_that_delete_connected_nodes() {
     assert_eq!(count(&graph, "MATCH ()-[r]->() RETURN r"), 0);
     assert_eq!(violations_of(&graph), vec![]);
 }
+
+#[test]
+fn clearing_a_property_that_never_existed_does_not_intern_its_name() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    run_query(&graph, "CREATE (:A {k: 1})-[:R]->(:B)").unwrap();
+    for query in [
+        "MATCH (n) REMOVE n.typo",
+        "MATCH (n) SET n.typo = null",
+        "MATCH ()-[r]->() REMOVE r.typo",
+        "MATCH ()-[r]->() SET r.typo = null",
+    ] {
+        run_query(&graph, query).unwrap();
+        let known = graph
+            .read()
+            .unwrap()
+            .lookup_token::<PropertyKey>("typo")
+            .unwrap();
+        assert_eq!(known, None, "{query}");
+    }
+    assert_eq!(violations_of(&graph), vec![]);
+
+    run_query(&graph, "MATCH (n:A) REMOVE n.k").unwrap();
+    assert_eq!(count(&graph, "MATCH (n:A) WHERE n.k IS NULL RETURN n"), 1);
+    run_query(&graph, "MATCH (n:A) SET n.k = 2").unwrap();
+    assert_eq!(count(&graph, "MATCH (n:A) WHERE n.k = 2 RETURN n"), 1);
+    assert_eq!(violations_of(&graph), vec![]);
+}
