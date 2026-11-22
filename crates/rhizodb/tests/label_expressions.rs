@@ -243,6 +243,27 @@ fn set_and_remove_take_a_label_set_after_is_or_colon() {
     assert_eq!(run(&db, "MATCH (n) RETURN labels(n)"), [vec![list([])]]);
     run(&db, "MERGE (n {k: 1}) ON MATCH SET n IS F&G");
     assert_eq!(keys(&db, "MATCH (n:F:G) RETURN n.k"), [1]);
+    run(&db, "MATCH (n) SET n:(H&I)&J");
+    assert_eq!(keys(&db, "MATCH (n:H:I:J) RETURN n.k"), [1]);
+}
+
+#[test]
+fn set_and_remove_do_not_read_a_keyword_after_is_as_a_label() {
+    let db = db();
+    run(&db, "INSERT ({k: 1})");
+    for query in [
+        "MATCH (n) SET n IS NULL",
+        "MATCH (n) REMOVE n IS NULL",
+        "MATCH (n) SET n IS NOT A",
+        "MATCH (n) REMOVE n IS LABELED A",
+    ] {
+        assert!(
+            matches!(error_kind(&db, query), ErrorKind::Syntax(_)),
+            "{query}"
+        );
+    }
+    run(&db, "MATCH (n) SET n IS `NULL`");
+    assert_eq!(keys(&db, "MATCH (n:`NULL`) RETURN n.k"), [1]);
 }
 
 #[test]

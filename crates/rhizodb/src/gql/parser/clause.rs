@@ -264,7 +264,10 @@ impl Parser {
         self.at_variable_followed_by(Punct::Colon)
             || (matches!(self.kind_at(0), Some(TokenKind::Word { .. }))
                 && self.keyword_at(1, "IS")
-                && self.label_starts_at(2))
+                && self.label_starts_at(2)
+                && !["NULL", "NOT", "LABELED"]
+                    .iter()
+                    .any(|keyword| self.keyword_at(2, keyword)))
     }
 
     fn label_item(&mut self) -> ParseResult<(Name, LabelExpr)> {
