@@ -293,7 +293,7 @@ impl Binder<'_> {
                     clauses.push(Clause::Read(ReadClause::Unwind { expr, slot }));
                 }
                 ast::Clause::Call(call) => {
-                    let standalone = query.clauses.len() == 1;
+                    let standalone = !subquery && query.clauses.len() == 1;
                     let (bound, columns) = self.call(call, &mut scope, standalone)?;
                     if standalone {
                         result_reads_variables = true;
@@ -478,7 +478,13 @@ impl Binder<'_> {
         };
         let (items, filter) = match &call.yields {
             Some(ast::Yield::Items { items, filter }) => (items.clone(), filter.as_ref()),
-            Some(ast::Yield::Star) => (all_outputs(), None),
+            Some(ast::Yield::Star) if standalone => (all_outputs(), None),
+            Some(ast::Yield::Star) => {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "`YIELD *` is allowed only in a query that is a single `CALL`",
+                ));
+            }
             None if standalone => (all_outputs(), None),
             None => (Vec::new(), None),
         };

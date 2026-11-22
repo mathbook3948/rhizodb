@@ -93,6 +93,23 @@ fn a_query_that_is_one_call_reads_left_out_arguments_from_parameters() {
 }
 
 #[test]
+fn a_call_inside_exists_passes_its_arguments_and_names_its_yields() {
+    let db = with_procedures();
+    let rows = run(&db, "RETURN EXISTS { CALL test.split('a') } AS e");
+    assert_eq!(rows, [vec![Value::Boolean(true)]]);
+    let mut parameters = Parameters::new();
+    parameters.insert("text".to_owned(), string("p,q"));
+    let failure = db
+        .execute("RETURN EXISTS { CALL test.split } AS e", &parameters)
+        .unwrap_err();
+    assert_eq!(failure.kind(), ErrorKind::InvalidArgumentPassingMode);
+    assert_eq!(
+        error_kind(&db, "RETURN EXISTS { CALL test.split('a') YIELD * } AS e"),
+        ErrorKind::InvalidClauseComposition
+    );
+}
+
+#[test]
 fn a_procedure_without_outputs_keeps_each_row_once() {
     let db = with_procedures();
     let rows = run(&db, "UNWIND [1, 2] AS x CALL test.nothing() RETURN x");

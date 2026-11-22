@@ -28,6 +28,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - An integer argument to a float parameter arrives as a float.
 - A query that is a single `CALL` returns the `YIELD` items, or every output without `YIELD` or with `YIELD *`.
 - A query that is a single `CALL` may leave out the arguments, which are then read from the query parameters of the same names.
+- A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
 - A `CALL` inside a larger query passes the arguments of a procedure that takes any, binds only its `YIELD` items, and rejects `YIELD *`.
 - A `CALL` gives one row per row the procedure returns, and a procedure without outputs keeps each row once.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
