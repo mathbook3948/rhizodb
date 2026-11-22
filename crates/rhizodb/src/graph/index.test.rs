@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use proptest::prelude::*;
 
 use super::*;
@@ -7,7 +10,10 @@ use crate::graph::NodeId;
 use crate::graph::RelationshipId;
 use crate::graph::records::Properties;
 use crate::storage::Storage;
+use crate::storage::StorageError;
+use crate::storage::redb_backend::RedbRead;
 use crate::storage::redb_backend::RedbStorage;
+use crate::storage::redb_backend::RedbWrite;
 
 const TEXTS: [&str; 6] = [
     "graph store",
@@ -497,8 +503,138 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     );
 }
 
+#[derive(Debug)]
+struct CountingStorage {
+    inner: RedbStorage,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+struct CountingWrite {
+    inner: RedbWrite,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+impl CountingWrite {
+    fn count(&self, table: Table) {
+        if ENTRY_TABLES.contains(&table) {
+            self.entry_writes.set(self.entry_writes.get() + 1);
+        }
+    }
+}
+
+impl Storage for CountingStorage {
+    type Read<'a> = RedbRead;
+    type Write<'a> = CountingWrite;
+
+    fn begin_read(&self) -> Result<RedbRead, StorageError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<CountingWrite, StorageError> {
+        Ok(CountingWrite {
+            inner: self.inner.begin_write()?,
+            entry_writes: Rc::clone(&self.entry_writes),
+        })
+    }
+}
+
+impl ReadTransaction for CountingWrite {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_prefix(table, prefix)
+    }
+}
+
+impl WriteTransaction for CountingWrite {
+    fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.put(table, key, value)
+    }
+
+    fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete(table, key)
+    }
+
+    fn commit(self) -> Result<(), StorageError> {
+        self.inner.commit()
+    }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback()
+    }
+}
+
 #[test]
-fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
+fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("four.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        let at = write.intern_token("at").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String("graph store graph".to_owned())),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Float(1.0),
+                            PropertyValue::Float(0.0),
+                        ]),
+                    ),
+                ]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_label_only_definitions(&mut previous);
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &4u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+    }
+    let entry_writes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: RedbStorage::open(&path).unwrap(),
+        entry_writes: Rc::clone(&entry_writes),
+    })
+    .unwrap();
+    assert_eq!(entry_writes.get(), 0);
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "\"graph store\"", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read.vector_search("points", ElementKind::Node, &[1.0, 0.0], 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("previous.redb");
     {
@@ -627,4 +763,133 @@ fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
     assert!(decode_counts(&posting[..10]).is_err());
     assert!(decode_counts(&posting[..8]).is_err());
     assert!(decode_counts(&posting[..7]).is_err());
+}
+
+#[test]
+fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let link = write.intern_token("LINK").unwrap();
+    let other = write.intern_token("OTHER").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let mut node = || {
+        write
+            .create_node(&NodeRecord {
+                labels: Default::default(),
+                properties: Properties::new(),
+            })
+            .unwrap()
+    };
+    let first = node();
+    let second = node();
+    let mut linked = Vec::new();
+    for (rel_type, source, target) in [
+        (link, first, second),
+        (other, first, second),
+        (link, second, second),
+        (link, second, first),
+        (other, first, first),
+    ] {
+        let id = write
+            .create_relationship(&RelationshipRecord {
+                rel_type,
+                source,
+                target,
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("shared words".to_owned()),
+                )]),
+            })
+            .unwrap();
+        if rel_type == link {
+            linked.push(id.0);
+        }
+    }
+    create_relationship_indexes(&mut write);
+    let mut found: Vec<u64> = write
+        .keyword_search("link words", ElementKind::Relationship, "shared", 10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    found.sort();
+    assert_eq!(found, linked);
+    write.commit().unwrap();
+    let violations = graph.read().unwrap().check_integrity().unwrap();
+    assert_eq!(violations, vec![]);
+}
+
+#[test]
+fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let link = write.intern_token("LINK").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let words = |write: &GraphTx<_>, element| {
+        write
+            .keyword_search("words", element, "shared", 10)
+            .unwrap()
+            .len()
+    };
+    let doc = NodeRecord {
+        labels: [label].into(),
+        properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
+    };
+    let first = write.create_node(&doc).unwrap();
+    let relationship = |source| RelationshipRecord {
+        rel_type: link,
+        source,
+        target: first,
+        properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
+    };
+    write.create_relationship(&relationship(first)).unwrap();
+
+    write
+        .create_keyword_index("words", IndexTarget::RelationshipType("LINK"), &["text"])
+        .unwrap();
+    let second = write.create_node(&doc).unwrap();
+    let linked = write.create_relationship(&relationship(second)).unwrap();
+    assert_eq!(words(&write, ElementKind::Relationship), 2);
+    write.drop_index("words").unwrap();
+    write
+        .set_relationship_property(linked, text, PropertyValue::String("other".to_owned()))
+        .unwrap();
+    write.delete_relationship(linked).unwrap();
+
+    write
+        .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    write.create_relationship(&relationship(second)).unwrap();
+    write.create_node(&doc).unwrap();
+    write.remove_node_property(first, text).unwrap();
+    assert_eq!(words(&write, ElementKind::Node), 2);
+    write.drop_index("words").unwrap();
+    write.create_node(&doc).unwrap();
+
+    write
+        .create_vector_index(
+            "words",
+            IndexTarget::RelationshipType("LINK"),
+            "at",
+            1,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    let pointed = write.create_relationship(&relationship(first)).unwrap();
+    let at = write.intern_token("at").unwrap();
+    write
+        .set_relationship_property(
+            pointed,
+            at,
+            PropertyValue::List(vec![PropertyValue::Integer(3)]),
+        )
+        .unwrap();
+    let found = write
+        .vector_search("words", ElementKind::Relationship, &[1.0], 10)
+        .unwrap();
+    assert_eq!(found, vec![(pointed.0, 3.0)]);
+    write.commit().unwrap();
+    let violations = graph.read().unwrap().check_integrity().unwrap();
+    assert_eq!(violations, vec![]);
 }

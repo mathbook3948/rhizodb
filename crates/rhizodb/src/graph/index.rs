@@ -11,8 +11,10 @@ use crate::value::put_varint;
 
 use super::GraphError;
 use super::GraphTx;
+use super::NodeId;
 use super::NodeRecord;
 use super::Properties;
+use super::RelationshipId;
 use super::RelationshipRecord;
 use super::decode_u64;
 use super::ids::Label;
@@ -260,6 +262,11 @@ impl Index {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let (id, target, reader) = Self::decode_target(bytes)?;
+        Self::decode_kind(id, target, reader)
+    }
+
+    fn decode_target(bytes: &[u8]) -> Result<(u32, Target, Reader<'_>), DecodeError> {
         let mut reader = Reader::new(bytes);
         let id = reader.u32()?;
         let target = match reader.u8()? {
@@ -267,7 +274,7 @@ impl Index {
             TARGET_RELATIONSHIP_TYPE => Target::RelationshipType(Token::new(reader.u32()?)),
             other => return Err(DecodeError::UnknownTag(other)),
         };
-        Self::decode_kind(id, target, reader)
+        Ok((id, target, reader))
     }
 
     /// Reads a definition stored before format version 5, which names a label and no target
@@ -348,13 +355,6 @@ impl IndexDefinition {
 }
 
 impl IndexKind {
-    pub(crate) fn search_kind(&self) -> SearchKind {
-        match self {
-            Self::Keyword { .. } => SearchKind::Keyword,
-            Self::Vector { .. } => SearchKind::Vector,
-        }
-    }
-
     fn entry(&self, values: &Properties) -> Option<Entry> {
         match self {
             IndexKind::Keyword { properties } => {
@@ -563,12 +563,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(bytes.map(|bytes| Index::decode(&bytes)).transpose()?)
     }
 
-    fn searched_index(
+    fn searched_index<F>(
         &self,
         name: &str,
         search: SearchKind,
         element: ElementKind,
-    ) -> Result<Index, GraphError> {
+        fields: impl FnOnce(&IndexKind) -> Option<F>,
+    ) -> Result<(u32, F), GraphError> {
         let what = match (search, element) {
             (SearchKind::Keyword, ElementKind::Node) => "keyword index over nodes",
             (SearchKind::Keyword, ElementKind::Relationship) => "keyword index over relationships",
@@ -576,10 +577,8 @@ impl<T: ReadTransaction> GraphTx<T> {
             (SearchKind::Vector, ElementKind::Relationship) => "vector index over relationships",
         };
         self.index(name)?
-            .filter(|index| {
-                index.definition.kind.search_kind() == search
-                    && index.definition.target.element_kind() == element
-            })
+            .filter(|index| index.definition.target.element_kind() == element)
+            .and_then(|index| Some((index.id, fields(&index.definition.kind)?)))
             .ok_or_else(|| GraphError::IndexNotFound(name.to_owned(), what))
     }
 
@@ -594,10 +593,14 @@ impl<T: ReadTransaction> GraphTx<T> {
         text: &str,
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let index = self.searched_index(name, SearchKind::Keyword, element)?;
+        let (id, ()) =
+            self.searched_index(name, SearchKind::Keyword, element, |kind| match kind {
+                IndexKind::Keyword { .. } => Some(()),
+                IndexKind::Vector { .. } => None,
+            })?;
         let totals = self
             .transaction
-            .get(Table::KeywordTotals, &keys::index_prefix(index.id))?
+            .get(Table::KeywordTotals, &keys::index_prefix(id))?
             .ok_or(GraphError::Corrupt("a keyword index has no totals"))?;
         let (documents, length) = decode_totals(&totals)?;
         if documents == 0 {
@@ -618,10 +621,10 @@ impl<T: ReadTransaction> GraphTx<T> {
             let clause_scores: BTreeMap<u64, f64> = match &clause {
                 Clause::Term(term) => {
                     let mut counts = BTreeMap::new();
-                    for (key, value) in self.transaction.scan_prefix(
-                        Table::KeywordPostings,
-                        &keys::posting_prefix(index.id, term),
-                    )? {
+                    for (key, value) in self
+                        .transaction
+                        .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(id, term))?
+                    {
                         counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
                     }
                     score(counts).collect()
@@ -638,7 +641,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     };
                     for (key, value) in self
                         .transaction
-                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(index.id, prefix))?
+                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(id, prefix))?
                     {
                         let term = keys::parse_posting_term(&key)?.as_bytes();
                         if current.as_deref() != Some(term) {
@@ -650,7 +653,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     merge(counts);
                     best_scores
                 }
-                Clause::Phrase(terms) => score(self.phrase_matches(index.id, terms)?).collect(),
+                Clause::Phrase(terms) => score(self.phrase_matches(id, terms)?).collect(),
             };
             for (element, value) in clause_scores {
                 *scores.entry(element).or_insert(0.0) += value;
@@ -722,13 +725,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         query: &[f64],
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let index = self.searched_index(name, SearchKind::Vector, element)?;
-        let IndexKind::Vector {
-            dimension, metric, ..
-        } = index.definition.kind
-        else {
-            return Err(GraphError::IndexNotFound(name.to_owned(), "vector index"));
-        };
+        let (id, (dimension, metric)) =
+            self.searched_index(name, SearchKind::Vector, element, |kind| match kind {
+                IndexKind::Vector {
+                    dimension, metric, ..
+                } => Some((*dimension, *metric)),
+                IndexKind::Keyword { .. } => None,
+            })?;
         if usize::try_from(dimension).ok() != Some(query.len()) {
             return Err(GraphError::InvalidQueryVector(format!(
                 "index `{name}` holds vectors of {dimension} numbers, not {}",
@@ -749,7 +752,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut scored = Vec::new();
         for (key, value) in self
             .transaction
-            .scan_prefix(Table::Vectors, &keys::index_prefix(index.id))?
+            .scan_prefix(Table::Vectors, &keys::index_prefix(id))?
         {
             let stored = decode_vector(&value, dimension)?;
             scored.push((
@@ -760,30 +763,44 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(best(scored, limit))
     }
 
-    fn covered_entries(
-        &self,
-        definition: &IndexDefinition,
-    ) -> Result<Vec<(u64, Entry)>, GraphError> {
-        let mut entries = Vec::new();
-        match definition.target {
-            Target::Label(label) => {
-                for node in self.node_ids_with_label(label)? {
-                    let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
-                    if let Some(entry) = definition.entry(Element::Node(&record)) {
-                        entries.push((node.0, entry));
-                    }
-                }
-            }
-            Target::RelationshipType(_) => {
+    fn covered_ids(&self, target: Target) -> Result<Vec<u64>, GraphError> {
+        match target {
+            Target::Label(label) => Ok(self
+                .node_ids_with_label(label)?
+                .into_iter()
+                .map(|node| node.0)
+                .collect()),
+            Target::RelationshipType(covered) => {
+                let mut ids = Vec::new();
                 for (key, value) in self.transaction.scan_prefix(Table::Relationships, &[])? {
-                    let record = RelationshipRecord::decode(&value)?;
-                    if let Some(entry) = definition.entry(Element::Relationship(&record)) {
-                        entries.push((decode_u64(&key)?, entry));
+                    if RelationshipRecord::decode(&value)?.rel_type == covered {
+                        ids.push(decode_u64(&key)?);
                     }
                 }
+                Ok(ids)
             }
         }
-        Ok(entries)
+    }
+
+    fn covered_entry(
+        &self,
+        definition: &IndexDefinition,
+        id: u64,
+    ) -> Result<Option<Entry>, GraphError> {
+        Ok(match definition.target {
+            Target::Label(_) => {
+                let node = NodeId(id);
+                let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
+                definition.entry(Element::Node(&record))
+            }
+            Target::RelationshipType(_) => {
+                let relationship = RelationshipId(id);
+                let record = self
+                    .relationship(relationship)?
+                    .ok_or(GraphError::RelationshipNotFound(relationship))?;
+                definition.entry(Element::Relationship(&record))
+            }
+        })
     }
 }
 
@@ -882,8 +899,10 @@ impl<T: WriteTransaction> GraphTx<T> {
                 &encode_totals(0, 0),
             )?;
         }
-        for (element, entry) in self.covered_entries(&index.definition)? {
-            self.insert_entry(index, element, &entry)?;
+        for element in self.covered_ids(index.definition.target)? {
+            if let Some(entry) = self.covered_entry(&index.definition, element)? {
+                self.insert_entry(index, element, &entry)?;
+            }
         }
         Ok(())
     }
@@ -944,21 +963,24 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     /// Brings every index in line with the element with ID `element` that changed from
     /// `before` to `after`, both records of one node or of one relationship. `None` stands for
-    /// an element that did not exist or no longer does.
+    /// an element that did not exist or no longer does. Only the definitions whose target
+    /// covers `before` or `after` are decoded past their target.
     pub(crate) fn reindex(
         &mut self,
         element: u64,
         before: Option<Element<'_>>,
         after: Option<Element<'_>>,
     ) -> Result<(), GraphError> {
-        for (_, index) in self.indexes()? {
-            let definition = &index.definition;
-            let covers = |record: &Element<'_>| definition.target.covered(*record).is_some();
+        for (_, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
+            let (id, target, reader) = Index::decode_target(&bytes)?;
+            let covers = |record: &Element<'_>| target.covered(*record).is_some();
             let before = before.filter(covers);
             let after = after.filter(covers);
             if before.is_none() && after.is_none() {
                 continue;
             }
+            let index = Index::decode_kind(id, target, reader)?;
+            let definition = &index.definition;
             let rows = |entry: &Entry| index.rows(element, entry);
             let old = before.and_then(|record| definition.entry(record));
             let new = after.and_then(|record| definition.entry(record));
