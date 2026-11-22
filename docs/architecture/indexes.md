@@ -38,9 +38,13 @@ A host that keeps people, places, and tasks for years must find them by words an
 - No text is split with a word dictionary.
 - Text between double quotes in a keyword query is a phrase, and an unclosed quote runs to the end of the text.
 - A phrase matches a node that holds its terms at the same distances from one another as in the query, inside one string value.
-- A keyword query matches a node that holds any of its terms or phrases.
+- A word directly followed by `*` outside a phrase is a prefix, which matches every term that starts with it.
+- A `*` after a run of Hangul, Han, kana, or another paired script changes nothing.
+- A keyword query matches a node that holds any of its terms, prefixes, or phrases.
+- Keyword queries offer no fuzzy matching of misspelled terms.
 - Keyword matches are ranked by BM25.
 - A phrase is ranked as one term whose occurrences are the phrase's.
+- A prefix is ranked in each node by the best of the terms it matches there.
 - Each keyword index keeps its node count and total term count, and each posting keeps its node's term count, so ranking reads only the postings of the query terms.
 - Each posting keeps the positions of its term in the node, so a phrase is matched from the postings of its terms alone.
 - Each indexed node keeps the terms it was indexed under, and removing it from the index deletes those terms rather than tokenizing again.
@@ -61,4 +65,3 @@ A host that keeps people, places, and tasks for years must find them by words an
 
 - An approximate vector structure, such as HNSW, for indexes too large to scan
 - Indexes over relationship properties
-- Prefix and fuzzy keyword queries

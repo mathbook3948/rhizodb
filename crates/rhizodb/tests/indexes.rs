@@ -283,6 +283,30 @@ fn a_quoted_phrase_matches_its_words_in_order_and_next_to_each_other() {
 }
 
 #[test]
+fn a_trailing_star_matches_every_term_that_starts_with_the_word() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'plural', body: 'graphs everywhere'}), \
+                (:Note {name: 'both', body: 'graphs and graphql'}), \
+                (:Note {name: 'exact', body: 'a graph'}), \
+                (:Note {name: 'inside', body: 'paragraph'})",
+    );
+    let mut found = keyword(&db, "notes", "Graph*");
+    found.sort();
+    assert_eq!(found, ["both", "exact", "plural"]);
+    assert_eq!(keyword(&db, "notes", "graph *"), ["exact"]);
+    let score = |query: &str| {
+        keyword_hits(&db, "notes", query, 100)
+            .into_iter()
+            .find(|(name, _)| name == "both")
+            .map(|(_, score)| score)
+            .unwrap()
+    };
+    assert_eq!(score("graph*"), score("graphs").max(score("graphql")));
+}
+
+#[test]
 fn a_phrase_never_matches_across_two_values() {
     let db = notes_db();
     db.create_keyword_index("tags", "Note", &["tags"]).unwrap();
@@ -702,6 +726,33 @@ proptest! {
             .filter(|(_, strings)| {
                 strings.iter().any(|picks| picks.windows(phrase.len()).any(|window| window == phrase))
             })
+            .map(|(position, _)| position.to_string())
+            .collect();
+        expected.sort();
+        prop_assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn a_prefix_finds_exactly_the_nodes_with_a_word_that_starts_with_it(
+        documents in prop::collection::vec(prop::collection::vec(0usize..4, 0..5), 0..12),
+        prefix in prop::sample::select(vec!["r", "re", "rea", "read", "reader", "b", "x"]),
+    ) {
+        let words = ["red", "read", "reader", "blue"];
+        let db = db();
+        for (position, picks) in documents.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            let body = picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>().join(" ");
+            parameters.insert("body".to_owned(), string(&body));
+            db.execute("INSERT (:Note {name: $name, body: $body})", &parameters).unwrap();
+        }
+        db.create_keyword_index("notes", "Note", &["body"]).unwrap();
+        let mut found = keyword(&db, "notes", &format!("{prefix}*"));
+        found.sort();
+        let mut expected: Vec<String> = documents
+            .iter()
+            .enumerate()
+            .filter(|(_, picks)| picks.iter().any(|pick| words[*pick].starts_with(prefix)))
             .map(|(position, _)| position.to_string())
             .collect();
         expected.sort();

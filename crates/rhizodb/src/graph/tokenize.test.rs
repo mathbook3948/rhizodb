@@ -207,3 +207,21 @@ fn a_phrase_keeps_the_positions_of_a_run() {
         ])]
     );
 }
+
+#[test]
+fn a_star_right_after_a_word_makes_it_a_prefix() {
+    assert_eq!(
+        clauses("graph* data stor*e graph * Ｒｈｉｚｏ＊ \"in* phrase\" 東京*"),
+        [
+            Clause::Term("data".to_owned()),
+            Clause::Term("e".to_owned()),
+            Clause::Term("graph".to_owned()),
+            Clause::Term("東京".to_owned()),
+            Clause::Prefix("graph".to_owned()),
+            Clause::Prefix("rhizo".to_owned()),
+            Clause::Prefix("stor".to_owned()),
+            Clause::Phrase(vec![term("in", 0), term("phrase", 1)]),
+        ]
+    );
+    assert!(clauses("* **").is_empty());
+}

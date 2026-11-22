@@ -383,6 +383,13 @@ fn encode_posting(positions: &[u32], length: u32) -> Vec<u8> {
     out
 }
 
+fn counts(postings: BTreeMap<NodeId, Posting>) -> BTreeMap<NodeId, (u32, u32)> {
+    postings
+        .into_iter()
+        .map(|(node, posting)| (node, (frequency(&posting.positions), posting.length)))
+        .collect()
+}
+
 fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
     let mut reader = Reader::new(bytes);
     let frequency = reader.u32()?;
@@ -454,7 +461,7 @@ impl<T: ReadTransaction> GraphTx<T> {
 
     /// The nodes that best match `text` in the keyword index `name`, ranked by BM25. A node
     /// matches when it matches any clause of the text. A phrase is ranked as one term whose
-    /// occurrences are the phrase's.
+    /// occurrences are the phrase's, and a prefix by the best of the terms it starts.
     pub(crate) fn keyword_search(
         &self,
         name: &str,
@@ -474,20 +481,41 @@ impl<T: ReadTransaction> GraphTx<T> {
             return Ok(Vec::new());
         }
         let average_length = length as f64 / documents as f64;
-        let mut scores: BTreeMap<NodeId, f64> = BTreeMap::new();
-        for clause in tokenize::clauses(text) {
-            let matches = match &clause {
-                Clause::Term(term) => self
-                    .postings(index.id, term)?
-                    .into_iter()
-                    .map(|(node, posting)| (node, (frequency(&posting.positions), posting.length)))
-                    .collect(),
-                Clause::Phrase(terms) => self.phrase_matches(index.id, terms)?,
-            };
+        let score = |matches: BTreeMap<NodeId, (u32, u32)>| {
             let matching = matches.len() as f64;
             let idf = (1.0 + (documents as f64 - matching + 0.5) / (matching + 0.5)).ln();
-            for (node, (frequency, length)) in matches {
-                *scores.entry(node).or_insert(0.0) += bm25(idf, frequency, length, average_length);
+            matches.into_iter().map(move |(node, (frequency, length))| {
+                (node, bm25(idf, frequency, length, average_length))
+            })
+        };
+        let mut scores: BTreeMap<NodeId, f64> = BTreeMap::new();
+        for clause in tokenize::clauses(text) {
+            let clause_scores: BTreeMap<NodeId, f64> = match &clause {
+                Clause::Term(term) => score(counts(self.postings(index.id, term)?)).collect(),
+                Clause::Prefix(prefix) => {
+                    let mut by_term: BTreeMap<String, BTreeMap<NodeId, Posting>> = BTreeMap::new();
+                    for (key, value) in self
+                        .transaction
+                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(index.id, prefix))?
+                    {
+                        by_term
+                            .entry(keys::parse_posting_term(&key)?.to_owned())
+                            .or_default()
+                            .insert(keys::parse_posting_node(&key)?, decode_posting(&value)?);
+                    }
+                    let mut best_scores: BTreeMap<NodeId, f64> = BTreeMap::new();
+                    for postings in by_term.into_values() {
+                        for (node, value) in score(counts(postings)) {
+                            let held = best_scores.entry(node).or_insert(value);
+                            *held = held.max(value);
+                        }
+                    }
+                    best_scores
+                }
+                Clause::Phrase(terms) => score(self.phrase_matches(index.id, terms)?).collect(),
+            };
+            for (node, value) in clause_scores {
+                *scores.entry(node).or_insert(0.0) += value;
             }
         }
         Ok(best(scores.into_iter().collect(), limit))

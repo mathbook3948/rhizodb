@@ -55,6 +55,8 @@ pub(crate) struct Term {
 pub(crate) enum Clause {
     /// Matches a node that holds the term.
     Term(String),
+    /// Matches a node that holds a term that starts with this text.
+    Prefix(String),
     /// Matches a node that holds every term at the same distances from one another as in the
     /// query. The first term is at position zero.
     Phrase(Vec<Term>),
@@ -63,16 +65,25 @@ pub(crate) enum Clause {
 /// Parses a keyword query into its clauses, sorted and without repeats. Text between two
 /// double quotes is a phrase, and an unclosed quote runs to the end of the text. A phrase of one
 /// term is that term, and a phrase of none is nothing. Every term outside quotes is a clause of
-/// its own.
+/// its own, and a word directly followed by `*` outside quotes is a prefix. A `*` after a
+/// paired-script run changes nothing, because such a run already matches inside longer runs.
 pub(crate) fn clauses(text: &str) -> Vec<Clause> {
     let text: String = text.nfkc().collect();
     let mut clauses = Vec::new();
     for (index, piece) in text.split('"').enumerate() {
-        let terms = scan(piece, Purpose::Query);
-        if index % 2 == 0 || terms.len() == 1 {
-            clauses.extend(terms.into_iter().map(|term| Clause::Term(term.text)));
-        } else if !terms.is_empty() {
-            clauses.push(Clause::Phrase(terms));
+        let scan = scan(piece, Purpose::Query);
+        if index % 2 == 0 {
+            for (position, term) in scan.terms.into_iter().enumerate() {
+                if scan.starred.contains(&position) {
+                    clauses.push(Clause::Prefix(term.text));
+                } else {
+                    clauses.push(Clause::Term(term.text));
+                }
+            }
+        } else if let [term] = scan.terms.as_slice() {
+            clauses.push(Clause::Term(term.text.clone()));
+        } else if !scan.terms.is_empty() {
+            clauses.push(Clause::Phrase(scan.terms));
         }
     }
     clauses.sort();
@@ -89,17 +100,19 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// between words. A run starts at a letter that is not a digit. The same text always gives the
 /// same terms, in the same order, with positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
-    scan(&text.nfkc().collect::<String>(), purpose)
+    scan(&text.nfkc().collect::<String>(), purpose).terms
 }
 
-fn scan(text: &str, purpose: Purpose) -> Vec<Term> {
+fn scan(text: &str, purpose: Purpose) -> Scan {
     let mut scan = Scan {
         purpose,
         terms: Vec::new(),
+        starred: Vec::new(),
         run: String::new(),
         next: 0,
     };
-    for segment in text.split_word_bounds() {
+    let mut segments = text.split_word_bounds().peekable();
+    while let Some(segment) = segments.next() {
         if !segment.chars().any(char::is_alphanumeric) {
             scan.flush_run();
             continue;
@@ -114,15 +127,18 @@ fn scan(text: &str, purpose: Purpose) -> Vec<Term> {
                 word.push(character);
             }
         }
-        scan.push_word(&mut word);
+        if scan.push_word(&mut word) && segments.peek().is_some_and(|next| next.starts_with('*')) {
+            scan.starred.push(scan.terms.len().saturating_sub(1));
+        }
     }
     scan.flush_run();
-    scan.terms
+    scan
 }
 
 struct Scan {
     purpose: Purpose,
     terms: Vec<Term>,
+    starred: Vec<usize>,
     run: String,
     next: u32,
 }
@@ -133,8 +149,9 @@ impl Scan {
             .saturating_add(u32::try_from(offset).unwrap_or(u32::MAX))
     }
 
-    fn push_word(&mut self, word: &mut String) {
-        if word.chars().any(char::is_alphanumeric) {
+    fn push_word(&mut self, word: &mut String) -> bool {
+        let pushed = word.chars().any(char::is_alphanumeric);
+        if pushed {
             self.terms.push(Term {
                 text: word.to_lowercase().nfkc().collect(),
                 position: self.next,
@@ -142,6 +159,7 @@ impl Scan {
             self.next = self.at(1);
         }
         word.clear();
+        pushed
     }
 
     fn flush_run(&mut self) {
