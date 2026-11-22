@@ -2,7 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::Error;
+use crate::error::ErrorKind;
 use crate::graph::Graph;
+use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
 use crate::procedure::Procedures;
 use crate::query;
@@ -66,8 +68,74 @@ impl Database {
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
     /// under the same name. Registration lasts as long as this `Database` value.
-    pub fn register_procedure(&mut self, procedure: Procedure) {
-        self.procedures
-            .insert(procedure.name.clone(), Arc::new(procedure));
+    ///
+    /// Fails with [`ErrorKind::ReservedProcedureName`](crate::ErrorKind::ReservedProcedureName)
+    /// for a name in the `db` namespace, which the built-in procedures reserve.
+    pub fn register_procedure(&mut self, procedure: Procedure) -> Result<(), Error> {
+        let name = &procedure.signature.name;
+        if query::is_reserved(name) {
+            return Err(Error::new(
+                ErrorKind::ReservedProcedureName,
+                format!("procedure `{name}` is in the reserved `db` namespace"),
+            ));
+        }
+        self.procedures.insert(name.clone(), Arc::new(procedure));
+        Ok(())
+    }
+
+    /// Creates the keyword index `name` over the string properties `properties` of every node
+    /// labelled `label`, and fills it from the nodes already there, in one write transaction.
+    /// Text is split into words at Unicode word boundaries and lowercased, and a property that
+    /// holds a list of strings is indexed string by string. Search it with
+    /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`.
+    ///
+    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
+    /// another definition holds the name, and with
+    /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
+    /// empty name or no properties.
+    pub fn create_keyword_index(
+        &self,
+        name: &str,
+        label: &str,
+        properties: &[&str],
+    ) -> Result<(), Error> {
+        let mut tx = self.graph.write()?;
+        tx.create_keyword_index(name, label, properties)?;
+        Ok(tx.commit()?)
+    }
+
+    /// Creates the vector index `name` over the property `property` of every node labelled
+    /// `label`, and fills it from the nodes already there, in one write transaction. A node is
+    /// indexed when the property is a list of `dimension` finite numbers whose length leaves
+    /// every score finite, and under [`VectorMetric::Cosine`] not zero. Search it with
+    /// `CALL db.index.vector.query(name, vector, limit) YIELD node, score`, which scores every
+    /// vector in the index.
+    ///
+    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
+    /// another definition holds the name, and with
+    /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
+    /// empty name or a dimension of zero.
+    pub fn create_vector_index(
+        &self,
+        name: &str,
+        label: &str,
+        property: &str,
+        dimension: usize,
+        metric: VectorMetric,
+    ) -> Result<(), Error> {
+        let mut tx = self.graph.write()?;
+        tx.create_vector_index(name, label, property, dimension, metric)?;
+        Ok(tx.commit()?)
+    }
+
+    /// Drops the index `name` and all its entries in one write transaction. Returns whether an
+    /// index of that name existed.
+    pub fn drop_index(&self, name: &str) -> Result<bool, Error> {
+        let mut tx = self.graph.write()?;
+        let dropped = tx.drop_index(name)?;
+        tx.commit()?;
+        Ok(dropped)
     }
 }

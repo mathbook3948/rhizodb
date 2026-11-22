@@ -39,10 +39,20 @@ pub enum ValueType {
     Path,
 }
 
+/// The name, parameters, and outputs of a procedure, whether a host registered it or the engine
+/// provides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Signature {
+    pub(crate) name: String,
+    pub(crate) parameters: Vec<(String, ValueType)>,
+    pub(crate) outputs: Vec<String>,
+}
+
 /// A named routine written in Rust that queries run with `CALL`.
 ///
 /// A procedure sees only its arguments, never the graph. A query calls it once per incoming row
-/// and gets one row per row the body returns.
+/// and gets one row per row the body returns. The `db` namespace is reserved for the procedures
+/// the engine provides, such as `db.index.keyword.query`.
 ///
 /// ```
 /// use rhizodb::Database;
@@ -64,7 +74,7 @@ pub enum ValueType {
 ///     })
 ///     .parameter("text", ValueType::String)
 ///     .output("word"),
-/// );
+/// )?;
 /// let result = db.execute(
 ///     "CALL text.words('graph database') YIELD word RETURN word",
 ///     &Parameters::new(),
@@ -74,9 +84,7 @@ pub enum ValueType {
 /// ```
 #[derive(Clone)]
 pub struct Procedure {
-    pub(crate) name: String,
-    pub(crate) parameters: Vec<(String, ValueType)>,
-    pub(crate) outputs: Vec<String>,
+    pub(crate) signature: Signature,
     pub(crate) body: Arc<Body>,
 }
 
@@ -88,22 +96,24 @@ impl Procedure {
         body: impl Fn(&[Value]) -> ProcedureOutput + Send + Sync + 'static,
     ) -> Self {
         Self {
-            name: name.into(),
-            parameters: Vec::new(),
-            outputs: Vec::new(),
+            signature: Signature {
+                name: name.into(),
+                parameters: Vec::new(),
+                outputs: Vec::new(),
+            },
             body: Arc::new(body),
         }
     }
 
     /// Declares the next parameter.
     pub fn parameter(mut self, name: impl Into<String>, accepts: ValueType) -> Self {
-        self.parameters.push((name.into(), accepts));
+        self.signature.parameters.push((name.into(), accepts));
         self
     }
 
     /// Declares the next output column.
     pub fn output(mut self, name: impl Into<String>) -> Self {
-        self.outputs.push(name.into());
+        self.signature.outputs.push(name.into());
         self
     }
 }
@@ -112,9 +122,9 @@ impl fmt::Debug for Procedure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Procedure")
-            .field("name", &self.name)
-            .field("parameters", &self.parameters)
-            .field("outputs", &self.outputs)
+            .field("name", &self.signature.name)
+            .field("parameters", &self.signature.parameters)
+            .field("outputs", &self.signature.outputs)
             .finish_non_exhaustive()
     }
 }

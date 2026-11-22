@@ -16,9 +16,17 @@ use super::decode_u64;
 use super::ids::Label;
 use super::ids::PropertyKey;
 use super::ids::RelationshipType;
+use super::ids::Token;
 use super::ids::TokenKind;
+use super::index::ENTRY_TABLES;
+use super::index::Entry;
+use super::index::Index;
+use super::index::IndexKind;
+use super::index::document_length;
+use super::index::encode_totals;
 use super::keys;
 use super::records::Properties;
+use super::tokenize;
 
 const TOKEN_TAGS: [u8; 3] = [Label::TAG, RelationshipType::TAG, PropertyKey::TAG];
 
@@ -28,6 +36,7 @@ pub(crate) enum Counter {
     NodeId,
     RelationshipId,
     Token(u8),
+    IndexId,
 }
 
 /// One way a stored graph breaks an invariant of the key layout.
@@ -35,6 +44,7 @@ pub(crate) enum Counter {
 pub(crate) enum IntegrityViolation {
     FormatVersionMissing,
     FormatVersionMismatch(u32),
+    TokenizerMismatch,
     Undecodable {
         table: Table,
         key: Vec<u8>,
@@ -73,6 +83,19 @@ pub(crate) enum IntegrityViolation {
         label: u32,
         node: NodeId,
     },
+    DuplicateIndexId(u32),
+    MissingIndexEntry {
+        table: Table,
+        key: Vec<u8>,
+    },
+    UnexpectedIndexEntry {
+        table: Table,
+        key: Vec<u8>,
+    },
+    WrongIndexEntry {
+        table: Table,
+        key: Vec<u8>,
+    },
 }
 
 type Adjacency = BTreeMap<(NodeId, u32, RelationshipId), NodeId>;
@@ -88,6 +111,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         let label_index = self.load_label_index(&mut violations)?;
         let outgoing = self.load_adjacency(Table::Outgoing, &mut violations)?;
         let incoming = self.load_adjacency(Table::Incoming, &mut violations)?;
+        let indexes = self.load_indexes(&mut violations)?;
 
         let mut check_named = |tag: u8, id: u32| {
             if !named.contains(&(tag, id)) {
@@ -108,6 +132,12 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         for record in relationships.values() {
             check_named(RelationshipType::TAG, record.rel_type.id());
+        }
+        for index in &indexes {
+            check_named(Label::TAG, index.definition.label.id());
+            for property in covered_properties(&index.definition.kind) {
+                check_named(PropertyKey::TAG, property.id());
+            }
         }
 
         for (node, record) in &nodes {
@@ -174,7 +204,9 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
 
-        self.check_counters(&nodes, &relationships, &named, &mut violations)?;
+        self.check_index_entries(&indexes, &nodes, &mut violations)?;
+
+        self.check_counters(&nodes, &relationships, &named, &indexes, &mut violations)?;
         Ok(violations)
     }
 
@@ -195,6 +227,10 @@ impl<T: ReadTransaction> GraphTx<T> {
                     key: keys::FORMAT_VERSION_KEY.to_vec(),
                 }),
             },
+        }
+        let tokenizer = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
+        if tokenizer != Some(tokenize::fingerprint()) {
+            violations.push(IntegrityViolation::TokenizerMismatch);
         }
         Ok(())
     }
@@ -335,11 +371,95 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(entries)
     }
 
+    fn load_indexes(
+        &self,
+        violations: &mut Vec<IntegrityViolation>,
+    ) -> Result<Vec<Index>, GraphError> {
+        let mut indexes: Vec<Index> = Vec::new();
+        for (key, value) in self.transaction.scan_prefix(Table::Indexes, &[])? {
+            match (String::from_utf8(key.clone()), Index::decode(&value)) {
+                (Ok(_), Ok(index)) => {
+                    if indexes.iter().any(|held| held.id == index.id) {
+                        violations.push(IntegrityViolation::DuplicateIndexId(index.id));
+                    }
+                    indexes.push(index);
+                }
+                _ => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::Indexes,
+                    key,
+                }),
+            }
+        }
+        Ok(indexes)
+    }
+
+    fn check_index_entries(
+        &self,
+        indexes: &[Index],
+        nodes: &BTreeMap<NodeId, NodeRecord>,
+        violations: &mut Vec<IntegrityViolation>,
+    ) -> Result<(), GraphError> {
+        let mut expected = BTreeMap::new();
+        for index in indexes {
+            let mut documents = 0u64;
+            let mut length = 0u64;
+            for (node, record) in nodes {
+                let Some(entry) = index.definition.entry(record) else {
+                    continue;
+                };
+                if let Entry::Keyword(document) = &entry {
+                    documents += 1;
+                    length += u64::from(document_length(document));
+                }
+                for (table, key, value) in index.rows(*node, &entry) {
+                    expected.insert((table, key), value);
+                }
+            }
+            if matches!(index.definition.kind, IndexKind::Keyword { .. }) {
+                expected.insert(
+                    (Table::KeywordTotals, keys::index_prefix(index.id).to_vec()),
+                    encode_totals(documents, length),
+                );
+            }
+        }
+        let mut actual = BTreeMap::new();
+        for table in ENTRY_TABLES {
+            for (key, value) in self.transaction.scan_prefix(table, &[])? {
+                actual.insert((table, key), value);
+            }
+        }
+        for ((table, key), value) in &expected {
+            match actual.get(&(*table, key.clone())) {
+                None => violations.push(IntegrityViolation::MissingIndexEntry {
+                    table: *table,
+                    key: key.clone(),
+                }),
+                Some(stored) if stored != value => {
+                    violations.push(IntegrityViolation::WrongIndexEntry {
+                        table: *table,
+                        key: key.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+        for (table, key) in actual.keys() {
+            if !expected.contains_key(&(*table, key.clone())) {
+                violations.push(IntegrityViolation::UnexpectedIndexEntry {
+                    table: *table,
+                    key: key.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn check_counters(
         &self,
         nodes: &BTreeMap<NodeId, NodeRecord>,
         relationships: &BTreeMap<RelationshipId, RelationshipRecord>,
         named: &BTreeSet<(u8, u32)>,
+        indexes: &[Index],
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<(), GraphError> {
         let mut check = |counter: Counter, key: &[u8], highest: Option<u64>| {
@@ -371,6 +491,11 @@ impl<T: ReadTransaction> GraphTx<T> {
             keys::NEXT_RELATIONSHIP_ID_KEY,
             relationships.keys().next_back().map(|id| id.0),
         )?;
+        check(
+            Counter::IndexId,
+            keys::NEXT_INDEX_ID_KEY,
+            indexes.iter().map(|index| u64::from(index.id)).max(),
+        )?;
         for tag in TOKEN_TAGS {
             let highest = named
                 .iter()
@@ -380,6 +505,13 @@ impl<T: ReadTransaction> GraphTx<T> {
             check(Counter::Token(tag), &keys::next_token_key(tag), highest)?;
         }
         Ok(())
+    }
+}
+
+fn covered_properties(kind: &IndexKind) -> &[Token<PropertyKey>] {
+    match kind {
+        IndexKind::Keyword { properties } => properties,
+        IndexKind::Vector { property, .. } => std::slice::from_ref(property),
     }
 }
 

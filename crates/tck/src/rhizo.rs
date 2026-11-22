@@ -65,8 +65,8 @@ impl Graph for BrokenGraph {
 impl Graph for RhizoGraph {
     fn register_procedure(&mut self, procedure: &Procedure) -> Result<(), String> {
         self.database
-            .register_procedure(table_procedure(procedure)?);
-        Ok(())
+            .register_procedure(table_procedure(procedure)?)
+            .map_err(|error| error.to_string())
     }
 
     fn execute(

@@ -84,3 +84,45 @@ pub(crate) fn parse_label_key(key: &[u8]) -> Result<NodeId, DecodeError> {
     reader.finish()?;
     Ok(node)
 }
+
+pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";
+pub(crate) const TOKENIZER_KEY: &[u8] = b"tokenizer";
+
+pub(crate) fn index_prefix(index: u32) -> [u8; 4] {
+    index.to_be_bytes()
+}
+
+pub(crate) fn index_entry_key(index: u32, node: NodeId) -> [u8; 12] {
+    let mut key = [0u8; 12];
+    key[..4].copy_from_slice(&index.to_be_bytes());
+    key[4..].copy_from_slice(&node.0.to_be_bytes());
+    key
+}
+
+pub(crate) fn parse_index_entry_key(key: &[u8]) -> Result<NodeId, DecodeError> {
+    parse_label_key(key)
+}
+
+/// The tokenizer drops control characters, so a term never holds a zero byte, and the zero
+/// after it keeps one term's postings apart from those of a longer term it starts.
+pub(crate) fn posting_prefix(index: u32, term: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + term.len() + 1 + 8);
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(term.as_bytes());
+    key.push(0);
+    key
+}
+
+pub(crate) fn posting_key(index: u32, term: &str, node: NodeId) -> Vec<u8> {
+    let mut key = posting_prefix(index, term);
+    key.extend_from_slice(&node.0.to_be_bytes());
+    key
+}
+
+pub(crate) fn parse_posting_node(key: &[u8]) -> Result<NodeId, DecodeError> {
+    let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
+    let mut reader = Reader::new(&key[start..]);
+    let node = NodeId(reader.u64()?);
+    reader.finish()?;
+    Ok(node)
+}

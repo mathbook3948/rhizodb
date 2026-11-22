@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
 use crate::graph::GraphTx;
+use crate::procedure::Procedure;
 use crate::procedure::ValueType;
 use crate::result;
 use crate::result::QueryResult;
@@ -23,6 +24,7 @@ use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
 use super::plan::CallClause;
+use super::plan::Callee;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
@@ -179,11 +181,11 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
-        let procedure = &call.procedure;
+        let signature = call.callee.signature();
         let mut out = Vec::new();
         for row in rows {
             let mut args = Vec::new();
-            for (arg, (parameter, accepts)) in call.args.iter().zip(&procedure.parameters) {
+            for (arg, (parameter, accepts)) in call.args.iter().zip(&signature.parameters) {
                 let value = match self.eval(arg, &row)? {
                     Datum::Integer(value) if *accepts == ValueType::Float => {
                         Datum::Float(value as f64)
@@ -197,40 +199,37 @@ impl<T: ReadTransaction> Env<'_, T> {
                         ErrorKind::InvalidArgumentValue,
                         format!(
                             "parameter `{parameter}` of `{}` cannot take a {}",
-                            procedure.name,
+                            signature.name,
                             value.type_name()
                         ),
                     ));
                 }
-                args.push(self.value(value, self.graveyard)?);
+                args.push(value);
             }
-            let results = (procedure.body)(&args).map_err(|source| {
-                Error::caused_by(
-                    ErrorKind::ProcedureFailed,
-                    format!("procedure `{}` failed: {source}", procedure.name),
-                    source,
-                )
-            })?;
-            if procedure.outputs.is_empty() {
+            let results = match &call.callee {
+                Callee::Host(procedure) => self.call_host(procedure, args)?,
+                Callee::Builtin(builtin) => builtin.call(self.tx, &args)?,
+            };
+            if signature.outputs.is_empty() {
                 out.push(row);
                 continue;
             }
             for result in results {
-                if result.len() != procedure.outputs.len() {
+                if result.len() != signature.outputs.len() {
                     return Err(Error::new(
                         ErrorKind::ProcedureFailed,
                         format!(
                             "procedure `{}` returned a row of {} values for {} outputs",
-                            procedure.name,
+                            signature.name,
                             result.len(),
-                            procedure.outputs.len()
+                            signature.outputs.len()
                         ),
                     ));
                 }
                 let mut next = row.clone();
                 for (index, slot) in &call.yields {
                     if let Some(value) = result.get(*index) {
-                        set(&mut next, *slot, from_parameter(value));
+                        set(&mut next, *slot, value.clone());
                     }
                 }
                 let keep = match &call.filter {
@@ -243,6 +242,24 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
         }
         Ok(out)
+    }
+
+    fn call_host(&self, procedure: &Procedure, args: Vec<Datum>) -> Result<Vec<Vec<Datum>>, Error> {
+        let args = args
+            .into_iter()
+            .map(|arg| self.value(arg, self.graveyard))
+            .collect::<Result<Vec<_>, _>>()?;
+        let results = (procedure.body)(&args).map_err(|source| {
+            Error::caused_by(
+                ErrorKind::ProcedureFailed,
+                format!("procedure `{}` failed: {source}", procedure.signature.name),
+                source,
+            )
+        })?;
+        Ok(results
+            .iter()
+            .map(|result| result.iter().map(from_parameter).collect())
+            .collect())
     }
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {

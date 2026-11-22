@@ -1,5 +1,6 @@
 mod aggregate;
 mod bind;
+mod builtin;
 mod compare;
 mod datum;
 mod eval;
@@ -26,6 +27,7 @@ use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 use crate::temporal::DateTime;
 
+pub(crate) use self::builtin::is_reserved;
 use self::plan::Plan;
 
 /// Parses, binds, and runs one query in a transaction of its own. A query that updates commits

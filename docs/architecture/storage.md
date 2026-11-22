@@ -14,6 +14,8 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - Each format version can hold everything the older versions hold.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
+- Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
+- Index definitions and index entries live in tables of their own, so a database from before indexes upgrades with no index.
 
 ## Open
 

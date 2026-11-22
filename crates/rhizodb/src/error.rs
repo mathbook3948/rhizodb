@@ -112,6 +112,15 @@ pub enum ErrorKind {
     /// A write was started on a thread that already holds the open write transaction, which
     /// would otherwise wait for itself forever.
     WriteTransactionOnThisThread,
+    /// An index search names an index that does not exist, or one of another kind.
+    IndexNotFound,
+    /// An index is created under a name that an index with another definition already holds.
+    IndexAlreadyExists,
+    /// An index definition cannot be built: no name, no keyword property, or a vector dimension
+    /// of zero.
+    InvalidIndexDefinition,
+    /// A host procedure was registered in the `db` namespace, which built-in procedures reserve.
+    ReservedProcedureName,
     /// A feature this version does not support.
     Unsupported,
     /// The storage engine failed.
@@ -242,6 +251,10 @@ impl From<GraphError> for Error {
             }
             GraphError::NodeHasRelationships(_) => ErrorKind::DeleteConnectedNode,
             GraphError::WriterOnThisThread => ErrorKind::WriteTransactionOnThisThread,
+            GraphError::IndexNotFound(..) => ErrorKind::IndexNotFound,
+            GraphError::IndexExists(_) => ErrorKind::IndexAlreadyExists,
+            GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
+            GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
         };
         Self {
             kind,

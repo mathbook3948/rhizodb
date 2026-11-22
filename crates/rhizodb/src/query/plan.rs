@@ -6,7 +6,9 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
 use crate::procedure::Procedure;
+use crate::procedure::Signature;
 
+use super::builtin::Builtin;
 use super::datum::Datum;
 use super::functions::Function;
 
@@ -80,10 +82,26 @@ pub(crate) struct MatchClause {
 /// `slot` for every `(index, slot)` of `yields`. A procedure without outputs keeps each row once.
 #[derive(Clone, Debug)]
 pub(crate) struct CallClause {
-    pub(crate) procedure: Arc<Procedure>,
+    pub(crate) callee: Callee,
     pub(crate) args: Vec<Expr>,
     pub(crate) yields: Vec<(usize, Slot)>,
     pub(crate) filter: Option<Expr>,
+}
+
+/// The procedure a `CALL` runs: one the host registered, or one the engine provides.
+#[derive(Clone, Debug)]
+pub(crate) enum Callee {
+    Host(Arc<Procedure>),
+    Builtin(Builtin),
+}
+
+impl Callee {
+    pub(crate) fn signature(&self) -> &Signature {
+        match self {
+            Self::Host(procedure) => &procedure.signature,
+            Self::Builtin(builtin) => builtin.signature(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

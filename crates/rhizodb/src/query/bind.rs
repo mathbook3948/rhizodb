@@ -7,12 +7,14 @@ use crate::gql::ast::Direction;
 use crate::procedure::Procedures;
 use crate::result::Parameters;
 
+use super::builtin::Builtin;
 use super::datum::Datum;
 use super::datum::from_parameter;
 use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
 use super::plan::CallClause;
+use super::plan::Callee;
 use super::plan::Case;
 use super::plan::Clause;
 use super::plan::Expr;
@@ -430,44 +432,48 @@ impl Binder<'_> {
         standalone: bool,
     ) -> Result<(CallClause, Vec<String>), Error> {
         let name = names(&call.name).join(".");
-        let procedure = self.procedures.get(&name).cloned().ok_or_else(|| {
-            error(
-                ErrorKind::ProcedureNotFound,
-                format!("procedure `{name}` is not registered"),
-            )
-        })?;
+        let callee = match Builtin::named(&name) {
+            Some(builtin) => Callee::Builtin(builtin),
+            None => Callee::Host(self.procedures.get(&name).cloned().ok_or_else(|| {
+                error(
+                    ErrorKind::ProcedureNotFound,
+                    format!("procedure `{name}` is not registered"),
+                )
+            })?),
+        };
+        let signature = callee.signature();
         let args = match &call.args {
             Some(args) => {
-                if args.len() != procedure.parameters.len() {
+                if args.len() != signature.parameters.len() {
                     return Err(error(
                         ErrorKind::InvalidNumberOfArguments,
                         format!(
                             "procedure `{name}` takes {} arguments, not {}",
-                            procedure.parameters.len(),
+                            signature.parameters.len(),
                             args.len()
                         ),
                     ));
                 }
                 let bound = self.exprs(args, scope, &mut Mode::Plain)?;
-                for (arg, (_, accepts)) in args.iter().zip(&procedure.parameters) {
+                for (arg, (_, accepts)) in args.iter().zip(&signature.parameters) {
                     self.expect_shape(arg, scope, procedure_parameter(*accepts));
                 }
                 bound
             }
-            None if !standalone && !procedure.parameters.is_empty() => {
+            None if !standalone && !signature.parameters.is_empty() => {
                 return Err(error(
                     ErrorKind::InvalidArgumentPassingMode,
                     format!("a CALL inside a query must pass the arguments of `{name}`"),
                 ));
             }
-            None => procedure
+            None => signature
                 .parameters
                 .iter()
                 .map(|(parameter, _)| Ok(Expr::Parameter(self.parameter(parameter)?)))
                 .collect::<Result<_, Error>>()?,
         };
         let all_outputs = || {
-            procedure
+            signature
                 .outputs
                 .iter()
                 .map(|output| ast::YieldItem {
@@ -492,7 +498,7 @@ impl Binder<'_> {
         let mut columns: Vec<String> = Vec::new();
         for item in &items {
             let output = &item.output.0;
-            let index = procedure
+            let index = signature
                 .outputs
                 .iter()
                 .position(|candidate| candidate == output)
@@ -520,7 +526,7 @@ impl Binder<'_> {
             .transpose()?;
         Ok((
             CallClause {
-                procedure,
+                callee,
                 args,
                 yields,
                 filter,
