@@ -95,7 +95,7 @@ impl Database {
     /// list of strings is indexed string by string.
     ///
     /// Search an index over a label with
-    /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, and one over a
+    /// `CALL db.index.keyword.queryNodes(name, text, limit) YIELD node, score`, and one over a
     /// relationship type with
     /// `CALL db.index.keyword.queryRelationships(name, text, limit) YIELD relationship, score`.
     /// Both match an element that holds any term of `text`, ranked by BM25. Text between two
@@ -146,7 +146,7 @@ impl Database {
     /// [`VectorMetric::Cosine`] not zero.
     ///
     /// Search an index over a label with
-    /// `CALL db.index.vector.query(name, vector, limit) YIELD node, score`, and one over a
+    /// `CALL db.index.vector.queryNodes(name, vector, limit) YIELD node, score`, and one over a
     /// relationship type with
     /// `CALL db.index.vector.queryRelationships(name, vector, limit) YIELD relationship, score`.
     /// Both score every vector in the index.

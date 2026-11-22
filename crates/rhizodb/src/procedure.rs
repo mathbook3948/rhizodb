@@ -52,7 +52,7 @@ pub(crate) struct Signature {
 ///
 /// A procedure sees only its arguments, never the graph. A query calls it once per incoming row
 /// and gets one row per row the body returns. The `db` namespace is reserved for the procedures
-/// the engine provides, such as `db.index.keyword.query`.
+/// the engine provides, such as `db.index.keyword.queryNodes`.
 ///
 /// ```
 /// use rhizodb::Database;

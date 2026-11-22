@@ -12,6 +12,6 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Host-registered procedures callable with `CALL`, outside the `db` namespace that built-in procedures reserve, and full `EXISTS { ... }` subqueries.
 - Regular expression matching with `=~`.
 - Explicit read and write transactions through `Database::begin_read` and `Database::begin_write`.
-- Keyword (BM25) and exact vector indexes, kept in the same transaction as the data they index, created with `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.query` and `CALL db.index.vector.query`.
+- Keyword (BM25) and exact vector indexes, kept in the same transaction as the data they index, created with `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryNodes` and `CALL db.index.vector.queryNodes`.
 - Keyword and vector indexes over the properties of relationships of one type, created by passing `IndexTarget::RelationshipType` to `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryRelationships` and `CALL db.index.vector.queryRelationships`, which yield `relationship` and `score`.
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.

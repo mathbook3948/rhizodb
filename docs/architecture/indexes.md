@@ -23,7 +23,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Dropping an index removes its definition and every entry in one transaction.
 - Dropping an index that does not exist succeeds and reports that nothing was dropped.
 - Each index has an internal ID that keys its entries, so a dropped index's name can be reused at once.
-- Queries search an index over a label with the built-in procedures `db.index.keyword.query(index, query, limit)` and `db.index.vector.query(index, vector, limit)`.
+- Queries search an index over a label with the built-in procedures `db.index.keyword.queryNodes(index, query, limit)` and `db.index.vector.queryNodes(index, vector, limit)`.
 - Queries search an index over a relationship type with `db.index.keyword.queryRelationships` and `db.index.vector.queryRelationships`, which take the same arguments.
 - The procedures over a label yield `node` and `score`, and those over a relationship type yield `relationship` and `score`.
 - Searching an index that does not exist, one of the other kind, or one over the other kind of element fails with its own error kind when the query runs.

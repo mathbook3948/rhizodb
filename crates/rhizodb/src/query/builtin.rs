@@ -41,7 +41,7 @@ fn signature(name: &str, query: (&str, ValueType), element: &str) -> Signature {
 }
 
 static KEYWORD_NODES: LazyLock<Signature> =
-    LazyLock::new(|| signature("db.index.keyword.query", KEYWORD, "node"));
+    LazyLock::new(|| signature("db.index.keyword.queryNodes", KEYWORD, "node"));
 
 static KEYWORD_RELATIONSHIPS: LazyLock<Signature> = LazyLock::new(|| {
     signature(
@@ -52,7 +52,7 @@ static KEYWORD_RELATIONSHIPS: LazyLock<Signature> = LazyLock::new(|| {
 });
 
 static VECTOR_NODES: LazyLock<Signature> =
-    LazyLock::new(|| signature("db.index.vector.query", VECTOR, "node"));
+    LazyLock::new(|| signature("db.index.vector.queryNodes", VECTOR, "node"));
 
 static VECTOR_RELATIONSHIPS: LazyLock<Signature> =
     LazyLock::new(|| signature("db.index.vector.queryRelationships", VECTOR, "relationship"));

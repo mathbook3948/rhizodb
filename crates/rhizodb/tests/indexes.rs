@@ -10,9 +10,9 @@ use rhizodb::Value;
 use rhizodb::VectorMetric;
 use support::*;
 
-const KEYWORD_QUERY: &str = "CALL db.index.keyword.query($index, $text, $limit) YIELD node, score \
+const KEYWORD_QUERY: &str = "CALL db.index.keyword.queryNodes($index, $text, $limit) YIELD node, score \
                              RETURN node.name AS name, score";
-const VECTOR_QUERY: &str = "CALL db.index.vector.query($index, $vector, $limit) YIELD node, score \
+const VECTOR_QUERY: &str = "CALL db.index.vector.queryNodes($index, $vector, $limit) YIELD node, score \
                             RETURN node.name AS name, score";
 
 fn search_parameters(index: &str, query: Value, limit: i64) -> Parameters {
@@ -370,7 +370,7 @@ fn a_search_can_feed_the_rest_of_a_query() {
     assert_eq!(
         run(
             &db,
-            "CALL db.index.keyword.query('notes', 'trip', 5) YIELD node \
+            "CALL db.index.keyword.queryNodes('notes', 'trip', 5) YIELD node \
              MATCH (node)-[:FOR]->(place) RETURN place.name"
         ),
         [vec![string("Jeju")]]
@@ -378,7 +378,7 @@ fn a_search_can_feed_the_rest_of_a_query() {
     assert_eq!(
         run(
             &db,
-            "CALL db.index.keyword.query('notes', 'trip', 5) YIELD node, score WHERE score > 1000.0 \
+            "CALL db.index.keyword.queryNodes('notes', 'trip', 5) YIELD node, score WHERE score > 1000.0 \
              RETURN node"
         ),
         Vec::<Vec<Value>>::new()
@@ -535,11 +535,11 @@ fn search_arguments_are_checked() {
         ErrorKind::IndexNotFound
     );
     assert_eq!(
-        error_kind(&db, "CALL db.index.keyword.query('notes', 'x', 1.5)"),
+        error_kind(&db, "CALL db.index.keyword.queryNodes('notes', 'x', 1.5)"),
         ErrorKind::InvalidArgumentType
     );
-    assert!(run(&db, "CALL db.index.keyword.query('notes', null, 1)").is_empty());
-    assert!(run(&db, "CALL db.index.keyword.query(null, 'x', -1)").is_empty());
+    assert!(run(&db, "CALL db.index.keyword.queryNodes('notes', null, 1)").is_empty());
+    assert!(run(&db, "CALL db.index.keyword.queryNodes(null, 'x', -1)").is_empty());
     assert!(keyword_hits(&db, "notes", "x", 0).is_empty());
 }
 
@@ -548,7 +548,7 @@ fn a_standalone_search_returns_every_output() {
     let db = notes_db();
     run(&db, "INSERT (:Note {name: 'n', body: 'word'})");
     assert_eq!(
-        columns(&db, "CALL db.index.keyword.query('notes', 'word', 1)"),
+        columns(&db, "CALL db.index.keyword.queryNodes('notes', 'word', 1)"),
         ["node", "score"]
     );
 }
@@ -557,7 +557,9 @@ fn a_standalone_search_returns_every_output() {
 fn the_db_namespace_is_reserved_for_built_in_procedures() {
     let mut db = db();
     let error = db
-        .register_procedure(Procedure::new("db.index.keyword.query", |_| Ok(Vec::new())))
+        .register_procedure(Procedure::new("db.index.keyword.queryNodes", |_| {
+            Ok(Vec::new())
+        }))
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::ReservedProcedureName);
     assert_eq!(
