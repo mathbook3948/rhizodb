@@ -24,9 +24,9 @@ use crate::gql::error::SyntaxErrorKind;
 use crate::gql::lexer::Punct;
 use crate::gql::lexer::TokenKind;
 
-const CLAUSE_KEYWORDS: [&str; 15] = [
+const CLAUSE_KEYWORDS: [&str; 16] = [
     "MATCH", "OPTIONAL", "INSERT", "CREATE", "RETURN", "WITH", "UNWIND", "SET", "REMOVE", "DELETE",
-    "DETACH", "MERGE", "CALL", "FOREACH", "LOAD",
+    "DETACH", "MERGE", "CALL", "FOREACH", "LOAD", "FILTER",
 ];
 
 const UNSUPPORTED_CLAUSE_KEYWORDS: [&str; 2] = ["FOREACH", "LOAD"];
@@ -61,6 +61,10 @@ impl Parser {
             self.expect_keyword("AS")?;
             let variable = self.name()?;
             return Ok(Clause::Unwind(Unwind { expr, variable }));
+        }
+        if self.eat_keyword("FILTER") {
+            self.eat_keyword("WHERE");
+            return Ok(Clause::Filter(self.predicate()?));
         }
         if self.eat_keyword("SET") {
             return Ok(Clause::Set(self.comma_separated(Self::set_item)?));

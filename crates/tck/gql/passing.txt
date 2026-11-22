@@ -6,6 +6,8 @@
 13.2-insert-statement/Insert1.feature: [6] Insert once per incoming row
 13.2-insert-statement/Insert1.feature: [7] Return what an insert bound
 13.2-insert-statement/Insert1.feature: [8] Insert keywords are case-insensitive
+14.6-filter-statement/Filter1.feature: [1] FILTER keeps the rows whose condition is true
+14.6-filter-statement/Filter1.feature: [2] FILTER takes an optional WHERE
 16.19-offset-clause/Offset1.feature: [1] OFFSET skips the first rows of an ordered result
 16.19-offset-clause/Offset1.feature: [2] OFFSET before LIMIT pages through a result
 16.19-offset-clause/Offset1.feature: [3] OFFSET takes a parameter

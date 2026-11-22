@@ -51,9 +51,14 @@ pub(crate) enum Clause {
 #[derive(Clone, Debug)]
 pub(crate) enum ReadClause {
     Match(MatchClause),
-    Unwind { expr: Expr, slot: Slot },
+    Unwind {
+        expr: Expr,
+        slot: Slot,
+    },
     Project(Box<Projection>),
     Call(Box<CallClause>),
+    /// Keeps the rows for which the condition is true.
+    Filter(Expr),
 }
 
 #[derive(Clone, Debug)]

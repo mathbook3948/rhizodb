@@ -56,6 +56,8 @@ pub(crate) enum Clause {
     Remove(Vec<RemoveItem>),
     Delete(Delete),
     Call(Call),
+    /// `FILTER condition` or `FILTER WHERE condition`.
+    Filter(Expr),
 }
 
 /// `CALL name(args) YIELD items WHERE filter`. `args` is `None` when the parentheses are left

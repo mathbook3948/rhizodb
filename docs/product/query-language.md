@@ -67,6 +67,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - The type the query text fixes leaves out null, so an operand that may be null, such as a comparison or an `OPTIONAL MATCH` variable, still fails early when no value of its type fits.
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
+- `FILTER` keeps the rows whose condition is true, with or without `WHERE` after the keyword, and keeps every variable in scope.
+- A `FILTER` condition is a `WHERE` in every rule above, so it may hold a pattern predicate and may not aggregate.
+- `FILTER` is a reading clause, so it cannot end a query and does not separate an updating clause from a reading clause after it.
 - A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.
 - A column projected twice is reported after a `WITH` item without an alias.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.

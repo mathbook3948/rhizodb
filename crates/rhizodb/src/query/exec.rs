@@ -177,6 +177,15 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             ReadClause::Project(projection) => self.project(projection, rows),
             ReadClause::Call(call) => self.call_procedure(call, rows),
+            ReadClause::Filter(condition) => {
+                let mut kept = Vec::new();
+                for row in rows {
+                    if self.predicate(condition, &row)? {
+                        kept.push(row);
+                    }
+                }
+                Ok(kept)
+            }
         }
     }
 

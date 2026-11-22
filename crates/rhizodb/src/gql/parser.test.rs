@@ -156,6 +156,44 @@ fn unwind_binds_a_variable() {
 }
 
 #[test]
+fn filter_takes_a_condition_with_or_without_where() {
+    for source in ["FILTER k > 1", "FILTER WHERE k > 1", "filter where k > 1"] {
+        let Clause::Filter(condition) = only_clause(source) else {
+            panic!("expected FILTER in {source}");
+        };
+        assert_eq!(sexp(&condition), "(cmp k > 1)", "{source}");
+    }
+}
+
+#[test]
+fn filter_accepts_a_pattern_predicate() {
+    let clauses = single_query_clauses("MATCH (a) FILTER (a)-->() RETURN a");
+    assert!(
+        matches!(&clauses[1], Clause::Filter(Expr::Pattern(_))),
+        "{clauses:?}"
+    );
+}
+
+#[test]
+fn filter_errors_report_offsets() {
+    for (source, expected) in [
+        ("FILTER", (6, SyntaxErrorKind::UnexpectedEnd)),
+        ("FILTER WHERE", (12, SyntaxErrorKind::UnexpectedEnd)),
+        ("FILTER RETURN 1", (7, SyntaxErrorKind::UnexpectedToken)),
+        (
+            "FILTER WHERE WHERE k",
+            (13, SyntaxErrorKind::UnexpectedToken),
+        ),
+        (
+            "FILTER k RETURN k k",
+            (18, SyntaxErrorKind::UnexpectedToken),
+        ),
+    ] {
+        assert_eq!(error(source), expected, "{source:?}");
+    }
+}
+
+#[test]
 fn set_has_property_map_and_label_forms() {
     let Clause::Set(found) = only_clause("SET n.a = 1, n = {b: 2}, n += $m, n:A:B") else {
         panic!("expected SET");
@@ -250,7 +288,8 @@ fn merge_collects_on_create_and_on_match_actions() {
 #[test]
 fn clauses_keep_their_source_order() {
     let clauses = single_query_clauses(
-        "MATCH (a) WITH a UNWIND [1] AS x CREATE (b) SET b.k = x REMOVE b.k DELETE b RETURN a",
+        "MATCH (a) WITH a UNWIND [1] AS x FILTER x > 0 CREATE (b) SET b.k = x REMOVE b.k DELETE b \
+         RETURN a",
     );
     let kinds: Vec<&str> = clauses
         .iter()
@@ -265,12 +304,13 @@ fn clauses_keep_their_source_order() {
             Clause::Remove(_) => "remove",
             Clause::Delete(_) => "delete",
             Clause::Call(_) => "call",
+            Clause::Filter(_) => "filter",
         })
         .collect();
     assert_eq!(
         kinds,
         vec![
-            "match", "with", "unwind", "insert", "set", "remove", "delete", "return"
+            "match", "with", "unwind", "filter", "insert", "set", "remove", "delete", "return"
         ]
     );
 }

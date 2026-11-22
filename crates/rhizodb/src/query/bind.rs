@@ -270,7 +270,7 @@ impl Binder<'_> {
                     | ast::Clause::Set(_)
                     | ast::Clause::Remove(_)
                     | ast::Clause::Delete(_)
-            );
+            ) || (follows_update && matches!(clause, ast::Clause::Filter(_)));
             if subquery && follows_update {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
@@ -303,6 +303,10 @@ impl Binder<'_> {
                         output = Some((slots, columns));
                     }
                     clauses.push(Clause::Read(ReadClause::Call(Box::new(bound))));
+                }
+                ast::Clause::Filter(condition) => {
+                    let condition = self.filter(condition, &scope, &mut Mode::Plain)?;
+                    clauses.push(Clause::Read(ReadClause::Filter(condition)));
                 }
                 ast::Clause::With(with) => {
                     let (projection, next, _) =
@@ -409,6 +413,7 @@ impl Binder<'_> {
                         | ast::Clause::With(_)
                         | ast::Clause::Unwind(_)
                         | ast::Clause::Call(_)
+                        | ast::Clause::Filter(_)
                 )
             {
                 return Err(error(
@@ -1982,6 +1987,7 @@ fn collect_query_free<'a>(
                 collect_free(&unwind.expr, bound, free);
                 bound.push(&unwind.variable.0);
             }
+            ast::Clause::Filter(condition) => collect_free(condition, bound, free),
             ast::Clause::Call(call) => {
                 for arg in call.args.iter().flatten() {
                     collect_free(arg, bound, free);
