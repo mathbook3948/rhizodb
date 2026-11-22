@@ -765,6 +765,46 @@ fn a_type_error_in_the_query_text_fails_before_any_row_reaches_it() {
 }
 
 #[test]
+fn a_reading_clause_cannot_follow_an_updating_clause_without_with() {
+    let db = db();
+    run(&db, "CREATE (:Q)");
+    for query in [
+        "CREATE (a:Q) MATCH (b:Q) RETURN count(b) AS c",
+        "CREATE (a:Q) OPTIONAL MATCH (b:Q) RETURN count(b) AS c",
+        "CREATE (a:Q) UNWIND [1] AS x RETURN x",
+        "MERGE (a:Q) MATCH (b:Q) RETURN count(b) AS c",
+        "MATCH (a:Q) SET a.v = 1 MATCH (b:Q) RETURN count(b) AS c",
+        "MATCH (a:Q) REMOVE a.v MATCH (b:Q) RETURN count(b) AS c",
+        "MATCH (a:Q) DELETE a MATCH (b:Q) RETURN count(b) AS c",
+        "MATCH (a:Q) SET a.v = 1 RETURN a UNION CREATE (c:Q) MATCH (d:Q) RETURN d",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidClauseComposition,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        single(&db, "CREATE (a:Q) WITH a MATCH (b:Q) RETURN count(b) AS c"),
+        int(2)
+    );
+    assert_eq!(
+        single(
+            &db,
+            "CREATE (a:Q) SET a.v = 1 WITH a UNWIND [1, 2] AS x RETURN count(x) AS c"
+        ),
+        int(2)
+    );
+    assert_eq!(
+        single(
+            &db,
+            "CREATE (a:Z) CREATE (b:Z) SET b.v = 1 RETURN count(*) AS n"
+        ),
+        int(1)
+    );
+}
+
+#[test]
 fn a_type_error_fails_before_any_row_reaches_it_in_every_place_an_expression_can_stand() {
     let db = db();
     let mut escaped = Vec::new();

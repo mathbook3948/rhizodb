@@ -213,6 +213,7 @@ impl Binder<'_> {
         let mut clauses = Vec::new();
         let mut output = None;
         let mut result_reads_variables = false;
+        let mut follows_update = false;
         let last = query.clauses.len().saturating_sub(1);
         for (index, clause) in query.clauses.iter().enumerate() {
             if output.is_some() {
@@ -221,6 +222,20 @@ impl Binder<'_> {
                     "RETURN must be the last clause",
                 ));
             }
+            if follows_update && matches!(clause, ast::Clause::Match(_) | ast::Clause::Unwind(_)) {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "WITH is needed between an updating clause and a reading clause",
+                ));
+            }
+            follows_update = matches!(
+                clause,
+                ast::Clause::Insert(_)
+                    | ast::Clause::Merge(_)
+                    | ast::Clause::Set(_)
+                    | ast::Clause::Remove(_)
+                    | ast::Clause::Delete(_)
+            );
             match clause {
                 ast::Clause::Match(found) => {
                     clauses.push(Clause::Read(self.match_clause(found, &mut scope)?));
