@@ -139,8 +139,12 @@ impl Amount {
     }
 
     /// `count` divided by `divisor`, where `divisor` counts as the shortest decimal that reads
-    /// back as it. `None` when `divisor` is zero or not finite, or the quotient is out of range.
+    /// back as it. An infinite `divisor` gives zero. `None` when `divisor` is zero or NaN, or the
+    /// quotient is out of range.
     pub(crate) fn divided(count: i128, divisor: f64) -> Option<Amount> {
+        if divisor.is_infinite() {
+            return Some(Amount::ZERO);
+        }
         let divisor = Decimal::of_float(divisor)?;
         if divisor.digits == 0 {
             return None;

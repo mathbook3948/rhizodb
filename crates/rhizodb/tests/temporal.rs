@@ -208,6 +208,27 @@ fn duration_amounts_with_many_digits_keep_the_ones_that_matter() {
 }
 
 #[test]
+fn a_duration_divided_by_an_infinite_float_is_zero() {
+    let db = db();
+    for query in [
+        "RETURN duration('P1M2DT3.5S') / (1.0 / 0.0)",
+        "RETURN duration('PT-1S') / -(1.0 / 0.0)",
+    ] {
+        assert_eq!(text(&db, query), "PT0S", "{query}");
+    }
+    for query in [
+        "RETURN duration('PT1S') / ((1.0 / 0.0) - (1.0 / 0.0))",
+        "RETURN duration('PT1S') * (1.0 / 0.0)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidTemporalValue,
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn a_date_moves_by_the_whole_days_of_the_time_truncated_toward_zero() {
     let db = db();
     for (query, expected) in [

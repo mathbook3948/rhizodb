@@ -43,6 +43,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A temporal function reads back every string it produces.
 - A fractional duration component carries into the next smaller units, with a month of 30.436875 days.
 - The carry is exact, and only the nanoseconds are truncated.
+- A duration divided by an infinite float is the zero duration, and a duration divided by NaN or multiplied by an infinite float or NaN raises an invalid temporal value error.
 - Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have.
 - A date moves by the whole days in the seconds and nanoseconds of a duration, truncated toward zero.
 - `<`, `<=`, `>`, and `>=` compare two temporal values of the same type and give null otherwise.
