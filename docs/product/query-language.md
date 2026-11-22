@@ -70,6 +70,12 @@ GQL is the reference language, but the only public conformance suite is the open
 - `FILTER` keeps the rows whose condition is true, with or without `WHERE` after the keyword, and keeps every variable in scope.
 - A `FILTER` condition is a `WHERE` in every rule above, so it may hold a pattern predicate and may not aggregate.
 - `FILTER` is a reading clause, so it cannot end a query and does not separate an updating clause from a reading clause after it.
+- `LET` binds each value to a new variable and keeps every variable in scope.
+- A `LET` variable cannot already be in scope, so `LET` never shadows or rebinds a variable.
+- The values of one `LET` see only the incoming row, not the variables the same `LET` binds.
+- A `LET` value cannot aggregate.
+- `LET` is a reading clause under the same clause-order rules as `FILTER`.
+- `LET` accepts only `variable = value`, without the `VALUE` keyword or a declared type.
 - A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.
 - A column projected twice is reported after a `WITH` item without an alias.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.

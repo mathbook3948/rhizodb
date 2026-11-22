@@ -59,6 +59,8 @@ pub(crate) enum ReadClause {
     Call(Box<CallClause>),
     /// Keeps the rows for which the condition is true.
     Filter(Expr),
+    /// Extends each row with the value of each expression in its slot.
+    Let(Vec<(Expr, Slot)>),
 }
 
 #[derive(Clone, Debug)]

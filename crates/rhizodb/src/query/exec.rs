@@ -186,6 +186,16 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
                 Ok(kept)
             }
+            ReadClause::Let(bindings) => rows
+                .into_iter()
+                .map(|mut row| {
+                    for (expr, slot) in bindings {
+                        let value = self.eval(expr, &row)?;
+                        set(&mut row, *slot, value);
+                    }
+                    Ok(row)
+                })
+                .collect(),
         }
     }
 

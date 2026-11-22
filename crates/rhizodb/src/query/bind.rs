@@ -270,7 +270,8 @@ impl Binder<'_> {
                     | ast::Clause::Set(_)
                     | ast::Clause::Remove(_)
                     | ast::Clause::Delete(_)
-            ) || (follows_update && matches!(clause, ast::Clause::Filter(_)));
+            ) || (follows_update
+                && matches!(clause, ast::Clause::Filter(_) | ast::Clause::Let(_)));
             if subquery && follows_update {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
@@ -307,6 +308,25 @@ impl Binder<'_> {
                 ast::Clause::Filter(condition) => {
                     let condition = self.filter(condition, &scope, &mut Mode::Plain)?;
                     clauses.push(Clause::Read(ReadClause::Filter(condition)));
+                }
+                ast::Clause::Let(bindings) => {
+                    let mut next = scope.clone();
+                    let mut bound = Vec::new();
+                    for (variable, value) in bindings {
+                        let expr = self.expr(value, &scope, &mut Mode::Plain)?;
+                        let name = &variable.0;
+                        if next.get(name).is_some() {
+                            return Err(error(
+                                ErrorKind::VariableAlreadyBound,
+                                format!("variable `{name}` is already bound"),
+                            ));
+                        }
+                        let slot = self.slot();
+                        next.insert(name, slot, kind_of(value, &scope));
+                        bound.push((expr, slot));
+                    }
+                    scope = next;
+                    clauses.push(Clause::Read(ReadClause::Let(bound)));
                 }
                 ast::Clause::With(with) => {
                     let (projection, next, _) =
@@ -414,6 +434,7 @@ impl Binder<'_> {
                         | ast::Clause::Unwind(_)
                         | ast::Clause::Call(_)
                         | ast::Clause::Filter(_)
+                        | ast::Clause::Let(_)
                 )
             {
                 return Err(error(
@@ -1988,6 +2009,12 @@ fn collect_query_free<'a>(
                 bound.push(&unwind.variable.0);
             }
             ast::Clause::Filter(condition) => collect_free(condition, bound, free),
+            ast::Clause::Let(bindings) => {
+                for (_, value) in bindings {
+                    collect_free(value, bound, free);
+                }
+                bound.extend(bindings.iter().map(|(variable, _)| variable.0.as_str()));
+            }
             ast::Clause::Call(call) => {
                 for arg in call.args.iter().flatten() {
                     collect_free(arg, bound, free);

@@ -58,6 +58,8 @@ pub(crate) enum Clause {
     Call(Call),
     /// `FILTER condition` or `FILTER WHERE condition`.
     Filter(Expr),
+    /// `LET a = value, b = value`. Never empty.
+    Let(Vec<(Name, Expr)>),
 }
 
 /// `CALL name(args) YIELD items WHERE filter`. `args` is `None` when the parentheses are left
