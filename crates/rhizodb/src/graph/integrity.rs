@@ -26,6 +26,7 @@ use super::index::document_length;
 use super::index::encode_totals;
 use super::keys;
 use super::records::Properties;
+use super::tokenize;
 
 const TOKEN_TAGS: [u8; 3] = [Label::TAG, RelationshipType::TAG, PropertyKey::TAG];
 
@@ -43,6 +44,7 @@ pub(crate) enum Counter {
 pub(crate) enum IntegrityViolation {
     FormatVersionMissing,
     FormatVersionMismatch(u32),
+    TokenizerMismatch,
     Undecodable {
         table: Table,
         key: Vec<u8>,
@@ -225,6 +227,10 @@ impl<T: ReadTransaction> GraphTx<T> {
                     key: keys::FORMAT_VERSION_KEY.to_vec(),
                 }),
             },
+        }
+        let tokenizer = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
+        if tokenizer != Some(tokenize::fingerprint()) {
+            violations.push(IntegrityViolation::TokenizerMismatch);
         }
         Ok(())
     }

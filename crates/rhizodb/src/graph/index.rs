@@ -564,20 +564,44 @@ impl<T: WriteTransaction> GraphTx<T> {
         let index = Index { id, definition };
         self.transaction
             .put(Table::Indexes, name.as_bytes(), &index.encode())?;
+        self.fill(&index)
+    }
+
+    fn fill(&mut self, index: &Index) -> Result<(), GraphError> {
         if matches!(index.definition.kind, IndexKind::Keyword { .. }) {
             self.transaction.put(
                 Table::KeywordTotals,
-                &keys::index_prefix(id),
+                &keys::index_prefix(index.id),
                 &encode_totals(0, 0),
             )?;
         }
         for node in self.node_ids_with_label(index.definition.label)? {
             let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
             if let Some(entry) = index.definition.entry(&record) {
-                self.insert_entry(&index, node, &entry)?;
+                self.insert_entry(index, node, &entry)?;
             }
         }
         Ok(())
+    }
+
+    /// Records the current tokenizer, first rebuilding every keyword index from the nodes when
+    /// the stored entries came from another one. Returns whether anything was written.
+    pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
+        let fingerprint = tokenize::fingerprint();
+        let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
+        if stored.as_deref() == Some(fingerprint.as_slice()) {
+            return Ok(false);
+        }
+        for (_, index) in self.indexes()? {
+            if !matches!(index.definition.kind, IndexKind::Keyword { .. }) {
+                continue;
+            }
+            self.clear(&index)?;
+            self.fill(&index)?;
+        }
+        self.transaction
+            .put(Table::Metadata, keys::TOKENIZER_KEY, &fingerprint)?;
+        Ok(true)
     }
 
     /// Removes the index and all its entries. Returns whether there was one to remove.
@@ -586,6 +610,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             return Ok(false);
         };
         self.transaction.delete(Table::Indexes, name.as_bytes())?;
+        self.clear(&index)?;
+        Ok(true)
+    }
+
+    fn clear(&mut self, index: &Index) -> Result<(), GraphError> {
         for table in ENTRY_TABLES {
             for (key, _) in self
                 .transaction
@@ -594,7 +623,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                 self.transaction.delete(table, &key)?;
             }
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Brings every index in line with a node that changed from `before` to `after`. `None`

@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::graph::Graph;
 use crate::graph::records::Properties;
+use crate::storage::Storage;
 use crate::storage::redb_backend::RedbStorage;
 
 const TEXTS: [&str; 6] = [
@@ -191,6 +192,88 @@ fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
     write.commit().unwrap();
     let violations = graph.read().unwrap().check_integrity().unwrap();
     assert_eq!(violations, vec![]);
+}
+
+#[test]
+fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("stale.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", "Doc", &["text"])
+            .unwrap();
+        write
+            .create_vector_index("points", "Doc", "at", 1, VectorMetric::DotProduct)
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        let at = write.intern_token("at").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String("current terms".to_owned())),
+                    (at, PropertyValue::List(vec![PropertyValue::Integer(2)])),
+                ]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+
+        let mut stale = graph.storage.begin_write().unwrap();
+        for table in [Table::KeywordPostings, Table::KeywordDocuments] {
+            for (key, _) in stale.scan_prefix(table, &[]).unwrap() {
+                stale.delete(table, &key).unwrap();
+            }
+        }
+        let index = Index {
+            id: 0,
+            definition: IndexDefinition {
+                label,
+                kind: IndexKind::Keyword {
+                    properties: vec![text],
+                },
+            },
+        };
+        let old_output = Entry::Keyword(Document::from([("stale".to_owned(), 3)]));
+        for (table, key, value) in index.rows(NodeId(0), &old_output) {
+            stale.put(table, &key, &value).unwrap();
+        }
+        stale
+            .put(
+                Table::KeywordTotals,
+                &keys::index_prefix(0),
+                &encode_totals(1, 3),
+            )
+            .unwrap();
+        stale
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"an older tokenizer")
+            .unwrap();
+        stale.commit().unwrap();
+        assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(read.keyword_search("words", "stale", 10).unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("words", "current", 10).unwrap().len(),
+        1
+    );
+    assert_eq!(read.vector_search("points", &[1.0], 10).unwrap().len(), 1);
+}
+
+#[test]
+fn opening_records_the_current_tokenizer() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let stored = graph
+        .read()
+        .unwrap()
+        .transaction
+        .get(Table::Metadata, keys::TOKENIZER_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(tokenize::fingerprint()));
 }
 
 #[test]

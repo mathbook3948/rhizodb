@@ -132,27 +132,37 @@ pub(crate) struct Graph<S> {
 
 impl<S: Storage> Graph<S> {
     /// Records the format version on first open, upgrades a database written in an older
-    /// version to the current one, and rejects a database written in a newer version.
+    /// version to the current one, and rejects a database written in a newer version. Keyword
+    /// indexes built by another tokenizer are rebuilt in the same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
-            let mut transaction = storage.begin_write()?;
-            let found = match transaction.get(Table::Metadata, keys::FORMAT_VERSION_KEY)? {
+            let mut tx = GraphTx {
+                transaction: storage.begin_write()?,
+                _writer: None,
+            };
+            let found = match tx
+                .transaction
+                .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
+            {
                 None => None,
                 Some(bytes) => Some(decode_u32(&bytes)?),
             };
-            match found {
-                Some(FORMAT_VERSION) => {}
+            let upgrade = match found {
+                Some(FORMAT_VERSION) => false,
                 Some(found) if !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) => {
                     return Err(GraphError::UnsupportedFormatVersion(found));
                 }
-                _ => {
-                    transaction.put(
-                        Table::Metadata,
-                        keys::FORMAT_VERSION_KEY,
-                        &FORMAT_VERSION.to_be_bytes(),
-                    )?;
-                    transaction.commit()?;
-                }
+                _ => true,
+            };
+            if upgrade {
+                tx.transaction.put(
+                    Table::Metadata,
+                    keys::FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION.to_be_bytes(),
+                )?;
+            }
+            if tx.adopt_current_tokenizer()? || upgrade {
+                tx.commit()?;
             }
         }
         Ok(Self {

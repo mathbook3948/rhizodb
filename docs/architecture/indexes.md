@@ -37,8 +37,10 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Keyword matches are ranked by BM25.
 - Each keyword index keeps its node count and total term count, and each posting keeps its node's term count, so ranking reads only the postings of the query terms.
 - Each indexed node keeps the terms it was indexed under, and removing it from the index deletes those terms rather than tokenizing again.
-- The tokenizer's output is part of the on-disk format, so changing it changes the format version.
-- An upgrade across a tokenizer change rebuilds the keyword indexes.
+- The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms for a fixed probe text that exercises the Unicode tables it depends on.
+- Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction and records the current tokenizer.
+- Changing what the tokenizer produces on purpose raises its version.
+- The word segmentation crate is pinned to one exact version, so a host's lockfile cannot change the tokenizer.
 - A vector index covers one property and has a fixed dimension and one metric: cosine, euclidean, or dot product.
 - A node is in a vector index when the property is a list of finite numbers of the index's dimension whose length is small enough that no score can overflow, and under cosine large enough that no product of lengths can underflow.
 - Any other value leaves the node out of the vector index without an error.

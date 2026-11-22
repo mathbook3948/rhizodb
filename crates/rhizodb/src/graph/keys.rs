@@ -86,6 +86,7 @@ pub(crate) fn parse_label_key(key: &[u8]) -> Result<NodeId, DecodeError> {
 }
 
 pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";
+pub(crate) const TOKENIZER_KEY: &[u8] = b"tokenizer";
 
 pub(crate) fn index_prefix(index: u32) -> [u8; 4] {
     index.to_be_bytes()

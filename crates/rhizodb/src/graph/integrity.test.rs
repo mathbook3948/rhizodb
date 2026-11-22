@@ -129,6 +129,18 @@ fn a_missing_format_version_is_caught() {
 }
 
 #[test]
+fn a_keyword_index_from_another_tokenizer_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+                .unwrap();
+        },
+        IntegrityViolation::TokenizerMismatch,
+    );
+}
+
+#[test]
 fn a_foreign_format_version_is_caught() {
     assert_caught(
         |write| {
