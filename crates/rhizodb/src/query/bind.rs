@@ -396,7 +396,14 @@ impl Binder<'_> {
                 ast::Clause::Delete(delete) => {
                     let mut targets = Vec::new();
                     for target in &delete.targets {
-                        if matches!(target, ast::Expr::HasLabels { .. }) {
+                        let label_test = match target {
+                            ast::Expr::Unary {
+                                op: ast::UnaryOp::Not,
+                                operand,
+                            } => operand.as_ref(),
+                            other => other,
+                        };
+                        if matches!(label_test, ast::Expr::HasLabels { .. }) {
                             return Err(error(
                                 ErrorKind::InvalidDelete,
                                 "DELETE takes an element, not a label expression",

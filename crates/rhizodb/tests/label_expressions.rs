@@ -245,3 +245,16 @@ fn a_deleted_relationship_keeps_its_type_for_a_label_expression() {
     );
     assert_eq!(rows, [vec![boolean(false)], vec![boolean(true)]]);
 }
+
+#[test]
+fn delete_rejects_every_form_of_label_test() {
+    let db = labeled();
+    for query in [
+        "MATCH (n) DELETE n:A",
+        "MATCH (n) DELETE n:A|B",
+        "MATCH (n) DELETE n IS LABELED A",
+        "MATCH (n) DELETE n IS NOT LABELED A",
+    ] {
+        assert_eq!(error_kind(&db, query), ErrorKind::InvalidDelete, "{query}");
+    }
+}
