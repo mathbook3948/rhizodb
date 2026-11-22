@@ -1,7 +1,7 @@
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -14,7 +14,7 @@ const PROBE: &str = concat!(
     "\u{1d15f} \u{2adc} \u{11099}\u{110ba} \u{1133b}\u{1133e} \u{0f73} \u{1e9b}\u{323} ",
     "ก่อน ๒๕๖๗ a\u{e48} ພາສາລາວ ភាសាខ្មែរ မြန်မာဘာသာ \u{1a20}\u{1a60}\u{1a21} \u{aa80}\u{aab0} ",
     "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60} ",
-    "ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0}",
+    "a\u{e31} ก\u{e31}a\u{e31} \u{e31}ก ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0}",
 );
 
 /// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
@@ -98,10 +98,12 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// ligatures and full-width letters. Runs of Hangul, Han, Hiragana, Katakana, and the scripts
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
 /// grapheme clusters, because those scripts attach particles to words or leave out spaces
-/// between words. In Hangul the unit is each syllable and each jamo left over after
-/// normalization, since a grapheme cluster of loose jamo such as "ㅋㅋㅋ" holds several
-/// letters a reader types and searches one at a time. A run starts at a letter that is not a digit. The same text always gives the
-/// same terms, in the same order, with positions counted from zero.
+/// between words. A grapheme cluster goes wholly to a run or wholly to a word, by its first
+/// character, so a run starts at a letter that is not a digit and never at a mark. In Hangul
+/// the unit is each syllable and each jamo left over after normalization, since a grapheme
+/// cluster of loose jamo such as "ㅋㅋㅋ" holds several letters a reader types and searches
+/// one at a time. The same text always gives the same terms, in the same order, with
+/// positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
     scan(&text.nfkc().collect::<String>(), purpose).terms
 }
@@ -121,13 +123,14 @@ fn scan(text: &str, purpose: Purpose) -> Scan {
             continue;
         }
         let mut word = String::new();
-        for character in segment.chars().filter(|character| !character.is_control()) {
-            if joins_run(character, &scan.run) {
+        for cluster in segment.graphemes(true) {
+            let kept = cluster.chars().filter(|character| !character.is_control());
+            if cluster.chars().next().is_some_and(starts_run) {
                 scan.push_word(&mut word);
-                scan.run.push(character);
+                scan.run.extend(kept);
             } else {
                 scan.flush_run();
-                word.push(character);
+                word.extend(kept);
             }
         }
         if scan.push_word(&mut word) && segments.peek().is_some_and(|next| next.starts_with('*')) {
@@ -202,10 +205,8 @@ impl Scan {
     }
 }
 
-fn joins_run(character: char, run: &str) -> bool {
-    is_paired_script(character)
-        && !character.is_numeric()
-        && (character.is_alphabetic() || !run.is_empty())
+fn starts_run(character: char) -> bool {
+    is_paired_script(character) && !character.is_numeric() && character.is_alphabetic()
 }
 
 fn is_hangul(character: char) -> bool {

@@ -87,6 +87,8 @@ fn thai_lao_khmer_and_myanmar_runs_pair_their_grapheme_clusters() {
 fn numbers_and_a_stray_mark_do_not_start_a_run() {
     assert_eq!(query("ปี ๒๕๖๗"), ["ปี", "๒๕๖๗"]);
     assert_eq!(query("a\u{e48}"), ["a\u{e48}"]);
+    assert_eq!(document("a\u{e31}"), ["a\u{e31}"]);
+    assert_eq!(document("ก\u{e31}a\u{e31}"), ["ก\u{e31}", "a\u{e31}"]);
 }
 
 #[test]
