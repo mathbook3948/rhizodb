@@ -83,6 +83,23 @@ fn a_variable_named_is_stays_a_variable() {
 }
 
 #[test]
+fn a_variable_named_is_takes_an_is_label_expression() {
+    let parts = patterns("(is IS Person)");
+    let start = &parts[0].element.start;
+    assert_eq!(start.variable.as_ref().map(|n| n.0.as_str()), Some("is"));
+    assert_eq!(node_labels("(is IS Person)"), "Person");
+    let parts = patterns("()-[is IS KNOWS]->()");
+    let relationship = &parts[0].element.steps[0].relationship;
+    assert_eq!(
+        relationship.variable.as_ref().map(|n| n.0.as_str()),
+        Some("is")
+    );
+    assert_eq!(relationship_labels("()-[is IS KNOWS]->()"), "KNOWS");
+    assert_eq!(node_labels("(IS A)"), "A");
+    assert_eq!(node_labels("(is:A)"), "A");
+}
+
+#[test]
 fn relationship_patterns_take_one_label_expression() {
     for (source, expected) in [
         ("()-[]->()", "_"),

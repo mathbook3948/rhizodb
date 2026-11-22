@@ -85,7 +85,8 @@ impl Parser {
     }
 
     fn element_variable(&mut self) -> ParseResult<Option<Name>> {
-        let starts_labels = self.at_keyword("IS") && self.label_starts_at(1);
+        let starts_labels =
+            self.at_keyword("IS") && !self.keyword_at(1, "IS") && self.label_starts_at(1);
         if self.at_word() && !starts_labels {
             Ok(Some(self.name()?))
         } else {
