@@ -245,7 +245,10 @@ fn set_has_property_map_and_label_forms() {
             },
             SetItem::Labels {
                 variable: name("n"),
-                labels: vec![name("A"), name("B")]
+                labels: LabelExpr::And(vec![
+                    LabelExpr::Name(name("A")),
+                    LabelExpr::Name(name("B"))
+                ])
             },
         ]
     );
@@ -278,7 +281,10 @@ fn remove_has_property_and_label_forms() {
             },
             RemoveItem::Labels {
                 variable: name("n"),
-                labels: vec![name("A"), name("B")]
+                labels: LabelExpr::And(vec![
+                    LabelExpr::Name(name("A")),
+                    LabelExpr::Name(name("B"))
+                ])
             },
         ])
     );

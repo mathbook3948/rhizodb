@@ -229,6 +229,37 @@ fn a_pattern_that_creates_rejects_any_other_label_expression() {
 }
 
 #[test]
+fn set_and_remove_take_a_label_set_after_is_or_colon() {
+    let db = db();
+    run(&db, "INSERT ({k: 1})");
+    run(&db, "MATCH (n) SET n IS A");
+    run(&db, "MATCH (n) SET n:B&C, n IS D&E");
+    assert_eq!(
+        run(&db, "MATCH (n) RETURN labels(n)"),
+        [vec![list(["A", "B", "C", "D", "E"].map(string))]]
+    );
+    run(&db, "MATCH (n) REMOVE n IS A, n:B&C");
+    run(&db, "MATCH (n) REMOVE n IS D&E");
+    assert_eq!(run(&db, "MATCH (n) RETURN labels(n)"), [vec![list([])]]);
+    run(&db, "MERGE (n {k: 1}) ON MATCH SET n IS F&G");
+    assert_eq!(keys(&db, "MATCH (n:F:G) RETURN n.k"), [1]);
+}
+
+#[test]
+fn set_and_remove_reject_any_other_label_expression() {
+    let db = labeled();
+    for query in [
+        "MATCH (n) SET n:A|B",
+        "MATCH (n) SET n IS !A",
+        "MATCH (n) SET n IS %",
+        "MATCH (n) REMOVE n:A|B",
+        "MATCH (n) REMOVE n IS A&!B",
+    ] {
+        assert_eq!(error_kind(&db, query), ErrorKind::NoLabelSet, "{query}");
+    }
+}
+
+#[test]
 fn merge_matches_a_conjunction_like_a_label_list() {
     let db = labeled();
     let rows = run(&db, "MERGE (n:A&B {k: 3}) RETURN n.k");

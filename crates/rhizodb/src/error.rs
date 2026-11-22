@@ -41,8 +41,8 @@ pub enum ErrorKind {
     NegativeIntegerArgument,
     /// A relationship to create names no type or more than one.
     NoSingleRelationshipType,
-    /// A node to create has a label expression other than a label or a conjunction of labels,
-    /// such as `A|B` or `!A`.
+    /// A node to create, or a `SET` or `REMOVE` label item, has a label expression other than a
+    /// label or a conjunction of labels, such as `A|B` or `!A`.
     NoLabelSet,
     /// A relationship to create has no direction.
     RequiresDirectedRelationship,

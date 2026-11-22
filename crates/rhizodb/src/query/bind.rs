@@ -387,7 +387,7 @@ impl Binder<'_> {
                             },
                             ast::RemoveItem::Labels { variable, labels } => RemoveAction::Labels {
                                 target: self.lookup(&variable.0, &scope)?.slot,
-                                labels: names(labels),
+                                labels: label_set(labels)?,
                             },
                         });
                     }
@@ -601,7 +601,7 @@ impl Binder<'_> {
                 },
                 ast::SetItem::Labels { variable, labels } => SetAction::Labels {
                     target: self.lookup(&variable.0, scope)?.slot,
-                    labels: names(labels),
+                    labels: label_set(labels)?,
                 },
             });
         }
@@ -1891,6 +1891,16 @@ fn is_simple_key(key: &ast::Expr) -> bool {
 
 fn names(names: &[ast::Name]) -> Vec<String> {
     names.iter().map(|name| name.0.clone()).collect()
+}
+
+fn label_set(labels: &ast::LabelExpr) -> Result<Vec<String>, Error> {
+    match labels.label_set() {
+        Some(names) => Ok(names.into_iter().map(|name| name.0.clone()).collect()),
+        None => Err(error(
+            ErrorKind::NoLabelSet,
+            "SET and REMOVE take labels joined by `&` or `:` only",
+        )),
+    }
 }
 
 fn qualified_name(call: &ast::FunctionCall) -> String {

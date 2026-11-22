@@ -170,14 +170,14 @@ pub(crate) enum SetItem {
     ReplaceProperties { variable: Name, value: Expr },
     /// `variable += map`
     MergeProperties { variable: Name, value: Expr },
-    /// `variable:A:B`
-    Labels { variable: Name, labels: Vec<Name> },
+    /// `variable:A:B`, `variable:A&B`, or `variable IS A&B`
+    Labels { variable: Name, labels: LabelExpr },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RemoveItem {
     Property { base: Expr, key: Name },
-    Labels { variable: Name, labels: Vec<Name> },
+    Labels { variable: Name, labels: LabelExpr },
 }
 
 /// A comma-separated pattern, optionally bound to a path variable.
