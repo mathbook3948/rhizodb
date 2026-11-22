@@ -26,10 +26,10 @@ GQL is the reference language, but the only public conformance suite is the open
 - The check tracks, for each value, which parts it read as null: the whole value, or single items of a list and entries of a map.
 - An operator, indexing, slicing, property access, and `size`, `keys`, `head`, `last`, `tail`, `reverse`, and `properties` take their type errors from the types of their operands alone, so only an operand read as null as a whole hides a type error there.
 - Any other function hides a type error when any part of an argument was read as null.
-- List and map literals, indexing, slicing, property access on a map, `head`, `last`, `tail`, `reverse`, `properties`, and the variable of a comprehension or quantifier keep track of the items and entries they pass on.
+- List and map literals, indexing, slicing, property access on a map, `head`, `last`, `tail`, `reverse`, `properties`, `coalesce` for the argument it returns, a `CASE` for the branch it takes, a comprehension for each item it projects, and the variable of a comprehension or quantifier keep track of the items and entries they pass on.
 - `size` and `keys` read only how many items or which keys a list or map has, so an item read as null does not reach their result.
 - `IS NULL` reads only whether its operand is null.
-- Any other step that reads an item or entry read as null, such as `=`, `IN`, `+`, or another function, gives a value read as null as a whole.
+- Any other step that reads an item or entry read as null, such as `=`, `IN`, `+`, or a function not named above, gives a value read as null as a whole.
 - `coalesce` gives a value read as null as a whole when an argument it passes over was read as null.
 - A `CASE` whose choice of branch reads a part read as null gives a value read as null as a whole and evaluates no branch.
 - A comprehension whose filter reads a part read as null for an item skips that item and gives a value read as null as a whole, and so does a quantifier for its result.
