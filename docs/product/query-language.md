@@ -29,6 +29,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - `sum`, `avg`, `stDev`, `stDevP`, and the percentile aggregates take numbers only.
 - A percentile aggregate over a group with no rows is null and does not evaluate its percentile.
 - A null percentile makes a percentile aggregate null.
+- Operators, indexing, slicing, and label tests fall under the early type-error rule for every operand whose type the query text fixes, including node, relationship, and path variables.
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.

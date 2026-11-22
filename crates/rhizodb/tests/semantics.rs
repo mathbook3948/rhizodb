@@ -1129,3 +1129,27 @@ fn split_by_the_empty_string_gives_one_string_per_character() {
         list([string("a"), string(""), string("b")])
     );
 }
+
+#[test]
+fn an_operator_on_a_variable_of_a_kind_the_text_fixes_fails_before_reading_data() {
+    let db = db();
+    for query in [
+        "MATCH (n) RETURN -n",
+        "MATCH (n) RETURN n + 1",
+        "MATCH (n) RETURN NOT n",
+        "MATCH ()-[r]->() RETURN r:T",
+        "MATCH p = ()-->() RETURN p:T",
+        "MATCH p = ()-->() RETURN p[0..1]",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    assert_eq!(
+        error_kind(&db, "MATCH (n) RETURN n[0]"),
+        ErrorKind::MapElementAccessByNonString
+    );
+    run(&db, "CREATE (:A {x: 1})-[:T]->()");
+    assert_eq!(
+        run(&db, "MATCH (n:A) RETURN size(n + [1]) AS a, n['x'] AS b"),
+        [vec![int(2), int(1)]]
+    );
+}

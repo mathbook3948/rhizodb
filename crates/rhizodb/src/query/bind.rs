@@ -37,6 +37,12 @@ use super::plan::UpdateClause;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
+use super::shape::binary_error;
+use super::shape::index_error;
+use super::shape::label_test_error;
+use super::shape::slice_bound_error;
+use super::shape::slice_error;
+use super::shape::unary_error;
 
 /// Resolves every variable of `query` to a row slot and rejects queries that are malformed by
 /// scope or by clause order. Parameters are folded in as constants.
@@ -1082,11 +1088,32 @@ impl Binder<'_> {
                 self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map])?;
                 Expr::Property(self.boxed(base, scope, mode)?, key.0.clone())
             }
-            ast::Expr::Index { base, index } => Expr::Index(
-                self.boxed(base, scope, mode)?,
-                self.boxed(index, scope, mode)?,
-            ),
+            ast::Expr::Index { base, index } => {
+                if let (Some(base), Some(index)) =
+                    (self.shape(base, scope), self.shape(index, scope))
+                {
+                    reject(index_error(base, index), || {
+                        format!("a {base:?} cannot be indexed with a {index:?}")
+                    })?;
+                }
+                Expr::Index(
+                    self.boxed(base, scope, mode)?,
+                    self.boxed(index, scope, mode)?,
+                )
+            }
             ast::Expr::Slice { base, from, to } => {
+                if let Some(shape) = self.shape(base, scope) {
+                    reject(slice_error(shape), || {
+                        format!("a {shape:?} cannot be sliced")
+                    })?;
+                    for bound in [from, to].into_iter().flatten() {
+                        if let Some(bound) = self.shape(bound, scope) {
+                            reject(slice_bound_error(bound), || {
+                                format!("a slice bound cannot be a {bound:?}")
+                            })?;
+                        }
+                    }
+                }
                 let base = self.boxed(base, scope, mode)?;
                 let from = match from {
                     Some(from) => Some(self.boxed(from, scope, mode)?),
@@ -1099,9 +1126,19 @@ impl Binder<'_> {
                 Expr::Slice(base, from, to)
             }
             ast::Expr::HasLabels { operand, labels } => {
+                if let Some(shape) = self.shape(operand, scope) {
+                    reject(label_test_error(shape), || {
+                        format!("labels cannot be tested on a {shape:?}")
+                    })?;
+                }
                 Expr::HasLabels(self.boxed(operand, scope, mode)?, names(labels))
             }
             ast::Expr::Unary { op, operand } => {
+                if let Some(shape) = self.shape(operand, scope) {
+                    reject(unary_error(*op, shape), || {
+                        format!("{op:?} cannot take a {shape:?}")
+                    })?;
+                }
                 let operand = self.boxed(operand, scope, mode)?;
                 match op {
                     ast::UnaryOp::Not => Expr::Not(operand),
@@ -1109,11 +1146,19 @@ impl Binder<'_> {
                     ast::UnaryOp::Plus => Expr::UnaryPlus(operand),
                 }
             }
-            ast::Expr::Binary { op, lhs, rhs } => Expr::Binary(
-                *op,
-                self.boxed(lhs, scope, mode)?,
-                self.boxed(rhs, scope, mode)?,
-            ),
+            ast::Expr::Binary { op, lhs, rhs } => {
+                if let (Some(left), Some(right)) = (self.shape(lhs, scope), self.shape(rhs, scope))
+                {
+                    reject(binary_error(*op, left, right), || {
+                        format!("{op:?} cannot take a {left:?} and a {right:?}")
+                    })?;
+                }
+                Expr::Binary(
+                    *op,
+                    self.boxed(lhs, scope, mode)?,
+                    self.boxed(rhs, scope, mode)?,
+                )
+            }
             ast::Expr::Comparison { first, rest } => {
                 let first = self.boxed(first, scope, mode)?;
                 let mut chain = Vec::new();
@@ -1591,6 +1636,14 @@ fn is_simple_key(key: &ast::Expr) -> bool {
 
 fn names(names: &[ast::Name]) -> Vec<String> {
     names.iter().map(|name| name.0.clone()).collect()
+}
+
+fn reject(kind: Option<ErrorKind>, message: impl FnOnce() -> String) -> Result<(), Error> {
+    match kind {
+        None => Ok(()),
+        Some(ErrorKind::TypeMismatch) => Err(error(ErrorKind::InvalidArgumentType, message())),
+        Some(kind) => Err(error(kind, message())),
+    }
 }
 
 fn qualified_name(call: &ast::FunctionCall) -> String {
