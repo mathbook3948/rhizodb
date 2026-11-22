@@ -453,6 +453,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             Function::Split => {
                 let text = string_argument(function, first)?;
                 match second {
+                    Some(Datum::String(delimiter)) if delimiter.is_empty() => Ok(Datum::List(
+                        text.chars()
+                            .map(|char| Datum::String(char.to_string()))
+                            .collect(),
+                    )),
                     Some(Datum::String(delimiter)) => Ok(Datum::List(
                         text.split(delimiter.as_str())
                             .map(|part| Datum::String(part.to_owned()))

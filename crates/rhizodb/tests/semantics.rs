@@ -1114,3 +1114,18 @@ fn a_function_argument_of_a_type_the_text_fixes_fails_before_reading_data() {
         assert!(run(&db, query).is_empty(), "{query}");
     }
 }
+
+#[test]
+fn split_by_the_empty_string_gives_one_string_per_character() {
+    let db = db();
+    assert_eq!(
+        single(&db, "RETURN split('abc', '')"),
+        list([string("a"), string("b"), string("c")])
+    );
+    assert_eq!(single(&db, "RETURN split('', '')"), list([]));
+    assert_eq!(single(&db, "RETURN split('', ',')"), list([string("")]));
+    assert_eq!(
+        single(&db, "RETURN split('a,,b', ',')"),
+        list([string("a"), string(""), string("b")])
+    );
+}
