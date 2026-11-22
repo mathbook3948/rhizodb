@@ -229,6 +229,18 @@ fn a_duration_divided_by_an_infinite_float_is_zero() {
 }
 
 #[test]
+fn a_zero_duration_times_a_huge_float_is_zero() {
+    let db = db();
+    for query in [
+        "RETURN duration('PT0S') * 1e39",
+        "RETURN duration('PT0S') * 1e300",
+        "RETURN duration('P0D') * -1.5e100",
+    ] {
+        assert_eq!(text(&db, query), "PT0S", "{query}");
+    }
+}
+
+#[test]
 fn a_date_moves_by_the_whole_days_of_the_time_truncated_toward_zero() {
     let db = db();
     for (query, expected) in [

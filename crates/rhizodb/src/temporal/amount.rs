@@ -122,6 +122,9 @@ impl Amount {
     /// 24th decimal place are dropped.
     pub(crate) fn times(count: i128, factor: Decimal) -> Option<Amount> {
         let product = count.checked_mul(factor.digits)?;
+        if product == 0 {
+            return Some(Amount::ZERO);
+        }
         let places = factor.exponent.unsigned_abs();
         if factor.exponent >= 0 {
             return product
