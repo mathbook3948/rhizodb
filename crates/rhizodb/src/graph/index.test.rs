@@ -348,3 +348,10 @@ fn a_definition_reads_back_as_it_was_written() {
         assert_eq!(Index::decode(&index.encode()).unwrap(), index);
     }
 }
+
+#[test]
+fn counts_read_the_frequency_and_length_of_a_posting_without_its_positions() {
+    let posting = encode_posting(&[0, 5, 9], 12);
+    assert_eq!(decode_counts(&posting).unwrap(), (3, 12));
+    assert_eq!(decode_posting(&posting).unwrap().positions, [0, 5, 9]);
+}

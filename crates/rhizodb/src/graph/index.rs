@@ -383,11 +383,9 @@ fn encode_posting(positions: &[u32], length: u32) -> Vec<u8> {
     out
 }
 
-fn counts(postings: BTreeMap<NodeId, Posting>) -> BTreeMap<NodeId, (u32, u32)> {
-    postings
-        .into_iter()
-        .map(|(node, posting)| (node, (frequency(&posting.positions), posting.length)))
-        .collect()
+fn decode_counts(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+    let mut reader = Reader::new(bytes);
+    Ok((reader.u32()?, reader.u32()?))
 }
 
 fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
@@ -491,25 +489,38 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut scores: BTreeMap<NodeId, f64> = BTreeMap::new();
         for clause in tokenize::clauses(text) {
             let clause_scores: BTreeMap<NodeId, f64> = match &clause {
-                Clause::Term(term) => score(counts(self.postings(index.id, term)?)).collect(),
+                Clause::Term(term) => {
+                    let mut counts = BTreeMap::new();
+                    for (key, value) in self.transaction.scan_prefix(
+                        Table::KeywordPostings,
+                        &keys::posting_prefix(index.id, term),
+                    )? {
+                        counts.insert(keys::parse_posting_node(&key)?, decode_counts(&value)?);
+                    }
+                    score(counts).collect()
+                }
                 Clause::Prefix(prefix) => {
-                    let mut by_term: BTreeMap<String, BTreeMap<NodeId, Posting>> = BTreeMap::new();
+                    let mut best_scores: BTreeMap<NodeId, f64> = BTreeMap::new();
+                    let mut current: Option<Vec<u8>> = None;
+                    let mut counts = BTreeMap::new();
+                    let mut merge = |counts: BTreeMap<NodeId, (u32, u32)>| {
+                        for (node, value) in score(counts) {
+                            let held = best_scores.entry(node).or_insert(value);
+                            *held = held.max(value);
+                        }
+                    };
                     for (key, value) in self
                         .transaction
                         .scan_prefix(Table::KeywordPostings, &keys::term_prefix(index.id, prefix))?
                     {
-                        by_term
-                            .entry(keys::parse_posting_term(&key)?.to_owned())
-                            .or_default()
-                            .insert(keys::parse_posting_node(&key)?, decode_posting(&value)?);
-                    }
-                    let mut best_scores: BTreeMap<NodeId, f64> = BTreeMap::new();
-                    for postings in by_term.into_values() {
-                        for (node, value) in score(counts(postings)) {
-                            let held = best_scores.entry(node).or_insert(value);
-                            *held = held.max(value);
+                        let term = keys::parse_posting_term(&key)?.as_bytes();
+                        if current.as_deref() != Some(term) {
+                            merge(std::mem::take(&mut counts));
+                            current = Some(term.to_vec());
                         }
+                        counts.insert(keys::parse_posting_node(&key)?, decode_counts(&value)?);
                     }
+                    merge(counts);
                     best_scores
                 }
                 Clause::Phrase(terms) => score(self.phrase_matches(index.id, terms)?).collect(),
@@ -539,13 +550,19 @@ impl<T: ReadTransaction> GraphTx<T> {
             lists.push((term.position, self.postings(index, &term.text)?));
         }
         let mut matches = BTreeMap::new();
-        let Some(((first_offset, first), rest)) = lists.split_first() else {
+        let Some((rarest, (rarest_offset, anchor))) = lists
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (_, postings))| postings.len())
+        else {
             return Ok(matches);
         };
-        for (node, posting) in first {
-            let Some(others) = rest
+        for (node, posting) in anchor {
+            let Some(others) = lists
                 .iter()
-                .map(|(offset, postings)| Some((*offset, postings.get(node)?)))
+                .enumerate()
+                .filter(|(position, _)| *position != rarest)
+                .map(|(_, (offset, postings))| Some((*offset, postings.get(node)?)))
                 .collect::<Option<Vec<_>>>()
             else {
                 continue;
@@ -553,7 +570,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             let occurrences = posting
                 .positions
                 .iter()
-                .filter_map(|start| start.checked_sub(*first_offset))
+                .filter_map(|start| start.checked_sub(*rarest_offset))
                 .filter(|base| {
                     others.iter().all(|(offset, other)| {
                         base.checked_add(*offset)
