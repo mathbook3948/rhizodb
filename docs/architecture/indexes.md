@@ -33,6 +33,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Text is put in Unicode normalization form NFKC before it is split.
 - Text splits into words at Unicode word boundaries.
 - Words are lowercased.
+- A grapheme cluster that starts with whitespace, or with a character that Unicode grapheme rules join to the character before it, separates words.
 - A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of grapheme clusters and its single grapheme clusters.
 - Such a run starts at a grapheme cluster whose first character is a letter.
 - Digits of such a script are words, not part of a run.

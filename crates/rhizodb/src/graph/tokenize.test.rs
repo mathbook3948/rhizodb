@@ -92,6 +92,22 @@ fn numbers_and_a_stray_mark_do_not_start_a_run() {
 }
 
 #[test]
+fn a_cluster_without_a_base_letter_separates_words() {
+    assert_eq!(document("x \u{e31}ก"), ["x", "ก"]);
+    assert_eq!(document("\u{e31}ก"), ["ก"]);
+    assert_eq!(document("\u{301}abc"), ["abc"]);
+    assert_eq!(document("ab\u{7}\u{301}cd"), ["ab", "cd"]);
+    for text in ["x \u{e31}ก", " \u{e48}", "a \u{301}b", "\u{e31}"] {
+        for term in document(text) {
+            assert!(
+                !term.chars().any(char::is_whitespace),
+                "{term:?} from {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn each_hangul_syllable_and_each_loose_jamo_is_a_unit_of_its_own() {
     let khieukh = "\u{110f}";
     assert_eq!(query("ㅋㅋㅋ"), [khieukh.repeat(2), khieukh.repeat(2)]);
@@ -141,7 +157,7 @@ fn every_query_term_of_a_text_is_a_document_term_of_it() {
 
 #[test]
 fn control_characters_never_reach_a_term() {
-    for text in ["\u{0}\u{903}", "a\u{0}\u{301}b", "x\u{7}\u{200d}y"] {
+    for text in ["x\u{0}\u{903}y", "a\u{0}\u{301}b", "x\u{7}\u{200d}y"] {
         let found = document(text);
         assert!(!found.is_empty(), "{text:?} gave no terms");
         for term in found {

@@ -100,7 +100,11 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
 /// grapheme clusters, because those scripts attach particles to words or leave out spaces
 /// between words. A grapheme cluster goes wholly to a run or wholly to a word, by its first
-/// character, so a run starts at a letter that is not a digit and never at a mark. In Hangul
+/// character, so a run starts at a letter that is not a digit. A cluster that starts with
+/// whitespace, or with a character the Unicode grapheme rules join to the character before it
+/// (Grapheme_Cluster_Break Extend, SpacingMark, or ZWJ), has no base letter and separates words
+/// like a space; a mark with Grapheme_Cluster_Break Other, such as a few spacing marks of
+/// Brahmic scripts, is still taken for a letter. Control characters are dropped. In Hangul
 /// the unit is each syllable and each jamo left over after normalization, together with the
 /// marks and joiners of its grapheme cluster that follow it, since a grapheme cluster of loose
 /// jamo such as "ㅋㅋㅋ" holds several letters a reader types and searches one at a time. The same text always gives the same terms, in the same order, with
@@ -125,6 +129,11 @@ fn scan(text: &str, purpose: Purpose) -> Scan {
         }
         let mut word = String::new();
         for cluster in segment.graphemes(true) {
+            if has_no_base(cluster) {
+                scan.push_word(&mut word);
+                scan.flush_run();
+                continue;
+            }
             let kept = cluster.chars().filter(|character| !character.is_control());
             if cluster.chars().next().is_some_and(starts_run) {
                 scan.push_word(&mut word);
@@ -195,6 +204,21 @@ impl Scan {
         }
         self.next = self.at(units.len());
     }
+}
+
+fn has_no_base(cluster: &str) -> bool {
+    let Some(first) = cluster.chars().next() else {
+        return true;
+    };
+    if first.is_whitespace() {
+        return true;
+    }
+    let mut buffer = [b'a'; 5];
+    let length = first.encode_utf8(&mut buffer[1..]).len();
+    buffer
+        .get(..=length)
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .is_some_and(|text| text.graphemes(true).count() == 1)
 }
 
 fn starts_run(character: char) -> bool {
