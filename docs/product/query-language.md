@@ -15,30 +15,39 @@ GQL is the reference language, but the only public conformance suite is the open
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
 - `EXISTS { query }` runs the query from the current row with the outer variables in scope, and is true when the query gives a row.
-- A query inside `EXISTS` may end without `RETURN`, cannot update the graph, and keeps its own variables to itself.
+- A query inside `EXISTS` may end without `RETURN`.
+- A query inside `EXISTS` cannot update the graph.
+- A query inside `EXISTS` keeps the variables it binds to itself.
 - A variable that a projection hides from the expressions next to it is hidden inside both forms of `EXISTS` there.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
 - The check on the query text reads a value error as null and goes on, so a value error earlier in an expression never hides a type error after it.
 - The check reports a type error only when no value read as null flows into it.
-- A procedure is a Rust function the host registers on a `Database` under a qualified name, and `CALL` runs it.
+- A procedure is a Rust function the host registers on a `Database` under a qualified name.
+- `CALL` runs a registered procedure.
 - A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
 - Procedure names are case-sensitive.
-- Each procedure parameter declares the types it accepts, and arguments fall under the same checks as function arguments.
+- Each procedure parameter declares the types it accepts.
+- Procedure arguments fall under the same checks as function arguments.
 - Every procedure parameter accepts null.
 - An integer argument to a float parameter arrives as a float.
 - A query that is a single `CALL` returns the `YIELD` items, or every output without `YIELD` or with `YIELD *`.
 - A query that is a single `CALL` may leave out the arguments, which are then read from the query parameters of the same names.
 - A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
-- A `CALL` inside a larger query passes the arguments of a procedure that takes any, binds only its `YIELD` items, and rejects `YIELD *`.
-- A `CALL` gives one row per row the procedure returns, and a procedure without outputs keeps each row once.
+- A `CALL` inside a larger query passes the arguments of a procedure that takes any.
+- A `CALL` inside a larger query binds only its `YIELD` items.
+- A `CALL` inside a larger query rejects `YIELD *`.
+- A `CALL` gives one row per row the procedure returns.
+- A `CALL` of a procedure without outputs keeps each row once.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
 - A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data. They never take part in the type checks made on the query text.
-- An element deleted earlier in the same query is returned as it was when deleted, and reading its properties fails.
-- The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests, while the labels of a deleted node do not.
+- An element deleted earlier in the same query is returned as it was when deleted.
+- Reading the properties of an element deleted earlier in the same query fails.
+- The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
+- Reading the labels of a node deleted earlier in the same query fails.
 - A `MERGE` property that evaluates to null is an error.
 - `range()` has a length cap, so one query cannot exhaust the host's memory.
 - Floats convert to strings in the same form as the openCypher reference implementation.
