@@ -57,6 +57,7 @@ pub fn parse_doc(path: &str, text: &str) -> Result<Doc, Vec<String>> {
     if headings != SECTIONS {
         problems.push(format!("sections must be exactly {}", SECTIONS.join(", ")));
     }
+    problems.extend(decision_problems(&lines));
 
     if problems.is_empty() {
         Ok(Doc {
@@ -68,6 +69,41 @@ pub fn parse_doc(path: &str, text: &str) -> Result<Doc, Vec<String>> {
     } else {
         Err(problems)
     }
+}
+
+fn decision_problems(lines: &[&str]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut in_decisions = false;
+    for (index, line) in lines.iter().enumerate() {
+        if line.starts_with("## ") {
+            in_decisions = *line == "## Decisions";
+            continue;
+        }
+        if !in_decisions {
+            continue;
+        }
+        let number = index + 1;
+        let sentence_breaks = line
+            .as_bytes()
+            .windows(3)
+            .filter(|window| {
+                matches!(window[0], b'.' | b'?' | b'!')
+                    && window[1] == b' '
+                    && (window[2].is_ascii_uppercase() || window[2] == b'`')
+            })
+            .count();
+        if sentence_breaks > 0 || line.contains("; ") {
+            problems.push(format!(
+                "line {number}: a Decisions line holds one decision in one sentence"
+            ));
+        }
+        if line.contains(" because ") {
+            problems.push(format!(
+                "line {number}: a Decisions line leaves its reasoning to the commit message"
+            ));
+        }
+    }
+    problems
 }
 
 pub fn render_index(docs: &[Doc]) -> String {

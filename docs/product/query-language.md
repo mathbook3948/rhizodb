@@ -41,7 +41,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - A host procedure sees only its arguments, never the graph.
 - The engine provides built-in procedures in the reserved `db` namespace, and they read the graph of the transaction that calls them.
 - A host cannot register a procedure in the `db` namespace.
-- `CALL` is a reading clause, because no procedure writes the graph.
+- No procedure writes the graph.
+- `CALL` is a reading clause.
 - Procedure names are case-sensitive.
 - Each procedure parameter declares the types it accepts.
 - Procedure arguments fall under the same checks as function arguments.
@@ -77,7 +78,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `DELETE` target that is a label test, alone or under `NOT`, `AND`, `OR`, or `XOR`, fails as an invalid delete rather than as an argument of the wrong type.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
-- Parameters are data. They never take part in the type checks made on the query text.
+- Parameters are data and never take part in the type checks made on the query text.
 - An element deleted earlier in the same query is returned as it was when deleted.
 - Reading the properties of an element deleted earlier in the same query fails.
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
