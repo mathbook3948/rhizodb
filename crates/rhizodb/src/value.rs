@@ -1,0 +1,213 @@
+use std::error::Error;
+use std::fmt;
+
+pub(crate) const MAX_DEPTH: usize = 64;
+
+const TAG_BOOLEAN: u8 = 0;
+const TAG_INTEGER: u8 = 1;
+const TAG_FLOAT: u8 = 2;
+const TAG_STRING: u8 = 3;
+const TAG_BYTES: u8 = 4;
+const TAG_LIST: u8 = 5;
+
+/// A stored property value. Null is never stored: setting a property to null removes it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PropertyValue {
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    String(String),
+    Bytes(Vec<u8>),
+    List(Vec<PropertyValue>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeError {
+    UnexpectedEnd,
+    UnknownTag(u8),
+    InvalidBoolean(u8),
+    InvalidUtf8,
+    LengthOverflow,
+    NestingTooDeep,
+    TrailingBytes,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedEnd => write!(formatter, "input ended inside a value"),
+            Self::UnknownTag(tag) => write!(formatter, "unknown value tag {tag}"),
+            Self::InvalidBoolean(byte) => write!(formatter, "invalid boolean byte {byte}"),
+            Self::InvalidUtf8 => write!(formatter, "string is not valid UTF-8"),
+            Self::LengthOverflow => write!(formatter, "length does not fit in memory"),
+            Self::NestingTooDeep => write!(formatter, "lists nest deeper than {MAX_DEPTH}"),
+            Self::TrailingBytes => write!(formatter, "bytes remain after the value"),
+        }
+    }
+}
+
+impl Error for DecodeError {}
+
+impl PropertyValue {
+    #[cfg(test)]
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out);
+        out
+    }
+
+    pub(crate) fn encode_into(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Boolean(value) => {
+                out.push(TAG_BOOLEAN);
+                out.push(u8::from(*value));
+            }
+            Self::Integer(value) => {
+                out.push(TAG_INTEGER);
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            Self::Float(value) => {
+                out.push(TAG_FLOAT);
+                out.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+            Self::String(value) => {
+                out.push(TAG_STRING);
+                put_varint(out, value.len());
+                out.extend_from_slice(value.as_bytes());
+            }
+            Self::Bytes(value) => {
+                out.push(TAG_BYTES);
+                put_varint(out, value.len());
+                out.extend_from_slice(value);
+            }
+            Self::List(items) => {
+                out.push(TAG_LIST);
+                put_varint(out, items.len());
+                for item in items {
+                    item.encode_into(out);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let value = reader.value()?;
+        reader.finish()?;
+        Ok(value)
+    }
+}
+
+pub(crate) fn put_varint(out: &mut Vec<u8>, value: usize) {
+    let mut rest = value as u64;
+    while rest >= 0x80 {
+        out.push((rest & 0x7f) as u8 | 0x80);
+        rest >>= 7;
+    }
+    out.push(rest as u8);
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Reader<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> Reader<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes }
+    }
+
+    pub(crate) fn finish(&self) -> Result<(), DecodeError> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(DecodeError::TrailingBytes)
+        }
+    }
+
+    pub(crate) fn take(&mut self, count: usize) -> Result<&'a [u8], DecodeError> {
+        let (head, tail) = self
+            .bytes
+            .split_at_checked(count)
+            .ok_or(DecodeError::UnexpectedEnd)?;
+        self.bytes = tail;
+        Ok(head)
+    }
+
+    pub(crate) fn u8(&mut self) -> Result<u8, DecodeError> {
+        let bytes = self.take(1)?;
+        Ok(bytes[0])
+    }
+
+    pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
+        let mut array = [0u8; 4];
+        array.copy_from_slice(self.take(4)?);
+        Ok(u32::from_be_bytes(array))
+    }
+
+    pub(crate) fn u64(&mut self) -> Result<u64, DecodeError> {
+        let mut array = [0u8; 8];
+        array.copy_from_slice(self.take(8)?);
+        Ok(u64::from_be_bytes(array))
+    }
+
+    pub(crate) fn varint(&mut self) -> Result<usize, DecodeError> {
+        let mut result: u64 = 0;
+        for shift in (0..64).step_by(7) {
+            let byte = self.u8()?;
+            let bits = u64::from(byte & 0x7f);
+            let shifted = bits << shift;
+            if shifted >> shift != bits {
+                return Err(DecodeError::LengthOverflow);
+            }
+            result |= shifted;
+            if byte & 0x80 == 0 {
+                return usize::try_from(result).map_err(|_| DecodeError::LengthOverflow);
+            }
+        }
+        Err(DecodeError::LengthOverflow)
+    }
+
+    pub(crate) fn value(&mut self) -> Result<PropertyValue, DecodeError> {
+        self.value_at_depth(0)
+    }
+
+    fn value_at_depth(&mut self, depth: usize) -> Result<PropertyValue, DecodeError> {
+        match self.u8()? {
+            TAG_BOOLEAN => match self.u8()? {
+                0 => Ok(PropertyValue::Boolean(false)),
+                1 => Ok(PropertyValue::Boolean(true)),
+                other => Err(DecodeError::InvalidBoolean(other)),
+            },
+            TAG_INTEGER => Ok(PropertyValue::Integer(self.u64()? as i64)),
+            TAG_FLOAT => Ok(PropertyValue::Float(f64::from_bits(self.u64()?))),
+            TAG_STRING => {
+                let length = self.varint()?;
+                let bytes = self.take(length)?;
+                let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)?;
+                Ok(PropertyValue::String(text.to_owned()))
+            }
+            TAG_BYTES => {
+                let length = self.varint()?;
+                Ok(PropertyValue::Bytes(self.take(length)?.to_vec()))
+            }
+            TAG_LIST => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                let count = self.varint()?;
+                let mut items = Vec::with_capacity(count.min(self.bytes.len()));
+                for _ in 0..count {
+                    items.push(self.value_at_depth(depth + 1)?);
+                }
+                Ok(PropertyValue::List(items))
+            }
+            tag => Err(DecodeError::UnknownTag(tag)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "value.test.rs"]
+mod tests;

@@ -1,0 +1,18 @@
+[package]
+name = "tck"
+description = "Runs the vendored openCypher TCK against a pluggable engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+libtest-mimic = "0.8"
+rhizodb = { path = "../rhizodb" }
+
+[[test]]
+name = "tck"
+harness = false

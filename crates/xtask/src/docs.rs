@@ -101,13 +101,22 @@ fn collect(workspace_root: &Path) -> Result<(Vec<Doc>, Vec<String>), Box<dyn Err
         if !domain.file_type()?.is_dir() {
             continue;
         }
-        for file in fs::read_dir(domain.path())? {
-            let file = file?.path();
+        for entry in fs::read_dir(domain.path())? {
+            let entry = entry?;
+            let file = entry.path();
             let path = file
                 .strip_prefix(&root)?
                 .to_string_lossy()
                 .replace('\\', "/");
-            match parse_doc(&path, &fs::read_to_string(&file)?) {
+            if !fs::metadata(&file)?.is_file() || file.extension().is_none_or(|ext| ext != "md") {
+                violations.push(format!("docs/{path}: a domain folder holds only .md docs"));
+                continue;
+            }
+            let Ok(text) = String::from_utf8(fs::read(&file)?) else {
+                violations.push(format!("docs/{path}: a doc must be UTF-8 text"));
+                continue;
+            };
+            match parse_doc(&path, &text) {
                 Ok(doc) => docs.push(doc),
                 Err(problems) => violations.extend(
                     problems

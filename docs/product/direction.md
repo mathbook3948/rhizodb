@@ -16,5 +16,4 @@ dotori needs to store people, places, tasks, and their relationships for years a
 
 ## Open
 
-- The order in which GQL features are supported
 - Whether vector and keyword indexes live inside the graph
