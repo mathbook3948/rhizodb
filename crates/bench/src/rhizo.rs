@@ -69,7 +69,12 @@ impl Instance for RhizoInstance {
     }
 
     fn create_schema(&self) -> Result<(), EngineError> {
-        Ok(())
+        self.database
+            .create_property_index("person_id", IndexTarget::Label("Person"), "id")
+            .map_err(failed)?;
+        self.database
+            .create_property_index("city_id", IndexTarget::Label("City"), "id")
+            .map_err(failed)
     }
 
     fn prepare_bulk_load(&self, _data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
