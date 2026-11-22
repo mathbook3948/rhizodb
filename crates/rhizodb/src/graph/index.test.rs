@@ -628,3 +628,57 @@ fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
     assert!(decode_counts(&posting[..8]).is_err());
     assert!(decode_counts(&posting[..7]).is_err());
 }
+
+#[test]
+fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let link = write.intern_token("LINK").unwrap();
+    let other = write.intern_token("OTHER").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let mut node = || {
+        write
+            .create_node(&NodeRecord {
+                labels: Default::default(),
+                properties: Properties::new(),
+            })
+            .unwrap()
+    };
+    let first = node();
+    let second = node();
+    let mut linked = Vec::new();
+    for (rel_type, source, target) in [
+        (link, first, second),
+        (other, first, second),
+        (link, second, second),
+        (link, second, first),
+        (other, first, first),
+    ] {
+        let id = write
+            .create_relationship(&RelationshipRecord {
+                rel_type,
+                source,
+                target,
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("shared words".to_owned()),
+                )]),
+            })
+            .unwrap();
+        if rel_type == link {
+            linked.push(id.0);
+        }
+    }
+    create_relationship_indexes(&mut write);
+    let mut found: Vec<u64> = write
+        .keyword_search("link words", ElementKind::Relationship, "shared", 10)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    found.sort();
+    assert_eq!(found, linked);
+    write.commit().unwrap();
+    let violations = graph.read().unwrap().check_integrity().unwrap();
+    assert_eq!(violations, vec![]);
+}

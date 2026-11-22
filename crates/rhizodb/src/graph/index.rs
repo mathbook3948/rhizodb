@@ -11,10 +11,11 @@ use crate::value::put_varint;
 
 use super::GraphError;
 use super::GraphTx;
+use super::NodeId;
 use super::NodeRecord;
 use super::Properties;
+use super::RelationshipId;
 use super::RelationshipRecord;
-use super::decode_u64;
 use super::ids::Label;
 use super::ids::PropertyKey;
 use super::ids::RelationshipType;
@@ -760,30 +761,45 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(best(scored, limit))
     }
 
-    fn covered_entries(
-        &self,
-        definition: &IndexDefinition,
-    ) -> Result<Vec<(u64, Entry)>, GraphError> {
-        let mut entries = Vec::new();
-        match definition.target {
-            Target::Label(label) => {
-                for node in self.node_ids_with_label(label)? {
-                    let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
-                    if let Some(entry) = definition.entry(Element::Node(&record)) {
-                        entries.push((node.0, entry));
+    fn covered_ids(&self, target: Target) -> Result<Vec<u64>, GraphError> {
+        match target {
+            Target::Label(label) => Ok(self
+                .node_ids_with_label(label)?
+                .into_iter()
+                .map(|node| node.0)
+                .collect()),
+            Target::RelationshipType(covered) => {
+                let mut ids = Vec::new();
+                for (key, _) in self.transaction.scan_prefix(Table::Outgoing, &[])? {
+                    let (rel_type, relationship) = keys::parse_adjacency_key(&key)?;
+                    if rel_type == covered {
+                        ids.push(relationship.0);
                     }
                 }
-            }
-            Target::RelationshipType(_) => {
-                for (key, value) in self.transaction.scan_prefix(Table::Relationships, &[])? {
-                    let record = RelationshipRecord::decode(&value)?;
-                    if let Some(entry) = definition.entry(Element::Relationship(&record)) {
-                        entries.push((decode_u64(&key)?, entry));
-                    }
-                }
+                Ok(ids)
             }
         }
-        Ok(entries)
+    }
+
+    fn covered_entry(
+        &self,
+        definition: &IndexDefinition,
+        id: u64,
+    ) -> Result<Option<Entry>, GraphError> {
+        Ok(match definition.target {
+            Target::Label(_) => {
+                let node = NodeId(id);
+                let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
+                definition.entry(Element::Node(&record))
+            }
+            Target::RelationshipType(_) => {
+                let relationship = RelationshipId(id);
+                let record = self
+                    .relationship(relationship)?
+                    .ok_or(GraphError::RelationshipNotFound(relationship))?;
+                definition.entry(Element::Relationship(&record))
+            }
+        })
     }
 }
 
@@ -882,8 +898,10 @@ impl<T: WriteTransaction> GraphTx<T> {
                 &encode_totals(0, 0),
             )?;
         }
-        for (element, entry) in self.covered_entries(&index.definition)? {
-            self.insert_entry(index, element, &entry)?;
+        for element in self.covered_ids(index.definition.target)? {
+            if let Some(entry) = self.covered_entry(&index.definition, element)? {
+                self.insert_entry(index, element, &entry)?;
+            }
         }
         Ok(())
     }
