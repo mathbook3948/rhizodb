@@ -899,9 +899,9 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Records the current tokenizer, first rebuilding every keyword index from the nodes when
-    /// `stale` is set or the stored entries came from another tokenizer. Returns whether
-    /// anything was written.
+    /// Records the current tokenizer, first rebuilding every keyword index from the elements it
+    /// covers when `stale` is set or the stored entries came from another tokenizer. Returns
+    /// whether anything was written.
     pub(crate) fn adopt_current_tokenizer(&mut self, stale: bool) -> Result<bool, GraphError> {
         let fingerprint = tokenize::fingerprint();
         let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;

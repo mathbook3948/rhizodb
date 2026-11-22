@@ -153,7 +153,7 @@ impl Database {
     /// grows with the number of indexed vectors times their dimension. There is no approximate
     /// index. A host with more vectors than one query can scan keeps an approximate index of
     /// its own outside the database and reads the elements it returns by ID, for example with
-    /// `MATCH (n) WHERE id(n) IN $ids`.
+    /// `MATCH (n) WHERE id(n) IN $ids` or `MATCH ()-[r]->() WHERE id(r) IN $ids`.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of

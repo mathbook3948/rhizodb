@@ -13,7 +13,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - A rolled-back transaction leaves every index as it was.
 - A search inside a write transaction sees that transaction's own writes.
 - An index covers the nodes that carry one label or the relationships of one type.
-- An index entry is keyed by its element's ID alone, because no index covers both nodes and relationships.
+- An index entry is keyed by its element's ID alone.
 - Index names are case-sensitive and unique across both kinds and both kinds of element.
 - The host creates and drops indexes with `Database` methods, each in a write transaction of its own.
 - The same `Database` method creates an index of one kind over a label or over a relationship type, named by an `IndexTarget`.
@@ -70,7 +70,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Any other value leaves the element out of the vector index without an error.
 - A query vector that breaks the same rules fails the query.
 - Vectors are stored in a table of their own, so a search reads no node or relationship records.
-- Vector search is exact: each query reads and scores every vector in its index, so its cost grows with the number of vectors times their dimension.
+- Vector search is exact: each query reads and scores every vector in its index.
 - RhizoDB offers no approximate vector index, such as HNSW.
 - A host with more vectors than one query can scan keeps an approximate index of its own outside the database and reads the elements it returns by ID.
 - The score is higher for closer vectors: the cosine similarity, the dot product, or the negative euclidean distance.
