@@ -241,3 +241,49 @@ fn a_harness_error_fails_the_ratchet_whether_listed_or_not() {
             .is_err()
     );
 }
+
+fn gql() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("gql")
+}
+
+#[test]
+fn every_gql_scenario_compiles() {
+    let cases = load_cases(&gql()).expect("gql directory");
+
+    assert!(!cases.is_empty());
+    for case in &cases {
+        assert!(case.scenario.is_ok(), "{}: {:?}", case.name, case.scenario);
+    }
+}
+
+#[test]
+fn every_gql_feature_cites_the_iso_clause_its_directory_names() {
+    let mut checked = 0;
+    for dir in fs::read_dir(gql().join("features")).expect("gql features") {
+        let dir = dir.expect("clause directory").path();
+        let name = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let name = name.unwrap_or_default();
+        let (clause, rule) = name
+            .split_once('-')
+            .unwrap_or_else(|| panic!("{name} is not <clause>-<rule>"));
+        assert!(
+            clause.split('.').all(|part| part.parse::<u32>().is_ok()),
+            "{name} does not start with an ISO/IEC 39075 clause number"
+        );
+        let citation = format!("ISO/IEC 39075:2024 {clause} <{}>", rule.replace('-', " "));
+        for file in fs::read_dir(&dir).expect("clause directory") {
+            let file = file.expect("feature file").path();
+            let text = fs::read_to_string(&file).expect("feature text");
+            assert!(
+                text.lines()
+                    .any(|line| line.starts_with("Feature:") && line.contains(&citation)),
+                "{} does not cite {citation}",
+                file.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no gql features");
+}

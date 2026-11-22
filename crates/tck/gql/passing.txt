@@ -1,0 +1,27 @@
+13.2-insert-statement/Insert1.feature: [1] Insert a node with a label and a property
+13.2-insert-statement/Insert1.feature: [2] Insert a path with an edge pointing right
+13.2-insert-statement/Insert1.feature: [3] Insert a path with an edge pointing left
+13.2-insert-statement/Insert1.feature: [4] Insert a list of path patterns that share a variable
+13.2-insert-statement/Insert1.feature: [5] Insert an edge between matched nodes
+13.2-insert-statement/Insert1.feature: [6] Insert once per incoming row
+13.2-insert-statement/Insert1.feature: [7] Return what an insert bound
+13.2-insert-statement/Insert1.feature: [8] Insert keywords are case-insensitive
+16.19-offset-clause/Offset1.feature: [1] OFFSET skips the first rows of an ordered result
+16.19-offset-clause/Offset1.feature: [2] OFFSET before LIMIT pages through a result
+16.19-offset-clause/Offset1.feature: [3] OFFSET takes a parameter
+16.19-offset-clause/Offset1.feature: [4] OFFSET past the end gives no rows
+16.19-offset-clause/Offset1.feature: [5] OFFSET zero keeps every row
+16.19-offset-clause/Offset1.feature: [6] A negative OFFSET fails
+16.19-offset-clause/Offset1.feature: [7] A float OFFSET fails
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [1] An edge pointing right matches outgoing edges only
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [2] An edge pointing left matches incoming edges only
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [3] An edge in any direction matches both orientations
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [4] Abbreviated edges chain into a longer path
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [5] Abbreviated and full edge patterns mix in one path
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [6] An abbreviated edge works as a pattern predicate
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [7] An abbreviated edge works in OPTIONAL MATCH
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [8] A minus sign between parenthesized terms in an expression is subtraction
+16.7-path-pattern-expression/AbbreviatedEdge1.feature: [9] An edge pointing left or right matches both orientations
+16.8-label-expression/LabelExpression1.feature: [5] A label disjunction in an edge pattern matches either type
+19.9-labeled-predicate/LabeledPredicate1.feature: [1] A label test on an edge is true for its type
+19.9-labeled-predicate/LabeledPredicate1.feature: [2] A label test on an edge filters in WHERE

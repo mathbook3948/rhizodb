@@ -16,3 +16,7 @@ rhizodb = { path = "../rhizodb" }
 [[test]]
 name = "tck"
 harness = false
+
+[[test]]
+name = "gql"
+harness = false

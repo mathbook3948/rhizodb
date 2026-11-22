@@ -35,7 +35,7 @@ tx.commit()?;
 
 ## Testing
 
-`mise run check` runs formatting, lints, tests, and the repository guards. The tests include the openCypher TCK, run against the engine with a checked-in list of scenarios that must pass (`crates/tck/passing.txt`), and a crash test that kills a writing process and checks the reopened store. To record newly passing TCK scenarios, run `TCK_BLESS=1 cargo test -p tck --test tck`. To fuzz the parser, run `cargo +nightly fuzz run parse`.
+`mise run check` runs formatting, lints, tests, and the repository guards. The tests include the openCypher TCK, run against the engine with a checked-in list of scenarios that must pass (`crates/tck/passing.txt`), and a crash test that kills a writing process and checks the reopened store. To record newly passing TCK scenarios, run `TCK_BLESS=1 cargo test -p tck --test tck`. GQL syntax outside the Cypher overlap is checked by hand-written scenarios in the same format under `crates/tck/gql/features`, one directory per ISO/IEC 39075 clause, with their own list in `crates/tck/gql/passing.txt`. Record those with `TCK_BLESS=1 cargo test -p tck --test gql`. To fuzz the parser, run `cargo +nightly fuzz run parse`.
 
 ## License
 

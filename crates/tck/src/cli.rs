@@ -16,20 +16,19 @@ use crate::suite::Verdict;
 use crate::suite::evaluate;
 use crate::suite::load_cases;
 
-/// Runs the whole TCK against `engine` as a libtest-style binary.
+/// Runs a whole scenario suite against `engine` as a libtest-style binary.
 ///
-/// `crate_root` holds `vendor/opencypher` and `passing.txt`. With `TCK_BLESS=1` every scenario
-/// runs and `passing.txt` is rewritten with the ones that pass, so a run of only part of the
-/// suite is refused.
-pub fn main(engine: Arc<dyn Engine>, crate_root: &Path) -> ExitCode {
+/// `suite` holds `features` and `graphs` laid out like the vendored TCK, and `ratchet_path` is
+/// the suite's `passing.txt`. With `TCK_BLESS=1` every scenario runs and the ratchet is rewritten
+/// with the ones that pass, so a run of only part of the suite is refused.
+pub fn main(engine: Arc<dyn Engine>, suite: &Path, ratchet_path: &Path) -> ExitCode {
     let args = Arguments::from_args();
     let bless = std::env::var("TCK_BLESS").is_ok_and(|value| value == "1");
     if bless && let Some(reason) = bless_refusal(&args) {
         eprintln!("tck: refusing to bless with {reason}, it would drop scenarios from passing.txt");
         return ExitCode::FAILURE;
     }
-    let vendor = crate_root.join("vendor/opencypher");
-    let ratchet_path = crate_root.join("passing.txt");
+    let vendor = suite.to_path_buf();
     let cases = match load_cases(&vendor) {
         Ok(cases) => cases,
         Err(error) => {
@@ -37,7 +36,7 @@ pub fn main(engine: Arc<dyn Engine>, crate_root: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let ratchet = match fs::read_to_string(&ratchet_path) {
+    let ratchet = match fs::read_to_string(ratchet_path) {
         Ok(text) => Ratchet::parse(&text),
         Err(error) => {
             eprintln!("tck: cannot read {}: {error}", ratchet_path.display());
@@ -98,7 +97,7 @@ pub fn main(engine: Arc<dyn Engine>, crate_root: &Path) -> ExitCode {
         eprintln!("tck: not writing passing.txt because of harness errors");
         return ExitCode::FAILURE;
     }
-    match fs::write(&ratchet_path, Ratchet::from_passing(passing).render()) {
+    match fs::write(ratchet_path, Ratchet::from_passing(passing).render()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("tck: cannot write {}: {error}", ratchet_path.display());
