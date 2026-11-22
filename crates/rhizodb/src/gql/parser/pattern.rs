@@ -10,6 +10,8 @@ use crate::gql::ast::PatternPart;
 use crate::gql::ast::PatternStep;
 use crate::gql::ast::Properties;
 use crate::gql::ast::RelationshipPattern;
+use crate::gql::error::SyntaxError;
+use crate::gql::error::SyntaxErrorKind;
 use crate::gql::lexer::Punct;
 use crate::gql::lexer::TokenKind;
 
@@ -134,32 +136,43 @@ impl Parser {
             }
         }
         if self.eat_punct(Punct::Star) {
-            relationship.length = Some(self.length_bounds());
+            relationship.length = Some(self.length_bounds()?);
+        } else if self.at_punct(Punct::DotDot)
+            || matches!(self.kind_at(0), Some(TokenKind::Integer(_)))
+        {
+            return Err(self.invalid_relationship_pattern());
         }
         relationship.properties = self.properties()?;
         Ok(())
     }
 
-    fn length_bounds(&mut self) -> Length {
-        let min = self.integer_bound();
-        if self.eat_punct(Punct::DotDot) {
+    fn length_bounds(&mut self) -> ParseResult<Length> {
+        let min = self.integer_bound()?;
+        Ok(if self.eat_punct(Punct::DotDot) {
             Length {
                 min,
-                max: self.integer_bound(),
+                max: self.integer_bound()?,
             }
         } else {
             Length { min, max: min }
-        }
+        })
     }
 
-    fn integer_bound(&mut self) -> Option<u64> {
-        if let Some(TokenKind::Integer(bound)) = self.kind_at(0) {
+    fn integer_bound(&mut self) -> ParseResult<Option<u64>> {
+        if self.at_punct(Punct::Minus) {
+            return Err(self.invalid_relationship_pattern());
+        }
+        Ok(if let Some(TokenKind::Integer(bound)) = self.kind_at(0) {
             let bound = *bound;
             self.pos += 1;
             Some(bound)
         } else {
             None
-        }
+        })
+    }
+
+    fn invalid_relationship_pattern(&self) -> SyntaxError {
+        SyntaxError::new(self.offset(), SyntaxErrorKind::InvalidRelationshipPattern)
     }
 
     pub(super) fn relationship_starts_at(&self, index: usize) -> bool {

@@ -196,6 +196,9 @@ fn query_error(kind: ErrorKind) -> QueryError {
             SyntaxErrorKind::IntegerOverflow => ("SyntaxError", "IntegerOverflow"),
             SyntaxErrorKind::InvalidUnicodeEscape => ("SyntaxError", "InvalidUnicodeLiteral"),
             SyntaxErrorKind::MixedUnion => ("SyntaxError", "InvalidClauseComposition"),
+            SyntaxErrorKind::InvalidRelationshipPattern => {
+                ("SyntaxError", "InvalidRelationshipPattern")
+            }
             SyntaxErrorKind::UnexpectedToken
             | SyntaxErrorKind::UnexpectedEnd
             | SyntaxErrorKind::UnexpectedCharacter

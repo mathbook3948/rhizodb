@@ -25,6 +25,8 @@ pub enum SyntaxErrorKind {
     UnterminatedQuotedName,
     /// A block comment without its closing `*/`.
     UnterminatedComment,
+    /// Length bounds on a relationship without the `*` before them, or a negative bound.
+    InvalidRelationshipPattern,
     /// `UNION` and `UNION ALL` in one query.
     MixedUnion,
     /// Syntax that is recognized but not supported.
@@ -46,6 +48,7 @@ impl SyntaxErrorKind {
             Self::UnterminatedString => "unterminated string literal",
             Self::UnterminatedQuotedName => "unterminated quoted name",
             Self::UnterminatedComment => "unterminated comment",
+            Self::InvalidRelationshipPattern => "invalid relationship length",
             Self::MixedUnion => "UNION and UNION ALL cannot be mixed",
             Self::UnsupportedFeature => "unsupported feature",
             Self::NestingTooDeep => "query is nested too deeply",
