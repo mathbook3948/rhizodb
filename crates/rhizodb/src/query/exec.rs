@@ -30,6 +30,7 @@ use super::plan::MatchClause;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
+use super::regex::Patterns;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
@@ -42,11 +43,13 @@ pub(crate) fn run_read<T: ReadTransaction>(
     now: &DateTime,
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
+    let patterns = Patterns::default();
     let env = Env {
         tx,
         slots: program.slot_count,
         now,
         graveyard: &graveyard,
+        patterns: &patterns,
         check: None,
     };
     env.check_closed(&program.closed)?;
@@ -62,11 +65,13 @@ pub(crate) fn run_write<W: WriteTransaction>(
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
     let mut graveyard = Graveyard::default();
+    let patterns = Patterns::default();
     Env {
         tx: &*tx,
         slots,
         now,
         graveyard: &graveyard,
+        patterns: &patterns,
         check: None,
     }
     .check_closed(&program.closed)?;
@@ -76,11 +81,12 @@ pub(crate) fn run_write<W: WriteTransaction>(
             slots,
             now,
             graveyard: &graveyard,
+            patterns: &patterns,
             check: None,
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => {
-            super::update::apply(tx, slots, now, &mut graveyard, clause, rows)
+            super::update::apply(tx, slots, now, &patterns, &mut graveyard, clause, rows)
         }
     })?;
     for node in &graveyard.deleted_nodes {
@@ -91,6 +97,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         slots,
         now,
         graveyard: &graveyard,
+        patterns: &patterns,
         check: None,
     };
     materialize(&env, &graveyard, &program.columns, rows)
@@ -322,6 +329,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             slots: self.slots,
             now: self.now,
             graveyard: self.graveyard,
+            patterns: self.patterns,
             check: Some(&check),
         };
         let row = vec![Datum::Null; self.slots];

@@ -94,6 +94,8 @@ pub enum ErrorKind {
     IntegerOverflow,
     /// Integer division or modulo by zero.
     DivisionByZero,
+    /// The pattern of `=~` is not a valid regular expression, or compiles past the size limit.
+    InvalidRegex,
     /// A numeric argument outside the range the function accepts.
     NumberOutOfRange,
     /// A temporal value that cannot be built or read: a malformed date or duration string, a
@@ -103,6 +105,13 @@ pub enum ErrorKind {
     DeleteConnectedNode,
     /// A node or relationship deleted earlier in the query was read.
     DeletedEntityAccess,
+    /// A query that updates the graph ran in a read transaction.
+    ReadOnlyTransaction,
+    /// A write transaction was used after a query that failed in it rolled it back.
+    TransactionAborted,
+    /// A write was started on a thread that already holds the open write transaction, which
+    /// would otherwise wait for itself forever.
+    WriteTransactionOnThisThread,
     /// A feature this version does not support.
     Unsupported,
     /// The storage engine failed.
@@ -232,6 +241,7 @@ impl From<GraphError> for Error {
                 ErrorKind::DeletedEntityAccess
             }
             GraphError::NodeHasRelationships(_) => ErrorKind::DeleteConnectedNode,
+            GraphError::WriterOnThisThread => ErrorKind::WriteTransactionOnThisThread,
         };
         Self {
             kind,

@@ -28,8 +28,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Adding a stored value type changes the format version, so an older build refuses the database instead of failing on an unknown tag.
 - Stored lists have a fixed nesting limit, enforced on write as well as on read.
 - The database records one format version in a metadata table.
-- Each query runs in its own transaction.
 
 ## Open
 
-- Explicit multi-statement transactions in the public API
+None

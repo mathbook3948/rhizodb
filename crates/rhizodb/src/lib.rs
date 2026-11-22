@@ -21,6 +21,34 @@
 //! assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
 //! # Ok::<(), rhizodb::Error>(())
 //! ```
+//!
+//! Each `execute` call on a [`Database`] is its own transaction. A [`WriteTransaction`] makes
+//! several queries take effect together, and a [`ReadTransaction`] reads one snapshot.
+//!
+//! ```
+//! use rhizodb::Database;
+//! use rhizodb::Parameters;
+//! use rhizodb::Value;
+//!
+//! let db = Database::in_memory()?;
+//! db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+//!
+//! let mut tx = db.begin_write()?;
+//! tx.execute("INSERT (:Person {name: 'Alan'})", &Parameters::new())?;
+//! tx.execute(
+//!     "MATCH (a:Person {name: 'Alan'}), (b:Person {name: 'Ada'}) INSERT (a)-[:KNOWS]->(b)",
+//!     &Parameters::new(),
+//! )?;
+//! tx.commit()?;
+//!
+//! let snapshot = db.begin_read()?;
+//! let result = snapshot.execute(
+//!     "MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k) AS friendships",
+//!     &Parameters::new(),
+//! )?;
+//! assert_eq!(result.rows(), [vec![Value::Integer(1)]]);
+//! # Ok::<(), rhizodb::Error>(())
+//! ```
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -33,6 +61,7 @@ mod query;
 mod result;
 mod storage;
 mod temporal;
+mod transaction;
 mod value;
 
 pub use database::Database;
@@ -57,3 +86,5 @@ pub use temporal::LocalDateTime;
 pub use temporal::LocalTime;
 pub use temporal::Temporal;
 pub use temporal::Time;
+pub use transaction::ReadTransaction;
+pub use transaction::WriteTransaction;
