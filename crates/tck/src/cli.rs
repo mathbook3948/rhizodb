@@ -19,12 +19,13 @@ use crate::suite::load_cases;
 /// Runs the whole TCK against `engine` as a libtest-style binary.
 ///
 /// `crate_root` holds `vendor/opencypher` and `passing.txt`. With `TCK_BLESS=1` every scenario
-/// runs and `passing.txt` is rewritten with the ones that pass.
+/// runs and `passing.txt` is rewritten with the ones that pass, so a run of only part of the
+/// suite is refused.
 pub fn main(engine: Arc<dyn Engine>, crate_root: &Path) -> ExitCode {
     let args = Arguments::from_args();
     let bless = std::env::var("TCK_BLESS").is_ok_and(|value| value == "1");
-    if bless && (args.filter.is_some() || !args.skip.is_empty()) {
-        eprintln!("tck: refusing to bless with a name filter, it would drop unlisted scenarios");
+    if bless && let Some(reason) = bless_refusal(&args) {
+        eprintln!("tck: refusing to bless with {reason}, it would drop scenarios from passing.txt");
         return ExitCode::FAILURE;
     }
     let vendor = crate_root.join("vendor/opencypher");
@@ -105,3 +106,21 @@ pub fn main(engine: Arc<dyn Engine>, crate_root: &Path) -> ExitCode {
         }
     }
 }
+
+fn bless_refusal(args: &Arguments) -> Option<&'static str> {
+    [
+        (args.filter.is_some(), "a name filter"),
+        (!args.skip.is_empty(), "--skip"),
+        (args.ignored, "--ignored"),
+        (args.include_ignored, "--include-ignored"),
+        (args.exact, "--exact"),
+        (args.list, "--list"),
+    ]
+    .into_iter()
+    .find(|(set, _)| *set)
+    .map(|(_, reason)| reason)
+}
+
+#[cfg(test)]
+#[path = "cli.test.rs"]
+mod tests;
