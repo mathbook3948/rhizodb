@@ -1,0 +1,24 @@
+[package]
+name = "bench"
+description = "Measures RhizoDB and LadybugDB on the same graph workloads and compares the numbers"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.clippy]
+allow_attributes_without_reason = "deny"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[dependencies]
+lbug = "=0.22.3"
+rhizodb = { path = "../rhizodb" }
+serde_json = "1"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[workspace]
