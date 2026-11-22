@@ -238,13 +238,12 @@ fn length_takes_a_path_and_size_takes_a_list_or_string() {
 }
 
 #[test]
-fn an_integer_only_argument_of_another_type_is_a_non_integer_argument() {
+fn a_range_argument_of_another_type_than_integer_is_a_non_integer_argument() {
     let db = graph();
     for query in [
         "MATCH (n:Missing) RETURN range(0.0, 1)",
         "RETURN range(0, 1, 'x')",
         "WITH true AS b RETURN range(0, b)",
-        "WITH 1.5 AS f RETURN substring('abc', f)",
     ] {
         assert_eq!(
             error_kind(&db, query),
@@ -252,8 +251,20 @@ fn an_integer_only_argument_of_another_type_is_a_non_integer_argument() {
             "{query}"
         );
     }
+    for query in [
+        "RETURN substring(1, 1)",
+        "RETURN left('abc', 1.5)",
+        "RETURN right('abc', 'x')",
+        "RETURN datetime.fromepochmillis(1.5)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
     assert_eq!(
-        error_kind(&db, "RETURN substring(1, 1)"),
-        ErrorKind::InvalidArgumentType
+        error_kind(&db, "WITH 1.5 AS f RETURN substring('abc', f)"),
+        ErrorKind::InvalidArgumentValue
     );
 }

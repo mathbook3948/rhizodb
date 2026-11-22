@@ -1366,7 +1366,7 @@ impl Binder<'_> {
                         arg,
                         scope,
                         function.parameter(index),
-                        function.argument_error(index),
+                        function.argument_error(),
                     );
                 }
                 Expr::Call(function, bound)
