@@ -957,13 +957,11 @@ impl Binder<'_> {
             }
             ast::ProjectionItems::Items(explicit) => explicit,
         };
+        let missing_alias = is_with
+            && explicit
+                .iter()
+                .any(|item| item.alias.is_none() && !matches!(item.expr, ast::Expr::Variable(_)));
         for item in explicit {
-            if is_with && item.alias.is_none() && !matches!(item.expr, ast::Expr::Variable(_)) {
-                return Err(error(
-                    ErrorKind::NoExpressionAlias,
-                    "an expression in WITH needs an alias",
-                ));
-            }
             items.push((item.expr.clone(), self.column_name(item)));
         }
         let mut columns: Vec<String> = Vec::new();
@@ -1073,6 +1071,12 @@ impl Binder<'_> {
             (Items::Plain(plain), order_by, visible)
         };
         let (items_bound, order_by, visible) = bound_items;
+        if missing_alias {
+            return Err(error(
+                ErrorKind::NoExpressionAlias,
+                "an expression in WITH needs an alias",
+            ));
+        }
         let skip = projection
             .skip
             .as_ref()

@@ -222,6 +222,14 @@ fn next_to_an_aggregate_only_simple_keys_and_projected_names_are_visible() {
             "RETURN [x IN [1, 2] | count(*)]",
             ErrorKind::InvalidAggregation,
         ),
+        (
+            "UNWIND [1, 2] AS x WITH x + 1, count(*) AS c ORDER BY x + 1 + count(*) RETURN c",
+            ErrorKind::AmbiguousAggregationExpression,
+        ),
+        (
+            "UNWIND [1, 2] AS x WITH x + 1, count(*) AS c RETURN c",
+            ErrorKind::NoExpressionAlias,
+        ),
     ] {
         assert_eq!(error_kind(&db, query), kind, "{query}");
     }
