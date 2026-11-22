@@ -582,13 +582,20 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
         create_indexes(&mut write);
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
+        let at = write.intern_token("at").unwrap();
         write
             .create_node(&NodeRecord {
                 labels: [label].into(),
-                properties: Properties::from([(
-                    text,
-                    PropertyValue::String("graph store graph".to_owned()),
-                )]),
+                properties: Properties::from([
+                    (text, PropertyValue::String("graph store graph".to_owned())),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Float(1.0),
+                            PropertyValue::Float(0.0),
+                        ]),
+                    ),
+                ]),
             })
             .unwrap();
         write.commit().unwrap();
@@ -614,6 +621,12 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     assert_eq!(
         read.keyword_search("words", ElementKind::Node, "\"graph store\"", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read.vector_search("points", ElementKind::Node, &[1.0, 0.0], 10)
             .unwrap()
             .len(),
         1
