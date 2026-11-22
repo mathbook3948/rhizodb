@@ -66,9 +66,9 @@ fn a_delete_whose_result_can_hold_an_element_retains_records() {
 }
 
 #[test]
-fn closed_parts_that_conditional_evaluation_may_skip_are_not_recorded() {
+fn closed_parts_that_conditional_evaluation_may_skip_are_still_recorded() {
     assert_eq!(
         closed_count("MATCH (n) RETURN CASE WHEN n.x THEN 1 + 2 ELSE 3 + 4 END"),
-        0
+        2
     );
 }

@@ -97,6 +97,23 @@ pub enum ErrorKind {
     IdSpaceExhausted,
 }
 
+impl ErrorKind {
+    /// Whether the failure is decided by the types of its operands alone. Evaluating an
+    /// expression that has no variables or parameters can only fail this way when the query text
+    /// is wrong, so such a failure is reported before any data is read. Every other kind depends
+    /// on values and is reported only when a row reaches the expression.
+    pub(crate) fn is_type_error(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidArgumentType
+                | Self::TypeMismatch
+                | Self::PropertyAccessOnNonEntity
+                | Self::ListElementAccessByNonInteger
+                | Self::MapElementAccessByNonString
+        )
+    }
+}
+
 /// A failed query or database operation.
 #[derive(Debug)]
 pub struct Error {

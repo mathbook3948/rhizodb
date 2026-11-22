@@ -1141,7 +1141,7 @@ impl Binder<'_> {
                 let mut inner = scope.clone();
                 inner.insert(&comprehension.variable.0, slot, Kind::Unknown);
                 let filter = match &comprehension.filter {
-                    Some(filter) => Some(self.expr(filter, &inner, mode)?),
+                    Some(filter) => Some(self.filter(filter, &inner, mode)?),
                     None => None,
                 };
                 let projection = match &comprehension.projection {
@@ -1163,7 +1163,7 @@ impl Binder<'_> {
                 let slot = self.slot();
                 let mut inner = scope.clone();
                 inner.insert(&predicate.variable.0, slot, Kind::Unknown);
-                let condition = self.expr(&predicate.predicate, &inner, mode)?;
+                let condition = self.filter(&predicate.predicate, &inner, mode)?;
                 Expr::Quantified(Box::new(Quantified {
                     quantifier: predicate.quantifier,
                     slot,
@@ -1484,33 +1484,41 @@ fn evaluated_parts(expr: &Expr) -> Option<(Vec<&Expr>, Vec<&Expr>, Option<Slot>)
     })
 }
 
-fn collect_closed<'a>(expr: &'a Expr, local: &mut Vec<Slot>, out: &mut Vec<&'a Expr>) -> bool {
+fn collect_closed<'a>(
+    expr: &'a Expr,
+    local: &mut Vec<Slot>,
+    out: &mut Vec<&'a Expr>,
+) -> Option<usize> {
+    let base = local.len();
     let Some((always, sometimes, bound)) = evaluated_parts(expr) else {
         return match expr {
-            Expr::Constant(_) => true,
-            Expr::Slot(slot) => local.contains(slot),
-            _ => false,
+            Expr::Constant(_) => Some(usize::MAX),
+            Expr::Slot(slot) => local.iter().rposition(|bound| bound == slot),
+            _ => None,
         };
     };
     let mark = out.len();
-    let mut closed = true;
+    let mut outermost = Some(usize::MAX);
     for child in always {
-        closed &= collect_closed(child, local, out);
+        outermost = join(outermost, collect_closed(child, local, out));
     }
-    let kept = out.len();
+    let covered = out.len();
     local.extend(bound);
     for child in sometimes {
-        closed &= collect_closed(child, local, out);
+        outermost = join(outermost, collect_closed(child, local, out));
     }
     if bound.is_some() {
         local.pop();
     }
-    out.truncate(kept);
-    if closed {
-        out.truncate(mark);
+    if outermost.is_some_and(|reach| reach >= base) {
+        out.drain(mark..covered);
         out.push(expr);
     }
-    closed
+    outermost
+}
+
+fn join(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    a.zip(b).map(|(a, b)| a.min(b))
 }
 
 fn is_simple_key(key: &ast::Expr) -> bool {

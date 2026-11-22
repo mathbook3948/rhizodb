@@ -368,12 +368,12 @@ fn reading_a_deleted_element_fails() {
 }
 
 #[test]
-fn an_expression_conditional_evaluation_skips_never_fails() {
+fn an_expression_conditional_evaluation_skips_never_fails_on_values() {
     let db = db();
     assert!(
         run(
             &db,
-            "MATCH (n) WHERE false RETURN CASE WHEN n IS NULL THEN 0 ELSE -'x' END"
+            "MATCH (n) WHERE false RETURN CASE WHEN n IS NULL THEN 0 ELSE 1 / 0 END"
         )
         .is_empty()
     );
@@ -381,24 +381,24 @@ fn an_expression_conditional_evaluation_skips_never_fails() {
     assert_eq!(
         single(
             &db,
-            "MATCH (n:N) RETURN CASE WHEN n IS NOT NULL THEN 0 ELSE -'x' END"
+            "MATCH (n:N) RETURN CASE WHEN n IS NOT NULL THEN 0 ELSE 1 / 0 END"
         ),
         int(0)
     );
     assert_eq!(
-        single(&db, "RETURN CASE WHEN true THEN 1 ELSE -'x' END"),
+        single(&db, "RETURN CASE WHEN true THEN 1 ELSE 1 / 0 END"),
         int(1)
     );
     assert_eq!(
-        single(&db, "RETURN [x IN [] | -'x']"),
+        single(&db, "RETURN [x IN [] | 1 / 0]"),
         Value::List(Vec::new())
     );
     assert_eq!(
         error_kind(
             &db,
-            "MATCH (n:N) RETURN CASE WHEN n IS NULL THEN 0 ELSE -'x' END"
+            "MATCH (n:N) RETURN CASE WHEN n IS NULL THEN 0 ELSE 1 / 0 END"
         ),
-        ErrorKind::TypeMismatch
+        ErrorKind::DivisionByZero
     );
 }
 
@@ -715,4 +715,88 @@ fn replace_names_the_argument_that_is_wrong() {
         single(&db, "RETURN replace('abc', 'b', 'x')"),
         string("axc")
     );
+}
+
+fn fails_before_reading_data(db: &rhizodb::Database, query: &str) {
+    let error = db
+        .execute(query, &rhizodb::Parameters::new())
+        .expect_err(query);
+    assert!(
+        matches!(
+            error.kind(),
+            ErrorKind::InvalidArgumentType | ErrorKind::PropertyAccessOnNonEntity
+        ),
+        "{query}: {error} ({:?})",
+        error.kind()
+    );
+}
+
+#[test]
+fn a_type_error_in_the_query_text_fails_before_any_row_reaches_it() {
+    let db = db();
+    for query in [
+        "RETURN CASE WHEN false THEN (1).x ELSE 2 END",
+        "RETURN CASE WHEN false THEN true + 1 ELSE 2 END",
+        "RETURN false AND (1).x",
+        "RETURN [x IN [] | size(1)]",
+        "RETURN [x IN [] WHERE 1]",
+        "RETURN all(x IN [] WHERE 1)",
+        "MATCH (n:Missing) RETURN CASE WHEN n IS NULL THEN 1 ELSE true + 1 END",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+}
+
+#[test]
+fn a_type_error_in_a_merge_action_fails_even_when_the_action_is_not_run() {
+    let db = db();
+    run(&db, "CREATE (:A)");
+    fails_before_reading_data(&db, "MERGE (n:A) ON CREATE SET n.v = 'a' - 1 RETURN n");
+    fails_before_reading_data(&db, "MERGE (n:A) ON MATCH SET n.v = 'a' - 1 RETURN n");
+    fails_before_reading_data(&db, "MATCH (n:Missing) SET n.v = 'a' - 1");
+}
+
+#[test]
+fn an_error_that_depends_on_values_fails_only_when_a_row_reaches_it() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:Missing) RETURN CASE WHEN n IS NULL THEN 1 / 0 ELSE 2 END"
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        single(
+            &db,
+            "RETURN CASE WHEN false THEN 9223372036854775807 + 1 ELSE 2 END"
+        ),
+        int(2)
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN CASE WHEN true THEN 1 / 0 ELSE 2 END"),
+        ErrorKind::DivisionByZero
+    );
+}
+
+#[test]
+fn a_parameter_is_data_so_its_type_error_waits_for_a_row() {
+    let db = db();
+    let mut parameters = rhizodb::Parameters::new();
+    parameters.insert("flag".to_owned(), boolean(false));
+    parameters.insert("a".to_owned(), string("x"));
+    let result = db
+        .execute(
+            "RETURN CASE WHEN $flag THEN $a - 1 ELSE $a END",
+            &parameters,
+        )
+        .unwrap();
+    assert_eq!(result.rows(), [vec![string("x")]]);
+
+    let mut parameters = rhizodb::Parameters::new();
+    parameters.insert("p".to_owned(), int(1));
+    let result = db
+        .execute("MATCH (n:Missing) WHERE $p RETURN n", &parameters)
+        .unwrap();
+    assert!(result.rows().is_empty());
 }
