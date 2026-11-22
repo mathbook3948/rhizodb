@@ -18,6 +18,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A query inside `EXISTS` may end without `RETURN`, cannot update the graph, and keeps its own variables to itself.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
+- The check on the query text reads a value error as null and goes on, so a value error earlier in an expression never hides a type error after it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name, and `CALL` runs it.
 - A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
 - Procedure names are case-sensitive.

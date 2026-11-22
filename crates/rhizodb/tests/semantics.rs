@@ -1276,3 +1276,20 @@ fn a_full_exists_subquery_runs_from_the_outer_row_and_keeps_its_variables_inside
         ErrorKind::InvalidClauseComposition
     );
 }
+
+#[test]
+fn a_value_error_in_the_query_text_does_not_hide_a_later_type_error() {
+    let db = db();
+    for query in [
+        "MATCH (n:Missing) RETURN [x IN [0, 'a'] | 1 / x] AS x",
+        "MATCH (n:Missing) RETURN [x IN [0, 1] | (1 / x) + [x IN ['a'] | -x][0]] AS x",
+        "MATCH (n:Missing) RETURN [x IN [9223372036854775807, 'a'] | x + 1 - true] AS x",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    assert!(run(&db, "MATCH (n:Missing) RETURN [x IN [0] | 1 / x] AS x").is_empty());
+    assert_eq!(
+        error_kind(&db, "RETURN [x IN [0, 'a'] | 1 / x] AS x"),
+        ErrorKind::InvalidArgumentType
+    );
+}

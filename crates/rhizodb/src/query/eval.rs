@@ -36,6 +36,9 @@ pub(crate) struct Env<'a, T> {
     pub(crate) now: &'a DateTime,
     /// What the query deleted so far.
     pub(crate) graveyard: &'a Graveyard,
+    /// Whether evaluation only looks for type errors, reading every other failure as null so
+    /// it reaches the parts after it.
+    pub(crate) checking: bool,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -153,6 +156,13 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
+        match self.eval_node(expr, row) {
+            Err(error) if self.checking && !error.is_type_error() => Ok(Datum::Null),
+            result => result,
+        }
+    }
+
+    fn eval_node(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
         match expr {
             Expr::Constant(value) | Expr::Parameter(value) => Ok(value.clone()),
             Expr::Slot(slot) => Ok(row.get(*slot).cloned().unwrap_or(Datum::Null)),

@@ -46,6 +46,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         slots: program.slot_count,
         now,
         graveyard: &graveyard,
+        checking: false,
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
@@ -65,6 +66,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         slots,
         now,
         graveyard: &graveyard,
+        checking: false,
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| match clause {
@@ -73,6 +75,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             slots,
             now,
             graveyard: &graveyard,
+            checking: false,
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => {
@@ -87,6 +90,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         slots,
         now,
         graveyard: &graveyard,
+        checking: false,
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -311,11 +315,16 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn check_closed(&self, closed: &[Expr]) -> Result<(), Error> {
+        let checker = Env {
+            tx: self.tx,
+            slots: self.slots,
+            now: self.now,
+            graveyard: self.graveyard,
+            checking: true,
+        };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
-            if let Err(error) = self.eval(expr, &row)
-                && error.is_type_error()
-            {
+            if let Err(error) = checker.eval(expr, &row) {
                 return Err(match error.kind() {
                     ErrorKind::TypeMismatch => error.with_kind(ErrorKind::InvalidArgumentType),
                     _ => error,
