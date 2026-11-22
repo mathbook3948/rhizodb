@@ -1,5 +1,7 @@
 use crate::gql::ast::Expr;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::ListComprehension;
+use crate::gql::ast::Name;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::testing::error;
 use crate::gql::testing::expr;
@@ -7,6 +9,10 @@ use crate::gql::testing::label_sexp;
 use crate::gql::testing::patterns;
 use crate::gql::testing::predicate;
 use crate::gql::testing::sexp;
+
+fn label(text: &str) -> LabelExpr {
+    LabelExpr::Name(Name::new(text))
+}
 
 fn node_labels(source: &str) -> String {
     let parts = patterns(source);
@@ -178,6 +184,29 @@ fn a_pipe_in_a_comprehension_filter_starts_the_projection() {
         assert_eq!(
             found.projection.as_deref().map_or("_".into(), sexp),
             projection,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn a_delimited_part_of_a_comprehension_filter_keeps_its_disjunction() {
+    for source in [
+        "[x IN l WHERE coalesce(x:A|B, false) | x]",
+        "[x IN l WHERE CASE WHEN x:A|B THEN true END | x]",
+        "[x IN l WHERE CASE x:A|B WHEN true THEN x IS LABELED A|B ELSE x:A|B END | x]",
+        "[x IN l WHERE {k: x:A|B}.k | x]",
+        "[x IN l WHERE m[x:A|B] | x]",
+        "[x IN l WHERE m[x:A|B..x:A|B] | x]",
+        "[x IN l WHERE EXISTS { MATCH (x) WHERE x:A|B } | x]",
+    ] {
+        let found = comprehension(source);
+        let filter = format!("{:?}", found.filter);
+        let disjunction = format!("{:?}", LabelExpr::Or(vec![label("A"), label("B")]));
+        assert!(filter.contains(&disjunction), "{source}: {filter}");
+        assert_eq!(
+            found.projection.as_deref().map(sexp).as_deref(),
+            Some("x"),
             "{source}"
         );
     }

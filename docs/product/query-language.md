@@ -59,7 +59,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `:` may follow a `|`, as in Cypher's `[:T|:U]`.
 - A label test in an expression takes a label expression after `:` or after `IS LABELED`, and `IS NOT LABELED` is its negation.
 - `IS LABELED` and `IS NOT LABELED` bind like `IS NULL`.
-- Inside the `WHERE` of a list or pattern comprehension, a `|` outside parentheses or brackets starts the projection, so a label disjunction there needs parentheses.
+- Inside the `WHERE` of a list or pattern comprehension, a `|` that no parenthesis, bracket, brace, or `CASE` within the filter encloses starts the projection, so only a label disjunction at the top of the filter needs parentheses.
 - A node in a pattern that creates takes only a label or a conjunction of labels, and anything else fails with its own error kind.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.

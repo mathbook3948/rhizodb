@@ -70,14 +70,15 @@ impl Parser {
 
     fn condition(&mut self, pipe_ends: bool) -> ParseResult<Expr> {
         let outer = std::mem::replace(&mut self.in_where, true);
-        let condition = self.pipe_ending(pipe_ends, Self::expression);
+        let ends = pipe_ends.then(|| self.bracket_depth());
+        let condition = self.pipe_ending(ends, Self::expression);
         self.in_where = outer;
         condition
     }
 
     fn pipe_ending<T>(
         &mut self,
-        ends: bool,
+        ends: Option<usize>,
         parse: impl FnOnce(&mut Self) -> ParseResult<T>,
     ) -> ParseResult<T> {
         let outer = std::mem::replace(&mut self.pipe_ends_filter, ends);
@@ -107,7 +108,7 @@ impl Parser {
                     if self.eat_keyword("LABELED") {
                         let test = Expr::HasLabels {
                             operand: Box::new(lhs),
-                            labels: self.label_expression(!self.pipe_ends_filter)?,
+                            labels: self.label_expression(self.label_pipe_allowed())?,
                         };
                         if negated {
                             Expr::Unary {
@@ -248,7 +249,7 @@ impl Parser {
             } else if self.eat_punct(Punct::LBracket) {
                 expr = self.subscript(expr)?;
             } else if self.at_punct(Punct::Colon) && self.label_starts_at(1) {
-                let labels = self.colon_labels(true, !self.pipe_ends_filter)?;
+                let labels = self.colon_labels(true, self.label_pipe_allowed())?;
                 expr = Expr::HasLabels {
                     operand: Box::new(expr),
                     labels,
@@ -331,7 +332,7 @@ impl Parser {
             return Ok(Expr::Pattern(self.pattern_element()?));
         }
         self.pos += 1;
-        let inner = self.pipe_ending(false, Self::expression)?;
+        let inner = self.expression()?;
         self.expect_punct(Punct::RParen)?;
         Ok(inner)
     }
@@ -354,10 +355,6 @@ impl Parser {
     }
 
     fn list(&mut self) -> ParseResult<Expr> {
-        self.pipe_ending(false, Self::list_body)
-    }
-
-    fn list_body(&mut self) -> ParseResult<Expr> {
         if self.eat_punct(Punct::RBracket) {
             return Ok(Expr::List(Vec::new()));
         }
@@ -463,7 +460,7 @@ impl Parser {
             }
             if is("CASE") {
                 self.pos += 1;
-                return self.case();
+                return self.pipe_ending(None, Self::case);
             }
             if is("EXISTS") && self.punct_at(1, Punct::LBrace) {
                 return self.exists_subquery();
