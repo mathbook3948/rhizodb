@@ -19,9 +19,11 @@ use super::ids::RelationshipType;
 use super::ids::Token;
 use super::ids::TokenKind;
 use super::index::ENTRY_TABLES;
+use super::index::Element;
 use super::index::Entry;
 use super::index::Index;
 use super::index::IndexKind;
+use super::index::Target;
 use super::index::document_length;
 use super::index::encode_totals;
 use super::keys;
@@ -134,7 +136,12 @@ impl<T: ReadTransaction> GraphTx<T> {
             check_named(RelationshipType::TAG, record.rel_type.id());
         }
         for index in &indexes {
-            check_named(Label::TAG, index.definition.label.id());
+            match index.definition.target {
+                Target::Label(label) => check_named(Label::TAG, label.id()),
+                Target::RelationshipType(rel_type) => {
+                    check_named(RelationshipType::TAG, rel_type.id());
+                }
+            }
             for property in covered_properties(&index.definition.kind) {
                 check_named(PropertyKey::TAG, property.id());
             }
@@ -204,7 +211,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
 
-        self.check_index_entries(&indexes, &nodes, &mut violations)?;
+        self.check_index_entries(&indexes, &nodes, &relationships, &mut violations)?;
 
         self.check_counters(&nodes, &relationships, &named, &indexes, &mut violations)?;
         Ok(violations)
@@ -397,13 +404,22 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         indexes: &[Index],
         nodes: &BTreeMap<NodeId, NodeRecord>,
+        relationships: &BTreeMap<RelationshipId, RelationshipRecord>,
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<(), GraphError> {
         let mut expected = BTreeMap::new();
         for index in indexes {
             let mut documents = 0u64;
             let mut length = 0u64;
-            for (node, record) in nodes {
+            let elements = nodes
+                .iter()
+                .map(|(id, record)| (id.0, Element::Node(record)))
+                .chain(
+                    relationships
+                        .iter()
+                        .map(|(id, record)| (id.0, Element::Relationship(record))),
+                );
+            for (element, record) in elements {
                 let Some(entry) = index.definition.entry(record) else {
                     continue;
                 };
@@ -411,7 +427,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     documents += 1;
                     length += u64::from(document_length(document));
                 }
-                for (table, key, value) in index.rows(*node, &entry) {
+                for (table, key, value) in index.rows(element, &entry) {
                     expected.insert((table, key), value);
                 }
             }

@@ -29,13 +29,18 @@ pub use ids::RelationshipId;
 pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
+pub(crate) use index::ElementKind;
+pub use index::IndexTarget;
 pub use index::VectorMetric;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 
-const FORMAT_VERSION: u32 = 4;
+use index::Element;
+
+const FORMAT_VERSION: u32 = 5;
 const OLDEST_FORMAT_VERSION: u32 = 1;
+const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -132,8 +137,9 @@ pub(crate) struct Graph<S> {
 
 impl<S: Storage> Graph<S> {
     /// Records the format version on first open, upgrades a database written in an older
-    /// version to the current one, and rejects a database written in a newer version. Keyword
-    /// indexes written in an older version or built by another tokenizer are rebuilt in the
+    /// version to the current one, and rejects a database written in a newer version. Index
+    /// definitions written before indexes could cover relationships are rewritten, and keyword
+    /// indexes written in an older version or built by another tokenizer are rebuilt, in the
     /// same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
@@ -155,6 +161,9 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
+            if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
+                tx.tag_index_targets()?;
+            }
             if upgrade {
                 tx.transaction.put(
                     Table::Metadata,
@@ -383,7 +392,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.transaction
                 .put(Table::LabelIndex, &keys::label_key(*label, id), &[])?;
         }
-        self.reindex_node(id, None, Some(record))?;
+        self.reindex(id.0, None, Some(Element::Node(record)))?;
         Ok(id)
     }
 
@@ -409,6 +418,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             &keys::adjacency_key(record.target, record.rel_type, id),
             &record.source.0.to_be_bytes(),
         )?;
+        self.reindex(id.0, None, Some(Element::Relationship(record)))?;
         Ok(id)
     }
 
@@ -494,7 +504,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             Table::Incoming,
             &keys::adjacency_key(record.target, record.rel_type, id),
         )?;
-        Ok(())
+        self.reindex(id.0, Some(Element::Relationship(&record)), None)
     }
 
     /// Removes the node with its label and property index entries. Relationships that touch it
@@ -502,7 +512,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     /// `ensure_detached` checks.
     pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<(), GraphError> {
         let record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
-        self.reindex_node(id, Some(&record), None)?;
+        self.reindex(id.0, Some(Element::Node(&record)), None)?;
         for label in record.labels {
             self.transaction
                 .delete(Table::LabelIndex, &keys::label_key(label, id))?;
@@ -528,7 +538,11 @@ impl<T: WriteTransaction> GraphTx<T> {
         let result = edit(&mut record);
         self.transaction
             .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
-        self.reindex_node(id, Some(&before), Some(&record))?;
+        self.reindex(
+            id.0,
+            Some(Element::Node(&before)),
+            Some(Element::Node(&record)),
+        )?;
         Ok(result)
     }
 
@@ -537,14 +551,20 @@ impl<T: WriteTransaction> GraphTx<T> {
         id: RelationshipId,
         edit: impl FnOnce(&mut RelationshipRecord) -> R,
     ) -> Result<R, GraphError> {
-        let mut record = self
+        let before = self
             .relationship(id)?
             .ok_or(GraphError::RelationshipNotFound(id))?;
+        let mut record = before.clone();
         let result = edit(&mut record);
         self.transaction.put(
             Table::Relationships,
             &keys::element_key(id.0),
             &record.encode(),
+        )?;
+        self.reindex(
+            id.0,
+            Some(Element::Relationship(&before)),
+            Some(Element::Relationship(&record)),
         )?;
         Ok(result)
     }

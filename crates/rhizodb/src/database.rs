@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::Graph;
+use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
 use crate::procedure::Procedures;
@@ -84,20 +85,43 @@ impl Database {
     }
 
     /// Creates the keyword index `name` over the string properties `properties` of every node
-    /// labelled `label`, and fills it from the nodes already there, in one write transaction.
-    /// Text is put in Unicode normalization form NFKC, split into words at Unicode word
-    /// boundaries, and lowercased, so a composed accent matches its decomposed form, and a
-    /// ligature or a full-width letter matches its plain form. Hangul, Han, kana, and scripts
-    /// written without spaces between words, such as Thai, are indexed as overlapping pairs of
-    /// letters, so a query finds a word inside a longer run. A letter here is a grapheme
-    /// cluster, or in Hangul a syllable or a loose jamo. A property that holds a
+    /// or relationship that `target` covers, and fills it from the ones already there, in one
+    /// write transaction. Text is put in Unicode normalization form NFKC, split into words at
+    /// Unicode word boundaries, and lowercased, so a composed accent matches its decomposed
+    /// form, and a ligature or a full-width letter matches its plain form. Hangul, Han, kana,
+    /// and scripts written without spaces between words, such as Thai, are indexed as
+    /// overlapping pairs of letters, so a query finds a word inside a longer run. A letter here
+    /// is a grapheme cluster, or in Hangul a syllable or a loose jamo. A property that holds a
     /// list of strings is indexed string by string.
     ///
-    /// Search it with `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, which
-    /// matches a node that holds any term of `text`, ranked by BM25. Text between two `"`, as in
-    /// `"new york" pizza`, is a phrase, which matches only its terms in order and next to each
-    /// other inside one string. A word directly followed by `*` outside quotes, as in `graph*`,
-    /// matches every term that starts with it. There is no fuzzy matching.
+    /// Search an index over a label with
+    /// `CALL db.index.keyword.queryNodes(name, text, limit) YIELD node, score`, and one over a
+    /// relationship type with
+    /// `CALL db.index.keyword.queryRelationships(name, text, limit) YIELD relationship, score`.
+    /// Both match an element that holds any term of `text`, ranked by BM25. Text between two
+    /// `"`, as in `"new york" pizza`, is a phrase, which matches only its terms in order and
+    /// next to each other inside one string. A word directly followed by `*` outside quotes, as
+    /// in `graph*`, matches every term that starts with it. There is no fuzzy matching.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::IndexTarget;
+    /// use rhizodb::Parameters;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.execute(
+    ///     "INSERT (:Person)-[:WROTE {note: 'a graph store'}]->(:Paper)",
+    ///     &Parameters::new(),
+    /// )?;
+    /// db.create_keyword_index("notes", IndexTarget::RelationshipType("WROTE"), &["note"])?;
+    /// let result = db.execute(
+    ///     "CALL db.index.keyword.queryRelationships('notes', 'graph', 10) YIELD relationship \
+    ///      RETURN relationship.note",
+    ///     &Parameters::new(),
+    /// )?;
+    /// assert_eq!(result.rows().len(), 1);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
@@ -107,20 +131,29 @@ impl Database {
     pub fn create_keyword_index(
         &self,
         name: &str,
-        label: &str,
+        target: IndexTarget<'_>,
         properties: &[&str],
     ) -> Result<(), Error> {
         let mut tx = self.graph.write()?;
-        tx.create_keyword_index(name, label, properties)?;
+        tx.create_keyword_index(name, target, properties)?;
         Ok(tx.commit()?)
     }
 
-    /// Creates the vector index `name` over the property `property` of every node labelled
-    /// `label`, and fills it from the nodes already there, in one write transaction. A node is
-    /// indexed when the property is a list of `dimension` finite numbers whose length leaves
-    /// every score finite, and under [`VectorMetric::Cosine`] not zero. Search it with
-    /// `CALL db.index.vector.query(name, vector, limit) YIELD node, score`, which scores every
-    /// vector in the index.
+    /// Creates the vector index `name` over the property `property` of every node or
+    /// relationship that `target` covers, and fills it from the ones already there, in one
+    /// write transaction. An element is indexed when the property is a list of `dimension`
+    /// finite numbers whose length leaves every score finite, and under
+    /// [`VectorMetric::Cosine`] not zero.
+    ///
+    /// Search an index over a label with
+    /// `CALL db.index.vector.queryNodes(name, vector, limit) YIELD node, score`, and one over a
+    /// relationship type with
+    /// `CALL db.index.vector.queryRelationships(name, vector, limit) YIELD relationship, score`.
+    /// Search is exact: each query reads and scores every vector in the index, so its cost
+    /// grows with the number of indexed vectors times their dimension. There is no approximate
+    /// index. A host with more vectors than one query can scan keeps an approximate index of
+    /// its own outside the database and reads the elements it returns by ID, for example with
+    /// `MATCH (n) WHERE id(n) IN $ids` or `MATCH ()-[r]->() WHERE id(r) IN $ids`.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
@@ -130,13 +163,13 @@ impl Database {
     pub fn create_vector_index(
         &self,
         name: &str,
-        label: &str,
+        target: IndexTarget<'_>,
         property: &str,
         dimension: usize,
         metric: VectorMetric,
     ) -> Result<(), Error> {
         let mut tx = self.graph.write()?;
-        tx.create_vector_index(name, label, property, dimension, metric)?;
+        tx.create_vector_index(name, target, property, dimension, metric)?;
         Ok(tx.commit()?)
     }
 

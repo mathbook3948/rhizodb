@@ -1,7 +1,10 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::graph::Direction;
 use crate::graph::Graph;
+use crate::graph::NodeId;
+use crate::graph::RelationshipId;
 use crate::graph::records::Properties;
 use crate::storage::Storage;
 use crate::storage::redb_backend::RedbStorage;
@@ -15,36 +18,83 @@ const TEXTS: [&str; 6] = [
     "Mixed CASE words",
 ];
 
+#[derive(Clone, Copy, Debug)]
+enum On {
+    Node(usize),
+    Relationship(usize),
+}
+
 #[derive(Clone, Debug)]
 enum Op {
-    Create { labelled: bool, text: usize },
-    SetText { node: usize, text: usize },
-    SetTags { node: usize, text: usize },
-    RemoveText { node: usize },
-    SetVector { node: usize, vector: Vec<i8> },
-    AddLabel { node: usize },
-    RemoveLabel { node: usize },
-    Delete { node: usize },
+    Create {
+        labelled: bool,
+        text: usize,
+    },
+    Link {
+        from: usize,
+        to: usize,
+        linked: bool,
+        text: usize,
+    },
+    SetText {
+        on: On,
+        text: usize,
+    },
+    SetTags {
+        on: On,
+        text: usize,
+    },
+    RemoveText {
+        on: On,
+    },
+    SetVector {
+        on: On,
+        vector: Vec<i8>,
+    },
+    AddLabel {
+        node: usize,
+    },
+    RemoveLabel {
+        node: usize,
+    },
+    Unlink {
+        relationship: usize,
+    },
+    DetachDelete {
+        node: usize,
+    },
     Rebuild,
+}
+
+fn on() -> impl Strategy<Value = On> {
+    prop_oneof![
+        (0usize..8).prop_map(On::Node),
+        (0usize..8).prop_map(On::Relationship),
+    ]
 }
 
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         4 => (any::<bool>(), 0..TEXTS.len()).prop_map(|(labelled, text)| Op::Create { labelled, text }),
-        1 => (0usize..8, 0..TEXTS.len()).prop_map(|(node, text)| Op::SetText { node, text }),
-        1 => (0usize..8, 0..TEXTS.len()).prop_map(|(node, text)| Op::SetTags { node, text }),
-        1 => (0usize..8).prop_map(|node| Op::RemoveText { node }),
-        1 => (0usize..8, prop::collection::vec(-2i8..=2, 1..4))
-            .prop_map(|(node, vector)| Op::SetVector { node, vector }),
+        3 => (0usize..8, 0usize..8, any::<bool>(), 0..TEXTS.len())
+            .prop_map(|(from, to, linked, text)| Op::Link { from, to, linked, text }),
+        2 => (on(), 0..TEXTS.len()).prop_map(|(on, text)| Op::SetText { on, text }),
+        1 => (on(), 0..TEXTS.len()).prop_map(|(on, text)| Op::SetTags { on, text }),
+        1 => on().prop_map(|on| Op::RemoveText { on }),
+        2 => (on(), prop::collection::vec(-2i8..=2, 1..4))
+            .prop_map(|(on, vector)| Op::SetVector { on, vector }),
         1 => (0usize..8).prop_map(|node| Op::AddLabel { node }),
         1 => (0usize..8).prop_map(|node| Op::RemoveLabel { node }),
-        1 => (0usize..8).prop_map(|node| Op::Delete { node }),
+        1 => (0usize..8).prop_map(|relationship| Op::Unlink { relationship }),
+        1 => (0usize..8).prop_map(|node| Op::DetachDelete { node }),
         1 => Just(Op::Rebuild),
     ]
 }
 
 struct Names {
     label: Token<Label>,
+    link: Token<RelationshipType>,
+    other: Token<RelationshipType>,
     text: Token<PropertyKey>,
     tags: Token<PropertyKey>,
     at: Token<PropertyKey>,
@@ -52,11 +102,82 @@ struct Names {
 
 fn create_indexes(write: &mut GraphTx<impl WriteTransaction>) {
     write
-        .create_keyword_index("words", "Doc", &["text", "tags"])
+        .create_keyword_index("words", IndexTarget::Label("Doc"), &["text", "tags"])
         .unwrap();
     write
-        .create_vector_index("points", "Doc", "at", 2, VectorMetric::Cosine)
+        .create_vector_index(
+            "points",
+            IndexTarget::Label("Doc"),
+            "at",
+            2,
+            VectorMetric::Cosine,
+        )
         .unwrap();
+}
+
+fn create_relationship_indexes(write: &mut GraphTx<impl WriteTransaction>) {
+    write
+        .create_keyword_index(
+            "link words",
+            IndexTarget::RelationshipType("LINK"),
+            &["text", "tags"],
+        )
+        .unwrap();
+    write
+        .create_vector_index(
+            "link points",
+            IndexTarget::RelationshipType("LINK"),
+            "at",
+            2,
+            VectorMetric::Euclidean,
+        )
+        .unwrap();
+}
+
+fn relationship_ids(write: &GraphTx<impl ReadTransaction>) -> Vec<RelationshipId> {
+    let mut ids: Vec<RelationshipId> = write
+        .node_ids()
+        .unwrap()
+        .into_iter()
+        .flat_map(|node| write.adjacent(node, Direction::Outgoing, None).unwrap())
+        .map(|adjacent| adjacent.relationship)
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn set(
+    write: &mut GraphTx<impl WriteTransaction>,
+    on: On,
+    key: Token<PropertyKey>,
+    value: Option<PropertyValue>,
+) {
+    let pick = |ids: Vec<u64>, at: usize| (!ids.is_empty()).then(|| ids[at % ids.len()]);
+    match on {
+        On::Node(at) => {
+            let ids = write
+                .node_ids()
+                .unwrap()
+                .into_iter()
+                .map(|id| id.0)
+                .collect();
+            if let Some(id) = pick(ids, at).map(NodeId) {
+                match value {
+                    Some(value) => write.set_node_property(id, key, value).unwrap(),
+                    None => write.remove_node_property(id, key).unwrap(),
+                }
+            }
+        }
+        On::Relationship(at) => {
+            let ids = relationship_ids(write).into_iter().map(|id| id.0).collect();
+            if let Some(id) = pick(ids, at).map(RelationshipId) {
+                match value {
+                    Some(value) => write.set_relationship_property(id, key, value).unwrap(),
+                    None => write.remove_relationship_property(id, key).unwrap(),
+                }
+            }
+        }
+    }
 }
 
 fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
@@ -79,34 +200,34 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             }
             write.create_node(&record).unwrap();
         }
-        Op::SetText { node, text: chosen } => {
-            if let Some(id) = pick(write, *node) {
-                write
-                    .set_node_property(id, names.text, text(*chosen))
-                    .unwrap();
+        Op::Link {
+            from,
+            to,
+            linked,
+            text: chosen,
+        } => {
+            if let (Some(source), Some(target)) = (pick(write, *from), pick(write, *to)) {
+                let record = RelationshipRecord {
+                    rel_type: if *linked { names.link } else { names.other },
+                    source,
+                    target,
+                    properties: Properties::from([(names.text, text(*chosen))]),
+                };
+                write.create_relationship(&record).unwrap();
             }
         }
-        Op::SetTags { node, text: chosen } => {
-            if let Some(id) = pick(write, *node) {
-                let tags = PropertyValue::List(vec![text(*chosen), PropertyValue::Integer(1)]);
-                write.set_node_property(id, names.tags, tags).unwrap();
-            }
+        Op::SetText { on, text: chosen } => set(write, *on, names.text, Some(text(*chosen))),
+        Op::SetTags { on, text: chosen } => {
+            let tags = PropertyValue::List(vec![text(*chosen), PropertyValue::Integer(1)]);
+            set(write, *on, names.tags, Some(tags));
         }
-        Op::RemoveText { node } => {
-            if let Some(id) = pick(write, *node) {
-                write.remove_node_property(id, names.text).unwrap();
-            }
-        }
-        Op::SetVector { node, vector } => {
-            if let Some(id) = pick(write, *node) {
-                let items = vector
-                    .iter()
-                    .map(|item| PropertyValue::Float(f64::from(*item)))
-                    .collect();
-                write
-                    .set_node_property(id, names.at, PropertyValue::List(items))
-                    .unwrap();
-            }
+        Op::RemoveText { on } => set(write, *on, names.text, None),
+        Op::SetVector { on, vector } => {
+            let items = vector
+                .iter()
+                .map(|item| PropertyValue::Float(f64::from(*item)))
+                .collect();
+            set(write, *on, names.at, Some(PropertyValue::List(items)));
         }
         Op::AddLabel { node } => {
             if let Some(id) = pick(write, *node) {
@@ -118,15 +239,28 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
                 write.remove_label(id, names.label).unwrap();
             }
         }
-        Op::Delete { node } => {
+        Op::Unlink { relationship } => {
+            let ids = relationship_ids(write);
+            if !ids.is_empty() {
+                write
+                    .delete_relationship(ids[relationship % ids.len()])
+                    .unwrap();
+            }
+        }
+        Op::DetachDelete { node } => {
             if let Some(id) = pick(write, *node) {
+                for adjacent in write.adjacent(id, Direction::Both, None).unwrap() {
+                    write.delete_relationship(adjacent.relationship).unwrap();
+                }
                 write.delete_node(id).unwrap();
             }
         }
         Op::Rebuild => {
-            write.drop_index("words").unwrap();
-            write.drop_index("points").unwrap();
+            for name in ["words", "points", "link words", "link points"] {
+                write.drop_index(name).unwrap();
+            }
             create_indexes(write);
+            create_relationship_indexes(write);
         }
     }
 }
@@ -144,6 +278,8 @@ proptest! {
             let mut write = graph.write().unwrap();
             let names = Names {
                 label: write.intern_token("Doc").unwrap(),
+                link: write.intern_token("LINK").unwrap(),
+                other: write.intern_token("OTHER").unwrap(),
                 text: write.intern_token("text").unwrap(),
                 tags: write.intern_token("tags").unwrap(),
                 at: write.intern_token("at").unwrap(),
@@ -155,6 +291,7 @@ proptest! {
             let mut write = graph.write().unwrap();
             if position == indexed_after {
                 create_indexes(&mut write);
+                create_relationship_indexes(&mut write);
                 write.commit().unwrap();
                 write = graph.write().unwrap();
             }
@@ -175,7 +312,13 @@ fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
     let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
     let mut write = graph.write().unwrap();
     write
-        .create_vector_index("points", "P", "at", 2, VectorMetric::Euclidean)
+        .create_vector_index(
+            "points",
+            IndexTarget::Label("P"),
+            "at",
+            2,
+            VectorMetric::Euclidean,
+        )
         .unwrap();
     let label = write.intern_token("P").unwrap();
     let at = write.intern_token("at").unwrap();
@@ -202,10 +345,16 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
         let mut write = graph.write().unwrap();
         write
-            .create_keyword_index("words", "Doc", &["text"])
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
             .unwrap();
         write
-            .create_vector_index("points", "Doc", "at", 1, VectorMetric::DotProduct)
+            .create_vector_index(
+                "points",
+                IndexTarget::Label("Doc"),
+                "at",
+                1,
+                VectorMetric::DotProduct,
+            )
             .unwrap();
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
@@ -230,14 +379,14 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         let index = Index {
             id: 0,
             definition: IndexDefinition {
-                label,
+                target: Target::Label(label),
                 kind: IndexKind::Keyword {
                     properties: vec![text],
                 },
             },
         };
         let old_output = Entry::Keyword(Document::from([("stale".to_owned(), vec![0, 1, 2])]));
-        for (table, key, value) in index.rows(NodeId(0), &old_output) {
+        for (table, key, value) in index.rows(0, &old_output) {
             stale.put(table, &key, &value).unwrap();
         }
         stale
@@ -256,12 +405,96 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
     let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
-    assert_eq!(read.keyword_search("words", "stale", 10).unwrap(), vec![]);
     assert_eq!(
-        read.keyword_search("words", "current", 10).unwrap().len(),
+        read.keyword_search("words", ElementKind::Node, "stale", 10)
+            .unwrap(),
+        vec![]
+    );
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "current", 10)
+            .unwrap()
+            .len(),
         1
     );
-    assert_eq!(read.vector_search("points", &[1.0], 10).unwrap().len(), 1);
+    assert_eq!(
+        read.vector_search("points", ElementKind::Node, &[1.0], 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+fn store_label_only_definitions(write: &mut impl WriteTransaction) {
+    for (name, value) in write.scan_prefix(Table::Indexes, &[]).unwrap() {
+        assert_eq!(value[4], TARGET_LABEL);
+        let label_only = [&value[..4], &value[5..]].concat();
+        write.put(Table::Indexes, &name, &label_only).unwrap();
+    }
+}
+
+#[test]
+fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("four.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        let at = write.intern_token("at").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String("graph store".to_owned())),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Integer(1),
+                            PropertyValue::Integer(0),
+                        ]),
+                    ),
+                ]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_label_only_definitions(&mut previous);
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &4u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+        assert!(graph.read().unwrap().indexes().is_err());
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    let targets: Vec<Target> = read
+        .indexes()
+        .unwrap()
+        .into_iter()
+        .map(|(_, index)| index.definition.target)
+        .collect();
+    let label = read.lookup_token::<Label>("Doc").unwrap().unwrap();
+    assert_eq!(targets, [Target::Label(label), Target::Label(label)]);
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "graph", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read.vector_search("points", ElementKind::Node, &[1.0, 1.0], 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -272,7 +505,7 @@ fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
         let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
         let mut write = graph.write().unwrap();
         write
-            .create_keyword_index("words", "Doc", &["text"])
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
             .unwrap();
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
@@ -288,6 +521,7 @@ fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
         write.commit().unwrap();
 
         let mut previous = graph.storage.begin_write().unwrap();
+        store_label_only_definitions(&mut previous);
         for (key, value) in previous.scan_prefix(Table::KeywordPostings, &[]).unwrap() {
             previous
                 .put(Table::KeywordPostings, &key, &value[..8])
@@ -307,7 +541,7 @@ fn opening_a_database_of_the_previous_format_rebuilds_its_keyword_indexes() {
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     assert_eq!(
-        read.keyword_search("words", "\"graph store\"", 10)
+        read.keyword_search("words", ElementKind::Node, "\"graph store\"", 10)
             .unwrap()
             .len(),
         1
@@ -330,23 +564,54 @@ fn opening_records_the_current_tokenizer() {
 fn a_definition_reads_back_as_it_was_written() {
     for definition in [
         IndexDefinition {
-            label: Token::new(3),
+            target: Target::Label(Token::new(3)),
             kind: IndexKind::Keyword {
                 properties: vec![Token::new(1), Token::new(4)],
             },
         },
         IndexDefinition {
-            label: Token::new(0),
+            target: Target::Label(Token::new(0)),
             kind: IndexKind::Vector {
                 property: Token::new(9),
                 dimension: 384,
                 metric: VectorMetric::DotProduct,
             },
         },
+        IndexDefinition {
+            target: Target::RelationshipType(Token::new(3)),
+            kind: IndexKind::Keyword {
+                properties: vec![Token::new(2)],
+            },
+        },
+        IndexDefinition {
+            target: Target::RelationshipType(Token::new(5)),
+            kind: IndexKind::Vector {
+                property: Token::new(1),
+                dimension: 2,
+                metric: VectorMetric::Euclidean,
+            },
+        },
     ] {
         let index = Index { id: 7, definition };
         assert_eq!(Index::decode(&index.encode()).unwrap(), index);
     }
+    let over_label = Index {
+        id: 7,
+        definition: IndexDefinition {
+            target: Target::Label(Token::new(3)),
+            kind: IndexKind::Keyword {
+                properties: vec![Token::new(2)],
+            },
+        },
+    };
+    let over_type = Index {
+        id: 7,
+        definition: IndexDefinition {
+            target: Target::RelationshipType(Token::new(3)),
+            ..over_label.definition.clone()
+        },
+    };
+    assert_ne!(over_label.encode(), over_type.encode());
 }
 
 #[test]

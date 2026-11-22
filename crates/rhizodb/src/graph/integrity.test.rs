@@ -1,6 +1,7 @@
 use super::super::records::Properties;
 use super::*;
 use crate::graph::Graph;
+use crate::graph::IndexTarget;
 use crate::graph::Token;
 use crate::graph::VectorMetric;
 use crate::storage::Storage;
@@ -654,10 +655,16 @@ fn indexed_graph() -> Graph<RedbStorage> {
     let graph = healthy_graph();
     let mut write = graph.write().unwrap();
     write
-        .create_keyword_index("names", "Person", &["name"])
+        .create_keyword_index("names", IndexTarget::Label("Person"), &["name"])
         .unwrap();
     write
-        .create_vector_index("points", "Person", "at", 2, VectorMetric::Euclidean)
+        .create_vector_index(
+            "points",
+            IndexTarget::Label("Person"),
+            "at",
+            2,
+            VectorMetric::Euclidean,
+        )
         .unwrap();
     write
         .set_node_property(
@@ -715,7 +722,7 @@ fn an_indexed_graph_after_edits_passes() {
 
 #[test]
 fn a_missing_posting_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "alice", ALICE);
+    let key = keys::posting_key(NAMES_INDEX, "alice", ALICE.0);
     assert_index_damage_caught(
         |write| write.delete(Table::KeywordPostings, &key).unwrap(),
         IntegrityViolation::MissingIndexEntry {
@@ -727,7 +734,7 @@ fn a_missing_posting_is_caught() {
 
 #[test]
 fn a_posting_for_a_term_the_node_lacks_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "zed", ALICE);
+    let key = keys::posting_key(NAMES_INDEX, "zed", ALICE.0);
     assert_index_damage_caught(
         |write| {
             write
@@ -743,7 +750,7 @@ fn a_posting_for_a_term_the_node_lacks_is_caught() {
 
 #[test]
 fn a_posting_with_the_wrong_positions_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "bobson", BOB);
+    let key = keys::posting_key(NAMES_INDEX, "bobson", BOB.0);
     let mut moved = 1u32.to_be_bytes().to_vec();
     moved.extend_from_slice(&2u32.to_be_bytes());
     moved.push(5);
@@ -780,7 +787,7 @@ fn keyword_totals_that_disagree_with_the_documents_are_caught() {
 
 #[test]
 fn a_vector_that_differs_from_the_property_is_caught() {
-    let key = keys::index_entry_key(POINTS_INDEX, ALICE).to_vec();
+    let key = keys::index_entry_key(POINTS_INDEX, ALICE.0).to_vec();
     assert_index_damage_caught(
         |write| {
             write.put(Table::Vectors, &key, &[0; 16]).unwrap();
@@ -794,7 +801,7 @@ fn a_vector_that_differs_from_the_property_is_caught() {
 
 #[test]
 fn an_entry_of_an_unknown_index_is_caught() {
-    let key = keys::index_entry_key(7, BOB).to_vec();
+    let key = keys::index_entry_key(7, BOB.0).to_vec();
     assert_index_damage_caught(
         |write| write.put(Table::Vectors, &key, &[0; 16]).unwrap(),
         IntegrityViolation::UnexpectedIndexEntry {
@@ -842,5 +849,164 @@ fn an_index_counter_behind_the_indexes_is_caught() {
             counter: Counter::IndexId,
             highest: u64::from(POINTS_INDEX),
         },
+    );
+}
+
+const FRIENDSHIP_NOTES_INDEX: u32 = 0;
+
+fn relationship_indexed_graph() -> Graph<RedbStorage> {
+    let graph = healthy_graph();
+    let mut write = graph.write().unwrap();
+    write
+        .create_keyword_index(
+            "friendship notes",
+            IndexTarget::RelationshipType("KNOWS"),
+            &["name"],
+        )
+        .unwrap();
+    write
+        .set_relationship_property(
+            FRIENDSHIP,
+            Token::new(NAME),
+            PropertyValue::String("old friends".to_owned()),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    graph
+}
+
+#[test]
+fn a_graph_with_a_relationship_index_after_edits_and_deletes_passes() {
+    let graph = relationship_indexed_graph();
+    assert_eq!(violations_of(&graph), vec![]);
+    let mut write = graph.write().unwrap();
+    write
+        .set_relationship_property(
+            LOOP,
+            Token::new(NAME),
+            PropertyValue::String("a loop".to_owned()),
+        )
+        .unwrap();
+    write
+        .remove_relationship_property(FRIENDSHIP, Token::new(NAME))
+        .unwrap();
+    write.commit().unwrap();
+    assert_eq!(violations_of(&graph), vec![]);
+
+    let mut write = graph.write().unwrap();
+    write.delete_relationship(LOOP).unwrap();
+    write.delete_node(CAROL).unwrap();
+    write.commit().unwrap();
+    assert_eq!(violations_of(&graph), vec![]);
+}
+
+#[test]
+fn a_missing_relationship_posting_is_caught() {
+    let graph = relationship_indexed_graph();
+    assert_eq!(violations_of(&graph), vec![], "graph must start healthy");
+    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
+    corrupt(&graph, |write| {
+        write.delete(Table::KeywordPostings, &key).unwrap();
+    });
+    assert!(
+        violations_of(&graph).contains(&IntegrityViolation::MissingIndexEntry {
+            table: Table::KeywordPostings,
+            key,
+        })
+    );
+}
+
+#[test]
+fn a_relationship_index_entry_for_a_relationship_with_nothing_to_index_is_caught() {
+    let graph = relationship_indexed_graph();
+    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", LOOP.0);
+    corrupt(&graph, |write| {
+        let stored = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
+        let value = write.get(Table::KeywordPostings, &stored).unwrap().unwrap();
+        write.put(Table::KeywordPostings, &key, &value).unwrap();
+    });
+    assert!(
+        violations_of(&graph).contains(&IntegrityViolation::UnexpectedIndexEntry {
+            table: Table::KeywordPostings,
+            key,
+        })
+    );
+}
+
+#[test]
+fn an_index_over_an_unnamed_relationship_type_is_caught() {
+    let graph = healthy_graph();
+    let mut write = graph.write().unwrap();
+    write
+        .create_vector_index(
+            "likes",
+            IndexTarget::RelationshipType("LIKES"),
+            "at",
+            2,
+            VectorMetric::Cosine,
+        )
+        .unwrap();
+    write.commit().unwrap();
+    assert_eq!(violations_of(&graph), vec![]);
+    corrupt(&graph, |write| {
+        remove_token(write, RelationshipType::TAG, 1, "LIKES");
+    });
+    assert!(
+        violations_of(&graph).contains(&IntegrityViolation::UnnamedToken {
+            tag: RelationshipType::TAG,
+            id: 1,
+        })
+    );
+}
+
+#[test]
+fn relationship_indexes_stay_consistent_through_every_query_that_writes_relationships() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .create_keyword_index("notes", IndexTarget::RelationshipType("R"), &["note"])
+        .unwrap();
+    write
+        .create_vector_index(
+            "points",
+            IndexTarget::RelationshipType("R"),
+            "at",
+            2,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    write.commit().unwrap();
+    for query in [
+        "CREATE (:A {k: 1})-[:R {note: 'first link', at: [1, 2]}]->(:B)",
+        "CREATE (:A {k: 2})-[:S {note: 'other type', at: [1, 2]}]->(:B)",
+        "MATCH (a:A {k: 1}), (b:B) MERGE (a)-[r:R {note: 'merged link'}]->(b) \
+         ON CREATE SET r.at = [3, 4]",
+        "MATCH (a:A {k: 1}), (b:B) MERGE (a)-[r:R {note: 'merged link'}]->(b) \
+         ON MATCH SET r.note = 'matched link'",
+        "MERGE (:C)-[:R {note: 'whole pattern'}]->(:D)",
+        "MATCH ()-[r:R]->() SET r += {extra: 'x'}",
+        "MATCH ()-[r:R {note: 'first link'}]->() SET r = {note: 'replaced', at: [0, 1]}",
+        "MATCH ()-[r:R]->() WHERE r.note = 'replaced' REMOVE r.at",
+        "MATCH ()-[r:R]->() WHERE r.note = 'replaced' SET r.note = null",
+        "MATCH (c:C) DETACH DELETE c",
+        "MATCH ()-[r:R]->() WHERE r.note = 'matched link' DELETE r",
+        "MATCH (a:A) DETACH DELETE a",
+    ] {
+        run_query(&graph, query).unwrap();
+        assert_eq!(violations_of(&graph), vec![], "{query}");
+    }
+    assert_eq!(count(&graph, "MATCH ()-[r:R]->() RETURN r"), 0);
+
+    run_query(&graph, "CREATE (:A)-[:R {note: 'kept'}]->(:B)").unwrap();
+    let refused = run_query(
+        &graph,
+        "MATCH (a:A)-[r:R]->() SET r.note = 'changed' DELETE a",
+    )
+    .unwrap_err();
+    assert_eq!(refused.kind(), crate::error::ErrorKind::DeleteConnectedNode);
+    assert_eq!(violations_of(&graph), vec![]);
+    assert_eq!(
+        count(&graph, "MATCH ()-[r:R]->() WHERE r.note = 'kept' RETURN r"),
+        1
     );
 }
