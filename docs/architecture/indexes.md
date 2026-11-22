@@ -36,7 +36,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Such a run starts at a letter, and digits stay words of their own.
 - A query run of such clusters looks for its pairs, or for its one cluster when it has one.
 - No text is split with a word dictionary.
-- Text between double quotes in a keyword query is a phrase, and an unclosed quote runs to the end of the text.
+- Text between two `"` characters in a keyword query is a phrase, and an unclosed quote runs to the end of the text.
 - A phrase matches a node that holds its terms at the same distances from one another as in the query, inside one string value.
 - A word directly followed by `*` outside a phrase is a prefix, which matches every term that starts with it.
 - A `*` after a run of Hangul, Han, kana, or another paired script changes nothing.

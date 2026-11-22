@@ -86,16 +86,17 @@ impl Database {
     /// Creates the keyword index `name` over the string properties `properties` of every node
     /// labelled `label`, and fills it from the nodes already there, in one write transaction.
     /// Text is put in Unicode normalization form NFKC, split into words at Unicode word
-    /// boundaries, and lowercased, so composed and decomposed accents, ligatures, and full-width
-    /// letters match their plain forms. Hangul, Han, kana, and scripts written without spaces
-    /// between words, such as Thai, are indexed as overlapping pairs of grapheme clusters, so a
-    /// query finds a word inside a longer run. A property that holds a list of strings is
-    /// indexed string by string. Search it with
-    /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, which matches a node
-    /// that holds any term of `text`. Text between double quotes, as in `"new york" pizza`, is a
-    /// phrase, which matches only its terms in order and next to each other inside one string.
-    /// A word directly followed by `*` outside quotes, as in `graph*`, matches every term that
-    /// starts with it. There is no fuzzy matching.
+    /// boundaries, and lowercased, so a composed accent matches its decomposed form, and a
+    /// ligature or a full-width letter matches its plain form. Hangul, Han, kana, and scripts
+    /// written without spaces between words, such as Thai, are indexed as overlapping pairs of
+    /// grapheme clusters, so a query finds a word inside a longer run. A property that holds a
+    /// list of strings is indexed string by string.
+    ///
+    /// Search it with `CALL db.index.keyword.query(name, text, limit) YIELD node, score`, which
+    /// matches a node that holds any term of `text`, ranked by BM25. Text between two `"`, as in
+    /// `"new york" pizza`, is a phrase, which matches only its terms in order and next to each
+    /// other inside one string. A word directly followed by `*` outside quotes, as in `graph*`,
+    /// matches every term that starts with it. There is no fuzzy matching.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
