@@ -42,7 +42,12 @@ GQL is the reference language, but the only public conformance suite is the open
 - Temporal values convert to strings in the ISO 8601 forms the TCK expects.
 - A temporal function reads back every string it produces.
 - A fractional duration component carries into the next smaller units, with a month of 30.436875 days.
-- The carry is exact, and only the nanoseconds are truncated.
+- The carry is exact and only the nanoseconds are truncated, except where one of the limits below first truncates an amount toward zero.
+- A duration string amount keeps its first 30 significant digits.
+- A float that multiplies or divides a duration counts as the shortest decimal that reads back as it.
+- A duration multiplied by a number keeps 24 decimal places of each unit.
+- A duration divided by a number above 10^24 keeps 24 decimal places of each unit, and is the zero duration when the number is above 10^36.
+- Any other product or quotient that fits in the duration range is computed exactly.
 - A duration divided by an infinite float is the zero duration, and a duration divided by NaN or multiplied by an infinite float or NaN raises an invalid temporal value error.
 - Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have.
 - A date moves by the whole days in the seconds and nanoseconds of a duration, truncated toward zero.
