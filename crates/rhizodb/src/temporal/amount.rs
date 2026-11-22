@@ -190,7 +190,7 @@ impl Amount {
                 whole = whole.checked_mul(10)?;
                 continue;
             }
-            let scaled = numerator * 10;
+            let scaled = numerator.checked_mul(10)?;
             whole = whole
                 .checked_mul(10)?
                 .checked_add(scaled / self.denominator)?;
