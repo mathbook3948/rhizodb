@@ -6,6 +6,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
 
@@ -124,6 +125,41 @@ pub(crate) struct PatternPart {
     pub(crate) path: Option<Slot>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<Step>,
+    /// Ways to find the start nodes without reading every node of the label, tried in order.
+    pub(crate) seeks: Vec<Seek>,
+}
+
+/// Conditions that every match puts on one value of the start node or of the first
+/// relationship, which an ID lookup or a property index turns into the start nodes to try.
+#[derive(Clone, Debug)]
+pub(crate) struct Seek {
+    pub(crate) element: SeekElement,
+    pub(crate) key: SeekKey,
+    /// Each holds for every match, and none reads a variable that the pattern part or a later
+    /// one binds.
+    pub(crate) tests: Vec<SeekTest>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeekElement {
+    Start,
+    FirstRelationship,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SeekKey {
+    Id,
+    Property(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SeekTest {
+    /// The value equals the expression.
+    Equal(Expr),
+    /// The value equals an item of the list the expression gives.
+    In(Expr),
+    /// The value compares to the expression as the bound says.
+    Compare(Bound, Expr),
 }
 
 #[derive(Clone, Debug)]

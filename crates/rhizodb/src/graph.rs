@@ -21,6 +21,7 @@ pub(crate) mod integrity;
 mod keys;
 mod records;
 mod tokenize;
+mod value_key;
 
 pub(crate) use ids::Label;
 pub use ids::NodeId;
@@ -31,15 +32,20 @@ pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
 pub use index::IndexTarget;
+pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use records::EncodedNode;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
+pub(crate) use value_key::Bound;
+pub(crate) use value_key::Compared;
+pub(crate) use value_key::KeyRange;
+pub(crate) use value_key::compared;
 
 use index::Element;
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 6;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;

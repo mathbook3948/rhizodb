@@ -173,6 +173,51 @@ impl Database {
         Ok(tx.commit()?)
     }
 
+    /// Creates the property index `name` over the property `property` of every node or
+    /// relationship that `target` covers, and fills it from the ones already there, in one
+    /// write transaction. A query that looks a property up by value reads the elements the
+    /// index holds for that value instead of every element of the label or type, when it names
+    /// the property in the pattern, as in `MATCH (p:Person {id: $id})`, or compares it in the
+    /// `WHERE` of the `MATCH` with `=`, `IN`, `<`, `<=`, `>`, or `>=`, as in
+    /// `MATCH (p:Person) WHERE p.age >= 18 AND p.age < 30`, against a value that the pattern
+    /// does not bind. A pattern that starts at a node of the label, or at a relationship of the
+    /// type, uses it.
+    ///
+    /// Values are found under the same rules as `=` and `<`: an integer finds the float of the
+    /// same number, a string sorts by its bytes, and a time or datetime compares by its instant.
+    /// NaN, which equals nothing, is not indexed.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::IndexTarget;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.create_property_index("person_id", IndexTarget::Label("Person"), "id")?;
+    /// db.execute("INSERT (:Person {id: 1, name: 'Ada'}), (:Person {id: 2.0, name: 'Grace'})", &Parameters::new())?;
+    /// let parameters = Parameters::from([("id".to_owned(), Value::Integer(2))]);
+    /// let result = db.execute("MATCH (p:Person {id: $id}) RETURN p.name", &parameters)?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    ///
+    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
+    /// another definition holds the name, and with
+    /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
+    /// empty name.
+    pub fn create_property_index(
+        &self,
+        name: &str,
+        target: IndexTarget<'_>,
+        property: &str,
+    ) -> Result<(), Error> {
+        let mut tx = self.graph.write()?;
+        tx.create_property_index(name, target, property)?;
+        Ok(tx.commit()?)
+    }
+
     /// Drops the index `name` and all its entries in one write transaction. Returns whether an
     /// index of that name existed.
     pub fn drop_index(&self, name: &str) -> Result<bool, Error> {

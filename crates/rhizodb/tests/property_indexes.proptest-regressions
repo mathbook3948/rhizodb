@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc aaedf0614de10d94d1f7d4c8105d09fc62ae37f535758d0562225f9d15d1014b # shrinks to writes = [Node { labelled: false, value: Integer(0) }], lookups = [(11, Float(-0.0), Integer(0))]

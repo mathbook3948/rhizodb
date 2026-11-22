@@ -38,6 +38,7 @@ use super::plan::SetAction;
 use super::plan::Slot;
 use super::plan::Step;
 use super::plan::UpdateClause;
+use super::seek;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
@@ -358,12 +359,13 @@ impl Binder<'_> {
                 }
                 ast::Clause::Merge(merge) => {
                     let mut introduced = Vec::new();
-                    let pattern = self.pattern_part(
+                    let mut pattern = self.pattern_part(
                         &merge.pattern,
                         &mut scope,
                         PatternUse::Merge,
                         &mut introduced,
                     )?;
+                    pattern.seeks = seek::derive(&pattern, None, &introduced);
                     let on_create = self.set_items(&merge.on_create, &scope)?;
                     let on_match = self.set_items(&merge.on_match, &scope)?;
                     clauses.push(Clause::Update(UpdateClause::Merge(Box::new(MergeClause {
@@ -611,7 +613,9 @@ impl Binder<'_> {
     fn match_clause(&mut self, found: &ast::Match, scope: &mut Scope) -> Result<ReadClause, Error> {
         let mut introduced = Vec::new();
         let mut patterns = Vec::new();
+        let mut firsts = Vec::new();
         for part in &found.patterns {
+            firsts.push(introduced.len());
             patterns.push(self.pattern_part(part, scope, PatternUse::Match, &mut introduced)?);
         }
         let filter = found
@@ -619,6 +623,9 @@ impl Binder<'_> {
             .as_ref()
             .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
+        for (part, first) in patterns.iter_mut().zip(firsts) {
+            part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
+        }
         Ok(ReadClause::Match(MatchClause {
             optional: found.optional,
             patterns,
@@ -674,7 +681,12 @@ impl Binder<'_> {
             }
             None => None,
         };
-        Ok(PatternPart { path, start, steps })
+        Ok(PatternPart {
+            path,
+            start,
+            steps,
+            seeks: Vec::new(),
+        })
     }
 
     fn pattern_properties(

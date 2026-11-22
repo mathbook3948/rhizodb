@@ -9,6 +9,7 @@ mod functions;
 mod matcher;
 mod plan;
 mod regex;
+mod seek;
 mod shape;
 mod taint;
 mod temporals;

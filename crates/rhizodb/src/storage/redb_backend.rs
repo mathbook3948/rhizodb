@@ -111,6 +111,22 @@ fn collect_prefix<T: ReadableTable<&'static [u8], &'static [u8]>>(
     Ok(entries)
 }
 
+fn collect_range<T: ReadableTable<&'static [u8], &'static [u8]>>(
+    table: &T,
+    start: &[u8],
+    end: &[u8],
+) -> Result<Vec<Entry>, StorageError> {
+    let mut entries = Vec::new();
+    if start >= end {
+        return Ok(entries);
+    }
+    for item in table.range(start..end).map_err(StorageError::new)? {
+        let (key, value) = item.map_err(StorageError::new)?;
+        entries.push((key.value().to_vec(), value.value().to_vec()));
+    }
+    Ok(entries)
+}
+
 impl ReadTransaction for RedbRead {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let value = self.table(table)?.get(key).map_err(StorageError::new)?;
@@ -119,6 +135,15 @@ impl ReadTransaction for RedbRead {
 
     fn scan_prefix(&self, table: Table, prefix: &[u8]) -> Result<Vec<Entry>, StorageError> {
         collect_prefix(self.table(table)?, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Entry>, StorageError> {
+        collect_range(self.table(table)?, start, end)
     }
 }
 
@@ -138,6 +163,19 @@ impl ReadTransaction for RedbWrite {
             .open_table(definition(table))
             .map_err(StorageError::new)?;
         collect_prefix(&table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Entry>, StorageError> {
+        let table = self
+            .transaction
+            .open_table(definition(table))
+            .map_err(StorageError::new)?;
+        collect_range(&table, start, end)
     }
 }
 

@@ -150,3 +150,29 @@ pub(crate) fn parse_posting_element(key: &[u8]) -> Result<u64, DecodeError> {
     reader.finish()?;
     Ok(element)
 }
+
+/// The key of a property index entry: the index, the value's key, and the element, so the
+/// entries of one value, or of a range of values, are one run of keys.
+pub(crate) fn property_entry_key(index: u32, value: &[u8], element: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + value.len() + 8);
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(value);
+    key.extend_from_slice(&element.to_be_bytes());
+    key
+}
+
+/// The bound of a run of property index entries whose value keys start at `value`.
+pub(crate) fn property_entry_bound(index: u32, value: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + value.len());
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(value);
+    key
+}
+
+pub(crate) fn parse_property_entry_element(key: &[u8]) -> Result<u64, DecodeError> {
+    let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
+    let mut reader = Reader::new(&key[start..]);
+    let element = reader.u64()?;
+    reader.finish()?;
+    Ok(element)
+}

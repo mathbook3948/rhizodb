@@ -19,10 +19,11 @@ pub(crate) enum Table {
     KeywordDocuments,
     KeywordTotals,
     Vectors,
+    PropertyEntries,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 13] = [
+    pub(crate) const ALL: [Table; 14] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -36,6 +37,7 @@ impl Table {
         Table::KeywordDocuments,
         Table::KeywordTotals,
         Table::Vectors,
+        Table::PropertyEntries,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Table {
             Table::KeywordDocuments => "keyword_documents",
             Table::KeywordTotals => "keyword_totals",
             Table::Vectors => "vectors",
+            Table::PropertyEntries => "property_entries",
         }
     }
 }
@@ -105,6 +108,14 @@ pub(crate) trait ReadTransaction {
 
     /// Every entry whose key starts with `prefix`, in ascending key order. An empty prefix scans the table.
     fn scan_prefix(&self, table: Table, prefix: &[u8]) -> Result<Vec<Entry>, StorageError>;
+
+    /// Every entry whose key is at least `start` and below `end`, in ascending key order.
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Entry>, StorageError>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

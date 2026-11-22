@@ -140,6 +140,18 @@ fn create_relationship_indexes(write: &mut GraphTx<impl WriteTransaction>) {
         .unwrap();
 }
 
+fn create_property_indexes(write: &mut GraphTx<impl WriteTransaction>) {
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write
+        .create_property_index("doc at", IndexTarget::Label("Doc"), "at")
+        .unwrap();
+    write
+        .create_property_index("link text", IndexTarget::RelationshipType("LINK"), "text")
+        .unwrap();
+}
+
 fn relationship_ids(write: &GraphTx<impl ReadTransaction>) -> Vec<RelationshipId> {
     let mut ids: Vec<RelationshipId> = write
         .node_ids()
@@ -262,11 +274,20 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             }
         }
         Op::Rebuild => {
-            for name in ["words", "points", "link words", "link points"] {
+            for name in [
+                "words",
+                "points",
+                "link words",
+                "link points",
+                "doc text",
+                "doc at",
+                "link text",
+            ] {
                 write.drop_index(name).unwrap();
             }
             create_indexes(write);
             create_relationship_indexes(write);
+            create_property_indexes(write);
         }
     }
 }
@@ -298,6 +319,7 @@ proptest! {
             if position == indexed_after {
                 create_indexes(&mut write);
                 create_relationship_indexes(&mut write);
+                create_property_indexes(&mut write);
                 write.commit().unwrap();
                 write = graph.write().unwrap();
             }
@@ -503,6 +525,58 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     );
 }
 
+#[test]
+fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("five.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(&NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(text, PropertyValue::String("five".to_owned()))]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &5u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let stored = graph
+        .storage
+        .begin_read()
+        .unwrap()
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(6u32.to_be_bytes().to_vec()));
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    let label = read.lookup_token::<Label>("Doc").unwrap().unwrap();
+    let text = read.lookup_token::<PropertyKey>("text").unwrap().unwrap();
+    let index = read
+        .property_index(Target::Label(label), text)
+        .unwrap()
+        .unwrap();
+    let five = KeyRange::equal_to(&PropertyValue::String("five".to_owned())).unwrap();
+    assert_eq!(read.property_seek(index, &[five]).unwrap().len(), 1);
+}
+
 #[derive(Debug)]
 struct CountingStorage {
     inner: RedbStorage,
@@ -549,6 +623,15 @@ impl ReadTransaction for CountingWrite {
         prefix: &[u8],
     ) -> Result<Vec<crate::storage::Entry>, StorageError> {
         self.inner.scan_prefix(table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
     }
 }
 

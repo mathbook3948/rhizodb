@@ -145,20 +145,33 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
-    fn start_candidates(&self, pattern: &NodePattern, row: &Row) -> Result<Vec<NodeId>, Error> {
+    fn start_candidates(
+        &self,
+        part: &PatternPart,
+        row: &Row,
+    ) -> Result<(Vec<NodeId>, bool), Error> {
+        let pattern = &part.start;
         if pattern.bound {
-            return Ok(match row.get(pattern.slot) {
-                Some(Datum::Node(id)) => vec![*id],
-                _ => Vec::new(),
-            });
+            return Ok((
+                match row.get(pattern.slot) {
+                    Some(Datum::Node(id)) => vec![*id],
+                    _ => Vec::new(),
+                },
+                false,
+            ));
         }
-        match pattern.labels.as_ref().and_then(LabelExpr::required) {
+        let labels_known = label_scan_decides(pattern);
+        if let Some(sought) = self.seek_start(part, row)? {
+            return Ok((sought.nodes, labels_known && sought.labelled));
+        }
+        let nodes = match pattern.labels.as_ref().and_then(LabelExpr::required) {
             Some(label) => match self.tx.lookup_token::<Label>(&label.0)? {
-                Some(token) => Ok(self.tx.node_ids_with_label(token)?),
-                None => Ok(Vec::new()),
+                Some(token) => self.tx.node_ids_with_label(token)?,
+                None => Vec::new(),
             },
-            None => Ok(self.tx.node_ids()?),
-        }
+            None => self.tx.node_ids()?,
+        };
+        Ok((nodes, labels_known))
     }
 
     fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
@@ -210,8 +223,8 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = patterns.get(index) else {
             return emit(row);
         };
-        let labels_known = label_scan_decides(&part.start);
-        for id in self.env.start_candidates(&part.start, row)? {
+        let (candidates, labels_known) = self.env.start_candidates(part, row)?;
+        for id in candidates {
             if !self.env.node_matches(id, &part.start, labels_known, row)? {
                 continue;
             }
