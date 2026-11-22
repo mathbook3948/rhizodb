@@ -7,7 +7,7 @@ use support::*;
 
 const MATCH: &str = "MATCH p = (a)-[r:T]->(b)";
 
-const FUNCTIONS: [(&str, &[&str]); 53] = [
+const FUNCTIONS: [(&str, &[&str]); 85] = [
     ("id", &["a"]),
     ("labels", &["a"]),
     ("type", &["r"]),
@@ -61,6 +61,77 @@ const FUNCTIONS: [(&str, &[&str]); 53] = [
     ("left", &["'abc'", "1"]),
     ("right", &["'abc'", "1"]),
     ("exists", &["1"]),
+    ("date", &["'2015-07-21'"]),
+    ("localtime", &["'12:00'"]),
+    ("time", &["'12:00'"]),
+    ("localdatetime", &["'2015-07-21T12:00'"]),
+    ("datetime", &["'2015-07-21T12:00'"]),
+    ("date.transaction", &["'UTC'"]),
+    ("date.statement", &["'UTC'"]),
+    ("date.realtime", &["'UTC'"]),
+    ("localtime.transaction", &["'UTC'"]),
+    ("localtime.statement", &["'UTC'"]),
+    ("localtime.realtime", &["'UTC'"]),
+    ("time.transaction", &["'UTC'"]),
+    ("time.statement", &["'UTC'"]),
+    ("time.realtime", &["'UTC'"]),
+    ("localdatetime.transaction", &["'UTC'"]),
+    ("localdatetime.statement", &["'UTC'"]),
+    ("localdatetime.realtime", &["'UTC'"]),
+    ("datetime.transaction", &["'UTC'"]),
+    ("datetime.statement", &["'UTC'"]),
+    ("datetime.realtime", &["'UTC'"]),
+    (
+        "date.truncate",
+        &["'day'", "datetime('2015-07-21T12:00')", "{}"],
+    ),
+    (
+        "localtime.truncate",
+        &["'day'", "datetime('2015-07-21T12:00')", "{}"],
+    ),
+    (
+        "time.truncate",
+        &["'day'", "datetime('2015-07-21T12:00')", "{}"],
+    ),
+    (
+        "localdatetime.truncate",
+        &["'day'", "datetime('2015-07-21T12:00')", "{}"],
+    ),
+    (
+        "datetime.truncate",
+        &["'day'", "datetime('2015-07-21T12:00')", "{}"],
+    ),
+    ("datetime.fromepoch", &["1", "1"]),
+    ("datetime.fromepochmillis", &["1"]),
+    ("duration", &["'P1D'"]),
+    (
+        "duration.between",
+        &[
+            "datetime('2015-07-21T12:00')",
+            "datetime('2015-07-21T12:00')",
+        ],
+    ),
+    (
+        "duration.inMonths",
+        &[
+            "datetime('2015-07-21T12:00')",
+            "datetime('2015-07-21T12:00')",
+        ],
+    ),
+    (
+        "duration.inDays",
+        &[
+            "datetime('2015-07-21T12:00')",
+            "datetime('2015-07-21T12:00')",
+        ],
+    ),
+    (
+        "duration.inSeconds",
+        &[
+            "datetime('2015-07-21T12:00')",
+            "datetime('2015-07-21T12:00')",
+        ],
+    ),
 ];
 
 const AGGREGATES: [(&str, &[&str]); 10] = [

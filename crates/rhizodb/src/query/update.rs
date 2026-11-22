@@ -16,6 +16,7 @@ use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Token;
 use crate::storage::WriteTransaction;
+use crate::temporal::DateTime;
 
 use super::datum::Datum;
 use super::datum::PathIds;
@@ -45,6 +46,7 @@ pub(crate) struct Graveyard {
 pub(crate) fn apply<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     slots: usize,
+    now: &DateTime,
     graveyard: &mut Graveyard,
     clause: &UpdateClause,
     rows: Vec<Row>,
@@ -52,6 +54,7 @@ pub(crate) fn apply<W: WriteTransaction>(
     let mut writer = Writer {
         tx,
         slots,
+        now,
         graveyard,
     };
     match clause {
@@ -99,6 +102,7 @@ pub(crate) fn apply<W: WriteTransaction>(
 struct Writer<'a, W> {
     tx: &'a mut GraphTx<W>,
     slots: usize,
+    now: &'a DateTime,
     graveyard: &'a mut Graveyard,
 }
 
@@ -107,6 +111,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         Env {
             tx: &*self.tx,
             slots: self.slots,
+            now: self.now,
         }
     }
 

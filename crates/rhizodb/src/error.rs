@@ -83,6 +83,9 @@ pub enum ErrorKind {
     DivisionByZero,
     /// A numeric argument outside the range the function accepts.
     NumberOutOfRange,
+    /// A temporal value that cannot be built or read: a malformed date or duration string, a
+    /// component out of range, an unknown time zone, or a result past the supported years.
+    InvalidTemporalValue,
     /// A node to delete still has relationships and the delete is not `DETACH`.
     DeleteConnectedNode,
     /// A node or relationship deleted earlier in the query was read.

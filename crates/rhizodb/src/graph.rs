@@ -27,7 +27,8 @@ pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
+const OLDEST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -104,24 +105,27 @@ pub(crate) struct Graph<S> {
 }
 
 impl<S: Storage> Graph<S> {
-    /// Records the format version on first open and rejects a database written in another version.
+    /// Records the format version on first open, upgrades a database written in an older
+    /// version to the current one, and rejects a database written in a newer version.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
             let mut transaction = storage.begin_write()?;
-            match transaction.get(Table::Metadata, keys::FORMAT_VERSION_KEY)? {
-                None => {
+            let found = match transaction.get(Table::Metadata, keys::FORMAT_VERSION_KEY)? {
+                None => None,
+                Some(bytes) => Some(decode_u32(&bytes)?),
+            };
+            match found {
+                Some(FORMAT_VERSION) => {}
+                Some(found) if !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) => {
+                    return Err(GraphError::UnsupportedFormatVersion(found));
+                }
+                _ => {
                     transaction.put(
                         Table::Metadata,
                         keys::FORMAT_VERSION_KEY,
                         &FORMAT_VERSION.to_be_bytes(),
                     )?;
                     transaction.commit()?;
-                }
-                Some(bytes) => {
-                    let found = decode_u32(&bytes)?;
-                    if found != FORMAT_VERSION {
-                        return Err(GraphError::UnsupportedFormatVersion(found));
-                    }
                 }
             }
         }

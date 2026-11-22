@@ -31,6 +31,7 @@ mod graph;
 mod query;
 mod result;
 mod storage;
+mod temporal;
 mod value;
 
 pub use database::Database;
@@ -45,3 +46,10 @@ pub use result::Path;
 pub use result::QueryResult;
 pub use result::Relationship;
 pub use result::Value;
+pub use temporal::Date;
+pub use temporal::DateTime;
+pub use temporal::Duration;
+pub use temporal::LocalDateTime;
+pub use temporal::LocalTime;
+pub use temporal::Temporal;
+pub use temporal::Time;

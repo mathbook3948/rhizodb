@@ -8,6 +8,7 @@ mod functions;
 mod matcher;
 mod plan;
 mod shape;
+mod temporals;
 mod update;
 
 use crate::error::Error;
@@ -16,6 +17,7 @@ use crate::graph::Graph;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::Storage;
+use crate::temporal;
 
 use self::plan::Plan;
 
@@ -27,11 +29,12 @@ pub(crate) fn execute<S: Storage>(
     parameters: &Parameters,
 ) -> Result<QueryResult, Error> {
     let syntax = parse(query)?;
+    let now = temporal::now();
     match bind::bind(&syntax, query, parameters)? {
-        Plan::ReadOnly(program) => exec::run_read(&graph.read()?, &program),
+        Plan::ReadOnly(program) => exec::run_read(&graph.read()?, &program, &now),
         Plan::Updating(program) => {
             let mut tx = graph.write()?;
-            let result = exec::run_write(&mut tx, &program)?;
+            let result = exec::run_write(&mut tx, &program, &now)?;
             tx.commit()?;
             Ok(result)
         }
