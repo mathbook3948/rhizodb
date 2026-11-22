@@ -147,6 +147,20 @@ fn the_clock_functions_read_one_instant_per_query() {
 }
 
 #[test]
+fn a_duration_divided_by_a_float_is_exact() {
+    let db = db();
+    for (query, expected) in [
+        ("RETURN duration('P1D') / 3.0", "PT8H"),
+        ("RETURN duration('P1D') / 3", "PT8H"),
+        ("RETURN duration('PT1S') / 0.3", "PT3.333333333S"),
+        ("RETURN duration('P1M') / -0.5", "P-2M"),
+        ("RETURN duration('PT1S') / 1e-9", "PT277777H46M40S"),
+    ] {
+        assert_eq!(text(&db, query), expected, "{query}");
+    }
+}
+
+#[test]
 fn the_same_instant_at_different_offsets_compares_equal_but_is_not_equal() {
     let db = db();
     for (query, expected) in [

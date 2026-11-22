@@ -33,3 +33,14 @@ fn products_and_quotients_are_exact() {
     assert_eq!(Amount::quotient(-7, 2).truncated(), -3);
     assert_eq!(Amount::product(1, 5e-324).map(Amount::truncated), Some(0));
 }
+
+#[test]
+fn thirds_carry_without_rounding() {
+    let third = |count| Amount::quotient(count, 3);
+    assert_eq!(
+        carry(third(0), third(1), third(0), third(0)),
+        Some((0, 0, 28_800, 0))
+    );
+    assert_eq!(Amount::divided(1, 0.3).map(Amount::truncated), Some(3));
+    assert_eq!(Amount::divided(1, 0.0), None);
+}

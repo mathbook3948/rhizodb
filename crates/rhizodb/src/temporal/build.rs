@@ -760,7 +760,7 @@ pub(crate) fn from_epoch_millis(millis: i64) -> Result<Temporal, TemporalError> 
 
 /// The duration that a map of amounts describes, with fractions carried into smaller units.
 pub(crate) fn duration_from_fields(fields: &[(String, Input)]) -> Result<Duration, TemporalError> {
-    let mut totals = [Amount::default(); 4];
+    let mut totals = [Amount::ZERO; 4];
     for (key, value) in fields {
         let (slot, scale) = match key.to_ascii_lowercase().as_str() {
             "years" => (0, 12),

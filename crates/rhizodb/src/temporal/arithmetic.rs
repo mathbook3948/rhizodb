@@ -110,6 +110,18 @@ pub(crate) fn divided_by_integer(duration: &Duration, divisor: i64) -> Option<Du
     Duration::from_parts(months, days, seconds, nanoseconds)
 }
 
+/// A duration divided by a float other than zero, exactly, with the fractions of months, days,
+/// and seconds carried into the smaller units.
+pub(crate) fn divided_by_float(duration: &Duration, divisor: f64) -> Option<Duration> {
+    let (months, days, seconds, nanoseconds) = carry(
+        Amount::divided(i128::from(duration.months), divisor)?,
+        Amount::divided(i128::from(duration.days), divisor)?,
+        Amount::divided(i128::from(duration.seconds), divisor)?,
+        Amount::divided(i128::from(duration.nanoseconds), divisor)?,
+    )?;
+    Duration::from_parts(months, days, seconds, nanoseconds)
+}
+
 pub(crate) fn plus_months(date: Date, months: i64) -> Option<Date> {
     if months == 0 {
         return Some(date);

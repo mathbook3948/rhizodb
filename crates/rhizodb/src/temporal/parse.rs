@@ -248,7 +248,7 @@ pub(crate) fn duration(text: &str) -> Option<Duration> {
     if time_part.is_some_and(str::is_empty) {
         return None;
     }
-    let mut totals = [Amount::default(); 4];
+    let mut totals = [Amount::ZERO; 4];
     let mut any = false;
     for (part, units) in [
         (

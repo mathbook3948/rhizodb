@@ -205,7 +205,7 @@ pub(crate) fn arithmetic(op: BinaryOp, lhs: &Datum, rhs: &Datum) -> Option<Resul
             Datum::Float(divisor) if *divisor == 0.0 => {
                 return Some(Err(division_by_zero()));
             }
-            Datum::Float(divisor) => arithmetic::times_float(duration, 1.0 / divisor),
+            Datum::Float(divisor) => arithmetic::divided_by_float(duration, *divisor),
             _ => return None,
         }
         .map(Temporal::Duration),
