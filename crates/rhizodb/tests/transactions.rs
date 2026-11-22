@@ -240,3 +240,49 @@ fn a_clock_call_without_arguments_reads_the_statement_clock_inside_a_transaction
         ]]
     );
 }
+
+#[test]
+fn a_read_transaction_does_not_see_names_committed_after_it_began() {
+    let db = db();
+    let before = db.begin_read().unwrap();
+    run(&db, "INSERT (:Fresh {fresh: 1})-[:FRESH]->()");
+    assert_eq!(
+        run(&db, "MATCH (n:Fresh)-[:FRESH]->() RETURN n.fresh"),
+        [vec![int(1)]]
+    );
+    let result = before
+        .execute("MATCH (n:Fresh) RETURN n.fresh", &Parameters::new())
+        .unwrap();
+    assert!(result.rows().is_empty());
+    let result = before
+        .execute("MATCH ()-[r:FRESH]->() RETURN r", &Parameters::new())
+        .unwrap();
+    assert!(result.rows().is_empty());
+}
+
+#[test]
+fn a_name_from_a_rolled_back_write_does_not_find_a_later_name() {
+    let db = db();
+    let mut write = db.begin_write().unwrap();
+    write
+        .execute("INSERT (:Gone {gone: 1})", &Parameters::new())
+        .unwrap();
+    assert_eq!(
+        ints(
+            write
+                .execute("MATCH (n:Gone) RETURN n.gone", &Parameters::new())
+                .unwrap()
+                .rows()
+        ),
+        [1]
+    );
+    write.rollback().unwrap();
+    run(&db, "INSERT (:Kept {kept: 2})");
+    assert!(run(&db, "MATCH (n:Gone) RETURN n").is_empty());
+    assert!(
+        run(&db, "MATCH (n) RETURN n.gone")
+            .iter()
+            .all(|row| row[0] == rhizodb::Value::Null)
+    );
+    assert_eq!(ints(&run(&db, "MATCH (n:Kept) RETURN n.kept")), [2]);
+}

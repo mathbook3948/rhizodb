@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -143,6 +146,31 @@ pub(crate) struct Graph<S> {
     storage: S,
     writer: Arc<Mutex<Option<ThreadId>>>,
     committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    committed_tokens: Arc<CommittedTokens>,
+}
+
+/// The tokens of every name space by name, as committed. A committed token never changes, and
+/// no element of a snapshot taken before a token was committed refers to it.
+#[derive(Debug, Default)]
+pub(crate) struct CommittedTokens {
+    by_name: RwLock<[HashMap<String, u32>; 3]>,
+}
+
+impl CommittedTokens {
+    fn get<K: TokenKind>(&self, name: &str) -> Option<Token<K>> {
+        let by_name = self.by_name.read().unwrap_or_else(PoisonError::into_inner);
+        by_name
+            .get(usize::from(K::TAG))?
+            .get(name)
+            .map(|id| Token::new(*id))
+    }
+
+    fn insert<K: TokenKind>(&self, name: &str, token: Token<K>) {
+        let mut by_name = self.by_name.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(names) = by_name.get_mut(usize::from(K::TAG)) {
+            names.insert(name.to_owned(), token.id());
+        }
+    }
 }
 
 impl<S: Storage> Graph<S> {
@@ -158,6 +186,8 @@ impl<S: Storage> Graph<S> {
                 _writer: None,
                 index_definitions: OnceLock::new(),
                 catalog: None,
+                tokens: Arc::default(),
+                reads_committed_tokens: false,
             };
             let found = match tx
                 .transaction
@@ -194,12 +224,15 @@ impl<S: Storage> Graph<S> {
             _writer: None,
             index_definitions: OnceLock::new(),
             catalog: None,
+            tokens: Arc::default(),
+            reads_committed_tokens: false,
         }
         .index_definitions()?;
         Ok(Self {
             storage,
             writer: Arc::default(),
             committed_index_definitions: Arc::new(Mutex::new(definitions)),
+            committed_tokens: Arc::default(),
         })
     }
 
@@ -211,6 +244,8 @@ impl<S: Storage> Graph<S> {
             _writer: None,
             index_definitions: OnceLock::from(Arc::clone(&catalog)),
             catalog: None,
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: true,
         })
     }
 
@@ -232,6 +267,8 @@ impl<S: Storage> Graph<S> {
                 shared: Arc::clone(&self.committed_index_definitions),
                 changed: false,
             }),
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: false,
         })
     }
 }
@@ -243,6 +280,8 @@ pub(crate) struct GraphTx<T> {
     _writer: Option<WriterClaim>,
     index_definitions: OnceLock<Arc<[Vec<u8>]>>,
     catalog: Option<Catalog>,
+    tokens: Arc<CommittedTokens>,
+    reads_committed_tokens: bool,
 }
 
 #[derive(Debug)]
@@ -396,12 +435,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        if let Some(token) = self.tokens.get(name) {
+            return Ok(Some(token));
+        }
         let bytes = self
             .transaction
             .get(Table::TokenByName, &keys::token_name_key(K::TAG, name))?;
-        Ok(bytes
+        let token = bytes
             .map(|bytes| decode_u32(&bytes).map(Token::new))
-            .transpose()?)
+            .transpose()?;
+        if let Some(token) = token
+            && self.reads_committed_tokens
+        {
+            self.tokens.insert(name, token);
+        }
+        Ok(token)
     }
 
     pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<String, GraphError> {

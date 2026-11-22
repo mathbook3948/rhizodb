@@ -23,7 +23,7 @@ impl RelationshipId {
 }
 
 /// One of the three name spaces interned to tokens. Each has its own token counter.
-pub(crate) trait TokenKind {
+pub(crate) trait TokenKind: Copy {
     const TAG: u8;
 }
 
