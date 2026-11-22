@@ -187,6 +187,27 @@ fn dividing_by_a_tiny_float_gives_any_result_that_fits() {
 }
 
 #[test]
+fn duration_amounts_with_many_digits_keep_the_ones_that_matter() {
+    let db = db();
+    for (query, expected) in [
+        (
+            "RETURN duration('PT0.12345678901234567890123456789012345678901S')",
+            "PT0.123456789S",
+        ),
+        (
+            "RETURN duration('PT0.12345678901234567890123456789012345678H')",
+            "PT7M24.444440444S",
+        ),
+        (
+            "RETURN duration('PT123456789.0123456789012345678901234567890123S')",
+            "PT34293H33M9.012345678S",
+        ),
+    ] {
+        assert_eq!(text(&db, query), expected, "{query}");
+    }
+}
+
+#[test]
 fn a_date_moves_by_the_whole_days_of_the_time_truncated_toward_zero() {
     let db = db();
     for (query, expected) in [

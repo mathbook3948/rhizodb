@@ -1,6 +1,7 @@
 const MAX_DENOMINATOR: i128 = 1_000_000_000_000_000_000_000_000;
 const MAX_DENOMINATOR_DIGITS: u32 = 24;
 const LARGEST_DIVISOR: u128 = 1_000_000_000_000_000_000_000_000_000_000_000_000;
+const MAX_SIGNIFICANT_DIGITS: usize = 30;
 
 /// A decimal number: `digits` times ten to the power `exponent`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -20,8 +21,9 @@ impl Decimal {
     }
 
     /// The decimal that `text` spells: an optional sign, digits with an optional fraction after
-    /// `.` or `,`, and an optional exponent after `e` or `E`. `None` when `text` is not such a
-    /// number or has more digits than fit.
+    /// `.` or `,`, and an optional exponent after `e` or `E`. Only the first 30 significant digits
+    /// count, the rest truncated toward zero, so no amount fails for having too many digits.
+    /// `None` when `text` is not such a number.
     pub(crate) fn parse(text: &str) -> Option<Decimal> {
         let (mantissa, exponent) = match text.split_once(['e', 'E']) {
             Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
@@ -40,14 +42,18 @@ impl Decimal {
         let fraction = fraction.trim_end_matches('0');
         let significant = format!("{whole}{fraction}");
         let significant = significant.trim_start_matches('0');
-        let magnitude: i128 = if significant.is_empty() {
+        let dropped = significant.len().saturating_sub(MAX_SIGNIFICANT_DIGITS);
+        let kept = &significant[..significant.len() - dropped];
+        let magnitude: i128 = if kept.is_empty() {
             0
         } else {
-            significant.parse().ok()?
+            kept.parse().ok()?
         };
         Some(Decimal {
             digits: if negative { -magnitude } else { magnitude },
-            exponent: exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?,
+            exponent: exponent
+                .checked_sub(i32::try_from(fraction.len()).ok()?)?
+                .checked_add(i32::try_from(dropped).ok()?)?,
         })
     }
 }

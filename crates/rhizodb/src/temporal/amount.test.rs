@@ -54,6 +54,10 @@ fn decimal_text_reads_exactly() {
     );
     assert_eq!(seconds("-0,5"), Some(Amount::quotient(-1, 2)));
     assert_eq!(seconds("1e3").map(Amount::truncated), Some(1000));
+    assert_eq!(
+        seconds("-0.00123456789012345678901234567890123456789012345"),
+        seconds("-0.00123456789012345678901234567890")
+    );
     for text in ["", "+", ".", "1.2.3", "1a", "--1"] {
         assert_eq!(Decimal::parse(text), None, "{text}");
     }
