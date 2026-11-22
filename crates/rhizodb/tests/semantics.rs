@@ -1046,3 +1046,16 @@ fn a_searched_case_needs_a_boolean_or_null_condition() {
         string("x")
     );
 }
+
+#[test]
+fn a_union_part_may_delete_an_element_an_earlier_part_returned() {
+    let db = db();
+    run(&db, "CREATE (:A {v: 1})");
+    let rows = run(
+        &db,
+        "MATCH (n) RETURN n AS x UNION ALL MATCH (n) DETACH DELETE n RETURN 1 AS x",
+    );
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(matches!(rows[0][0], Value::Node(_)), "{rows:?}");
+    assert_eq!(rows[1][0], int(1));
+}

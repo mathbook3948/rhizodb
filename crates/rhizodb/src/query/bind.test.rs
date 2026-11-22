@@ -83,6 +83,18 @@ fn a_delete_whose_result_can_hold_an_element_retains_records() {
 }
 
 #[test]
+fn a_delete_retains_records_when_any_union_part_can_return_an_element() {
+    assert_eq!(
+        delete_retains("MATCH (n) RETURN n AS x UNION ALL MATCH (n) DELETE n RETURN 1 AS x"),
+        [true]
+    );
+    assert_eq!(
+        delete_retains("RETURN 1 AS x UNION ALL MATCH (n) DELETE n RETURN 2 AS x"),
+        [false]
+    );
+}
+
+#[test]
 fn closed_parts_that_conditional_evaluation_may_skip_are_still_recorded() {
     assert_eq!(
         closed_count("MATCH (n) RETURN CASE WHEN n.x THEN 1 + 2 ELSE 3 + 4 END"),

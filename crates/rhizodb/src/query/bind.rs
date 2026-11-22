@@ -62,8 +62,10 @@ pub(crate) fn bind(
     };
     let mut parts = Vec::new();
     let mut columns: Option<Vec<String>> = None;
+    let mut results_read_variables = false;
     for single in singles {
-        let (pipeline, part_columns) = binder.single_query(single)?;
+        let (pipeline, part_columns, reads_variables) = binder.single_query(single)?;
+        results_read_variables |= reads_variables;
         match &columns {
             Some(first) if *first != part_columns => {
                 return Err(Error::new(
@@ -74,6 +76,13 @@ pub(crate) fn bind(
             _ => columns = Some(part_columns),
         }
         parts.push(pipeline);
+    }
+    if !results_read_variables {
+        for clause in parts.iter_mut().flat_map(|part| &mut part.clauses) {
+            if let Clause::Update(UpdateClause::Delete { retain, .. }) = clause {
+                *retain = false;
+            }
+        }
     }
     let columns = columns.unwrap_or_default();
     let slot_count = binder.slot_count;
@@ -208,7 +217,7 @@ impl Binder<'_> {
     fn single_query(
         &mut self,
         query: &ast::SingleQuery,
-    ) -> Result<(Pipeline<Clause>, Vec<String>), Error> {
+    ) -> Result<(Pipeline<Clause>, Vec<String>, bool), Error> {
         let mut scope = Scope::default();
         let mut clauses = Vec::new();
         let mut output = None;
@@ -363,15 +372,12 @@ impl Binder<'_> {
                 ));
             }
         }
-        if !result_reads_variables {
-            for clause in &mut clauses {
-                if let Clause::Update(UpdateClause::Delete { retain, .. }) = clause {
-                    *retain = false;
-                }
-            }
-        }
         let (output, columns) = output.unwrap_or_default();
-        Ok((Pipeline { clauses, output }, columns))
+        Ok((
+            Pipeline { clauses, output },
+            columns,
+            result_reads_variables,
+        ))
     }
 
     fn lookup(&self, name: &str, scope: &Scope) -> Result<Variable, Error> {
