@@ -34,7 +34,8 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - Mutating workloads start from a fresh copy of the loaded database, so repetitions do not build on each other.
 - A claim about a speedup needs its limiter named from a profile, per the benchmark checklist.
 - The benchmark crate's tests run every workload at tiny scale on both engines in the differential workflow.
+- Reopening is measured with a warm page cache, since an embedded host reopens a file it just used.
 
 ## Open
 
-- Whether to add a cold-cache variant that drops the page cache before reopening.
+None
