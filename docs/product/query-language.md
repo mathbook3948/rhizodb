@@ -32,7 +32,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - Any other step that reads an item or entry read as null, such as `=`, `IN`, `+`, or a function not named above, gives a value read as null as a whole.
 - `coalesce` gives a value read as null as a whole when an argument it passes over was read as null.
 - A `CASE` whose choice of branch reads a part read as null gives a value read as null as a whole and evaluates no branch.
-- A comprehension whose filter reads a part read as null for an item skips that item and gives a value read as null as a whole, and so does a quantifier for its result.
+- A comprehension whose filter reads a part read as null for an item skips that item and gives a value read as null as a whole.
+- A quantifier whose predicate reads a part read as null for an item gives a value read as null as a whole.
 - The type error the check reports is the first one it proves, which may be a later one than evaluation would raise first if each value error had given a value.
 - A type error the check skips this way still fails when a row reaches it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name.
