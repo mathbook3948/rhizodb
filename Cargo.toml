@@ -7,6 +7,7 @@ version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mathbook3948/rhizodb"
+rust-version = "1.100"
 
 [workspace.lints.clippy]
 allow_attributes_without_reason = "deny"
