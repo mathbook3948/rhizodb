@@ -1,6 +1,7 @@
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -8,7 +9,9 @@ const PROBE: &str = concat!(
     "서울에서 만나요 \u{1100}\u{1161}\u{11a8} 東京都に行く カタカナ ｶﾀｶﾅ 北京\u{2a6df}\u{31350}\u{323af} ",
     "\u{1e290}\u{1e291} \u{11f04}\u{11f05} \u{16d43}\u{16d44} \u{10d50}\u{10d51} \u{1e5d0}\u{1e5d1} ",
     "\u{2ebf0}\u{2ee5d} \u{1e030}\u{1e031} \u{0870}\u{0897} \u{1d7ff}\u{1df25} \u{10efc}\u{11b00} ",
-    "\u{0378}\u{0379} \u{05ff}\u{08b5} \u{1e7e0}\u{1e7e7} \u{2b73a}\u{31350} \u{3134b}\u{e0001}",
+    "\u{0378}\u{0379} \u{05ff}\u{08b5} \u{1e7e0}\u{1e7e7} \u{2b73a}\u{31350} \u{3134b}\u{e0001} ",
+    "Cafe\u{301} A\u{30a}\u{323} ﬁ Ｘ² ① ㎏ \u{1109}\u{1165} \u{0928}\u{093c} \u{2126} \u{fb2c} ",
+    "\u{1d15f} \u{2adc} \u{11099}\u{110ba} \u{1133b}\u{1133e} \u{0f73} \u{1e9b}\u{323}",
 );
 
 /// The tokenizer's version and its terms for a fixed probe text. The probe exercises the Unicode
@@ -36,12 +39,15 @@ pub(crate) enum Purpose {
 }
 
 /// Splits `text` into lowercase terms at Unicode word boundaries, dropping control characters,
-/// so no term holds a zero byte. Hangul, Han, Hiragana, and Katakana runs become overlapping
+/// so no term holds a zero byte. Text and terms are in Unicode normalization form NFKC, so
+/// canonically equivalent text gives the same terms, and so do compatibility forms such as
+/// ligatures and full-width letters. Hangul, Han, Hiragana, and Katakana runs become overlapping
 /// character pairs, because those scripts attach particles to words or leave out spaces. The
 /// same text always gives the same terms, in the same order.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
     let mut terms = Vec::new();
     let mut run = Vec::new();
+    let text: String = text.nfkc().collect();
     for segment in text.split_word_bounds() {
         if !segment.chars().any(char::is_alphanumeric) {
             flush_run(&mut run, purpose, &mut terms);
@@ -65,7 +71,7 @@ pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
 
 fn push_word(word: &mut String, terms: &mut Vec<String>) {
     if word.chars().any(char::is_alphanumeric) {
-        terms.push(word.to_lowercase());
+        terms.push(word.to_lowercase().nfkc().collect());
     }
     word.clear();
 }

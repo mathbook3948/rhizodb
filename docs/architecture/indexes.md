@@ -30,6 +30,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - Equal scores come in ascending node ID order.
 - A keyword index covers one or more properties, and a node's document is the terms of all of them together.
 - A keyword index reads strings and lists of strings, and ignores values of other types.
+- Text is put in Unicode normalization form NFKC, so canonically equivalent text and compatibility forms such as ligatures and full-width letters give the same terms.
 - Text splits into words at Unicode word boundaries and is lowercased.
 - A run of Hangul, Han, Hiragana, or Katakana is indexed as its overlapping character pairs and its single characters.
 - A query run of such characters looks for its character pairs, or for its one character when it has one.
@@ -40,7 +41,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms for a fixed probe text that exercises the Unicode tables it depends on.
 - Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction and records the current tokenizer.
 - Changing what the tokenizer produces on purpose raises its version.
-- The word segmentation crate is pinned to one exact version, so a host's lockfile cannot change the tokenizer.
+- The word segmentation and normalization crates are each pinned to one exact version, so a host's lockfile cannot change the tokenizer.
 - A vector index covers one property and has a fixed dimension and one metric: cosine, euclidean, or dot product.
 - A node is in a vector index when the property is a list of finite numbers of the index's dimension whose length is small enough that no score can overflow, and under cosine large enough that no product of lengths can underflow.
 - Any other value leaves the node out of the vector index without an error.
@@ -54,6 +55,5 @@ A host that keeps people, places, and tasks for years must find them by words an
 
 - An approximate vector structure, such as HNSW, for indexes too large to scan
 - Indexes over relationship properties
-- Unicode normalization of indexed text, so composed and decomposed forms of the same text match
 - Word segmentation for scripts written without spaces outside Hangul, Han, and kana, such as Thai
 - Phrase, prefix, and fuzzy keyword queries

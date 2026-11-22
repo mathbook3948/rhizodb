@@ -85,8 +85,10 @@ impl Database {
 
     /// Creates the keyword index `name` over the string properties `properties` of every node
     /// labelled `label`, and fills it from the nodes already there, in one write transaction.
-    /// Text is split into words at Unicode word boundaries and lowercased, and a property that
-    /// holds a list of strings is indexed string by string. Search it with
+    /// Text is put in Unicode normalization form NFKC, split into words at Unicode word
+    /// boundaries, and lowercased, so composed and decomposed accents, ligatures, and full-width
+    /// letters match their plain forms. A property that holds a list of strings is indexed
+    /// string by string. Search it with
     /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with

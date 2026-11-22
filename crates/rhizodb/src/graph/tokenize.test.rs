@@ -88,3 +88,27 @@ fn control_characters_never_reach_a_term() {
         }
     }
 }
+
+#[test]
+fn composed_and_decomposed_text_give_the_same_terms() {
+    assert_eq!(document("cafe\u{301} Åsa"), document("café A\u{30a}sa"));
+    assert_eq!(document("cafe\u{301}"), ["café"]);
+    assert_eq!(
+        document("\u{1109}\u{1165}\u{110b}\u{116e}\u{11af}"),
+        document("서울")
+    );
+}
+
+#[test]
+fn the_probe_holds_text_that_normalization_changes() {
+    assert!(document(PROBE).contains(&"café".to_owned()));
+    assert!(document(PROBE).contains(&"fi".to_owned()));
+}
+
+#[test]
+fn compatibility_forms_fold_to_their_plain_letters() {
+    assert_eq!(
+        document("ﬁle ＲｈｉｚｏＤＢ ｶﾀｶﾅ"),
+        document("file RhizoDB カタカナ")
+    );
+}

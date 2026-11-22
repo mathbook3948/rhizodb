@@ -235,6 +235,23 @@ fn japanese_and_chinese_text_is_found_without_spaces() {
 }
 
 #[test]
+fn composed_and_decomposed_text_find_each_other() {
+    let db = notes_db();
+    let mut parameters = Parameters::new();
+    parameters.insert("decomposed".to_owned(), string("Cafe\u{301} on the corner"));
+    parameters.insert("composed".to_owned(), string("Crème brûlée"));
+    db.execute(
+        "INSERT (:Note {name: 'decomposed', body: $decomposed}), \
+                (:Note {name: 'composed', body: $composed})",
+        &parameters,
+    )
+    .unwrap();
+    assert_eq!(keyword(&db, "notes", "café"), ["decomposed"]);
+    assert_eq!(keyword(&db, "notes", "bru\u{302}le\u{301}e"), ["composed"]);
+    assert_eq!(keyword(&db, "notes", "ＣＡＦÉ"), ["decomposed"]);
+}
+
+#[test]
 fn a_search_can_feed_the_rest_of_a_query() {
     let db = notes_db();
     run(
