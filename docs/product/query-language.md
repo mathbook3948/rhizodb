@@ -21,8 +21,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - A variable that a projection hides from the expressions next to it is hidden inside both forms of `EXISTS` there.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
-- The check on the query text reads a value error as null and goes on, so a value error earlier in an expression never hides a type error after it.
-- The check reports a type error only when no value read as null flows into it.
+- The check on the query text reads a value error as null and goes on.
+- The check reports a type error only when no value read as null was computed in the same expression step, so it never rejects a query that would succeed.
+- A type error the check skips this way still fails when a row reaches it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name.
 - `CALL` runs a registered procedure.
 - A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
