@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d37888adf8830a205b203de5a9a18ab35966166804efdcf81c8adf48fe9875ab # shrinks to graph = Graph { nodes: [0, 0], relationships: [(0, 0, 0)] }, target = Node { label: None, below: None }, read = Property, position = UnwindList
+cc e0d964bec209d7e7587566cdafcb481eadbbdb837e4ed47fd05a2ad8284cda9b # shrinks to case = Case { graph: Graph { nodes: [0, 0], relationships: [(0, 0, 0)] }, target: Node { label: None, below: None }, middle: [Unwind(Variable)], last: Return { items: [Elem(Variable)], order: None, distinct: false }, union_outputs: (Elem(Variable), Elem(Variable)), layout: Single }
+cc 058f9411b626a9c95481d1cd6c8839e69fc388f2b3bd37cddfa97c3c08dc3d80 # shrinks to case = Case { graph: Graph { nodes: [0, 0], relationships: [(0, 0, 0)] }, target: Relationship { rel_type: None }, middle: [WithWhere(None, HasType(Variable, 0))], last: Aggregate { key: None, aggregates: [(Count, Constant)] }, union_outputs: (Constant, Constant), layout: Single }
+cc 9509386f0051377994a724140a1b4cd42d78111b8faf53000c39790ee0295e0b # shrinks to case = Case { graph: Graph { nodes: [0, 0], relationships: [(0, 0, 0)] }, target: Node { label: None, below: None }, middle: [], last: Return { items: [Constant], order: None, distinct: false }, union_outputs: (Elem(Coalesce(Parameter)), Constant), layout: ReadThenDelete { distinct: false } }

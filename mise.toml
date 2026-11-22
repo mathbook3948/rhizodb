@@ -3,18 +3,28 @@ rust = { version = "1.100.0", components = "rustfmt,clippy" }
 ast-grep = "0.51.3"
 cargo-deny = "0.22.0"
 
-[tasks.check]
-description = "Format, lint, test, and guard checks"
+[hooks]
+postinstall = "git config core.hooksPath .githooks"
+
+[tasks.check-fast]
+description = "Format and guard checks that finish in seconds, run by the pre-commit hook"
 run = [
   "cargo fmt --all --check",
-  "cargo clippy --workspace --all-targets -- -D warnings",
-  "cargo test --workspace",
+  "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
   "ast-grep scan --no-ignore hidden",
   "cargo run --quiet --package xtask -- forbidden-chars",
   "cargo run --quiet --package xtask -- docs",
+  "cargo run --quiet --package xtask -- hooks",
   "cargo deny check licenses",
-  "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
   "cargo deny --manifest-path crates/differential/Cargo.toml check licenses",
+]
+
+[tasks.check]
+description = "Fast checks first, then lint and test"
+depends = ["check-fast"]
+run = [
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
 ]
 
 [tasks.differential]

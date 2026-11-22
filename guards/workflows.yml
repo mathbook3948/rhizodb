@@ -1,0 +1,21 @@
+id: checkout-without-persisted-credentials
+language: yaml
+severity: error
+message: "A checkout step sets `persist-credentials: false`, so later steps cannot read the token."
+files:
+  - .github/workflows/*.yml
+rule:
+  kind: block_mapping
+  has:
+    kind: block_mapping_pair
+    all:
+      - has:
+          field: key
+          regex: ^uses$
+      - has:
+          field: value
+          regex: ^actions/checkout@
+  not:
+    has:
+      kind: block_mapping_pair
+      regex: persist-credentials:\s*false

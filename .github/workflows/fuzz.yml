@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --locked
       - run: cargo +nightly fuzz run parse -- -max_total_time=60

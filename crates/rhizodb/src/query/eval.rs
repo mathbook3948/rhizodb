@@ -366,6 +366,15 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let (taint, doubtful) = taint::call(*function, &args, taints);
                 settle(self.call(*function, args), doubtful, taint)
             }
+            Expr::Admit(function, argument) => {
+                let (value, taint) = self.tracked(argument, row)?;
+                let doubtful = taint.is_tainted();
+                settle(
+                    function.admit(&value).map(|()| value),
+                    doubtful,
+                    Taint::Whole,
+                )
+            }
             Expr::Case(case) => {
                 let scrutinee = case
                     .scrutinee

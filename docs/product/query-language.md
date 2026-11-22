@@ -11,6 +11,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - Where GQL and Cypher differ, the GQL form is canonical.
 - Cypher's `CREATE` is accepted as an extension with the meaning of GQL `INSERT`, so TCK setup queries run unchanged.
 - Keywords are case-insensitive, and identifiers are case-sensitive.
+- Any keyword works as a label, relationship type, property key, map key, or procedure name, and every keyword except the clause and operator words works as a variable, alias, or `YIELD` name, in any letter case.
+- A variable, alias, or `YIELD` name that is a clause or operator word such as `MATCH`, `WHERE`, `AS`, or `AND` is a syntax error where the query reads it back, and a quoted name works there.
+- `SET` and `REMOVE` read `NULL`, `NOT`, and `LABELED` after `IS` as operators, not labels, so a label with one of those names takes a quoted name there.
 - The first features are `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP` or `OFFSET`, `LIMIT`, `INSERT`, and the core expressions over the stored value types.
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
@@ -41,7 +44,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - A host procedure sees only its arguments, never the graph.
 - The engine provides built-in procedures in the reserved `db` namespace, and they read the graph of the transaction that calls them.
 - A host cannot register a procedure in the `db` namespace.
-- `CALL` is a reading clause, because no procedure writes the graph.
+- No procedure writes the graph.
+- `CALL` is a reading clause.
 - Procedure names are case-sensitive.
 - Each procedure parameter declares the types it accepts.
 - Procedure arguments fall under the same checks as function arguments.
@@ -77,7 +81,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `DELETE` target that is a label test, alone or under `NOT`, `AND`, `OR`, or `XOR`, fails as an invalid delete rather than as an argument of the wrong type.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
-- Parameters are data. They never take part in the type checks made on the query text.
+- Parameters are data and never take part in the type checks made on the query text.
 - An element deleted earlier in the same query is returned as it was when deleted.
 - Reading the properties of an element deleted earlier in the same query fails.
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
@@ -151,4 +155,5 @@ GQL is the reference language, but the only public conformance suite is the open
 
 ## Open
 
-None
+- Whether a variable, alias, or `YIELD` name that is a reserved word fails where it is bound, as in Cypher, rather than where the query reads it back.
+- What `TRUE`, `FALSE`, `NULL`, `DISTINCT`, and `NOT` mean when bound as a variable, since reading one back now gives the literal, the modifier, or the operator instead of the variable.
