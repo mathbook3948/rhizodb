@@ -113,6 +113,54 @@ fn integer_arithmetic_stays_integer_and_reports_overflow() {
 }
 
 #[test]
+fn text_converts_to_a_number_only_when_it_is_a_decimal_number() {
+    let db = db();
+    for text in [
+        "inf",
+        "-inf",
+        "+inf",
+        "Infinity",
+        "-Infinity",
+        "nan",
+        "NaN",
+        "1e999",
+        "-1e999",
+        "0x10",
+        "1_000",
+        "1e",
+        "--1",
+        "",
+    ] {
+        assert_eq!(
+            run(
+                &db,
+                &format!("RETURN toFloat('{text}') AS f, toInteger('{text}') AS i")
+            ),
+            [vec![Value::Null, Value::Null]],
+            "{text:?}"
+        );
+    }
+    for (text, float_value, integer_value) in [
+        ("1.5", 1.5, 1),
+        ("-2", -2.0, -2),
+        ("+3", 3.0, 3),
+        ("1e3", 1000.0, 1000),
+        (".5", 0.5, 0),
+        ("2.5E-1", 0.25, 0),
+        (" 7 ", 7.0, 7),
+    ] {
+        assert_eq!(
+            run(
+                &db,
+                &format!("RETURN toFloat('{text}') AS f, toInteger('{text}') AS i")
+            ),
+            [vec![float(float_value), int(integer_value)]],
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
 fn the_remainder_by_minus_one_is_zero_even_for_the_smallest_integer() {
     let db = db();
     assert_eq!(

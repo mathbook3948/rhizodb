@@ -555,13 +555,10 @@ fn to_integer(value: Datum) -> Result<Datum, Error> {
         Datum::Integer(value) => Ok(Datum::Integer(value)),
         Datum::Float(value) => Ok(float_to_integer(value)),
         Datum::Boolean(value) => Ok(Datum::Integer(i64::from(value))),
-        Datum::String(text) => {
-            let text = text.trim();
-            if let Ok(value) = text.parse::<i64>() {
-                return Ok(Datum::Integer(value));
-            }
-            Ok(text.parse::<f64>().map_or(Datum::Null, float_to_integer))
-        }
+        Datum::String(text) => Ok(match number_in(&text) {
+            Datum::Float(value) => float_to_integer(value),
+            other => other,
+        }),
         other => Err(invalid_value(Function::ToInteger, &other)),
     }
 }
@@ -581,9 +578,47 @@ fn to_float(value: Datum) -> Result<Datum, Error> {
     match value {
         Datum::Integer(value) => Ok(Datum::Float(value as f64)),
         Datum::Float(value) => Ok(Datum::Float(value)),
-        Datum::String(text) => Ok(text.trim().parse::<f64>().map_or(Datum::Null, Datum::Float)),
+        Datum::String(text) => Ok(match number_in(&text) {
+            Datum::Integer(value) => Datum::Float(value as f64),
+            other => other,
+        }),
         other => Err(invalid_value(Function::ToFloat, &other)),
     }
+}
+
+fn number_in(text: &str) -> Datum {
+    let text = text.trim();
+    if !is_decimal_number(text.strip_prefix(['+', '-']).unwrap_or(text)) {
+        return Datum::Null;
+    }
+    if let Ok(value) = text.parse::<i64>() {
+        return Datum::Integer(value);
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => Datum::Float(value),
+        _ => Datum::Null,
+    }
+}
+
+fn is_decimal_number(unsigned: &str) -> bool {
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = match mantissa.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (mantissa, None),
+    };
+    let fraction_is_digits = fraction.is_none_or(|part| !part.is_empty() && digits(part));
+    let exponent_is_digits = exponent.is_none_or(|part| {
+        let part = part.strip_prefix(['+', '-']).unwrap_or(part);
+        !part.is_empty() && digits(part)
+    });
+    digits(whole)
+        && fraction_is_digits
+        && exponent_is_digits
+        && (!whole.is_empty() || fraction.is_some())
 }
 
 fn to_string(value: Datum) -> Result<Datum, Error> {
