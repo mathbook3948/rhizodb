@@ -11,6 +11,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - Where GQL and Cypher differ, the GQL form is canonical.
 - Cypher's `CREATE` is accepted as an extension with the meaning of GQL `INSERT`, so TCK setup queries run unchanged.
 - Keywords are case-insensitive, and identifiers are case-sensitive.
+- Any keyword works as a label, relationship type, property key, map key, or procedure name, and every keyword except the clause and operator words works as a variable, alias, or `YIELD` name, in any letter case.
+- A variable, alias, or `YIELD` name that is a clause or operator word such as `MATCH`, `WHERE`, `AS`, or `AND` is a syntax error where the query reads it back, and a quoted name works there.
+- `SET` and `REMOVE` read `NULL`, `NOT`, and `LABELED` after `IS` as operators, not labels, so a label with one of those names takes a quoted name there.
 - The first features are `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP` or `OFFSET`, `LIMIT`, `INSERT`, and the core expressions over the stored value types.
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
@@ -152,4 +155,5 @@ GQL is the reference language, but the only public conformance suite is the open
 
 ## Open
 
-None
+- Whether a variable, alias, or `YIELD` name that is a reserved word fails where it is bound, as in Cypher, rather than where the query reads it back.
+- What `TRUE`, `FALSE`, `NULL`, `DISTINCT`, and `NOT` mean when bound as a variable, since reading one back now gives the literal, the modifier, or the operator instead of the variable.
