@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -141,6 +142,7 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writer: Arc<Mutex<Option<ThreadId>>>,
+    committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
 }
 
 impl<S: Storage> Graph<S> {
@@ -154,6 +156,8 @@ impl<S: Storage> Graph<S> {
             let mut tx = GraphTx {
                 transaction: storage.begin_write()?,
                 _writer: None,
+                index_definitions: OnceLock::new(),
+                catalog: None,
             };
             let found = match tx
                 .transaction
@@ -185,16 +189,28 @@ impl<S: Storage> Graph<S> {
                 tx.commit()?;
             }
         }
+        let definitions = GraphTx {
+            transaction: storage.begin_read()?,
+            _writer: None,
+            index_definitions: OnceLock::new(),
+            catalog: None,
+        }
+        .index_definitions()?;
         Ok(Self {
             storage,
             writer: Arc::default(),
+            committed_index_definitions: Arc::new(Mutex::new(definitions)),
         })
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        let catalog = lock(&self.committed_index_definitions);
+        let transaction = self.storage.begin_read()?;
         Ok(GraphTx {
-            transaction: self.storage.begin_read()?,
+            transaction,
             _writer: None,
+            index_definitions: OnceLock::from(Arc::clone(&catalog)),
+            catalog: None,
         })
     }
 
@@ -207,9 +223,15 @@ impl<S: Storage> Graph<S> {
         }
         let transaction = self.storage.begin_write()?;
         *lock(&self.writer) = Some(current);
+        let definitions = Arc::clone(&lock(&self.committed_index_definitions));
         Ok(GraphTx {
             transaction,
             _writer: Some(WriterClaim(Arc::clone(&self.writer))),
+            index_definitions: OnceLock::from(definitions),
+            catalog: Some(Catalog {
+                shared: Arc::clone(&self.committed_index_definitions),
+                changed: false,
+            }),
         })
     }
 }
@@ -219,6 +241,14 @@ impl<S: Storage> Graph<S> {
 pub(crate) struct GraphTx<T> {
     transaction: T,
     _writer: Option<WriterClaim>,
+    index_definitions: OnceLock<Arc<[Vec<u8>]>>,
+    catalog: Option<Catalog>,
+}
+
+#[derive(Debug)]
+struct Catalog {
+    shared: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    changed: bool,
 }
 
 #[derive(Debug)]
@@ -230,8 +260,8 @@ impl Drop for WriterClaim {
     }
 }
 
-fn lock(writer: &Mutex<Option<ThreadId>>) -> std::sync::MutexGuard<'_, Option<ThreadId>> {
-    writer
+fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+    value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -385,7 +415,18 @@ impl<T: ReadTransaction> GraphTx<T> {
 
 impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn commit(self) -> Result<(), GraphError> {
-        Ok(self.transaction.commit()?)
+        let Some(Catalog {
+            shared,
+            changed: true,
+        }) = &self.catalog
+        else {
+            return Ok(self.transaction.commit()?);
+        };
+        let definitions = self.index_definitions()?;
+        let mut current = lock(shared);
+        self.transaction.commit()?;
+        *current = definitions;
+        Ok(())
     }
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {

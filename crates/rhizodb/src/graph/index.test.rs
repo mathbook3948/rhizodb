@@ -577,6 +577,73 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
     assert_eq!(read.property_seek(index, &[five]).unwrap().len(), 1);
 }
 
+#[test]
+fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_writes() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let doc = || NodeRecord {
+        labels: [label].into(),
+        properties: Properties::from([(text, PropertyValue::String("a".to_owned()))]),
+    };
+    write.create_node(&doc()).unwrap();
+    let target = Target::Label(label);
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    let index = write.property_index(target, text).unwrap().unwrap();
+    write.create_node(&doc()).unwrap();
+    let a = KeyRange::equal_to(&PropertyValue::String("a".to_owned())).unwrap();
+    assert_eq!(write.property_seek(index, &[a]).unwrap().len(), 2);
+    assert!(write.drop_index("doc text").unwrap());
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write.create_node(&doc()).unwrap();
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token::<Label>("Doc").unwrap();
+    let text = write.intern_token::<PropertyKey>("text").unwrap();
+    write.commit().unwrap();
+    let target = Target::Label(label);
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.rollback().unwrap();
+    assert_eq!(
+        graph.read().unwrap().property_index(target, text).unwrap(),
+        None
+    );
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    assert!(
+        graph
+            .read()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        graph
+            .write()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[derive(Debug)]
 struct CountingStorage {
     inner: RedbStorage,

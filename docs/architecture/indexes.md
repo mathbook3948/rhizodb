@@ -21,6 +21,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Creating an index that exists with the same definition changes nothing.
 - Creating an index under a name that another definition holds fails with its own error kind.
 - Dropping an index removes its definition and every entry in one transaction.
+- The database keeps the committed index definitions in memory, and a commit that changes them replaces that copy before any later transaction begins.
 - Dropping an index that does not exist succeeds and reports that nothing was dropped.
 - Each index has an internal ID that keys its entries, so a dropped index's name can be reused at once.
 - Queries search an index over a label with the built-in procedures `db.index.keyword.queryNodes(index, query, limit)` and `db.index.vector.queryNodes(index, vector, limit)`.

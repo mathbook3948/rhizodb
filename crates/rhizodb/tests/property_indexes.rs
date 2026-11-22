@@ -96,6 +96,22 @@ fn a_dropped_index_no_longer_serves_lookups() {
 }
 
 #[test]
+fn a_read_transaction_uses_the_indexes_of_its_snapshot() {
+    let db = trapped_db(false);
+    let query = "MATCH (n:P) WHERE n.k = 1 AND n.trap - 1 = 0 RETURN id(n)";
+    let before_create = db.begin_read().unwrap();
+    db.create_property_index("p_k", IndexTarget::Label("P"), "k")
+        .unwrap();
+    assert!(before_create.execute(query, &Parameters::new()).is_err());
+    assert_eq!(ints(&run(&db, query)), [0]);
+    let before_drop = db.begin_read().unwrap();
+    assert!(db.drop_index("p_k").unwrap());
+    let result = before_drop.execute(query, &Parameters::new()).unwrap();
+    assert_eq!(ints(result.rows()), [0]);
+    assert!(db.execute(query, &Parameters::new()).is_err());
+}
+
+#[test]
 fn numbers_are_found_by_value_whether_integer_or_float() {
     let db = indexed_db();
     run(

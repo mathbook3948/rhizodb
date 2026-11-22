@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
 use crate::storage::Table;
@@ -624,6 +625,22 @@ impl<T: ReadTransaction> GraphTx<T> {
             .collect()
     }
 
+    /// The stored bytes of every index definition, read from storage at most once per transaction.
+    pub(crate) fn index_definitions(&self) -> Result<Arc<[Vec<u8>]>, GraphError> {
+        if let Some(definitions) = self.index_definitions.get() {
+            return Ok(Arc::clone(definitions));
+        }
+        let definitions: Arc<[Vec<u8>]> = self
+            .transaction
+            .scan_prefix(Table::Indexes, &[])?
+            .into_iter()
+            .map(|(_, bytes)| bytes)
+            .collect();
+        Ok(Arc::clone(
+            self.index_definitions.get_or_init(|| definitions),
+        ))
+    }
+
     fn index(&self, name: &str) -> Result<Option<Index>, GraphError> {
         let bytes = self.transaction.get(Table::Indexes, name.as_bytes())?;
         Ok(bytes.map(|bytes| Index::decode(&bytes)).transpose()?)
@@ -826,8 +843,8 @@ impl<T: ReadTransaction> GraphTx<T> {
             target,
             kind: IndexKind::Property { property },
         };
-        for (_, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
-            let index = Index::decode(&bytes)?;
+        for bytes in self.index_definitions()?.iter() {
+            let index = Index::decode(bytes)?;
             if index.definition == wanted {
                 return Ok(Some(index.id));
             }
@@ -1000,9 +1017,22 @@ impl<T: WriteTransaction> GraphTx<T> {
         let id = u32::try_from(self.next_counter(keys::NEXT_INDEX_ID_KEY)?)
             .map_err(|_| GraphError::IdSpaceExhausted)?;
         let index = Index { id, definition };
-        self.transaction
-            .put(Table::Indexes, name.as_bytes(), &index.encode())?;
+        self.put_index_definition(name.as_bytes(), &index)?;
         self.fill(&index)
+    }
+
+    fn forget_index_definitions(&mut self) {
+        self.index_definitions.take();
+        if let Some(catalog) = &mut self.catalog {
+            catalog.changed = true;
+        }
+    }
+
+    fn put_index_definition(&mut self, name: &[u8], index: &Index) -> Result<(), GraphError> {
+        self.forget_index_definitions();
+        Ok(self
+            .transaction
+            .put(Table::Indexes, name, &index.encode())?)
     }
 
     fn fill(&mut self, index: &Index) -> Result<(), GraphError> {
@@ -1026,8 +1056,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn tag_index_targets(&mut self) -> Result<(), GraphError> {
         for (name, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
             let index = Index::decode_label_only(&bytes)?;
-            self.transaction
-                .put(Table::Indexes, &name, &index.encode())?;
+            self.put_index_definition(&name, &index)?;
         }
         Ok(())
     }
@@ -1058,6 +1087,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         let Some(index) = self.index(name)? else {
             return Ok(false);
         };
+        self.forget_index_definitions();
         self.transaction.delete(Table::Indexes, name.as_bytes())?;
         self.clear(&index)?;
         Ok(true)
@@ -1085,8 +1115,8 @@ impl<T: WriteTransaction> GraphTx<T> {
         before: Option<Element<'_>>,
         after: Option<Element<'_>>,
     ) -> Result<(), GraphError> {
-        for (_, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
-            let (id, target, reader) = Index::decode_target(&bytes)?;
+        for bytes in self.index_definitions()?.iter() {
+            let (id, target, reader) = Index::decode_target(bytes)?;
             let covers = |record: &Element<'_>| target.covered(*record).is_some();
             let before = before.filter(covers);
             let after = after.filter(covers);
