@@ -107,8 +107,8 @@ impl Database {
 
     /// Creates the vector index `name` over the property `property` of every node labelled
     /// `label`, and fills it from the nodes already there, in one write transaction. A node is
-    /// indexed when the property is a list of `dimension` finite numbers, and under
-    /// [`VectorMetric::Cosine`] not all zero. Search it with
+    /// indexed when the property is a list of `dimension` finite numbers whose length leaves
+    /// every score finite, and under [`VectorMetric::Cosine`] not zero. Search it with
     /// `CALL db.index.vector.query(name, vector, limit) YIELD node, score`, which scores every
     /// vector in the index.
     ///

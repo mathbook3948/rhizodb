@@ -40,7 +40,7 @@ A host that keeps people, places, and tasks for years must find them by words an
 - The tokenizer's output is part of the on-disk format, so changing it changes the format version.
 - An upgrade across a tokenizer change rebuilds the keyword indexes.
 - A vector index covers one property and has a fixed dimension and one metric: cosine, euclidean, or dot product.
-- A node is in a vector index when the property is a list of finite numbers of the index's dimension, and under cosine not all zero.
+- A node is in a vector index when the property is a list of finite numbers of the index's dimension whose length is small enough that no score can overflow, and under cosine large enough that no product of lengths can underflow.
 - Any other value leaves the node out of the vector index without an error.
 - A query vector that breaks the same rules fails the query.
 - Vectors are stored in a table of their own, so a search reads no node records.

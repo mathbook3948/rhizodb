@@ -464,6 +464,61 @@ fn a_cosine_index_skips_zero_vectors() {
     );
 }
 
+#[test]
+fn vectors_too_long_or_too_short_to_score_are_left_out_and_cannot_be_searched_for() {
+    let db = db();
+    for (name, metric) in [
+        ("cosine", VectorMetric::Cosine),
+        ("euclidean", VectorMetric::Euclidean),
+        ("dot", VectorMetric::DotProduct),
+    ] {
+        db.create_vector_index(name, "P", "at", 2, metric).unwrap();
+    }
+    run(
+        &db,
+        "INSERT (:P {name: 'huge', at: [1.0e200, 1.0e200]}), \
+                (:P {name: 'far', at: [1.3e154, 0.0]}), \
+                (:P {name: 'tiny', at: [1.0e-200, 0.0]}), \
+                (:P {name: 'plain', at: [1.0, 1.0]})",
+    );
+    for index in ["cosine", "euclidean", "dot"] {
+        let hits = vector(&db, index, &[1.0, 1.0], 10);
+        assert!(
+            hits.iter().all(|(_, score)| score.is_finite()),
+            "{index}: {hits:?}"
+        );
+        assert!(
+            !hits.iter().any(|(name, _)| name == "huge"),
+            "{index}: {hits:?}"
+        );
+        assert_eq!(
+            search_error(
+                &db,
+                VECTOR_QUERY,
+                index,
+                list([float(1.0e200), float(0.0)]),
+                1
+            ),
+            ErrorKind::InvalidArgumentValue,
+            "{index}"
+        );
+    }
+    let cosine = vector(&db, "cosine", &[1.0, 1.0], 10);
+    assert!(!cosine.iter().any(|(name, _)| name == "tiny"), "{cosine:?}");
+    assert_eq!(
+        search_error(
+            &db,
+            VECTOR_QUERY,
+            "cosine",
+            list([float(1.0e-200), float(0.0)]),
+            1
+        ),
+        ErrorKind::InvalidArgumentValue
+    );
+    let far = vector(&db, "euclidean", &[-6.0e153, 0.0], 10);
+    assert!(far.iter().all(|(_, score)| score.is_finite()), "{far:?}");
+}
+
 fn brute_force(
     vectors: &[Vec<f64>],
     query: &[f64],

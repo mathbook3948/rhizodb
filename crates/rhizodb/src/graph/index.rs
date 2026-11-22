@@ -23,6 +23,9 @@ use super::tokenize::Purpose;
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 
+const LARGEST_SQUARED_LENGTH: f64 = f64::MAX / 4.0;
+const SMALLEST_COSINE_SQUARED_LENGTH: f64 = f64::MIN_POSITIVE;
+
 const KIND_KEYWORD: u8 = 0;
 const KIND_VECTOR: u8 = 1;
 
@@ -39,12 +42,14 @@ pub(crate) const ENTRY_TABLES: [Table; 4] = [
 ];
 
 /// How a vector index measures closeness. Every metric gives a score that is higher for closer
-/// vectors, so results always come in descending score order.
+/// vectors, so results always come in descending score order. A vector so long that a score
+/// could overflow is not indexed and cannot be searched for, under every metric.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VectorMetric {
     /// The cosine of the angle between two vectors, which is also the score. A zero vector has no
-    /// direction, so it is not indexed and cannot be searched for.
+    /// direction, so it is not indexed and cannot be searched for, and neither is a vector so
+    /// short that the product of two lengths would underflow.
     Cosine,
     /// The straight-line distance between two vectors. The score is the negative distance.
     Euclidean,
@@ -71,7 +76,12 @@ impl VectorMetric {
     }
 
     fn admits(self, vector: &[f64]) -> bool {
-        self != Self::Cosine || norm(vector) > 0.0
+        let smallest = if self == Self::Cosine {
+            SMALLEST_COSINE_SQUARED_LENGTH
+        } else {
+            0.0
+        };
+        (smallest..=LARGEST_SQUARED_LENGTH).contains(&dot(vector, vector))
     }
 
     fn score(self, query: &[f64], stored: &[f64]) -> f64 {
@@ -467,7 +477,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         if !metric.admits(query) {
             return Err(GraphError::InvalidQueryVector(
-                "a cosine index cannot be searched with a zero vector".to_owned(),
+                "the query vector is too long, or for a cosine index too short, to score"
+                    .to_owned(),
             ));
         }
         let mut scored = Vec::new();
