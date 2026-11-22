@@ -75,6 +75,9 @@ impl Parser {
             return Ok(Clause::Delete(Delete { detach, targets }));
         }
         if self.eat_keyword("CALL") {
+            if self.at_punct(Punct::LBrace) {
+                return Err(self.unsupported());
+            }
             return self.call_clause();
         }
         if UNSUPPORTED_CLAUSE_KEYWORDS
