@@ -1091,3 +1091,26 @@ fn a_union_part_may_delete_an_element_an_earlier_part_returned() {
     assert!(matches!(rows[0][0], Value::Node(_)), "{rows:?}");
     assert_eq!(rows[1][0], int(1));
 }
+
+#[test]
+fn a_function_argument_of_a_type_the_text_fixes_fails_before_reading_data() {
+    let db = db();
+    for query in [
+        "MATCH (n) RETURN toUpper([1][0]) AS x",
+        "MATCH (n) RETURN abs(toString(1)) AS x",
+        "MATCH (n) RETURN [x IN [1, [1]] | toString(x)] AS x",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentValue,
+            "{query}"
+        );
+    }
+    for query in [
+        "MATCH (n) RETURN substring('abc', -1) AS x",
+        "MATCH (n) RETURN range(1, 2, 0) AS x",
+        "MATCH (n) RETURN abs(-9223372036854775807 - 1) AS x",
+    ] {
+        assert!(run(&db, query).is_empty(), "{query}");
+    }
+}

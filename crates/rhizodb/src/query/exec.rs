@@ -210,7 +210,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
             if let Err(error) = self.eval(expr, &row)
-                && error.kind().is_type_error()
+                && error.is_type_error()
             {
                 return Err(match error.kind() {
                     ErrorKind::TypeMismatch => error.with_kind(ErrorKind::InvalidArgumentType),

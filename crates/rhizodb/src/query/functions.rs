@@ -195,7 +195,7 @@ impl Function {
 
 /// A function got a value whose type it cannot work with.
 pub(crate) fn invalid_value(function: Function, value: &Datum) -> Error {
-    Error::new(
+    Error::rejecting_type(
         ErrorKind::InvalidArgumentValue,
         format!("{}() cannot take a {}", function.name(), value.type_name()),
     )

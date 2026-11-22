@@ -64,7 +64,8 @@ pub enum ErrorKind {
     InvalidArgumentType,
     /// An operator or clause got a value of a type it does not accept from the data it read.
     TypeMismatch,
-    /// A function got an argument from the data it read that it cannot use, whether of a type it does not accept or a value it cannot convert.
+    /// A function got an argument of a type it does not accept, computed by evaluating the query
+    /// rather than read off its text: `toUpper(x)` for a number `x`, or `toUpper([1][0])`.
     InvalidArgumentValue,
     /// A property was read from a value that is not a node, relationship, or map.
     PropertyAccessOnNonEntity,
@@ -120,6 +121,7 @@ pub struct Error {
     kind: ErrorKind,
     message: String,
     source: Option<Box<dyn StdError + Send + Sync>>,
+    rejects_type: bool,
 }
 
 impl Error {
@@ -128,7 +130,23 @@ impl Error {
             kind,
             message: message.into(),
             source: None,
+            rejects_type: false,
         }
+    }
+
+    /// A failure that rejects the type of a value but is reported as `kind`, such as a function
+    /// argument of a type the function does not take.
+    pub(crate) fn rejecting_type(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            rejects_type: true,
+            ..Self::new(kind, message)
+        }
+    }
+
+    /// Whether the failure is decided by the types of the values alone, as
+    /// [`ErrorKind::is_type_error`] describes.
+    pub(crate) fn is_type_error(&self) -> bool {
+        self.rejects_type || self.kind.is_type_error()
     }
 
     /// The condition that caused the failure.
@@ -168,6 +186,7 @@ impl From<StorageError> for Error {
             kind: ErrorKind::Storage,
             message: error.to_string(),
             source: Some(Box::new(error)),
+            rejects_type: false,
         }
     }
 }
@@ -188,6 +207,7 @@ impl From<GraphError> for Error {
             kind,
             message: error.to_string(),
             source: Some(Box::new(error)),
+            rejects_type: false,
         }
     }
 }
