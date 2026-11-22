@@ -8,37 +8,63 @@ use crate::workloads::Comparison;
 use crate::workloads::Context;
 use crate::workloads::Needs;
 use crate::workloads::Workload;
+use crate::workloads::close;
+use crate::workloads::load::CREATE_PERSON;
 use crate::workloads::load::PERSON_STATS;
 use crate::workloads::load::read_state;
 
-const CREATE_PERSON: Texts = Texts::graph(
-    "CREATE (:Person {id: $id, name: $name, age: $age, bio: $bio, embedding: $embedding})",
-);
-const BULK_UPDATE: Texts = Texts::graph("MATCH (p:Person) WHERE p.id % 4 = 0 SET p.age = 99");
-const DETACH_DELETE: Texts = Texts::graph("MATCH (p:Person) WHERE p.id % 10 = 0 DETACH DELETE p");
+const BULK_UPDATE: Texts = Texts::graph("MATCH (p:Person) WHERE p.id % 4 = 0 SET p.age = 99")
+    .sql("UPDATE persons SET age = 99 WHERE id % 4 = 0")
+    .datalog("?[id, age] := *persons{id}, mod(id, 4) == 0, age = 99 :update persons {id => age}");
+const DETACH_DELETE: Texts =
+    Texts::graph("MATCH (p:Person) WHERE p.id % 10 = 0 DETACH DELETE p")
+        .sql(
+            "BEGIN; DELETE FROM knows WHERE src % 10 = 0 OR dst % 10 = 0; DELETE FROM lives_in WHERE src % 10 = 0; DELETE FROM persons WHERE id % 10 = 0; COMMIT;",
+        )
+        .datalog(
+            "{ ?[src, dst] := *knows{src, dst}, (mod(src, 10) == 0 or mod(dst, 10) == 0) :rm knows {src, dst} }
+             { ?[src] := *lives_in{src}, mod(src, 10) == 0 :rm lives_in {src} }
+             { ?[id] := *persons{id}, mod(id, 10) == 0 :rm persons {id} }",
+        );
 
 pub fn small_commits() -> Vec<Workload> {
-    vec![copy("write/small-commits", small_commit_loop)]
+    vec![closed("write/small-commits", small_commit_loop)]
 }
 
 pub fn bulk() -> Vec<Workload> {
     vec![
-        copy("write/bulk-update", bulk_update),
-        copy("write/detach-delete", detach_delete),
+        closed("write/bulk-update", bulk_update),
+        closed("write/detach-delete", detach_delete),
     ]
 }
 
-fn copy(name: &'static str, run: fn(&Context<'_>) -> Result<Measurement, EngineError>) -> Workload {
+fn closed(
+    name: &'static str,
+    run: fn(&Context<'_>) -> Result<Measurement, EngineError>,
+) -> Workload {
     Workload {
         name,
-        needs: Needs::Copy,
+        needs: Needs::ClosedCopy,
         comparison: Comparison::Exact,
+        file_only: false,
         run,
     }
 }
 
+fn finish(
+    ctx: &Context<'_>,
+    instance: Box<dyn crate::engine::Instance>,
+    mut measurement: Measurement,
+) -> Result<Measurement, EngineError> {
+    let (closing, bytes) = close(ctx, instance)?;
+    measurement.elapsed += closing;
+    measurement.close = closing;
+    measurement.bytes = bytes;
+    Ok(measurement)
+}
+
 fn small_commit_loop(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
-    let instance = ctx.instance()?;
+    let instance = ctx.engine.open(ctx.dir)?;
     let create = ctx.text(&CREATE_PERSON)?;
     let stats = ctx.text(&PERSON_STATS)?;
     let mut session = instance.session()?;
@@ -59,24 +85,26 @@ fn small_commit_loop(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
         }
     });
     let state = session.run(&Query::new(stats))?;
+    drop(session);
     let mut measurement = tally.finish(elapsed);
     measurement.rows = commits as u64;
     measurement.fingerprint = state;
-    Ok(measurement)
+    finish(ctx, instance, measurement)
 }
 
 fn mutate(ctx: &Context<'_>, texts: &Texts, rows: usize) -> Result<Measurement, EngineError> {
     let statement = ctx.text(texts)?;
-    let instance = ctx.instance()?;
+    let instance = ctx.engine.open(ctx.dir)?;
     let mut session = instance.session()?;
     session.prepare(statement)?;
     let mut tally = Tally::default();
     let (elapsed, ()) = timed(|| tally.record(session.run(&Query::new(statement))));
-    let state = read_state(&mut *session, ctx.engine.dialect())?;
+    let state = read_state(&mut *session, ctx.engine.kind(), ctx.engine.dialect())?;
+    drop(session);
     let mut measurement = tally.finish(elapsed);
     measurement.rows = rows as u64;
     measurement.fingerprint = state;
-    Ok(measurement)
+    finish(ctx, instance, measurement)
 }
 
 fn bulk_update(ctx: &Context<'_>) -> Result<Measurement, EngineError> {

@@ -23,6 +23,7 @@ fn a_query_can_differ_per_dialect() {
         cypher: Some("c"),
         sql: Some("s"),
         datalog: None,
+        overrides: &[],
     };
 
     assert_eq!(texts.for_dialect(Dialect::Gql), Ok("g"));
@@ -40,4 +41,33 @@ fn directory_size_adds_up_nested_files() {
 
     assert_eq!(directory_size(&dir).unwrap(), 15);
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_override_replaces_the_text_of_one_engine_only() {
+    let texts = Texts::graph("MATCH (n) RETURN n").overriding(&[(EngineKind::Falkordb, "special")]);
+
+    assert_eq!(
+        texts.for_engine(EngineKind::Falkordb, Dialect::Cypher),
+        Ok("special")
+    );
+    assert_eq!(
+        texts.for_engine(EngineKind::Neo4j, Dialect::Cypher),
+        Ok("MATCH (n) RETURN n")
+    );
+}
+
+#[test]
+fn every_engine_has_a_unique_name_a_category_and_a_storage() {
+    let names: std::collections::HashSet<_> =
+        EngineKind::ALL.iter().map(|kind| kind.name()).collect();
+
+    assert_eq!(names.len(), EngineKind::ALL.len());
+    for kind in EngineKind::ALL {
+        assert_eq!(EngineKind::parse(kind.name()), Some(kind));
+    }
+    assert_eq!(EngineKind::Neo4j.category(), Category::Server);
+    assert_eq!(EngineKind::Sqlite.category(), Category::Embedded);
+    assert_eq!(EngineKind::Memgraph.storage(), Storage::Memory);
+    assert_eq!(EngineKind::Duckdb.storage(), Storage::File);
 }

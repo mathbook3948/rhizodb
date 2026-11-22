@@ -60,7 +60,11 @@ fn persons_have_embeddings_bios_and_sometimes_no_age() {
     let data = dataset();
 
     assert!(data.people.iter().all(|p| p.embedding.len() == 64));
-    assert!(data.people.iter().all(|p| p.bio.split(' ').count() == 20));
+    assert!(
+        data.people
+            .iter()
+            .all(|p| (20..=24).contains(&p.bio.split(' ').count()))
+    );
     assert!(data.people.iter().any(|p| p.age.is_none()));
     assert!(data.people.iter().any(|p| p.age.is_some()));
     assert!(
@@ -109,5 +113,89 @@ fn csv_export_has_a_header_and_one_line_per_record() {
     assert_eq!(lines(CITIES_CSV), 1 + data.cities.len());
     assert_eq!(lines(KNOWS_CSV), 1 + data.knows.len());
     assert_eq!(lines(LIVES_IN_CSV), 1 + data.lives_in.len());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn no_pair_of_persons_has_two_knows_edges_the_same_way() {
+    let data = Dataset::generate(3, Scale::Small.plan());
+    let pairs: std::collections::HashSet<(i64, i64)> =
+        data.knows.iter().map(|edge| (edge.from, edge.to)).collect();
+
+    assert_eq!(pairs.len(), data.knows.len());
+}
+
+#[test]
+fn rare_terms_have_fewer_than_ten_hits_and_the_truth_lists_every_one() {
+    let data = Dataset::generate(3, Scale::Small.plan());
+
+    for (index, term) in data.terms.iter().enumerate() {
+        let hits: Vec<i64> = data
+            .people
+            .iter()
+            .filter(|person| person.bio.split(' ').any(|word| word == term))
+            .map(|person| person.id)
+            .collect();
+        assert_eq!(data.keyword_truth[index], hits, "{term}");
+    }
+    let rare = data
+        .keyword_truth
+        .iter()
+        .filter(|hits| !hits.is_empty() && hits.len() < SEARCH_LIMIT)
+        .count();
+    assert!(rare >= 4, "{rare}");
+    assert!(
+        data.keyword_truth
+            .iter()
+            .any(|hits| hits.len() > SEARCH_LIMIT)
+    );
+}
+
+#[test]
+fn the_vector_truth_is_the_nearest_persons_by_cosine_distance_nearest_first() {
+    let data = dataset();
+    let vector = &data.query_vectors[0];
+    let norm = |values: &[f64]| values.iter().map(|value| value * value).sum::<f64>().sqrt();
+    let distance = |id: i64| {
+        let person = &data.people[usize::try_from(id - 1).unwrap()];
+        let dot: f64 = person
+            .embedding
+            .iter()
+            .zip(vector)
+            .map(|(a, b)| a * b)
+            .sum();
+        1.0 - dot / (norm(&person.embedding) * norm(vector))
+    };
+    let truth = &data.vector_truth[0];
+
+    assert_eq!(truth.len(), SEARCH_LIMIT);
+    assert!(
+        truth
+            .windows(2)
+            .all(|pair| distance(pair[0]) <= distance(pair[1]))
+    );
+    let worst = distance(*truth.last().unwrap());
+    assert!(
+        data.people
+            .iter()
+            .filter(|person| !truth.contains(&person.id))
+            .all(|person| distance(person.id) >= worst)
+    );
+}
+
+#[test]
+fn a_csv_file_with_its_final_name_is_always_complete() {
+    let data = dataset();
+    let dir = std::env::temp_dir().join(format!("bench-csv-atomic-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    data.write_csv(&dir).unwrap();
+
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

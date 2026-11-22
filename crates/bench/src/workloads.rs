@@ -1,4 +1,4 @@
-mod load;
+pub(crate) mod load;
 mod read;
 mod search;
 mod write;
@@ -7,13 +7,17 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::data::Dataset;
+use crate::engine::Built;
+use crate::engine::Category;
 use crate::engine::Engine;
 use crate::engine::EngineError;
 use crate::engine::Instance;
 use crate::engine::Query;
 use crate::engine::Texts;
+use crate::engine::directory_size;
 use crate::measure::Measurement;
 use crate::measure::Tally;
 use crate::measure::timed;
@@ -34,20 +38,21 @@ pub enum Needs {
     Empty,
 }
 
-/// How the fingerprints of the two engines are compared.
+/// How the fingerprints of the engines are compared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
     /// Row count and checksum must match.
     Exact,
-    /// Only the row count must match, for results the engines rank differently.
-    RowsOnly,
+    /// The engines rank differently, so each result is compared with the exact answer computed
+    /// from the dataset and reported as recall instead.
+    GroundTruth,
 }
 
-/// Whether each index the search workloads need was created on the shared indexed graph.
+/// What building each index the search workloads need did on the shared indexed graph.
 #[derive(Debug)]
 pub struct IndexState {
-    pub keyword: Result<(), EngineError>,
-    pub vector: Result<(), EngineError>,
+    pub keyword: Result<Built, EngineError>,
+    pub vector: Result<Built, EngineError>,
 }
 
 /// What a workload gets to work with.
@@ -73,7 +78,7 @@ impl fmt::Debug for Context<'_> {
 
 impl Context<'_> {
     pub(crate) fn text(&self, texts: &Texts) -> Result<&'static str, EngineError> {
-        texts.for_dialect(self.engine.dialect())
+        texts.for_engine(self.engine.kind(), self.engine.dialect())
     }
 
     pub(crate) fn instance(&self) -> Result<&dyn Instance, EngineError> {
@@ -91,6 +96,8 @@ pub struct Workload {
     pub name: &'static str,
     pub needs: Needs,
     pub comparison: Comparison,
+    /// Whether the workload measures a database file, which an engine that is a server lacks.
+    pub file_only: bool,
     pub run: Run,
 }
 
@@ -126,4 +133,19 @@ pub(crate) fn run_queries(
 
 pub(crate) fn io_failure(error: io::Error) -> EngineError {
     EngineError::Failed(error.to_string())
+}
+
+/// Closes `instance`, timing only the close, and measures how much disk the database takes
+/// where the engine keeps it in files this process can see.
+pub(crate) fn close(
+    ctx: &Context<'_>,
+    instance: Box<dyn Instance>,
+) -> Result<(Duration, Option<u64>), EngineError> {
+    let (closing, closed) = timed(|| instance.close());
+    closed?;
+    let bytes = match ctx.engine.kind().category() {
+        Category::Embedded => Some(directory_size(ctx.dir).map_err(io_failure)?),
+        Category::Server => None,
+    };
+    Ok((closing, bytes))
 }

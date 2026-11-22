@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::data::Dataset;
+use crate::engine::Built;
 use crate::engine::Session;
 use crate::fingerprint::Fingerprint;
 use crate::report::Agreement;
@@ -27,6 +28,10 @@ impl Engine for Fake {
     fn open(&self, _dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
         Ok(Box::new(FakeInstance))
     }
+
+    fn config(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
 }
 
 impl Instance for FakeInstance {
@@ -46,20 +51,20 @@ impl Instance for FakeInstance {
         Ok(())
     }
 
-    fn create_keyword_index(&self) -> Result<(), EngineError> {
-        Ok(())
+    fn create_keyword_index(&self) -> Result<Built, EngineError> {
+        Ok(Built::Index)
     }
 
-    fn create_vector_index(&self) -> Result<(), EngineError> {
-        Ok(())
+    fn create_vector_index(&self) -> Result<Built, EngineError> {
+        Ok(Built::Index)
     }
 
-    fn keyword_search(&self) -> &'static str {
-        ""
+    fn keyword_search(&self) -> Result<&'static str, EngineError> {
+        Ok("")
     }
 
-    fn vector_search(&self) -> &'static str {
-        ""
+    fn vector_search(&self) -> Result<&'static str, EngineError> {
+        Ok("")
     }
 }
 
@@ -78,7 +83,7 @@ fn logging(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
 fn declining(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
     match ctx.engine.kind() {
         EngineKind::Ladybugdb => Err(EngineError::Unsupported("no extension".to_owned())),
-        EngineKind::Rhizodb => logging(ctx),
+        _ => logging(ctx),
     }
 }
 
@@ -87,6 +92,7 @@ fn workload(name: &'static str, run: crate::workloads::Run) -> Workload {
         name,
         needs: Needs::Empty,
         comparison: Comparison::Exact,
+        file_only: false,
         run,
     }
 }
@@ -102,7 +108,6 @@ fn engines_alternate_after_an_unreported_warm_up_and_unsupported_work_is_recorde
     let settings = Settings {
         reps: 3,
         only: Some("alternate".to_owned()),
-        seed: 1,
     };
     let workloads = [
         workload("x/alternate", logging),
@@ -132,7 +137,6 @@ fn engines_alternate_after_an_unreported_warm_up_and_unsupported_work_is_recorde
     let settings = Settings {
         reps: 2,
         only: Some("declined".to_owned()),
-        seed: 1,
     };
     let reports = run_all(
         &mut environment,
@@ -166,4 +170,101 @@ fn the_scratch_directory_is_removed_when_the_environment_drops() {
     };
 
     assert!(!root.exists());
+}
+
+struct Failing {
+    opened: Mutex<usize>,
+}
+
+impl Engine for Failing {
+    fn kind(&self) -> EngineKind {
+        EngineKind::Sqlite
+    }
+
+    fn dialect(&self) -> crate::engine::Dialect {
+        crate::engine::Dialect::Sql
+    }
+
+    fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
+        *self.opened.lock().unwrap() += 1;
+        std::fs::write(dir.join("half-loaded"), b"x").unwrap();
+        Ok(Box::new(BrokenLoad))
+    }
+
+    fn config(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
+struct BrokenLoad;
+
+impl Instance for BrokenLoad {
+    fn session(&self) -> Result<Box<dyn Session + '_>, EngineError> {
+        Err(EngineError::Failed("no sessions".to_owned()))
+    }
+
+    fn create_schema(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn prepare_bulk_load(&self, _: &Dataset, _: &Path) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    fn bulk_load(&self, _: &Dataset, _: &Path) -> Result<(), EngineError> {
+        Err(EngineError::Failed("the load died".to_owned()))
+    }
+
+    fn create_keyword_index(&self) -> Result<Built, EngineError> {
+        Ok(Built::Index)
+    }
+
+    fn create_vector_index(&self) -> Result<Built, EngineError> {
+        Ok(Built::Index)
+    }
+
+    fn keyword_search(&self) -> Result<&'static str, EngineError> {
+        Ok("")
+    }
+
+    fn vector_search(&self) -> Result<&'static str, EngineError> {
+        Ok("")
+    }
+}
+
+#[test]
+fn a_failed_load_is_remembered_and_never_leaves_a_master_directory_to_reuse() {
+    let plan = Scale::Tiny.plan();
+    let data = Dataset::generate(1, plan);
+    let mut environment = Environment::new(&std::env::temp_dir(), &plan, &data).unwrap();
+    let engine = Failing {
+        opened: Mutex::new(0),
+    };
+    let workload = Workload {
+        name: "x/copy",
+        needs: Needs::Copy,
+        comparison: Comparison::Exact,
+        file_only: false,
+        run: logging,
+    };
+
+    let first = environment.run_once(&engine, &workload);
+    let second = environment.run_once(&engine, &workload);
+
+    assert_eq!(
+        first.unwrap_err(),
+        EngineError::Failed("the load died".to_owned())
+    );
+    assert_eq!(
+        second.unwrap_err(),
+        EngineError::Failed("the load died".to_owned())
+    );
+    assert_eq!(*engine.opened.lock().unwrap(), 1);
+    assert!(
+        !environment
+            .root_for_test()
+            .join("sqlite")
+            .join("master")
+            .exists()
+    );
 }

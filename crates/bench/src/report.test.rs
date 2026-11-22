@@ -16,6 +16,7 @@ fn series(engine: EngineKind, runs: Vec<Measurement>) -> Series {
         engine,
         runs,
         unsupported: None,
+        unavailable: None,
         failure: None,
     }
 }
@@ -58,29 +59,25 @@ fn engines_that_return_the_same_fingerprint_agree() {
 }
 
 #[test]
-fn a_different_checksum_is_a_disagreement_unless_only_rows_are_compared() {
+fn a_different_checksum_is_a_disagreement() {
     let a = series(EngineKind::Rhizodb, vec![run(1, 3, 9)]);
     let b = series(EngineKind::Ladybugdb, vec![run(1, 3, 8)]);
-    let both = [a, b];
 
-    let exact = agreements(&both, Comparison::Exact);
+    let exact = agreements(&[a, b], Comparison::Exact);
     assert_eq!(exact[0], Agreement::Agree);
     assert!(matches!(exact[1], Agreement::Disagree(_)));
-    assert_eq!(
-        agreements(&both, Comparison::RowsOnly),
-        [Agreement::Agree, Agreement::Agree]
-    );
 }
 
 #[test]
-fn a_different_row_count_disagrees_even_when_only_rows_are_compared() {
+fn results_judged_against_the_exact_answer_are_not_compared_with_each_other() {
     let a = series(EngineKind::Rhizodb, vec![run(1, 3, 9)]);
-    let b = series(EngineKind::Ladybugdb, vec![run(1, 4, 9)]);
+    let b = series(EngineKind::Ladybugdb, vec![run(1, 4, 8)]);
 
-    assert!(matches!(
-        agreements(&[a, b], Comparison::RowsOnly)[1],
-        Agreement::Disagree(_)
-    ));
+    assert!(
+        agreements(&[a, b], Comparison::GroundTruth)
+            .iter()
+            .all(|verdict| matches!(verdict, Agreement::NotComparable(_)))
+    );
 }
 
 #[test]
@@ -155,4 +152,40 @@ fn rhizodb_is_the_reference_whatever_the_series_order() {
 
     assert!(matches!(verdicts[0], Agreement::Disagree(_)));
     assert_eq!(verdicts[1], Agreement::Agree);
+}
+
+#[test]
+fn the_table_prints_unavailable_loudly_with_its_reason_and_groups_engines_by_category() {
+    let mut a = series(EngineKind::Rhizodb, vec![run(5, 3, 9)]);
+    a.runs[0].recall = Some(0.5);
+    let mut b = series(EngineKind::Ladybugdb, Vec::new());
+    b.unavailable = Some("the extension is not built".to_owned());
+    let report = WorkloadReport {
+        name: "x/y",
+        series: vec![a, b],
+        agreements: vec![Agreement::NotComparable(String::new()); 2],
+    };
+    let text = table(&[report]);
+
+    assert!(text.contains("UNAVAILABLE: the extension is not built"));
+    assert!(text.contains("UNAVAILABLE ladybugdb on 1 workloads"));
+    assert!(text.contains("engines, embedded: rhizodb (file-backed)"));
+    assert!(text.contains("embedded/file"));
+    assert!(text.contains("0.500"));
+}
+
+#[test]
+fn json_carries_the_category_the_storage_and_the_recall() {
+    let mut a = series(EngineKind::Memgraph, vec![run(5, 3, 9)]);
+    a.runs[0].recall = Some(0.75);
+    let report = WorkloadReport {
+        name: "x/y",
+        series: vec![a],
+        agreements: vec![Agreement::Agree],
+    };
+    let document = json(&[report], serde_json::json!({}));
+
+    assert_eq!(document["results"][0]["category"], "server");
+    assert_eq!(document["results"][0]["storage"], "in-memory");
+    assert_eq!(document["results"][0]["recall"], 0.75);
 }

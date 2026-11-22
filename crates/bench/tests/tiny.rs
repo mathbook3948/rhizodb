@@ -1,32 +1,66 @@
+use bench::cli::Options;
+use bench::cli::Servers;
 use bench::cli::benchmark;
+use bench::engine::EngineKind;
 use bench::report::Agreement;
 use bench::scale::Scale;
 
-const OPTIONAL_ON_LADYBUG: [&str; 4] = [
-    "index/keyword-create",
-    "index/vector-create",
-    "index/keyword-search",
-    "index/vector-search",
+/// What an engine has no form of, which the report shows as unsupported instead of a failure.
+const UNSUPPORTED: [(EngineKind, &str); 4] = [
+    (EngineKind::Sqlite, "index/vector-create"),
+    (EngineKind::Sqlite, "index/vector-search"),
+    (EngineKind::Duckdb, "index/keyword-create"),
+    (EngineKind::Duckdb, "index/vector-create"),
 ];
 
+fn embedded() -> Vec<EngineKind> {
+    let mut engines = vec![
+        EngineKind::Rhizodb,
+        EngineKind::Ladybugdb,
+        EngineKind::Sqlite,
+    ];
+    if cfg!(feature = "duckdb") {
+        engines.push(EngineKind::Duckdb);
+    }
+    if cfg!(feature = "cozo") {
+        engines.push(EngineKind::Cozodb);
+    }
+    engines
+}
+
 #[test]
-fn every_workload_runs_on_both_engines_without_errors_and_with_agreeing_results() {
-    let reports = benchmark(Scale::Tiny, 1, None, |_| {}).unwrap();
+fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing_results() {
+    let options = Options {
+        scale: Scale::Tiny,
+        reps: 1,
+        only: None,
+        engines: Some(embedded()),
+        servers: Servers::default(),
+    };
+    let reports = benchmark(&options, |_| {}).unwrap().reports;
     let mut problems = Vec::new();
     for report in &reports {
-        let optional = OPTIONAL_ON_LADYBUG.contains(&report.name);
         for series in &report.series {
-            let ladybug_may_skip = optional && series.unsupported.is_some();
-            if ladybug_may_skip {
-                continue;
-            }
-            if series.runs.is_empty() {
+            let allowed = UNSUPPORTED.contains(&(series.engine, report.name));
+            if let Some(reason) = &series.unavailable {
                 problems.push(format!(
-                    "{} on {}: no result ({:?} {:?})",
+                    "{} on {}: unavailable, {reason}",
+                    report.name,
+                    series.engine.name()
+                ));
+            } else if series.unsupported.is_some() && !allowed {
+                problems.push(format!(
+                    "{} on {}: unsupported, {:?}",
                     report.name,
                     series.engine.name(),
-                    series.failure,
                     series.unsupported
+                ));
+            } else if series.runs.is_empty() && !allowed {
+                problems.push(format!(
+                    "{} on {}: no result, {:?}",
+                    report.name,
+                    series.engine.name(),
+                    series.failure
                 ));
             }
             for run in &series.runs {
@@ -40,16 +74,20 @@ fn every_workload_runs_on_both_engines_without_errors_and_with_agreeing_results(
                     ));
                 }
             }
+            if series.engine == EngineKind::Rhizodb && report.name.contains("-search") {
+                let recall = series.runs.first().and_then(|run| run.recall);
+                if recall != Some(1.0) {
+                    problems.push(format!("{}: rhizodb recall is {recall:?}", report.name));
+                }
+            }
         }
         for (series, agreement) in report.series.iter().zip(&report.agreements) {
-            match agreement {
-                Agreement::Disagree(detail) => problems.push(format!("{}: {detail}", report.name)),
-                Agreement::NotComparable(why) if !optional => problems.push(format!(
-                    "{} on {}: not comparable, {why}",
+            if let Agreement::Disagree(detail) = agreement {
+                problems.push(format!(
+                    "{} on {}: {detail}",
                     report.name,
                     series.engine.name()
-                )),
-                _ => {}
+                ));
             }
         }
     }

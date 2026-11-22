@@ -13,6 +13,8 @@ fn no_arguments_give_the_defaults() {
             reps: 5,
             only: None,
             out: None,
+            engines: None,
+            servers: Servers::default(),
         })
     );
 }
@@ -30,6 +32,8 @@ fn every_flag_is_read() {
             reps: 3,
             only: Some("load".to_owned()),
             out: Some(PathBuf::from("r.json")),
+            engines: None,
+            servers: Servers::default(),
         })
     );
 }
@@ -40,4 +44,43 @@ fn bad_input_is_a_usage_error() {
     assert!(parse(args(&["--reps", "0"])).is_err());
     assert!(parse(args(&["--reps"])).is_err());
     assert!(parse(args(&["--nope"])).is_err());
+}
+
+#[test]
+fn engines_and_server_urls_are_read() {
+    let parsed = parse(args(&[
+        "--engines",
+        "rhizodb,sqlite",
+        "--neo4j",
+        "bolt://127.0.0.1:7687",
+        "--memgraph",
+        "bolt://127.0.0.1:7688",
+        "--falkordb",
+        "redis://127.0.0.1:6379",
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        parsed.engines,
+        Some(vec![EngineKind::Rhizodb, EngineKind::Sqlite])
+    );
+    assert_eq!(
+        parsed.servers.neo4j.as_deref(),
+        Some("bolt://127.0.0.1:7687")
+    );
+    assert_eq!(
+        parsed.servers.memgraph.as_deref(),
+        Some("bolt://127.0.0.1:7688")
+    );
+    assert_eq!(
+        parsed.servers.falkordb.as_deref(),
+        Some("redis://127.0.0.1:6379")
+    );
+    assert!(parse(args(&["--engines", "oracle"])).is_err());
+}
+
+#[test]
+fn fewer_than_five_repetitions_warn_loudly() {
+    assert!(warnings(5).is_empty());
+    assert!(warnings(3)[0].starts_with("WARNING"));
 }
