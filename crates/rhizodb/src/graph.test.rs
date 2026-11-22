@@ -164,7 +164,7 @@ fn the_label_index_follows_label_changes() {
 }
 
 #[test]
-fn deleting_a_node_with_relationships_is_refused_until_they_are_gone() {
+fn a_node_with_relationships_is_not_detached_until_they_are_gone() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
@@ -175,16 +175,17 @@ fn deleting_a_node_with_relationships_is_refused_until_they_are_gone() {
         .unwrap();
 
     assert!(matches!(
-        write.delete_node(a),
+        write.ensure_detached(a),
         Err(GraphError::NodeHasRelationships(_))
     ));
     assert!(matches!(
-        write.delete_node(b),
+        write.ensure_detached(b),
         Err(GraphError::NodeHasRelationships(_))
     ));
-    assert!(write.node(a).unwrap().is_some());
 
     write.delete_relationship(edge).unwrap();
+    write.ensure_detached(a).unwrap();
+    write.ensure_detached(b).unwrap();
     assert_eq!(write.relationship(edge).unwrap(), None);
     assert!(write.adjacent(a, Direction::Both, None).unwrap().is_empty());
     assert!(write.adjacent(b, Direction::Both, None).unwrap().is_empty());

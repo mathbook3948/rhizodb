@@ -566,3 +566,32 @@ fn every_violation_is_reported_not_just_the_first() {
         relationship: FRIENDSHIP,
     }));
 }
+
+fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error::Error> {
+    crate::query::execute(graph, query, &crate::result::Parameters::new()).map(|_| ())
+}
+
+fn count(graph: &Graph<RedbStorage>, query: &str) -> usize {
+    crate::query::execute(graph, query, &crate::result::Parameters::new())
+        .unwrap()
+        .rows()
+        .len()
+}
+
+#[test]
+fn a_graph_stays_consistent_after_queries_that_delete_connected_nodes() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    run_query(&graph, "CREATE (:A)-[:R]->(:B)").unwrap();
+
+    let refused = run_query(&graph, "MATCH (a:A)-[r]->() DELETE a").unwrap_err();
+    assert_eq!(refused.kind(), crate::error::ErrorKind::DeleteConnectedNode);
+    assert_eq!(count(&graph, "MATCH (n) RETURN n"), 2);
+    assert_eq!(count(&graph, "MATCH ()-[r]->() RETURN r"), 1);
+    assert_eq!(violations_of(&graph), vec![]);
+
+    run_query(&graph, "MATCH (a:A)-[r]->() DELETE a DELETE r").unwrap();
+    assert_eq!(count(&graph, "MATCH (n:B) RETURN n"), 1);
+    assert_eq!(count(&graph, "MATCH (n) RETURN n"), 1);
+    assert_eq!(count(&graph, "MATCH ()-[r]->() RETURN r"), 0);
+    assert_eq!(violations_of(&graph), vec![]);
+}

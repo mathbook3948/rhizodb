@@ -200,6 +200,15 @@ impl<T: ReadTransaction> GraphTx<T> {
             .collect()
     }
 
+    /// Fails with `NodeHasRelationships` while any relationship still touches the node.
+    pub(crate) fn ensure_detached(&self, node: NodeId) -> Result<(), GraphError> {
+        if self.adjacent(node, Direction::Both, None)?.is_empty() {
+            Ok(())
+        } else {
+            Err(GraphError::NodeHasRelationships(node))
+        }
+    }
+
     /// The relationships touching `node`, optionally of one type. A self-loop is reported once under `Both`.
     pub(crate) fn adjacent(
         &self,
@@ -413,12 +422,10 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Fails with `NodeHasRelationships` while any relationship still touches the node.
+    /// Removes the node and its label index entries. Relationships that touch it are left alone,
+    /// so the caller must delete them or reject the transaction, which `ensure_detached` checks.
     pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<(), GraphError> {
         let record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
-        if !self.adjacent(id, Direction::Both, None)?.is_empty() {
-            return Err(GraphError::NodeHasRelationships(id));
-        }
         for label in record.labels {
             self.transaction
                 .delete(Table::LabelIndex, &keys::label_key(label, id))?;

@@ -613,3 +613,20 @@ fn delete_takes_a_list_of_elements_whether_collected_or_written_out() {
         ErrorKind::TypeMismatch
     );
 }
+
+#[test]
+fn a_node_may_be_deleted_before_the_relationships_that_touch_it() {
+    let db = db();
+    run(&db, "CREATE (:A)-[:R]->(:B)");
+    assert_eq!(
+        error_kind(&db, "MATCH (a:A)-[r]->() DELETE a"),
+        ErrorKind::DeleteConnectedNode
+    );
+    assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(2));
+    run(&db, "MATCH (a:A)-[r]->() DELETE a DELETE r");
+    assert_eq!(
+        run(&db, "MATCH (n) RETURN labels(n)"),
+        [vec![list([string("B")])]]
+    );
+    assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(*)"), int(0));
+}

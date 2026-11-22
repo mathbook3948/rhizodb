@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -30,9 +31,11 @@ use super::plan::RemoveAction;
 use super::plan::SetAction;
 use super::plan::UpdateClause;
 
-/// The records of the elements a query deleted, kept so the query can still return them.
+/// What a query deleted. The records are kept so the query can still return them, and the
+/// deleted nodes are checked for relationships left behind once the query has run.
 #[derive(Default)]
 pub(crate) struct Graveyard {
+    pub(crate) deleted_nodes: BTreeSet<NodeId>,
     pub(crate) nodes: BTreeMap<NodeId, NodeRecord>,
     pub(crate) relationships: BTreeMap<RelationshipId, RelationshipRecord>,
 }
@@ -377,6 +380,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         for node in nodes {
             if let Some(record) = self.tx.node(node)? {
                 self.tx.delete_node(node)?;
+                self.graveyard.deleted_nodes.insert(node);
                 if retain {
                     self.graveyard.nodes.insert(node, record);
                 }

@@ -53,6 +53,9 @@ pub(crate) fn run_write<W: WriteTransaction>(
         Clause::Read(clause) => Env { tx: &*tx, slots }.read_clause(clause, rows),
         Clause::Update(clause) => super::update::apply(tx, slots, &mut graveyard, clause, rows),
     })?;
+    for node in &graveyard.deleted_nodes {
+        tx.ensure_detached(*node)?;
+    }
     materialize(&Env { tx: &*tx, slots }, &graveyard, &program.columns, rows)
 }
 
