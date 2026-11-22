@@ -36,6 +36,7 @@ struct Tokens {
     name_key: Token<PropertyKey>,
     payload_key: Token<PropertyKey>,
     next_key: Token<PropertyKey>,
+    at_key: Token<PropertyKey>,
 }
 
 impl Tokens {
@@ -49,6 +50,7 @@ impl Tokens {
             name_key: write.intern_token("name").unwrap(),
             payload_key: write.intern_token("payload").unwrap(),
             next_key: write.intern_token("next").unwrap(),
+            at_key: write.intern_token("at").unwrap(),
         }
     }
 
@@ -62,6 +64,7 @@ impl Tokens {
             name_key: read.lookup_token("name").unwrap()?,
             payload_key: read.lookup_token("payload").unwrap()?,
             next_key: read.lookup_token("next").unwrap()?,
+            at_key: read.lookup_token("at").unwrap()?,
         })
     }
 }
@@ -109,6 +112,13 @@ fn tail_record(tokens: &Tokens, iteration: u64) -> NodeRecord {
                     PropertyValue::Float(iteration as f64 / 4.0),
                 ]),
             ),
+            (
+                tokens.at_key,
+                PropertyValue::List(vec![
+                    PropertyValue::Float(iteration as f64),
+                    PropertyValue::Float(1.0),
+                ]),
+            ),
         ]),
     }
 }
@@ -125,6 +135,14 @@ fn link_record(tokens: &Tokens, iteration: u64) -> RelationshipRecord {
 fn write_iteration(graph: &Graph<RedbStorage>, iteration: u64) {
     let mut write = graph.write().unwrap();
     let tokens = Tokens::intern(&mut write);
+    if iteration == 0 {
+        write
+            .create_keyword_index("words", "Iter", &["name", "payload"])
+            .unwrap();
+        write
+            .create_vector_index("points", "Tail", "at", 2, VectorMetric::Cosine)
+            .unwrap();
+    }
     assert_eq!(
         write.create_node(&head_record(&tokens, iteration)).unwrap(),
         head_id(iteration)
@@ -345,7 +363,7 @@ fn the_oracle_accepts_whole_iterations_and_continues_the_sequence() {
 
 #[test]
 fn the_oracle_rejects_a_partially_applied_iteration() {
-    let tear_down: [Damage; 4] = [
+    let tear_down: [Damage; 5] = [
         |write, _| write.delete_relationship(link_id(2)).unwrap(),
         |write, tokens| {
             write
@@ -359,6 +377,12 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
             write
                 .transaction
                 .delete(Table::Nodes, &keys::element_key(tail_id(2).0))
+                .unwrap();
+        },
+        |write, _| {
+            write
+                .transaction
+                .delete(Table::Vectors, &keys::index_entry_key(1, tail_id(2)))
                 .unwrap();
         },
     ];

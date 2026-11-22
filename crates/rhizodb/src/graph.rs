@@ -15,10 +15,12 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod ids;
+mod index;
 #[cfg(test)]
 pub(crate) mod integrity;
 mod keys;
 mod records;
+mod tokenize;
 
 pub(crate) use ids::Label;
 pub use ids::NodeId;
@@ -27,11 +29,12 @@ pub use ids::RelationshipId;
 pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
+pub use index::VectorMetric;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug)]
@@ -45,6 +48,10 @@ pub(crate) enum GraphError {
     RelationshipNotFound(RelationshipId),
     NodeHasRelationships(NodeId),
     WriterOnThisThread,
+    IndexNotFound(String, &'static str),
+    IndexExists(String),
+    InvalidIndex(&'static str),
+    InvalidQueryVector(String),
 }
 
 impl fmt::Display for GraphError {
@@ -68,6 +75,15 @@ impl fmt::Display for GraphError {
                 formatter,
                 "this thread already holds the open write transaction, so another would wait forever"
             ),
+            Self::IndexNotFound(name, kind) => {
+                write!(formatter, "there is no {kind} named `{name}`")
+            }
+            Self::IndexExists(name) => write!(
+                formatter,
+                "an index named `{name}` already exists with another definition"
+            ),
+            Self::InvalidIndex(reason) => write!(formatter, "invalid index: {reason}"),
+            Self::InvalidQueryVector(reason) => write!(formatter, "invalid query vector: {reason}"),
         }
     }
 }
@@ -356,6 +372,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.transaction
                 .put(Table::LabelIndex, &keys::label_key(*label, id), &[])?;
         }
+        self.reindex_node(id, None, Some(record))?;
         Ok(id)
     }
 
@@ -469,10 +486,12 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Removes the node and its label index entries. Relationships that touch it are left alone,
-    /// so the caller must delete them or reject the transaction, which `ensure_detached` checks.
+    /// Removes the node with its label and property index entries. Relationships that touch it
+    /// are left alone, so the caller must delete them or reject the transaction, which
+    /// `ensure_detached` checks.
     pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<(), GraphError> {
         let record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        self.reindex_node(id, Some(&record), None)?;
         for label in record.labels {
             self.transaction
                 .delete(Table::LabelIndex, &keys::label_key(label, id))?;
@@ -493,10 +512,12 @@ impl<T: WriteTransaction> GraphTx<T> {
         id: NodeId,
         edit: impl FnOnce(&mut NodeRecord) -> R,
     ) -> Result<R, GraphError> {
-        let mut record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let before = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let mut record = before.clone();
         let result = edit(&mut record);
         self.transaction
             .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
+        self.reindex_node(id, Some(&before), Some(&record))?;
         Ok(result)
     }
 

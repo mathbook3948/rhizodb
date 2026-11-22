@@ -13,7 +13,8 @@ dotori needs to store people, places, tasks, and their relationships for years a
 - It is embedded and runs inside the host program with no separate server.
 - It is a schemaless property graph.
 - The query language follows GQL.
+- Vector and keyword indexes live inside the graph and are updated in the same transaction as the data they index.
 
 ## Open
 
-- Whether vector and keyword indexes live inside the graph
+None

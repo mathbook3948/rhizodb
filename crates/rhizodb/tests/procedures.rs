@@ -26,19 +26,24 @@ fn with_procedures() -> Database {
         .parameter("text", ValueType::String)
         .output("part")
         .output("position"),
-    );
+    )
+    .unwrap();
     db.register_procedure(
         Procedure::new("test.echo", |args| Ok(vec![args.to_vec()]))
             .parameter("value", ValueType::Float)
             .output("value"),
-    );
-    db.register_procedure(Procedure::new("test.nothing", |_| Ok(vec![Vec::new()])));
+    )
+    .unwrap();
+    db.register_procedure(Procedure::new("test.nothing", |_| Ok(vec![Vec::new()])))
+        .unwrap();
     db.register_procedure(
         Procedure::new("test.fail", |_| Err("the body gave up".into())).output("never"),
-    );
+    )
+    .unwrap();
     db.register_procedure(
         Procedure::new("test.ragged", |_| Ok(vec![vec![int(1), int(2)]])).output("one"),
-    );
+    )
+    .unwrap();
     db
 }
 
@@ -190,6 +195,7 @@ fn registering_a_name_again_replaces_the_procedure() {
     let mut db = with_procedures();
     db.register_procedure(
         Procedure::new("test.nothing", |_| Ok(vec![vec![int(7)]])).output("seven"),
-    );
+    )
+    .unwrap();
     assert_eq!(single(&db, "CALL test.nothing()"), int(7));
 }

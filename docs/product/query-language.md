@@ -26,7 +26,10 @@ GQL is the reference language, but the only public conformance suite is the open
 - A type error the check skips this way still fails when a row reaches it.
 - A procedure is a Rust function the host registers on a `Database` under a qualified name.
 - `CALL` runs a registered procedure.
-- A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
+- A host procedure sees only its arguments, never the graph.
+- The engine provides built-in procedures in the reserved `db` namespace, and they read the graph of the transaction that calls them.
+- A host cannot register a procedure in the `db` namespace.
+- `CALL` is a reading clause, because no procedure writes the graph.
 - Procedure names are case-sensitive.
 - Each procedure parameter declares the types it accepts.
 - Procedure arguments fall under the same checks as function arguments.

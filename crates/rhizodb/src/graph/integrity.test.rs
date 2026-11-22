@@ -2,6 +2,7 @@ use super::super::records::Properties;
 use super::*;
 use crate::graph::Graph;
 use crate::graph::Token;
+use crate::graph::VectorMetric;
 use crate::storage::Storage;
 use crate::storage::WriteTransaction;
 use crate::storage::redb_backend::RedbStorage;
@@ -632,4 +633,184 @@ fn clearing_a_property_that_never_existed_does_not_intern_its_name() {
     run_query(&graph, "MATCH (n:A) SET n.k = 2").unwrap();
     assert_eq!(count(&graph, "MATCH (n:A) WHERE n.k = 2 RETURN n"), 1);
     assert_eq!(violations_of(&graph), vec![]);
+}
+
+const NAMES_INDEX: u32 = 0;
+const POINTS_INDEX: u32 = 1;
+
+fn indexed_graph() -> Graph<RedbStorage> {
+    let graph = healthy_graph();
+    let mut write = graph.write().unwrap();
+    write
+        .create_keyword_index("names", "Person", &["name"])
+        .unwrap();
+    write
+        .create_vector_index("points", "Person", "at", 2, VectorMetric::Euclidean)
+        .unwrap();
+    write
+        .set_node_property(
+            BOB,
+            Token::new(NAME),
+            PropertyValue::String("Bob Bobson".to_owned()),
+        )
+        .unwrap();
+    let at = write.intern_token::<PropertyKey>("at").unwrap();
+    write
+        .set_node_property(
+            ALICE,
+            at,
+            PropertyValue::List(vec![PropertyValue::Float(1.0), PropertyValue::Integer(2)]),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    graph
+}
+
+fn assert_index_damage_caught(edit: impl FnOnce(&mut Write<'_>), expected: IntegrityViolation) {
+    let graph = indexed_graph();
+    assert_eq!(violations_of(&graph), vec![], "graph must start healthy");
+    corrupt(&graph, edit);
+    let violations = violations_of(&graph);
+    assert!(
+        violations.contains(&expected),
+        "expected {expected:?} in {violations:?}"
+    );
+}
+
+#[test]
+fn an_indexed_graph_after_edits_passes() {
+    let graph = indexed_graph();
+    let mut write = graph.write().unwrap();
+    let person = Token::<Label>::new(PERSON);
+    write.remove_label(BOB, person).unwrap();
+    write.add_label(CAROL, person).unwrap();
+    write
+        .set_node_property(
+            CAROL,
+            Token::new(NAME),
+            PropertyValue::List(vec![PropertyValue::String("Carol".to_owned())]),
+        )
+        .unwrap();
+    write.remove_node_property(ALICE, Token::new(NAME)).unwrap();
+    write.commit().unwrap();
+    assert_eq!(violations_of(&graph), vec![]);
+
+    let mut write = graph.write().unwrap();
+    write.drop_index("names").unwrap();
+    write.commit().unwrap();
+    assert_eq!(violations_of(&graph), vec![]);
+}
+
+#[test]
+fn a_missing_posting_is_caught() {
+    let key = keys::posting_key(NAMES_INDEX, "alice", ALICE);
+    assert_index_damage_caught(
+        |write| write.delete(Table::KeywordPostings, &key).unwrap(),
+        IntegrityViolation::MissingIndexEntry {
+            table: Table::KeywordPostings,
+            key: key.clone(),
+        },
+    );
+}
+
+#[test]
+fn a_posting_for_a_term_the_node_lacks_is_caught() {
+    let key = keys::posting_key(NAMES_INDEX, "zed", ALICE);
+    assert_index_damage_caught(
+        |write| {
+            write
+                .put(Table::KeywordPostings, &key, &[0, 0, 0, 1, 0, 0, 0, 1])
+                .unwrap();
+        },
+        IntegrityViolation::UnexpectedIndexEntry {
+            table: Table::KeywordPostings,
+            key: key.clone(),
+        },
+    );
+}
+
+#[test]
+fn keyword_totals_that_disagree_with_the_documents_are_caught() {
+    assert_index_damage_caught(
+        |write| {
+            write
+                .put(
+                    Table::KeywordTotals,
+                    &keys::index_prefix(NAMES_INDEX),
+                    &encode_totals(9, 9),
+                )
+                .unwrap();
+        },
+        IntegrityViolation::WrongIndexEntry {
+            table: Table::KeywordTotals,
+            key: keys::index_prefix(NAMES_INDEX).to_vec(),
+        },
+    );
+}
+
+#[test]
+fn a_vector_that_differs_from_the_property_is_caught() {
+    let key = keys::index_entry_key(POINTS_INDEX, ALICE).to_vec();
+    assert_index_damage_caught(
+        |write| {
+            write.put(Table::Vectors, &key, &[0; 16]).unwrap();
+        },
+        IntegrityViolation::WrongIndexEntry {
+            table: Table::Vectors,
+            key: key.clone(),
+        },
+    );
+}
+
+#[test]
+fn an_entry_of_an_unknown_index_is_caught() {
+    let key = keys::index_entry_key(7, BOB).to_vec();
+    assert_index_damage_caught(
+        |write| write.put(Table::Vectors, &key, &[0; 16]).unwrap(),
+        IntegrityViolation::UnexpectedIndexEntry {
+            table: Table::Vectors,
+            key: key.clone(),
+        },
+    );
+}
+
+#[test]
+fn an_undecodable_index_definition_is_caught() {
+    assert_index_damage_caught(
+        |write| write.put(Table::Indexes, b"broken", &[1, 2]).unwrap(),
+        IntegrityViolation::Undecodable {
+            table: Table::Indexes,
+            key: b"broken".to_vec(),
+        },
+    );
+}
+
+#[test]
+fn two_indexes_sharing_an_id_are_caught() {
+    assert_index_damage_caught(
+        |write| {
+            let names = write.get(Table::Indexes, b"names").unwrap().unwrap();
+            write.put(Table::Indexes, b"twin", &names).unwrap();
+        },
+        IntegrityViolation::DuplicateIndexId(NAMES_INDEX),
+    );
+}
+
+#[test]
+fn an_index_counter_behind_the_indexes_is_caught() {
+    assert_index_damage_caught(
+        |write| {
+            write
+                .put(
+                    Table::Metadata,
+                    keys::NEXT_INDEX_ID_KEY,
+                    &1u64.to_be_bytes(),
+                )
+                .unwrap();
+        },
+        IntegrityViolation::CounterNotAboveAllocated {
+            counter: Counter::IndexId,
+            highest: u64::from(POINTS_INDEX),
+        },
+    );
 }

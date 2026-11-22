@@ -4,7 +4,7 @@ use std::fmt;
 pub(crate) mod redb_backend;
 
 /// The fixed set of ordered key-value tables the graph layer is built on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Table {
     Metadata,
     TokenByName,
@@ -14,10 +14,15 @@ pub(crate) enum Table {
     Outgoing,
     Incoming,
     LabelIndex,
+    Indexes,
+    KeywordPostings,
+    KeywordDocuments,
+    KeywordTotals,
+    Vectors,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 8] = [
+    pub(crate) const ALL: [Table; 13] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -26,6 +31,11 @@ impl Table {
         Table::Outgoing,
         Table::Incoming,
         Table::LabelIndex,
+        Table::Indexes,
+        Table::KeywordPostings,
+        Table::KeywordDocuments,
+        Table::KeywordTotals,
+        Table::Vectors,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -38,6 +48,11 @@ impl Table {
             Table::Outgoing => "outgoing",
             Table::Incoming => "incoming",
             Table::LabelIndex => "label_index",
+            Table::Indexes => "indexes",
+            Table::KeywordPostings => "keyword_postings",
+            Table::KeywordDocuments => "keyword_documents",
+            Table::KeywordTotals => "keyword_totals",
+            Table::Vectors => "vectors",
         }
     }
 }

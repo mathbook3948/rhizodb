@@ -70,6 +70,7 @@ pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
 pub use graph::NodeId;
 pub use graph::RelationshipId;
+pub use graph::VectorMetric;
 pub use procedure::Procedure;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
