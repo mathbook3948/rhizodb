@@ -16,6 +16,7 @@ use super::decode_u64;
 use super::ids::Label;
 use super::ids::PropertyKey;
 use super::ids::RelationshipType;
+use super::ids::Token;
 use super::ids::TokenKind;
 use super::index::ENTRY_TABLES;
 use super::index::Entry;
@@ -132,7 +133,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         for index in &indexes {
             check_named(Label::TAG, index.definition.label.id());
-            for property in index.definition.properties() {
+            for property in covered_properties(&index.definition.kind) {
                 check_named(PropertyKey::TAG, property.id());
             }
         }
@@ -498,6 +499,13 @@ impl<T: ReadTransaction> GraphTx<T> {
             check(Counter::Token(tag), &keys::next_token_key(tag), highest)?;
         }
         Ok(())
+    }
+}
+
+fn covered_properties(kind: &IndexKind) -> &[Token<PropertyKey>] {
+    match kind {
+        IndexKind::Keyword { properties } => properties,
+        IndexKind::Vector { property, .. } => std::slice::from_ref(property),
     }
 }
 

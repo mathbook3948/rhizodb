@@ -240,13 +240,6 @@ impl Index {
 }
 
 impl IndexDefinition {
-    pub(crate) fn properties(&self) -> &[Token<PropertyKey>] {
-        match &self.kind {
-            IndexKind::Keyword { properties } => properties,
-            IndexKind::Vector { property, .. } => std::slice::from_ref(property),
-        }
-    }
-
     /// What `record` contributes, or `None` when it lacks the label or holds nothing to index.
     pub(crate) fn entry(&self, record: &NodeRecord) -> Option<Entry> {
         if !record.labels.contains(&self.label) {
@@ -617,21 +610,19 @@ impl<T: WriteTransaction> GraphTx<T> {
             let covers = |record: &&NodeRecord| record.labels.contains(&definition.label);
             let before = before.filter(covers);
             let after = after.filter(covers);
-            let unchanged = match (before, after) {
-                (None, None) => true,
-                (Some(before), Some(after)) => definition
-                    .properties()
-                    .iter()
-                    .all(|key| before.properties.get(key) == after.properties.get(key)),
-                _ => false,
-            };
-            if unchanged {
+            if before.is_none() && after.is_none() {
+                continue;
+            }
+            let rows = |entry: &Entry| index.rows(node, entry);
+            let old = before.and_then(|record| definition.entry(record));
+            let new = after.and_then(|record| definition.entry(record));
+            if old.as_ref().map(rows) == new.as_ref().map(rows) {
                 continue;
             }
             if before.is_some() {
                 self.remove_entry(&index, node)?;
             }
-            if let Some(entry) = after.and_then(|record| definition.entry(record)) {
+            if let Some(entry) = new {
                 self.insert_entry(&index, node, &entry)?;
             }
         }

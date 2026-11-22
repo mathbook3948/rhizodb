@@ -170,6 +170,30 @@ proptest! {
 }
 
 #[test]
+fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .create_vector_index("points", "P", "at", 2, VectorMetric::Euclidean)
+        .unwrap();
+    let label = write.intern_token("P").unwrap();
+    let at = write.intern_token("at").unwrap();
+    let vector = |first: f64| {
+        PropertyValue::List(vec![PropertyValue::Float(first), PropertyValue::Float(1.0)])
+    };
+    let node = write
+        .create_node(&NodeRecord {
+            labels: [label].into(),
+            properties: Properties::from([(at, vector(0.0))]),
+        })
+        .unwrap();
+    write.set_node_property(node, at, vector(-0.0)).unwrap();
+    write.commit().unwrap();
+    let violations = graph.read().unwrap().check_integrity().unwrap();
+    assert_eq!(violations, vec![]);
+}
+
+#[test]
 fn a_definition_reads_back_as_it_was_written() {
     for definition in [
         IndexDefinition {
