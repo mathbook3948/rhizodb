@@ -38,8 +38,8 @@ impl Error for QueryError {}
 
 /// One graph the runner drives. A scenario gets its own graph from [`Engine::fresh_graph`].
 pub trait Graph {
-    /// Makes a procedure callable by later queries.
-    fn register_procedure(&mut self, procedure: &Procedure);
+    /// Makes a procedure callable by later queries, or says why the engine cannot take it.
+    fn register_procedure(&mut self, procedure: &Procedure) -> Result<(), String>;
 
     /// Runs a query and returns its rows, or the error it raised.
     fn execute(
@@ -73,7 +73,9 @@ impl Engine for Unimplemented {
 struct UnimplementedGraph;
 
 impl Graph for UnimplementedGraph {
-    fn register_procedure(&mut self, _procedure: &Procedure) {}
+    fn register_procedure(&mut self, _procedure: &Procedure) -> Result<(), String> {
+        Ok(())
+    }
 
     fn execute(
         &mut self,

@@ -94,10 +94,11 @@ struct FakeGraph {
 }
 
 impl Graph for FakeGraph {
-    fn register_procedure(&mut self, procedure: &Procedure) {
+    fn register_procedure(&mut self, procedure: &Procedure) -> Result<(), String> {
         if let Ok(mut events) = self.events.lock() {
             events.push(Event::Registered(procedure.signature.clone()));
         }
+        Ok(())
     }
 
     fn execute(

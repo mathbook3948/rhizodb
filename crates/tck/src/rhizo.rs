@@ -45,7 +45,9 @@ struct RhizoGraph {
 struct BrokenGraph;
 
 impl Graph for BrokenGraph {
-    fn register_procedure(&mut self, _procedure: &Procedure) {}
+    fn register_procedure(&mut self, _procedure: &Procedure) -> Result<(), String> {
+        Ok(())
+    }
 
     fn execute(
         &mut self,
@@ -61,10 +63,10 @@ impl Graph for BrokenGraph {
 }
 
 impl Graph for RhizoGraph {
-    fn register_procedure(&mut self, procedure: &Procedure) {
-        if let Ok(registered) = table_procedure(procedure) {
-            self.database.register_procedure(registered);
-        }
+    fn register_procedure(&mut self, procedure: &Procedure) -> Result<(), String> {
+        self.database
+            .register_procedure(table_procedure(procedure)?);
+        Ok(())
     }
 
     fn execute(
@@ -344,3 +346,7 @@ fn from_path(path: &rhizodb::Path) -> Result<Path, QueryError> {
         steps,
     })
 }
+
+#[cfg(test)]
+#[path = "rhizo.test.rs"]
+mod tests;
