@@ -563,7 +563,7 @@ fn integer_arithmetic(op: BinaryOp, a: i64, b: i64) -> Result<Datum, Error> {
             if b == 0 {
                 return Err(divide_by_zero());
             }
-            a.checked_rem(b)
+            Some(a.wrapping_rem(b))
         }
         _ => return Ok(Datum::Float((a as f64).powf(b as f64))),
     };

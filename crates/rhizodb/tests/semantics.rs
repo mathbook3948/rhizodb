@@ -113,6 +113,18 @@ fn integer_arithmetic_stays_integer_and_reports_overflow() {
 }
 
 #[test]
+fn the_remainder_by_minus_one_is_zero_even_for_the_smallest_integer() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "RETURN -9223372036854775808 % -1 AS m, 9223372036854775807 % -1 AS n, -7 % -1 AS k"
+        ),
+        [vec![int(0), int(0), int(0)]]
+    );
+}
+
+#[test]
 fn plus_concatenates_strings_and_lists() {
     let db = db();
     assert_eq!(
