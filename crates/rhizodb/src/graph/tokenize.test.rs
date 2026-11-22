@@ -106,6 +106,19 @@ fn each_hangul_syllable_and_each_loose_jamo_is_a_unit_of_its_own() {
 }
 
 #[test]
+fn a_mark_or_joiner_after_hangul_stays_with_the_unit_before_it() {
+    assert_eq!(document("가\u{301}"), ["가\u{301}"]);
+    assert_eq!(
+        document("한\u{200d}국"),
+        ["한\u{200d}국", "한\u{200d}", "국"]
+    );
+    assert_eq!(
+        positioned("한\u{200d}국 x", Purpose::Query),
+        [("한\u{200d}국".to_owned(), 0), ("x".to_owned(), 2)]
+    );
+}
+
+#[test]
 fn latin_next_to_hangul_splits_into_a_word_and_a_run() {
     assert_eq!(query("RhizoDB에서"), ["rhizodb", "에서"]);
 }

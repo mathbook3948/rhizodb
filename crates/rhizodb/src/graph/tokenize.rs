@@ -1,7 +1,7 @@
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -14,7 +14,8 @@ const PROBE: &str = concat!(
     "\u{1d15f} \u{2adc} \u{11099}\u{110ba} \u{1133b}\u{1133e} \u{0f73} \u{1e9b}\u{323} ",
     "ก่อน ๒๕๖๗ a\u{e48} ພາສາລາວ ភាសាខ្មែរ မြန်မာဘာသာ \u{1a20}\u{1a60}\u{1a21} \u{aa80}\u{aab0} ",
     "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60} ",
-    "a\u{e31} ก\u{e31}a\u{e31} \u{e31}ก ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0}",
+    "a\u{e31} ก\u{e31}a\u{e31} \u{e31}ก ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0} ",
+    "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc",
 );
 
 /// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
@@ -100,9 +101,9 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// grapheme clusters, because those scripts attach particles to words or leave out spaces
 /// between words. A grapheme cluster goes wholly to a run or wholly to a word, by its first
 /// character, so a run starts at a letter that is not a digit and never at a mark. In Hangul
-/// the unit is each syllable and each jamo left over after normalization, since a grapheme
-/// cluster of loose jamo such as "ㅋㅋㅋ" holds several letters a reader types and searches
-/// one at a time. The same text always gives the same terms, in the same order, with
+/// the unit is each syllable and each jamo left over after normalization, together with the
+/// marks and joiners of its grapheme cluster that follow it, since a grapheme cluster of loose
+/// jamo such as "ㅋㅋㅋ" holds several letters a reader types and searches one at a time. The same text always gives the same terms, in the same order, with
 /// positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
     scan(&text.nfkc().collect::<String>(), purpose).terms
@@ -170,16 +171,7 @@ impl Scan {
 
     fn flush_run(&mut self) {
         let run = std::mem::take(&mut self.run);
-        let units: Vec<&str> = run
-            .graphemes(true)
-            .flat_map(|cluster| {
-                if cluster.chars().any(is_hangul) {
-                    cluster.split_inclusive(|_| true).collect()
-                } else {
-                    vec![cluster]
-                }
-            })
-            .collect();
+        let units: Vec<&str> = run.graphemes(true).flat_map(split_before_hangul).collect();
         if let [single] = units.as_slice() {
             self.terms.push(Term {
                 text: (*single).to_owned(),
@@ -207,6 +199,19 @@ impl Scan {
 
 fn starts_run(character: char) -> bool {
     is_paired_script(character) && !character.is_numeric() && character.is_alphabetic()
+}
+
+fn split_before_hangul(cluster: &str) -> Vec<&str> {
+    let mut units = Vec::new();
+    let mut start = 0;
+    for (at, character) in cluster.char_indices().skip(1) {
+        if is_hangul(character) {
+            units.extend(cluster.get(start..at));
+            start = at;
+        }
+    }
+    units.extend(cluster.get(start..));
+    units
 }
 
 fn is_hangul(character: char) -> bool {
