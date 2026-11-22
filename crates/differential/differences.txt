@@ -60,8 +60,8 @@ ladybug-rejects	tck: clauses/with-orderBy/WithOrderBy1.feature: [45] Sort order 
 ladybug-rejects	tck: clauses/with-orderBy/WithOrderBy1.feature: [45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName> #9	LadybugError: Query execution failed: Parser exception: Invalid input <size([ x IN values WHERE>: expected rule oC_ProjectionItem (line: 4, offset: 24) "WITH si
 ladybug-rejects	tck: clauses/with-orderBy/WithOrderBy1.feature: [9] Sort lists in ascending order	LadybugError: Query execution failed: Binder exception: Expression a has data type STRING but expected INT64. Implicit cast is not supported.
 ladybug-rejects	tck: expressions/aggregation/Aggregation2.feature: [10] `min()` over list values	LadybugError: Query execution failed: Binder exception: Function MIN did not receive correct arguments: Actual: (INT64[]) Expected: DISTINCT (BOOL) -> BOOL (BOO
-differ	tck: expressions/aggregation/Aggregation2.feature: [11] `max()` over mixed values	LadybugDB converts mixed-type list elements to one type before comparing them
-differ	tck: expressions/aggregation/Aggregation2.feature: [12] `min()` over mixed values	LadybugDB converts mixed-type list elements to one type before comparing them
+differ	tck: expressions/aggregation/Aggregation2.feature: [11] `max()` over mixed values	LadybugDB converts mixed-type list elements to strings
+differ	tck: expressions/aggregation/Aggregation2.feature: [12] `min()` over mixed values	LadybugDB converts mixed-type list elements to strings
 differ	tck: expressions/aggregation/Aggregation2.feature: [5] `max()` over mixed numeric values	LadybugDB max() over integers and floats gives a float
 ladybug-rejects	tck: expressions/aggregation/Aggregation2.feature: [9] `max()` over list values	LadybugError: Query execution failed: Binder exception: Function MAX did not receive correct arguments: Actual: (INT64[]) Expected: DISTINCT (BOOL) -> BOOL (BOO
 differ	tck: expressions/comparison/Comparison1.feature: [6] Comparing lists to lists #2	LadybugDB compares lists holding null as false instead of null
@@ -93,9 +93,9 @@ differ	tck: expressions/conditional/Conditional2.feature: [1] Simple cases over 
 ladybug-rejects	tck: expressions/conditional/Conditional2.feature: [1] Simple cases over integers #11	LadybugError: Query execution failed: Binder exception: Expression -10 has data type INT64 but expected BOOL. Implicit cast is not supported.
 ladybug-rejects	tck: expressions/list/List1.feature: [1] Indexing into literal list	LadybugError: Query execution failed: Runtime exception: List extract takes 1-based position.
 ladybug-rejects	tck: expressions/list/List1.feature: [2] Indexing into nested literal lists	LadybugError: Query execution failed: Runtime exception: List extract takes 1-based position.
-differ	tck: expressions/list/List2.feature: [1] List slice	LadybugDB list slices count from one, Cypher from zero
-differ	tck: expressions/list/List2.feature: [2] List slice with implicit end	LadybugDB list slices count from one, Cypher from zero
-differ	tck: expressions/list/List2.feature: [6] List slice with negative range	LadybugDB list slices count from one, Cypher from zero
+differ	tck: expressions/list/List2.feature: [1] List slice	LadybugDB list slices count from one and include the end, Cypher counts from zero and excludes it
+differ	tck: expressions/list/List2.feature: [2] List slice with implicit end	LadybugDB list slices count from one and include the end, Cypher counts from zero and excludes it
+differ	tck: expressions/list/List2.feature: [6] List slice with negative range	LadybugDB list slices count from one and include the end, Cypher counts from zero and excludes it
 ladybug-rejects	tck: expressions/list/List3.feature: [1] Equality between list and literal should return false	LadybugError: Query execution failed: Conversion exception: Cast failed. foo is not in INT64[] range.
 ladybug-rejects	tck: expressions/list/List3.feature: [3] Equality between different lists with null should return false	LadybugError: Query execution failed: Conversion exception: Cast failed. Could not convert "foo" to INT64.
 differ	tck: expressions/list/List3.feature: [4] Equality between almost equal lists with null should return null	LadybugDB compares lists holding null as false instead of null
@@ -128,10 +128,10 @@ differ	tck: expressions/list/List5.feature: [34] IN should return null if compar
 ladybug-rejects	tck: expressions/list/List5.feature: [37] IN should work with an empty list in the presence of other list elements: matching	LadybugError: Query execution failed: Binder exception: Expression LIST_CREATION() has data type INT64[] but expected INT64. Implicit cast is not supported.
 ladybug-rejects	tck: expressions/list/List5.feature: [38] IN should work with an empty list in the presence of other list elements: not matching	LadybugError: Query execution failed: Binder exception: Cannot compare INT64 and INT64[] in list_contains function.
 ladybug-rejects	tck: expressions/list/List5.feature: [39] IN should work with an empty list when comparing nested lists	LadybugError: Query execution failed: Binder exception: Expression LIST_CREATION(LIST_CREATION()) has data type INT64[][] but expected INT64. Implicit cast is n
-differ	tck: expressions/list/List5.feature: [3] IN should work with list slices	LadybugDB gives a string for IN over a list slice
+differ	tck: expressions/list/List5.feature: [3] IN should work with list slices	LadybugDB applies a list slice to the result of IN, not to its right operand
 ladybug-rejects	tck: expressions/list/List5.feature: [40] IN should return null if comparison with null is required for empty list	LadybugError: Query execution failed: Binder exception: Cannot compare INT64 and INT64[] in list_contains function.
 ladybug-rejects	tck: expressions/list/List5.feature: [41] IN should return true when LHS and RHS contain nested list with multiple empty lists	LadybugError: Query execution failed: Binder exception: Expression LIST_CREATION(LIST_CREATION(),LIST_CREATION()) has data type INT64[][] but expected INT64. Im
-differ	tck: expressions/list/List5.feature: [4] IN should work with literal list slices	LadybugDB gives a string for IN over a list slice
+differ	tck: expressions/list/List5.feature: [4] IN should work with literal list slices	LadybugDB applies a list slice to the result of IN, not to its right operand
 ladybug-rejects	tck: expressions/list/List5.feature: [5] IN should return false when matching a number with a string	LadybugError: Query execution failed: Binder exception: Expression 1 has data type STRING but expected INT64. Implicit cast is not supported.
 ladybug-rejects	tck: expressions/list/List5.feature: [6] IN should return false when matching a number with a string - list version	LadybugError: Query execution failed: Binder exception: Expression 2 has data type STRING but expected INT64. Implicit cast is not supported.
 ladybug-rejects	tck: expressions/list/List5.feature: [7] IN should return false when types of LHS and RHS don't match - singleton list	LadybugError: Query execution failed: Binder exception: Cannot compare INT64 and INT64[] in list_contains function.
