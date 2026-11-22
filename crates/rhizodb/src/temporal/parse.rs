@@ -3,7 +3,6 @@ use super::Duration;
 use super::LocalDateTime;
 use super::LocalTime;
 use super::amount::Amount;
-use super::amount::Decimal;
 use super::amount::carry;
 use super::calendar::MAX_YEAR;
 use super::calendar::days_from_civil;
@@ -270,8 +269,7 @@ pub(crate) fn duration(text: &str) -> Option<Duration> {
                 .position(|(name, _, _)| *name == unit)?;
             let (_, slot, scale) = units[next + position];
             next += position + 1;
-            let value = Decimal::parse(&part[..end])?;
-            totals[slot] = totals[slot].plus(Amount::times(scale, value)?)?;
+            totals[slot] = totals[slot].plus(Amount::of_text(scale, &part[..end])?)?;
             any = true;
             part = &part[end + 1..];
         }

@@ -43,7 +43,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A temporal function reads back every string it produces.
 - A fractional duration component carries into the next smaller units, with a month of 30.436875 days.
 - The carry is exact and only the nanoseconds are truncated, except where one of the limits below first truncates an amount toward zero.
-- A duration string amount keeps its first 30 significant digits.
+- A duration string amount keeps its whole part exactly and drops the fraction digits past the 24th place, which are worth less than a nanosecond in any unit.
 - A float that multiplies or divides a duration counts as the shortest decimal that reads back as it.
 - A duration multiplied by a number keeps 24 decimal places of each unit.
 - A duration divided by a number above 10^24 keeps 24 decimal places of each unit, and is the zero duration when the number is above 10^36.

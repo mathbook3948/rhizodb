@@ -202,6 +202,14 @@ fn duration_amounts_with_many_digits_keep_the_ones_that_matter() {
             "RETURN duration('PT123456789.0123456789012345678901234567890123S')",
             "PT34293H33M9.012345678S",
         ),
+        (
+            "RETURN duration('P1000000000000000000.0000000000001D')",
+            "P1000000000000000000DT0.000000008S",
+        ),
+        (
+            "RETURN duration('P100000000000000000.0000000000001Y')",
+            "P100000000000000000YT0.000003155S",
+        ),
     ] {
         assert_eq!(text(&db, query), expected, "{query}");
     }

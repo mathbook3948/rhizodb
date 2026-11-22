@@ -47,18 +47,18 @@ fn thirds_carry_without_rounding() {
 
 #[test]
 fn decimal_text_reads_exactly() {
-    let seconds = |text| Decimal::parse(text).and_then(|value| Amount::times(1, value));
+    let seconds = |text| Amount::of_text(1, text);
     assert_eq!(
         seconds("9007199254740993").map(Amount::truncated),
         Some(9_007_199_254_740_993)
     );
     assert_eq!(seconds("-0,5"), Some(Amount::quotient(-1, 2)));
-    assert_eq!(seconds("1e3").map(Amount::truncated), Some(1000));
+    assert_eq!(Amount::of_text(3600, "+.5"), Some(Amount::whole(1800)));
     assert_eq!(
-        seconds("-0.00123456789012345678901234567890123456789012345"),
-        seconds("-0.00123456789012345678901234567890")
+        seconds("-1000000000000000000.0000000000000000000000012345"),
+        seconds("-1000000000000000000.000000000000000000000001")
     );
-    for text in ["", "+", ".", "1.2.3", "1a", "--1"] {
-        assert_eq!(Decimal::parse(text), None, "{text}");
+    for text in ["", "+", ".", "1.2.3", "1a", "--1", "1e3"] {
+        assert_eq!(seconds(text), None, "{text}");
     }
 }

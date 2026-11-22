@@ -1,7 +1,6 @@
 const MAX_DENOMINATOR: i128 = 1_000_000_000_000_000_000_000_000;
 const MAX_DENOMINATOR_DIGITS: u32 = 24;
 const LARGEST_DIVISOR: u128 = 1_000_000_000_000_000_000_000_000_000_000_000_000;
-const MAX_SIGNIFICANT_DIGITS: usize = 30;
 
 /// A decimal number: `digits` times ten to the power `exponent`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -20,41 +19,41 @@ impl Decimal {
         Decimal::parse(&format!("{value:e}"))
     }
 
-    /// The decimal that `text` spells: an optional sign, digits with an optional fraction after
-    /// `.` or `,`, and an optional exponent after `e` or `E`. Only the first 30 significant digits
-    /// count, the rest truncated toward zero, so no amount fails for having too many digits.
-    /// `None` when `text` is not such a number.
-    pub(crate) fn parse(text: &str) -> Option<Decimal> {
+    fn parse(text: &str) -> Option<Decimal> {
         let (mantissa, exponent) = match text.split_once(['e', 'E']) {
             Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
             None => (text, 0),
         };
-        let (negative, unsigned) = match mantissa.as_bytes().first()? {
-            b'-' => (true, &mantissa[1..]),
-            b'+' => (false, &mantissa[1..]),
-            _ => (false, mantissa),
-        };
-        let (whole, fraction) = unsigned.split_once(['.', ',']).unwrap_or((unsigned, ""));
-        let all_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
-        if whole.len() + fraction.len() == 0 || !all_digits(whole) || !all_digits(fraction) {
-            return None;
-        }
+        let (negative, whole, fraction) = decimal_parts(mantissa)?;
         let fraction = fraction.trim_end_matches('0');
-        let significant = format!("{whole}{fraction}");
-        let significant = significant.trim_start_matches('0');
-        let dropped = significant.len().saturating_sub(MAX_SIGNIFICANT_DIGITS);
-        let kept = &significant[..significant.len() - dropped];
-        let magnitude: i128 = if kept.is_empty() {
-            0
-        } else {
-            kept.parse().ok()?
-        };
+        let magnitude = digits_value(&format!("{whole}{fraction}"))?;
         Some(Decimal {
             digits: if negative { -magnitude } else { magnitude },
-            exponent: exponent
-                .checked_sub(i32::try_from(fraction.len()).ok()?)?
-                .checked_add(i32::try_from(dropped).ok()?)?,
+            exponent: exponent.checked_sub(i32::try_from(fraction.len()).ok()?)?,
         })
+    }
+}
+
+fn decimal_parts(text: &str) -> Option<(bool, &str, &str)> {
+    let (negative, unsigned) = match text.as_bytes().first()? {
+        b'-' => (true, &text[1..]),
+        b'+' => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (whole, fraction) = unsigned.split_once(['.', ',']).unwrap_or((unsigned, ""));
+    let all_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.len() + fraction.len() == 0 || !all_digits(whole) || !all_digits(fraction) {
+        return None;
+    }
+    Some((negative, whole, fraction))
+}
+
+fn digits_value(digits: &str) -> Option<i128> {
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        Some(0)
+    } else {
+        significant.parse().ok()
     }
 }
 
@@ -116,6 +115,22 @@ impl Amount {
     /// range.
     pub(crate) fn product(count: i128, factor: f64) -> Option<Amount> {
         Amount::times(count, Decimal::of_float(factor)?)
+    }
+
+    /// `scale` times the number `text` spells: an optional sign, digits, and an optional
+    /// fraction after `.` or `,`. The whole part counts exactly, and fraction digits past the
+    /// 24th place are dropped, since they are worth less than a nanosecond in any unit. `None`
+    /// when `text` is not such a number or the amount is out of range.
+    pub(crate) fn of_text(scale: i128, text: &str) -> Option<Amount> {
+        let (negative, whole, fraction) = decimal_parts(text)?;
+        let kept = &fraction[..fraction.len().min(MAX_DENOMINATOR_DIGITS as usize)];
+        let sign = if negative { -1 } else { 1 };
+        let whole = Amount::whole(digits_value(whole)?.checked_mul(sign * scale)?);
+        let numerator = digits_value(kept)?.checked_mul(sign * scale)?;
+        whole.plus(Amount::ratio(
+            numerator,
+            10i128.pow(u32::try_from(kept.len()).ok()?),
+        )?)
     }
 
     /// `count` times a decimal, or `None` when the product is out of range. Digits past the
