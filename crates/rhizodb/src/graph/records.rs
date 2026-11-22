@@ -46,7 +46,36 @@ fn decode_properties(reader: &mut Reader<'_>) -> Result<Properties, DecodeError>
     Ok(properties)
 }
 
+fn find_property(
+    reader: &mut Reader<'_>,
+    key: Token<PropertyKey>,
+) -> Result<Option<PropertyValue>, DecodeError> {
+    let count = reader.varint()?;
+    for _ in 0..count {
+        if Token::new(reader.u32()?) == key {
+            return reader.value().map(Some);
+        }
+        reader.skip_value()?;
+    }
+    Ok(None)
+}
+
 impl NodeRecord {
+    /// The value of `key` in an encoded node record, decoding none of the other values.
+    pub(crate) fn property(
+        bytes: &[u8],
+        key: Token<PropertyKey>,
+    ) -> Result<Option<PropertyValue>, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let label_count = reader.varint()?;
+        reader.take(
+            label_count
+                .checked_mul(4)
+                .ok_or(DecodeError::LengthOverflow)?,
+        )?;
+        find_property(&mut reader, key)
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_varint(&mut out, self.labels.len());
@@ -71,6 +100,16 @@ impl NodeRecord {
 }
 
 impl RelationshipRecord {
+    /// The value of `key` in an encoded relationship record, decoding none of the other values.
+    pub(crate) fn property(
+        bytes: &[u8],
+        key: Token<PropertyKey>,
+    ) -> Result<Option<PropertyValue>, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        reader.take(20)?;
+        find_property(&mut reader, key)
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.rel_type.id().to_be_bytes());
@@ -95,3 +134,7 @@ impl RelationshipRecord {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "records.test.rs"]
+mod tests;

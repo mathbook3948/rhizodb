@@ -251,6 +251,36 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(bytes.map(|bytes| NodeRecord::decode(&bytes)).transpose()?)
     }
 
+    /// One property of a node, decoding none of the others. The outer `None` means the node does
+    /// not exist.
+    pub(crate) fn node_property(
+        &self,
+        id: NodeId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        let bytes = self
+            .transaction
+            .get(Table::Nodes, &keys::element_key(id.0))?;
+        Ok(bytes
+            .map(|bytes| NodeRecord::property(&bytes, key))
+            .transpose()?)
+    }
+
+    /// One property of a relationship, decoding none of the others. The outer `None` means the
+    /// relationship does not exist.
+    pub(crate) fn relationship_property(
+        &self,
+        id: RelationshipId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        let bytes = self
+            .transaction
+            .get(Table::Relationships, &keys::element_key(id.0))?;
+        Ok(bytes
+            .map(|bytes| RelationshipRecord::property(&bytes, key))
+            .transpose()?)
+    }
+
     pub(crate) fn relationship(
         &self,
         id: RelationshipId,

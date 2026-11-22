@@ -126,19 +126,16 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
-        let properties = match value {
-            Datum::Node(id) => self.node(*id)?.properties,
-            Datum::Relationship(id) => self.relationship(*id)?.properties,
+        let token = self.tx.lookup_token::<PropertyKey>(key)?;
+        let stored = match (value, token) {
+            (Datum::Node(id), Some(token)) => self.tx.node_property(*id, token)?,
+            (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
+            (Datum::Node(id), None) => self.tx.node(*id)?.map(|_| None),
+            (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
             _ => return Ok(None),
         };
-        let Some(token) = self.tx.lookup_token::<PropertyKey>(key)? else {
-            return Ok(Some(Datum::Null));
-        };
         Ok(Some(
-            properties
-                .get(&token)
-                .cloned()
-                .map_or(Datum::Null, Datum::from),
+            stored.ok_or_else(deleted)?.map_or(Datum::Null, Datum::from),
         ))
     }
 

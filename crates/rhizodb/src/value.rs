@@ -274,6 +274,38 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Moves past one value without building it.
+    pub(crate) fn skip_value(&mut self) -> Result<(), DecodeError> {
+        self.skip_at_depth(0)
+    }
+
+    fn skip_at_depth(&mut self, depth: usize) -> Result<(), DecodeError> {
+        let width = match self.u8()? {
+            TAG_BOOLEAN => 1,
+            TAG_INTEGER | TAG_FLOAT | TAG_DATE | TAG_LOCAL_TIME => 8,
+            TAG_TIME => 12,
+            TAG_LOCAL_DATETIME | TAG_OFFSET_DATETIME => 16,
+            TAG_DURATION => 28,
+            TAG_STRING | TAG_BYTES => self.varint()?,
+            TAG_ZONED_DATETIME => {
+                self.take(12)?;
+                self.varint()?
+            }
+            TAG_LIST => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                for _ in 0..self.varint()? {
+                    self.skip_at_depth(depth + 1)?;
+                }
+                0
+            }
+            tag => return Err(DecodeError::UnknownTag(tag)),
+        };
+        self.take(width)?;
+        Ok(())
+    }
+
     fn i64(&mut self) -> Result<i64, DecodeError> {
         Ok(self.u64()? as i64)
     }
@@ -322,4 +354,4 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 #[path = "value.test.rs"]
-mod tests;
+pub(crate) mod tests;

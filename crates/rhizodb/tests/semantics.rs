@@ -455,8 +455,10 @@ fn reading_a_deleted_element_fails_except_for_the_type_of_a_relationship() {
     run(&db, "CREATE (:L {x: 1})-[:T {y: 2}]->()");
     for query in [
         "MATCH (n:L) DETACH DELETE n RETURN n.x",
+        "MATCH (n:L) DETACH DELETE n RETURN n.never_set",
         "MATCH (n:L) DETACH DELETE n RETURN labels(n)",
         "MATCH ()-[r]->() DELETE r RETURN r.y",
+        "MATCH ()-[r]->() DELETE r RETURN r.never_set",
     ] {
         assert_eq!(
             error_kind(&db, query),
