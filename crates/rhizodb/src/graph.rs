@@ -32,6 +32,7 @@ pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
 pub use index::IndexTarget;
 pub use index::VectorMetric;
+pub(crate) use records::EncodedNode;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
@@ -245,25 +246,15 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 
 impl<T: ReadTransaction> GraphTx<T> {
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
-        let bytes = self
-            .transaction
-            .get(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(bytes.map(|bytes| NodeRecord::decode(&bytes)).transpose()?)
+        self.encoded_node(id)?.map(|node| node.decode()).transpose()
     }
 
-    /// One property of a node, decoding none of the others. The outer `None` means the node does
-    /// not exist.
-    pub(crate) fn node_property(
-        &self,
-        id: NodeId,
-        key: Token<PropertyKey>,
-    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
-        let bytes = self
+    /// A node's stored record, left encoded so the caller decodes only the parts it reads.
+    pub(crate) fn encoded_node(&self, id: NodeId) -> Result<Option<EncodedNode>, GraphError> {
+        Ok(self
             .transaction
-            .get(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(bytes
-            .map(|bytes| NodeRecord::property(&bytes, key))
-            .transpose()?)
+            .get(Table::Nodes, &keys::element_key(id.0))?
+            .map(EncodedNode))
     }
 
     /// One property of a relationship, decoding none of the others. The outer `None` means the

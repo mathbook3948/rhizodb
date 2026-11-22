@@ -6,6 +6,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 use crate::value::put_varint;
 
+use super::GraphError;
 use super::ids::Label;
 use super::ids::NodeId;
 use super::ids::PropertyKey;
@@ -46,6 +47,15 @@ fn decode_properties(reader: &mut Reader<'_>) -> Result<Properties, DecodeError>
     Ok(properties)
 }
 
+fn read_labels(reader: &mut Reader<'_>) -> Result<BTreeSet<Token<Label>>, DecodeError> {
+    let label_count = reader.varint()?;
+    let mut labels = BTreeSet::new();
+    for _ in 0..label_count {
+        labels.insert(Token::new(reader.u32()?));
+    }
+    Ok(labels)
+}
+
 fn find_property(
     reader: &mut Reader<'_>,
     key: Token<PropertyKey>,
@@ -60,22 +70,36 @@ fn find_property(
     Ok(None)
 }
 
-impl NodeRecord {
-    /// The value of `key` in an encoded node record, decoding none of the other values.
+/// A node record as stored, read one part at a time instead of decoded whole.
+#[derive(Debug)]
+pub(crate) struct EncodedNode(pub(super) Vec<u8>);
+
+impl EncodedNode {
+    pub(crate) fn labels(&self) -> Result<BTreeSet<Token<Label>>, GraphError> {
+        Ok(read_labels(&mut Reader::new(&self.0))?)
+    }
+
+    /// The value of `key`, decoding none of the other values.
     pub(crate) fn property(
-        bytes: &[u8],
+        &self,
         key: Token<PropertyKey>,
-    ) -> Result<Option<PropertyValue>, DecodeError> {
-        let mut reader = Reader::new(bytes);
+    ) -> Result<Option<PropertyValue>, GraphError> {
+        let mut reader = Reader::new(&self.0);
         let label_count = reader.varint()?;
         reader.take(
             label_count
                 .checked_mul(4)
                 .ok_or(DecodeError::LengthOverflow)?,
         )?;
-        find_property(&mut reader, key)
+        Ok(find_property(&mut reader, key)?)
     }
 
+    pub(crate) fn decode(&self) -> Result<NodeRecord, GraphError> {
+        Ok(NodeRecord::decode(&self.0)?)
+    }
+}
+
+impl NodeRecord {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_varint(&mut out, self.labels.len());
@@ -88,11 +112,7 @@ impl NodeRecord {
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
-        let label_count = reader.varint()?;
-        let mut labels = BTreeSet::new();
-        for _ in 0..label_count {
-            labels.insert(Token::new(reader.u32()?));
-        }
+        let labels = read_labels(&mut reader)?;
         let properties = decode_properties(&mut reader)?;
         reader.finish()?;
         Ok(Self { labels, properties })

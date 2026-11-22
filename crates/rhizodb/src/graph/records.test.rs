@@ -17,13 +17,14 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
-    fn one_node_property_reads_what_the_whole_record_holds(
+    fn an_encoded_node_reads_the_labels_and_each_property_its_record_holds(
         labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
     ) {
-        let record = NodeRecord { labels, properties };
-        let read = NodeRecord::property(&record.encode(), key).unwrap();
+        let record = NodeRecord { labels: labels.clone(), properties };
+        prop_assert_eq!(EncodedNode(record.encode()).labels().unwrap(), labels);
+        let read = EncodedNode(record.encode()).property(key).unwrap();
         prop_assert!(agrees(read, record.properties.get(&key)));
     }
 

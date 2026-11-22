@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 
 use crate::error::Error;
@@ -15,6 +16,7 @@ use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
+use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::temporal::Clocks;
 
@@ -128,7 +130,11 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
         let stored = match (value, token) {
-            (Datum::Node(id), Some(token)) => self.tx.node_property(*id, token)?,
+            (Datum::Node(id), Some(token)) => self
+                .tx
+                .encoded_node(*id)?
+                .map(|node| node.property(token))
+                .transpose()?,
             (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
             (Datum::Node(id), None) => self.tx.node(*id)?.map(|_| None),
             (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
@@ -156,14 +162,14 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn node_has_labels(
         &self,
-        record: &NodeRecord,
+        found: &BTreeSet<Token<Label>>,
         labels: &LabelExpr,
     ) -> Result<bool, Error> {
-        labels.matches(!record.labels.is_empty(), &mut |name| {
+        labels.matches(!found.is_empty(), &mut |name| {
             Ok(self
                 .tx
                 .lookup_token::<Label>(name)?
-                .is_some_and(|token| record.labels.contains(&token)))
+                .is_some_and(|token| found.contains(&token)))
         })
     }
 
@@ -529,9 +535,10 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn has_labels(&self, operand: Datum, labels: &LabelExpr) -> Result<Datum, Error> {
         match operand {
             Datum::Null => Ok(Datum::Null),
-            Datum::Node(id) => Ok(Datum::Boolean(
-                self.node_has_labels(&self.node(id)?, labels)?,
-            )),
+            Datum::Node(id) => Ok(Datum::Boolean(self.node_has_labels(
+                &self.tx.encoded_node(id)?.ok_or_else(deleted)?.labels()?,
+                labels,
+            )?)),
             Datum::Relationship(id) => {
                 let rel_type = self.relationship_type(id)?;
                 let Ok(found) =

@@ -10,7 +10,9 @@ use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipType;
+use crate::graph::Token;
 use crate::storage::ReadTransaction;
+use crate::value::PropertyValue;
 
 use super::compare::equals;
 use super::datum::Datum;
@@ -69,7 +71,7 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn properties_match(
         &self,
-        properties: &graph::Properties,
+        stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
         expected: Option<&Expr>,
         row: &Row,
     ) -> Result<bool, Error> {
@@ -87,7 +89,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         for (key, value) in &entries {
             let stored = match self.tx.lookup_token::<PropertyKey>(key)? {
-                Some(token) => properties.get(&token).cloned().map(Datum::from),
+                Some(token) => stored(token)?.map(Datum::from),
                 None => None,
             };
             let stored = stored.unwrap_or(Datum::Null);
@@ -98,16 +100,30 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(true)
     }
 
-    fn node_matches(&self, id: NodeId, pattern: &NodePattern, row: &Row) -> Result<bool, Error> {
-        let Some(record) = self.tx.node(id)? else {
+    fn node_matches(
+        &self,
+        id: NodeId,
+        pattern: &NodePattern,
+        labels_known: bool,
+        row: &Row,
+    ) -> Result<bool, Error> {
+        if labels_known && pattern.properties.is_none() {
+            return Ok(true);
+        }
+        let Some(node) = self.tx.encoded_node(id)? else {
             return Ok(false);
         };
         if let Some(labels) = &pattern.labels
-            && !self.node_has_labels(&record, labels)?
+            && !labels_known
+            && !self.node_has_labels(&node.labels()?, labels)?
         {
             return Ok(false);
         }
-        self.properties_match(&record.properties, pattern.properties.as_ref(), row)
+        self.properties_match(
+            |key| Ok(node.property(key)?),
+            pattern.properties.as_ref(),
+            row,
+        )
     }
 
     fn relationship_matches(
@@ -122,7 +138,11 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(record) = self.tx.relationship(id)? else {
             return Ok(false);
         };
-        self.properties_match(&record.properties, pattern.properties.as_ref(), row)
+        self.properties_match(
+            |key| Ok(record.properties.get(&key).cloned()),
+            pattern.properties.as_ref(),
+            row,
+        )
     }
 
     fn start_candidates(&self, pattern: &NodePattern, row: &Row) -> Result<Vec<NodeId>, Error> {
@@ -181,9 +201,7 @@ impl<T: ReadTransaction> Env<'_, T> {
 }
 
 fn label_scan_decides(pattern: &NodePattern) -> bool {
-    !pattern.bound
-        && pattern.properties.is_none()
-        && matches!(pattern.labels, Some(LabelExpr::Name(_)))
+    !pattern.bound && matches!(pattern.labels, Some(LabelExpr::Name(_)))
 }
 
 impl<T: ReadTransaction> Search<'_, '_, T> {
@@ -192,9 +210,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = patterns.get(index) else {
             return emit(row);
         };
-        let decided = label_scan_decides(&part.start);
+        let labels_known = label_scan_decides(&part.start);
         for id in self.env.start_candidates(&part.start, row)? {
-            if !decided && !self.env.node_matches(id, &part.start, row)? {
+            if !self.env.node_matches(id, &part.start, labels_known, row)? {
                 continue;
             }
             set(row, part.start.slot, Datum::Node(id));
@@ -367,7 +385,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         } else {
             set(row, step.node.slot, Datum::Node(node));
         }
-        if !self.env.node_matches(node, &step.node, row)? {
+        if !self.env.node_matches(node, &step.node, false, row)? {
             return Ok(true);
         }
         self.step(index, step_index + 1, node, row, trail, emit)
