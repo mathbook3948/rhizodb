@@ -228,6 +228,7 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::NonConstantExpression => ("SyntaxError", "NonConstantExpression"),
         ErrorKind::NegativeIntegerArgument => ("SyntaxError", "NegativeIntegerArgument"),
         ErrorKind::NoSingleRelationshipType => ("SyntaxError", "NoSingleRelationshipType"),
+        ErrorKind::NoLabelSet => ("SyntaxError", "NoLabelSet"),
         ErrorKind::RequiresDirectedRelationship => ("SyntaxError", "RequiresDirectedRelationship"),
         ErrorKind::CreatingVarLength => ("SyntaxError", "CreatingVarLength"),
         ErrorKind::InvalidParameterUse => ("SyntaxError", "InvalidParameterUse"),
