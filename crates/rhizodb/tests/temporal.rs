@@ -145,3 +145,32 @@ fn the_clock_functions_read_one_instant_per_query() {
         boolean(true)
     );
 }
+
+#[test]
+fn the_same_instant_at_different_offsets_compares_equal_but_is_not_equal() {
+    let db = db();
+    for (query, expected) in [
+        (
+            "RETURN datetime('2015-07-21T12:00+01:00') > datetime('2015-07-21T11:00Z')",
+            false,
+        ),
+        (
+            "RETURN datetime('2015-07-21T12:00+01:00') <= datetime('2015-07-21T11:00Z')",
+            true,
+        ),
+        (
+            "RETURN datetime('2015-07-21T13:00+02:00[Europe/Stockholm]') >= \
+             datetime('2015-07-21T11:00Z')",
+            true,
+        ),
+        ("RETURN time('12:00+01:00') >= time('11:00Z')", true),
+        ("RETURN time('12:00+01:00') < time('11:00Z')", false),
+        (
+            "RETURN datetime('2015-07-21T12:00+01:00') = datetime('2015-07-21T11:00Z')",
+            false,
+        ),
+        ("RETURN time('12:00+01:00') = time('11:00Z')", false),
+    ] {
+        assert_eq!(single(&db, query), boolean(expected), "{query}");
+    }
+}

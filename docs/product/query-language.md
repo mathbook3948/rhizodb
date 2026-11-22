@@ -41,7 +41,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - Temporal values convert to strings in the ISO 8601 forms the TCK expects, and a temporal function reads back every string it produces.
 - A fractional duration component carries into the next smaller units, with a month of 30.436875 days, and the carry is exact before the nanoseconds are truncated.
 - Adding a duration to a temporal value adds months, then days, then seconds and nanoseconds, and drops the units the value does not have. A date keeps only whole days of the seconds.
-- `<`, `<=`, `>`, and `>=` compare two temporal values of the same type and give null otherwise. Times and datetimes compare by instant. Durations do not compare.
+- `<`, `<=`, `>`, and `>=` compare two temporal values of the same type and give null otherwise.
+- Times and datetimes compare by instant alone, so the same instant at two offsets or zones is neither less nor greater, even though the two are not equal.
+- Durations do not compare.
 - Two times or two datetimes are equal when they have the same instant and the same offset or zone. Two durations are equal when their months, days, seconds, and nanoseconds are.
 - `ORDER BY` places temporal values after paths and before strings, in the order datetime, local datetime, date, time, local time, duration. Within a type it sorts by instant or by value, and then by zone.
 - A temporal argument that does not parse, a map key a temporal function does not know or cannot combine, and a component outside its range fail with their own error kind, which depends on values and never on the query text alone.

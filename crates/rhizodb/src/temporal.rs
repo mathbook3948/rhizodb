@@ -489,11 +489,18 @@ impl Temporal {
         }
     }
 
-    /// How two values compare for `<` and its siblings: values of one type other than durations
-    /// compare in their sort order, and anything else does not compare.
+    /// How two values compare for `<` and its siblings: times and datetimes by instant alone,
+    /// other values of one type other than durations in their sort order, and anything else
+    /// does not compare.
     pub(crate) fn compare(&self, other: &Temporal) -> Option<Ordering> {
-        let comparable = self.rank() == other.rank() && !matches!(self, Temporal::Duration(_));
-        comparable.then(|| self.order(other))
+        match (self, other) {
+            (Temporal::Time(a), Temporal::Time(b)) => Some(a.utc_nanos().cmp(&b.utc_nanos())),
+            (Temporal::DateTime(a), Temporal::DateTime(b)) => {
+                Some(a.epoch_nanos().cmp(&b.epoch_nanos()))
+            }
+            (Temporal::Duration(_), _) => None,
+            _ => (self.rank() == other.rank()).then(|| self.order(other)),
+        }
     }
 
     /// The name of the type as error messages give it.
