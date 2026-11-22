@@ -971,12 +971,10 @@ impl Binder<'_> {
             items.push((item.expr.clone(), self.column_name(item)));
         }
         let mut columns: Vec<String> = Vec::new();
+        let mut repeated = None;
         for (_, name) in &items {
             if columns.contains(name) {
-                return Err(error(
-                    ErrorKind::ColumnNameConflict,
-                    format!("column `{name}` is projected twice"),
-                ));
+                repeated.get_or_insert_with(|| name.clone());
             }
             columns.push(name.clone());
         }
@@ -1081,6 +1079,12 @@ impl Binder<'_> {
             return Err(error(
                 ErrorKind::NoExpressionAlias,
                 "an expression in WITH needs an alias",
+            ));
+        }
+        if let Some(name) = repeated {
+            return Err(error(
+                ErrorKind::ColumnNameConflict,
+                format!("column `{name}` is projected twice"),
             ));
         }
         let skip = projection

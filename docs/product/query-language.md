@@ -54,6 +54,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
 - A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.
+- A column projected twice is reported after a `WITH` item without an alias.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.
 - `toInteger()` and `toFloat()` read text only in the decimal number literal syntax with an optional sign and optional surrounding whitespace, and give null for anything else.
 - Temporal values follow openCypher: `date`, `localtime`, `time`, `localdatetime`, `datetime`, and `duration` build them from a map, a string, or another temporal value.

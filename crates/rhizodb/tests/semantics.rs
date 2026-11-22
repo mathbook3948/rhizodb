@@ -230,6 +230,14 @@ fn next_to_an_aggregate_only_simple_keys_and_projected_names_are_visible() {
             "UNWIND [1, 2] AS x WITH x + 1, count(*) AS c RETURN c",
             ErrorKind::NoExpressionAlias,
         ),
+        (
+            "UNWIND [1] AS a WITH a + 1, a + 1 RETURN 1",
+            ErrorKind::NoExpressionAlias,
+        ),
+        (
+            "UNWIND [1] AS a RETURN a + 1, a + 1",
+            ErrorKind::ColumnNameConflict,
+        ),
     ] {
         assert_eq!(error_kind(&db, query), kind, "{query}");
     }
