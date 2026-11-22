@@ -1,5 +1,6 @@
 mod clause;
 mod expression;
+mod label;
 mod pattern;
 
 use super::ast::Call;
@@ -30,6 +31,7 @@ pub(crate) fn parse(input: &str) -> ParseResult<Query> {
         depth: 0,
         input_len: input.len(),
         in_where: false,
+        pipe_ends_filter: false,
     };
     parser.query()
 }
@@ -40,6 +42,7 @@ struct Parser {
     depth: usize,
     input_len: usize,
     in_where: bool,
+    pipe_ends_filter: bool,
 }
 
 impl Parser {

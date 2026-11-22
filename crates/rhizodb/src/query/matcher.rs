@@ -1,5 +1,8 @@
+use std::convert::Infallible;
+
 use crate::error::Error;
 use crate::gql::ast::Direction;
+use crate::gql::ast::LabelExpr;
 use crate::graph;
 use crate::graph::Adjacent;
 use crate::graph::Label;
@@ -99,11 +102,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(record) = self.tx.node(id)? else {
             return Ok(false);
         };
-        for label in &pattern.labels {
-            match self.tx.lookup_token::<Label>(label)? {
-                Some(token) if record.labels.contains(&token) => {}
-                _ => return Ok(false),
-            }
+        if let Some(labels) = &pattern.labels
+            && !self.node_has_labels(&record, labels)?
+        {
+            return Ok(false);
         }
         self.properties_match(&record.properties, pattern.properties.as_ref(), row)
     }
@@ -130,8 +132,8 @@ impl<T: ReadTransaction> Env<'_, T> {
                 _ => Vec::new(),
             });
         }
-        match pattern.labels.first() {
-            Some(label) => match self.tx.lookup_token::<Label>(label)? {
+        match pattern.labels.as_ref().and_then(LabelExpr::required) {
+            Some(label) => match self.tx.lookup_token::<Label>(&label.0)? {
                 Some(token) => Ok(self.tx.node_ids_with_label(token)?),
                 None => Ok(Vec::new()),
             },
@@ -145,26 +147,35 @@ impl<T: ReadTransaction> Env<'_, T> {
             Direction::Incoming => graph::Direction::Incoming,
             Direction::Undirected => graph::Direction::Both,
         };
-        if let [only] = pattern.types.as_slice() {
-            return match self.tx.lookup_token::<RelationshipType>(only)? {
-                Some(token) => Ok(self.tx.adjacent(node, direction, Some(token))?),
-                None => Ok(Vec::new()),
-            };
-        }
-        let all = self.tx.adjacent(node, direction, None)?;
-        if pattern.types.is_empty() {
-            return Ok(all);
-        }
+        let labels = match &pattern.labels {
+            None => return Ok(self.tx.adjacent(node, direction, None)?),
+            Some(LabelExpr::Name(only)) => {
+                return match self.tx.lookup_token::<RelationshipType>(&only.0)? {
+                    Some(token) => Ok(self.tx.adjacent(node, direction, Some(token))?),
+                    None => Ok(Vec::new()),
+                };
+            }
+            Some(labels) => labels,
+        };
         let mut tokens = Vec::new();
-        for name in &pattern.types {
-            if let Some(token) = self.tx.lookup_token::<RelationshipType>(name)? {
-                tokens.push(token);
+        for name in labels.names() {
+            tokens.push((
+                name.0.as_str(),
+                self.tx.lookup_token::<RelationshipType>(&name.0)?,
+            ));
+        }
+        let mut kept = Vec::new();
+        for adjacent in self.tx.adjacent(node, direction, None)? {
+            let Ok(found) = labels.matches::<Infallible>(true, &mut |name| {
+                Ok(tokens
+                    .iter()
+                    .any(|(known, token)| *known == name && *token == Some(adjacent.rel_type)))
+            });
+            if found {
+                kept.push(adjacent);
             }
         }
-        Ok(all
-            .into_iter()
-            .filter(|adjacent| tokens.contains(&adjacent.rel_type))
-            .collect())
+        Ok(kept)
     }
 }
 

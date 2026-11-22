@@ -70,12 +70,8 @@ impl Parser {
 
     fn node_pattern(&mut self) -> ParseResult<NodePattern> {
         self.expect_punct(Punct::LParen)?;
-        let variable = if self.at_word() {
-            Some(self.name()?)
-        } else {
-            None
-        };
-        let labels = self.label_list()?;
+        let variable = self.element_variable()?;
+        let labels = self.pattern_labels(true)?;
         let properties = self.properties()?;
         self.expect_punct(Punct::RParen)?;
         Ok(NodePattern {
@@ -83,6 +79,15 @@ impl Parser {
             labels,
             properties,
         })
+    }
+
+    fn element_variable(&mut self) -> ParseResult<Option<Name>> {
+        let starts_labels = self.at_keyword("IS") && self.label_starts_at(1);
+        if self.at_word() && !starts_labels {
+            Ok(Some(self.name()?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn properties(&mut self) -> ParseResult<Option<Properties>> {
@@ -102,7 +107,7 @@ impl Parser {
         self.expect_punct(Punct::Minus)?;
         let mut relationship = RelationshipPattern {
             variable: None,
-            types: Vec::new(),
+            labels: None,
             length: None,
             properties: None,
             direction: Direction::Undirected,
@@ -125,16 +130,8 @@ impl Parser {
     }
 
     fn relationship_detail(&mut self, relationship: &mut RelationshipPattern) -> ParseResult<()> {
-        if self.at_word() {
-            relationship.variable = Some(self.name()?);
-        }
-        if self.eat_punct(Punct::Colon) {
-            relationship.types.push(self.name()?);
-            while self.eat_punct(Punct::Pipe) {
-                self.eat_punct(Punct::Colon);
-                relationship.types.push(self.name()?);
-            }
-        }
+        relationship.variable = self.element_variable()?;
+        relationship.labels = self.pattern_labels(false)?;
         if self.eat_punct(Punct::Star) {
             relationship.length = Some(self.length_bounds()?);
         } else if self.at_punct(Punct::DotDot)

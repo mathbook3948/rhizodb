@@ -3,6 +3,7 @@ use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::ProjectionItems;
@@ -310,7 +311,10 @@ fn merge_collects_on_create_and_on_match_actions() {
     };
     assert_eq!(found.on_create.len(), 2);
     assert_eq!(found.on_match.len(), 2);
-    assert_eq!(found.pattern.element.start.labels, vec![name("A")]);
+    assert_eq!(
+        found.pattern.element.start.labels,
+        Some(LabelExpr::Name(name("A")))
+    );
 }
 
 #[test]

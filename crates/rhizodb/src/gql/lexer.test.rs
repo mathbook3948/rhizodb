@@ -224,5 +224,20 @@ fn token_spans_are_byte_offsets() {
 #[test]
 fn unknown_characters_are_rejected_with_their_offset() {
     assert_eq!(error("a ? b"), (2, SyntaxErrorKind::UnexpectedCharacter));
-    assert_eq!(error("a !"), (2, SyntaxErrorKind::UnexpectedCharacter));
+    assert_eq!(error("a # b"), (2, SyntaxErrorKind::UnexpectedCharacter));
+}
+
+#[test]
+fn label_operators_are_single_characters() {
+    assert_eq!(
+        kinds("&!%|!="),
+        vec![
+            TokenKind::Punct(Punct::Ampersand),
+            TokenKind::Punct(Punct::Bang),
+            TokenKind::Punct(Punct::Percent),
+            TokenKind::Punct(Punct::Pipe),
+            TokenKind::Punct(Punct::Bang),
+            TokenKind::Punct(Punct::Eq),
+        ]
+    );
 }

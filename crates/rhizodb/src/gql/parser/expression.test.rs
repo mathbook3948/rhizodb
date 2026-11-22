@@ -229,7 +229,7 @@ fn indexing_and_slicing() {
 
 #[test]
 fn label_predicates() {
-    assert_shapes(&[("n:A", "(labels n :A)"), ("n:A:B", "(labels n :A:B)")]);
+    assert_shapes(&[("n:A", "(labels n A)"), ("n:A:B", "(labels n (& A B))")]);
 }
 
 #[test]

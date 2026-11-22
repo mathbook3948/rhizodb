@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::Direction;
+use crate::gql::ast::LabelExpr;
 use crate::graph::Direction as Adjacency;
 use crate::graph::GraphTx;
 use crate::graph::Label;
@@ -187,8 +188,10 @@ impl<W: WriteTransaction> Writer<'_, W> {
             properties: self.properties(pattern.properties.as_ref(), row, merging)?,
             ..NodeRecord::default()
         };
-        for label in &pattern.labels {
-            record.labels.insert(self.tx.intern_token::<Label>(label)?);
+        for label in pattern.labels.iter().flat_map(LabelExpr::names) {
+            record
+                .labels
+                .insert(self.tx.intern_token::<Label>(&label.0)?);
         }
         let id = self.tx.create_node(&record)?;
         set(row, pattern.slot, Datum::Node(id));
@@ -208,9 +211,9 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 Direction::Incoming => (next, current),
                 Direction::Outgoing | Direction::Undirected => (current, next),
             };
-            let rel_type = match relationship.types.first() {
-                Some(name) => self.tx.intern_token::<RelationshipType>(name)?,
-                None => return Err(type_error("a relationship to create needs a type")),
+            let rel_type = match &relationship.labels {
+                Some(LabelExpr::Name(name)) => self.tx.intern_token::<RelationshipType>(&name.0)?,
+                _ => return Err(type_error("a relationship to create needs one type")),
             };
             let record = RelationshipRecord {
                 rel_type,

@@ -203,18 +203,101 @@ pub(crate) struct PatternStep {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NodePattern {
     pub variable: Option<Name>,
-    pub labels: Vec<Name>,
+    /// `None` accepts any node.
+    pub labels: Option<LabelExpr>,
     pub properties: Option<Properties>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RelationshipPattern {
     pub variable: Option<Name>,
-    /// Alternatives joined by `|`. Empty means any type.
-    pub types: Vec<Name>,
+    /// A test on the type, which is the only label of a relationship. `None` accepts any type.
+    pub labels: Option<LabelExpr>,
     pub length: Option<Length>,
     pub properties: Option<Properties>,
     pub direction: Direction,
+}
+
+/// A label expression. Cypher's `:A:B` is the conjunction of `A` and `B`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum LabelExpr {
+    Name(Name),
+    /// `%`, which an element with at least one label satisfies.
+    Wildcard,
+    Not(Box<LabelExpr>),
+    /// Two or more operands.
+    And(Vec<LabelExpr>),
+    /// Two or more operands.
+    Or(Vec<LabelExpr>),
+}
+
+impl LabelExpr {
+    /// Whether an element satisfies the expression, where `labeled` says whether it has any
+    /// label and `has` whether it has the named one.
+    pub(crate) fn matches<E>(
+        &self,
+        labeled: bool,
+        has: &mut impl FnMut(&str) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        Ok(match self {
+            Self::Name(name) => has(&name.0)?,
+            Self::Wildcard => labeled,
+            Self::Not(operand) => !operand.matches(labeled, has)?,
+            Self::And(operands) => {
+                for operand in operands {
+                    if !operand.matches(labeled, has)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            Self::Or(operands) => {
+                for operand in operands {
+                    if operand.matches(labeled, has)? {
+                        return Ok(true);
+                    }
+                }
+                false
+            }
+        })
+    }
+
+    /// Every label the expression names, in source order and with repeats.
+    pub(crate) fn names(&self) -> Vec<&Name> {
+        match self {
+            Self::Name(name) => vec![name],
+            Self::Wildcard => Vec::new(),
+            Self::Not(operand) => operand.names(),
+            Self::And(operands) | Self::Or(operands) => {
+                operands.iter().flat_map(Self::names).collect()
+            }
+        }
+    }
+
+    /// A label that every element satisfying the expression has, if the expression requires one.
+    pub(crate) fn required(&self) -> Option<&Name> {
+        match self {
+            Self::Name(name) => Some(name),
+            Self::And(operands) => operands.iter().find_map(Self::required),
+            Self::Wildcard | Self::Not(_) | Self::Or(_) => None,
+        }
+    }
+
+    /// The labels of a name or a conjunction of names, the only forms a pattern that creates
+    /// accepts.
+    pub(crate) fn label_set(&self) -> Option<Vec<&Name>> {
+        match self {
+            Self::Name(name) => Some(vec![name]),
+            Self::And(operands) => operands
+                .iter()
+                .map(|operand| match operand {
+                    Self::Name(name) => Some(name),
+                    _ => None,
+                })
+                .collect(),
+            Self::Wildcard | Self::Not(_) | Self::Or(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -260,7 +343,7 @@ pub(crate) enum Expr {
     },
     HasLabels {
         operand: Box<Expr>,
-        labels: Vec<Name>,
+        labels: LabelExpr,
     },
     Unary {
         op: UnaryOp,
@@ -402,3 +485,7 @@ pub(crate) enum Quantifier {
     None,
     Single,
 }
+
+#[cfg(test)]
+#[path = "ast.test.rs"]
+mod tests;

@@ -254,7 +254,7 @@ impl Parser {
         Ok(SortItem { expr, direction })
     }
 
-    pub(super) fn label_list(&mut self) -> ParseResult<Vec<Name>> {
+    fn label_list(&mut self) -> ParseResult<Vec<Name>> {
         let mut labels = Vec::new();
         while self.eat_punct(Punct::Colon) {
             labels.push(self.name()?);

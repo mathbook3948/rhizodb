@@ -25,6 +25,11 @@
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [7] An abbreviated edge works in OPTIONAL MATCH
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [8] A minus sign between parenthesized terms in an expression is subtraction
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [9] An edge pointing left or right matches both orientations
+16.8-label-expression/LabelExpression1.feature: [1] IS introduces a label expression in a node pattern
+16.8-label-expression/LabelExpression1.feature: [2] A label conjunction needs every label
+16.8-label-expression/LabelExpression1.feature: [3] A label disjunction in a node pattern needs any label
+16.8-label-expression/LabelExpression1.feature: [4] A label negation excludes a label
 16.8-label-expression/LabelExpression1.feature: [5] A label disjunction in an edge pattern matches either type
 19.9-labeled-predicate/LabeledPredicate1.feature: [1] A label test on an edge is true for its type
 19.9-labeled-predicate/LabeledPredicate1.feature: [2] A label test on an edge filters in WHERE
+19.9-labeled-predicate/LabeledPredicate1.feature: [3] IS LABELED tests a node label

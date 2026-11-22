@@ -1,5 +1,6 @@
 use crate::gql::ast::Direction;
 use crate::gql::ast::Expr;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Length;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
@@ -15,10 +16,22 @@ fn name(text: &str) -> Name {
     Name::new(text)
 }
 
-fn node(variable: Option<&str>, labels: &[&str]) -> NodePattern {
+fn labels(names: &[&str]) -> Option<LabelExpr> {
+    let mut operands: Vec<LabelExpr> = names
+        .iter()
+        .map(|label| LabelExpr::Name(name(label)))
+        .collect();
+    match operands.len() {
+        0 => None,
+        1 => operands.pop(),
+        _ => Some(LabelExpr::And(operands)),
+    }
+}
+
+fn node(variable: Option<&str>, names: &[&str]) -> NodePattern {
     NodePattern {
         variable: variable.map(name),
-        labels: labels.iter().map(|label| name(label)).collect(),
+        labels: labels(names),
         properties: None,
     }
 }
@@ -96,8 +109,12 @@ fn relationship_detail_variable_types_and_properties() {
     let found = only_relationship("(a)-[r:KNOWS|LIKES|:LOVES {since: 1}]->(b)");
     assert_eq!(found.variable, Some(name("r")));
     assert_eq!(
-        found.types,
-        vec![name("KNOWS"), name("LIKES"), name("LOVES")]
+        found.labels,
+        Some(LabelExpr::Or(vec![
+            LabelExpr::Name(name("KNOWS")),
+            LabelExpr::Name(name("LIKES")),
+            LabelExpr::Name(name("LOVES")),
+        ]))
     );
     assert_eq!(
         found.properties,
@@ -167,7 +184,7 @@ fn variable_length_bounds() {
 fn variable_length_with_types_and_variable_together() {
     let found = only_relationship("(a)-[r:T*1..2 {k: 1}]->(b)");
     assert_eq!(found.variable, Some(name("r")));
-    assert_eq!(found.types, vec![name("T")]);
+    assert_eq!(found.labels, labels(&["T"]));
     assert_eq!(
         found.length,
         Some(Length {
@@ -195,13 +212,13 @@ fn chains_keep_every_step_in_order() {
             Direction::Undirected
         ]
     );
-    let labels: Vec<Vec<Name>> = part
+    let found: Vec<Option<LabelExpr>> = part
         .element
         .steps
         .iter()
         .map(|s| s.node.labels.clone())
         .collect();
-    assert_eq!(labels, vec![vec![name("B")], vec![], vec![]]);
+    assert_eq!(found, vec![labels(&["B"]), None, None]);
 }
 
 #[test]

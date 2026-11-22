@@ -706,7 +706,17 @@ impl Binder<'_> {
         introduced: &mut Vec<Slot>,
     ) -> Result<NodePattern, Error> {
         let properties = self.pattern_properties(node.properties.as_ref(), scope, usage)?;
-        let labels = names(&node.labels);
+        let labels = node.labels.clone();
+        if matches!(usage, PatternUse::Create | PatternUse::Merge)
+            && labels
+                .as_ref()
+                .is_some_and(|labels| labels.label_set().is_none())
+        {
+            return Err(error(
+                ErrorKind::NoLabelSet,
+                "a node to create takes labels joined by `&` or `:` only",
+            ));
+        }
         let (slot, bound) = match &node.variable {
             Some(name) => match scope.get(&name.0) {
                 Some(variable) => {
@@ -717,7 +727,7 @@ impl Binder<'_> {
                         ));
                     }
                     if matches!(usage, PatternUse::Create | PatternUse::Merge)
-                        && (!labels.is_empty() || properties.is_some())
+                        && (labels.is_some() || properties.is_some())
                     {
                         return Err(error(
                             ErrorKind::VariableAlreadyBound,
@@ -770,7 +780,7 @@ impl Binder<'_> {
                     "a variable-length relationship cannot be created",
                 ));
             }
-            if relationship.types.len() != 1 {
+            if !matches!(relationship.labels, Some(ast::LabelExpr::Name(_))) {
                 return Err(error(
                     ErrorKind::NoSingleRelationshipType,
                     "a relationship to create needs exactly one type",
@@ -831,7 +841,7 @@ impl Binder<'_> {
         Ok(RelationshipPattern {
             slot,
             bound,
-            types: names(&relationship.types),
+            labels: relationship.labels.clone(),
             direction: relationship.direction,
             length,
             properties,
@@ -1334,7 +1344,7 @@ impl Binder<'_> {
                         format!("labels cannot be tested on a {shape:?}")
                     });
                 }
-                Expr::HasLabels(bound, names(labels))
+                Expr::HasLabels(bound, labels.clone())
             }
             ast::Expr::Unary {
                 op,

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Direction;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
 use crate::procedure::Procedure;
@@ -136,7 +137,8 @@ pub(crate) struct Step {
 pub(crate) struct NodePattern {
     pub(crate) slot: Slot,
     pub(crate) bound: bool,
-    pub(crate) labels: Vec<String>,
+    /// In a pattern that creates, `None` or a label set.
+    pub(crate) labels: Option<LabelExpr>,
     pub(crate) properties: Option<Expr>,
 }
 
@@ -144,7 +146,8 @@ pub(crate) struct NodePattern {
 pub(crate) struct RelationshipPattern {
     pub(crate) slot: Slot,
     pub(crate) bound: bool,
-    pub(crate) types: Vec<String>,
+    /// In a pattern that creates, a single name.
+    pub(crate) labels: Option<LabelExpr>,
     pub(crate) direction: Direction,
     pub(crate) length: Option<Hops>,
     pub(crate) properties: Option<Expr>,
@@ -241,7 +244,7 @@ pub(crate) enum Expr {
     Property(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Slice(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
-    HasLabels(Box<Expr>, Vec<String>),
+    HasLabels(Box<Expr>, LabelExpr),
     Not(Box<Expr>),
     Negate(Box<Expr>),
     UnaryPlus(Box<Expr>),

@@ -45,6 +45,18 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `CALL` of a procedure without outputs keeps each row once.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
 - A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
+- Label expressions take `|`, `&`, `!`, `%`, and parentheses, with `|` binding weakest and `!` tightest.
+- `!` applies to a label, `%`, or a parenthesized expression, so `!!A` is a syntax error.
+- `%` is true of an element with at least one label, so it is true of every relationship.
+- A node or relationship pattern introduces its label expression with `:` or `IS`.
+- `IS` starts a label expression in a pattern only when a label expression follows it, so a variable can still be named `is`.
+- Cypher's `:A:B` is the conjunction of `A` and `B`, and it only joins plain label names, so mixing it with another label operator is a syntax error.
+- A relationship pattern takes a single `:`, so `[:T:U]` is a syntax error.
+- A `:` may follow a `|`, as in Cypher's `[:T|:U]`.
+- A label test in an expression takes a label expression after `:` or after `IS LABELED`, and `IS NOT LABELED` is its negation.
+- `IS LABELED` and `IS NOT LABELED` bind like `IS NULL`.
+- Inside the `WHERE` of a list or pattern comprehension, a `|` outside parentheses or brackets starts the projection, so a label disjunction there needs parentheses.
+- A node in a pattern that creates takes only a label or a conjunction of labels, and anything else fails with its own error kind.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data. They never take part in the type checks made on the query text.
