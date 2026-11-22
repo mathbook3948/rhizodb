@@ -1,5 +1,6 @@
 mod clause;
 mod expression;
+mod label;
 mod pattern;
 
 use super::ast::Call;
@@ -24,22 +25,45 @@ pub(crate) type ParseResult<T> = Result<T, SyntaxError>;
 /// Parses one query. Never panics: malformed input, including deeply nested
 /// input, comes back as a `SyntaxError`.
 pub(crate) fn parse(input: &str) -> ParseResult<Query> {
+    let tokens = lex(input)?;
     let mut parser = Parser {
-        tokens: lex(input)?,
+        bracket_depths: bracket_depths(&tokens),
+        tokens,
         pos: 0,
         depth: 0,
         input_len: input.len(),
         in_where: false,
+        pipe_ends_filter: None,
     };
     parser.query()
 }
 
+fn bracket_depths(tokens: &[Token]) -> Vec<usize> {
+    let mut depth = 0usize;
+    tokens
+        .iter()
+        .map(|token| match token.kind {
+            TokenKind::Punct(Punct::LParen | Punct::LBracket | Punct::LBrace) => {
+                depth += 1;
+                depth - 1
+            }
+            TokenKind::Punct(Punct::RParen | Punct::RBracket | Punct::RBrace) => {
+                depth = depth.saturating_sub(1);
+                depth
+            }
+            _ => depth,
+        })
+        .collect()
+}
+
 struct Parser {
     tokens: Vec<Token>,
+    bracket_depths: Vec<usize>,
     pos: usize,
     depth: usize,
     input_len: usize,
     in_where: bool,
+    pipe_ends_filter: Option<usize>,
 }
 
 impl Parser {
@@ -106,6 +130,14 @@ impl Parser {
 
     fn kind_at(&self, ahead: usize) -> Option<&TokenKind> {
         self.tokens.get(self.pos + ahead).map(|token| &token.kind)
+    }
+
+    fn bracket_depth(&self) -> usize {
+        self.bracket_depths.get(self.pos).copied().unwrap_or(0)
+    }
+
+    fn label_pipe_allowed(&self) -> bool {
+        self.pipe_ends_filter != Some(self.bracket_depth())
     }
 
     fn offset(&self) -> usize {

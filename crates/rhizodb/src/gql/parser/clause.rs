@@ -24,9 +24,9 @@ use crate::gql::error::SyntaxErrorKind;
 use crate::gql::lexer::Punct;
 use crate::gql::lexer::TokenKind;
 
-const CLAUSE_KEYWORDS: [&str; 15] = [
+const CLAUSE_KEYWORDS: [&str; 17] = [
     "MATCH", "OPTIONAL", "INSERT", "CREATE", "RETURN", "WITH", "UNWIND", "SET", "REMOVE", "DELETE",
-    "DETACH", "MERGE", "CALL", "FOREACH", "LOAD",
+    "DETACH", "MERGE", "CALL", "FOREACH", "LOAD", "FILTER", "LET",
 ];
 
 const UNSUPPORTED_CLAUSE_KEYWORDS: [&str; 2] = ["FOREACH", "LOAD"];
@@ -61,6 +61,17 @@ impl Parser {
             self.expect_keyword("AS")?;
             let variable = self.name()?;
             return Ok(Clause::Unwind(Unwind { expr, variable }));
+        }
+        if self.eat_keyword("FILTER") {
+            self.eat_keyword("WHERE");
+            return Ok(Clause::Filter(self.predicate()?));
+        }
+        if self.eat_keyword("LET") {
+            return Ok(Clause::Let(self.comma_separated(|parser| {
+                let variable = parser.name()?;
+                parser.expect_punct(Punct::Eq)?;
+                Ok((variable, parser.expression()?))
+            })?));
         }
         if self.eat_keyword("SET") {
             return Ok(Clause::Set(self.comma_separated(Self::set_item)?));
@@ -243,7 +254,7 @@ impl Parser {
         Ok(SortItem { expr, direction })
     }
 
-    pub(super) fn label_list(&mut self) -> ParseResult<Vec<Name>> {
+    fn label_list(&mut self) -> ParseResult<Vec<Name>> {
         let mut labels = Vec::new();
         while self.eat_punct(Punct::Colon) {
             labels.push(self.name()?);

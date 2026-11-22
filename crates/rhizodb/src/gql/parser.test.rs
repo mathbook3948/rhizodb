@@ -3,6 +3,7 @@ use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::ProjectionItems;
@@ -156,6 +157,72 @@ fn unwind_binds_a_variable() {
 }
 
 #[test]
+fn filter_takes_a_condition_with_or_without_where() {
+    for source in ["FILTER k > 1", "FILTER WHERE k > 1", "filter where k > 1"] {
+        let Clause::Filter(condition) = only_clause(source) else {
+            panic!("expected FILTER in {source}");
+        };
+        assert_eq!(sexp(&condition), "(cmp k > 1)", "{source}");
+    }
+}
+
+#[test]
+fn filter_accepts_a_pattern_predicate() {
+    let clauses = single_query_clauses("MATCH (a) FILTER (a)-->() RETURN a");
+    assert!(
+        matches!(&clauses[1], Clause::Filter(Expr::Pattern(_))),
+        "{clauses:?}"
+    );
+}
+
+#[test]
+fn filter_errors_report_offsets() {
+    for (source, expected) in [
+        ("FILTER", (6, SyntaxErrorKind::UnexpectedEnd)),
+        ("FILTER WHERE", (12, SyntaxErrorKind::UnexpectedEnd)),
+        ("FILTER RETURN 1", (7, SyntaxErrorKind::UnexpectedToken)),
+        (
+            "FILTER WHERE WHERE k",
+            (13, SyntaxErrorKind::UnexpectedToken),
+        ),
+        (
+            "FILTER k RETURN k k",
+            (18, SyntaxErrorKind::UnexpectedToken),
+        ),
+    ] {
+        assert_eq!(error(source), expected, "{source:?}");
+    }
+}
+
+#[test]
+fn let_binds_variables_in_source_order() {
+    let Clause::Let(bindings) = only_clause("let a = 1, b = k * 2") else {
+        panic!("expected LET");
+    };
+    let found: Vec<(&str, String)> = bindings
+        .iter()
+        .map(|(variable, value)| (variable.0.as_str(), sexp(value)))
+        .collect();
+    assert_eq!(found, [("a", "1".into()), ("b", "(* k 2)".into())]);
+}
+
+#[test]
+fn let_errors_report_offsets() {
+    for (source, expected) in [
+        ("LET", (3, SyntaxErrorKind::UnexpectedEnd)),
+        ("LET a", (5, SyntaxErrorKind::UnexpectedEnd)),
+        ("LET a 1", (6, SyntaxErrorKind::UnexpectedToken)),
+        ("LET a = ", (8, SyntaxErrorKind::UnexpectedEnd)),
+        ("LET = 1", (4, SyntaxErrorKind::UnexpectedToken)),
+        ("LET a = 1,", (10, SyntaxErrorKind::UnexpectedEnd)),
+        ("LET a.b = 1", (5, SyntaxErrorKind::UnexpectedToken)),
+        ("LET a = 1 b = 2", (10, SyntaxErrorKind::UnexpectedToken)),
+    ] {
+        assert_eq!(error(source), expected, "{source:?}");
+    }
+}
+
+#[test]
 fn set_has_property_map_and_label_forms() {
     let Clause::Set(found) = only_clause("SET n.a = 1, n = {b: 2}, n += $m, n:A:B") else {
         panic!("expected SET");
@@ -244,13 +311,17 @@ fn merge_collects_on_create_and_on_match_actions() {
     };
     assert_eq!(found.on_create.len(), 2);
     assert_eq!(found.on_match.len(), 2);
-    assert_eq!(found.pattern.element.start.labels, vec![name("A")]);
+    assert_eq!(
+        found.pattern.element.start.labels,
+        Some(LabelExpr::Name(name("A")))
+    );
 }
 
 #[test]
 fn clauses_keep_their_source_order() {
     let clauses = single_query_clauses(
-        "MATCH (a) WITH a UNWIND [1] AS x CREATE (b) SET b.k = x REMOVE b.k DELETE b RETURN a",
+        "MATCH (a) WITH a UNWIND [1] AS x FILTER x > 0 LET y = x CREATE (b) SET b.k = x REMOVE b.k DELETE b \
+         RETURN a",
     );
     let kinds: Vec<&str> = clauses
         .iter()
@@ -265,12 +336,15 @@ fn clauses_keep_their_source_order() {
             Clause::Remove(_) => "remove",
             Clause::Delete(_) => "delete",
             Clause::Call(_) => "call",
+            Clause::Filter(_) => "filter",
+            Clause::Let(_) => "let",
         })
         .collect();
     assert_eq!(
         kinds,
         vec![
-            "match", "with", "unwind", "insert", "set", "remove", "delete", "return"
+            "match", "with", "unwind", "filter", "let", "insert", "set", "remove", "delete",
+            "return"
         ]
     );
 }

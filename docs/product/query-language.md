@@ -43,8 +43,24 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `CALL` inside a larger query rejects `YIELD *`.
 - A `CALL` gives one row per row the procedure returns.
 - A `CALL` of a procedure without outputs keeps each row once.
-- Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
+- Patterns accept every GQL edge form, full and abbreviated: `<-`, `->`, `-`, `<->`, `~`, `<~`, and `~>`.
+- Every stored relationship is directed, so `~` matches no relationship, and `<~` and `~>` match what `<-` and `->` match.
+- A variable-length `~` edge still matches a path of zero hops.
+- `<~>` and `<~[]~>` are syntax errors.
+- A pattern that creates rejects the edge forms with `~` as missing a direction, and `INSERT` also rejects `-` and `<->`.
 - A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
+- Label expressions take `|`, `&`, `!`, `%`, and parentheses, with `|` binding weakest and `!` tightest.
+- `!` applies to a label, `%`, or a parenthesized expression, so `!!A` is a syntax error.
+- `%` is true of an element with at least one label, so it is true of every relationship.
+- A node or relationship pattern introduces its label expression with `:` or `IS`.
+- `IS` starts a label expression in a pattern only when a label expression follows it, so a variable can still be named `is`.
+- Cypher's `:A:B` is the conjunction of `A` and `B`, and it only joins plain label names, so mixing it with another label operator is a syntax error.
+- A relationship pattern takes a single `:`, so `[:T:U]` is a syntax error.
+- A `:` may follow a `|`, as in Cypher's `[:T|:U]`.
+- A label test in an expression takes a label expression after `:` or after `IS LABELED`, and `IS NOT LABELED` is its negation.
+- `IS LABELED` and `IS NOT LABELED` bind like `IS NULL`.
+- Inside the `WHERE` of a list or pattern comprehension, a `|` that no parenthesis, bracket, brace, or `CASE` within the filter encloses starts the projection, so only a label disjunction at the top of the filter needs parentheses.
+- A node in a pattern that creates takes only a label or a conjunction of labels, and anything else fails with its own error kind.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data. They never take part in the type checks made on the query text.
@@ -67,6 +83,15 @@ GQL is the reference language, but the only public conformance suite is the open
 - The type the query text fixes leaves out null, so an operand that may be null, such as a comparison or an `OPTIONAL MATCH` variable, still fails early when no value of its type fits.
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
+- `FILTER` keeps the rows whose condition is true, with or without `WHERE` after the keyword, and keeps every variable in scope.
+- A `FILTER` condition is a `WHERE` in every rule above, so it may hold a pattern predicate and may not aggregate.
+- `FILTER` is a reading clause, so it cannot end a query and does not separate an updating clause from a reading clause after it.
+- `LET` binds each value to a new variable and keeps every variable in scope.
+- A `LET` variable cannot already be in scope, so `LET` never shadows or rebinds a variable.
+- The values of one `LET` see only the incoming row, not the variables the same `LET` binds.
+- A `LET` value cannot aggregate.
+- `LET` is a reading clause under the same clause-order rules as `FILTER`.
+- `LET` accepts only `variable = value`, without the `VALUE` keyword or a declared type.
 - A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.
 - A column projected twice is reported after a `WITH` item without an alias.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.

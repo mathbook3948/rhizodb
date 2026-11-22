@@ -2,6 +2,7 @@ use super::ast::BinaryOp;
 use super::ast::Clause;
 use super::ast::ComparisonOp;
 use super::ast::Expr;
+use super::ast::LabelExpr;
 use super::ast::Literal;
 use super::ast::Name;
 use super::ast::PatternPart;
@@ -88,8 +89,7 @@ pub(super) fn sexp(expr: &Expr) -> String {
             format!("(slice {} {} {})", sexp(base), optional(from), optional(to))
         }
         Expr::HasLabels { operand, labels } => {
-            let labels: Vec<String> = labels.iter().map(|Name(l)| format!(":{l}")).collect();
-            format!("(labels {} {})", sexp(operand), labels.join(""))
+            format!("(labels {} {})", sexp(operand), label_sexp(labels))
         }
         Expr::Unary { op, operand } => {
             let op = match op {
@@ -134,6 +134,23 @@ pub(super) fn sexp(expr: &Expr) -> String {
             )
         }
         other => format!("{other:?}"),
+    }
+}
+
+pub(super) fn label_sexp(labels: &LabelExpr) -> String {
+    let all = |operands: &[LabelExpr]| {
+        operands
+            .iter()
+            .map(label_sexp)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match labels {
+        LabelExpr::Name(Name(name)) => name.clone(),
+        LabelExpr::Wildcard => "%".into(),
+        LabelExpr::Not(operand) => format!("(! {})", label_sexp(operand)),
+        LabelExpr::And(operands) => format!("(& {})", all(operands)),
+        LabelExpr::Or(operands) => format!("(| {})", all(operands)),
     }
 }
 

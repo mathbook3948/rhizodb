@@ -38,6 +38,19 @@ fn a_signature_that_does_not_parse_is_an_adapter_error() {
 }
 
 #[test]
+fn a_label_expression_that_is_not_a_label_set_raises_a_syntax_error() {
+    let mut graph = RhizoDb.fresh_graph();
+
+    assert_eq!(
+        graph.execute("INSERT (:A|B)", &BTreeMap::new()).err(),
+        Some(QueryError::Raised {
+            kind: "SyntaxError".into(),
+            detail: "NoLabelSet".into(),
+        })
+    );
+}
+
+#[test]
 fn a_scenario_whose_procedure_cannot_be_registered_fails() {
     let scenario = Scenario {
         feature: "f.feature".into(),

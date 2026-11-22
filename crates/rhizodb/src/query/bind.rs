@@ -270,7 +270,8 @@ impl Binder<'_> {
                     | ast::Clause::Set(_)
                     | ast::Clause::Remove(_)
                     | ast::Clause::Delete(_)
-            );
+            ) || (follows_update
+                && matches!(clause, ast::Clause::Filter(_) | ast::Clause::Let(_)));
             if subquery && follows_update {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
@@ -303,6 +304,29 @@ impl Binder<'_> {
                         output = Some((slots, columns));
                     }
                     clauses.push(Clause::Read(ReadClause::Call(Box::new(bound))));
+                }
+                ast::Clause::Filter(condition) => {
+                    let condition = self.filter(condition, &scope, &mut Mode::Plain)?;
+                    clauses.push(Clause::Read(ReadClause::Filter(condition)));
+                }
+                ast::Clause::Let(bindings) => {
+                    let mut next = scope.clone();
+                    let mut bound = Vec::new();
+                    for (variable, value) in bindings {
+                        let expr = self.expr(value, &scope, &mut Mode::Plain)?;
+                        let name = &variable.0;
+                        if next.get(name).is_some() {
+                            return Err(error(
+                                ErrorKind::VariableAlreadyBound,
+                                format!("variable `{name}` is already bound"),
+                            ));
+                        }
+                        let slot = self.slot();
+                        next.insert(name, slot, kind_of(value, &scope));
+                        bound.push((expr, slot));
+                    }
+                    scope = next;
+                    clauses.push(Clause::Read(ReadClause::Let(bound)));
                 }
                 ast::Clause::With(with) => {
                     let (projection, next, _) =
@@ -372,7 +396,14 @@ impl Binder<'_> {
                 ast::Clause::Delete(delete) => {
                     let mut targets = Vec::new();
                     for target in &delete.targets {
-                        if matches!(target, ast::Expr::HasLabels { .. }) {
+                        let label_test = match target {
+                            ast::Expr::Unary {
+                                op: ast::UnaryOp::Not,
+                                operand,
+                            } => operand.as_ref(),
+                            other => other,
+                        };
+                        if matches!(label_test, ast::Expr::HasLabels { .. }) {
                             return Err(error(
                                 ErrorKind::InvalidDelete,
                                 "DELETE takes an element, not a label expression",
@@ -409,6 +440,8 @@ impl Binder<'_> {
                         | ast::Clause::With(_)
                         | ast::Clause::Unwind(_)
                         | ast::Clause::Call(_)
+                        | ast::Clause::Filter(_)
+                        | ast::Clause::Let(_)
                 )
             {
                 return Err(error(
@@ -680,7 +713,17 @@ impl Binder<'_> {
         introduced: &mut Vec<Slot>,
     ) -> Result<NodePattern, Error> {
         let properties = self.pattern_properties(node.properties.as_ref(), scope, usage)?;
-        let labels = names(&node.labels);
+        let labels = node.labels.clone();
+        if matches!(usage, PatternUse::Create | PatternUse::Merge)
+            && labels
+                .as_ref()
+                .is_some_and(|labels| labels.label_set().is_none())
+        {
+            return Err(error(
+                ErrorKind::NoLabelSet,
+                "a node to create takes labels joined by `&` or `:` only",
+            ));
+        }
         let (slot, bound) = match &node.variable {
             Some(name) => match scope.get(&name.0) {
                 Some(variable) => {
@@ -691,7 +734,7 @@ impl Binder<'_> {
                         ));
                     }
                     if matches!(usage, PatternUse::Create | PatternUse::Merge)
-                        && (!labels.is_empty() || properties.is_some())
+                        && (labels.is_some() || properties.is_some())
                     {
                         return Err(error(
                             ErrorKind::VariableAlreadyBound,
@@ -744,16 +787,26 @@ impl Binder<'_> {
                     "a variable-length relationship cannot be created",
                 ));
             }
-            if relationship.types.len() != 1 {
+            if !matches!(relationship.labels, Some(ast::LabelExpr::Name(_))) {
                 return Err(error(
                     ErrorKind::NoSingleRelationshipType,
                     "a relationship to create needs exactly one type",
                 ));
             }
-            if usage == PatternUse::Create && relationship.direction == Direction::Undirected {
+            let undirected = matches!(
+                relationship.direction,
+                Direction::Undirected
+                    | Direction::IncomingOrUndirected
+                    | Direction::UndirectedOrOutgoing
+            );
+            let either_way = matches!(
+                relationship.direction,
+                Direction::Any | Direction::IncomingOrOutgoing
+            );
+            if undirected || (usage == PatternUse::Create && either_way) {
                 return Err(error(
                     ErrorKind::RequiresDirectedRelationship,
-                    "a relationship to create needs a direction",
+                    "a relationship to create needs a direction, since every stored edge has one",
                 ));
             }
         }
@@ -805,7 +858,7 @@ impl Binder<'_> {
         Ok(RelationshipPattern {
             slot,
             bound,
-            types: names(&relationship.types),
+            labels: relationship.labels.clone(),
             direction: relationship.direction,
             length,
             properties,
@@ -1308,7 +1361,7 @@ impl Binder<'_> {
                         format!("labels cannot be tested on a {shape:?}")
                     });
                 }
-                Expr::HasLabels(bound, names(labels))
+                Expr::HasLabels(bound, labels.clone())
             }
             ast::Expr::Unary {
                 op,
@@ -1981,6 +2034,13 @@ fn collect_query_free<'a>(
             ast::Clause::Unwind(unwind) => {
                 collect_free(&unwind.expr, bound, free);
                 bound.push(&unwind.variable.0);
+            }
+            ast::Clause::Filter(condition) => collect_free(condition, bound, free),
+            ast::Clause::Let(bindings) => {
+                for (_, value) in bindings {
+                    collect_free(value, bound, free);
+                }
+                bound.extend(bindings.iter().map(|(variable, _)| variable.0.as_str()));
             }
             ast::Clause::Call(call) => {
                 for arg in call.args.iter().flatten() {

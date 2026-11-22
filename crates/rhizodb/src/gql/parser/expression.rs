@@ -33,7 +33,7 @@ const PREDICATE_PRECEDENCE: u8 = 6;
 enum Infix {
     Binary(BinaryOp, usize),
     Comparison(ComparisonOp),
-    IsNull,
+    Is,
 }
 
 impl Infix {
@@ -50,7 +50,7 @@ impl Infix {
                 | BinaryOp::RegexMatch,
                 _,
             )
-            | Self::IsNull => PREDICATE_PRECEDENCE,
+            | Self::Is => PREDICATE_PRECEDENCE,
             Self::Comparison(_) => COMPARISON_PRECEDENCE,
             Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 7,
             Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 8,
@@ -65,10 +65,26 @@ impl Parser {
     }
 
     pub(super) fn predicate(&mut self) -> ParseResult<Expr> {
+        self.condition(false)
+    }
+
+    fn condition(&mut self, pipe_ends: bool) -> ParseResult<Expr> {
         let outer = std::mem::replace(&mut self.in_where, true);
-        let predicate = self.expression();
+        let ends = pipe_ends.then(|| self.bracket_depth());
+        let condition = self.pipe_ending(ends, Self::expression);
         self.in_where = outer;
-        predicate
+        condition
+    }
+
+    fn pipe_ending<T>(
+        &mut self,
+        ends: Option<usize>,
+        parse: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        let outer = std::mem::replace(&mut self.pipe_ends_filter, ends);
+        let parsed = parse(self);
+        self.pipe_ends_filter = outer;
+        parsed
     }
 
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
@@ -85,14 +101,29 @@ impl Parser {
             }
             self.deepen()?;
             lhs = match infix {
-                Infix::IsNull => {
+                Infix::Is => {
                     self.pos += 1;
                     let negated = self.eat_keyword("NOT");
-                    self.expect_keyword("NULL")?;
                     in_comparison_chain = false;
-                    Expr::IsNull {
-                        operand: Box::new(lhs),
-                        negated,
+                    if self.eat_keyword("LABELED") {
+                        let test = Expr::HasLabels {
+                            operand: Box::new(lhs),
+                            labels: self.label_expression(self.label_pipe_allowed())?,
+                        };
+                        if negated {
+                            Expr::Unary {
+                                op: UnaryOp::Not,
+                                operand: Box::new(test),
+                            }
+                        } else {
+                            test
+                        }
+                    } else {
+                        self.expect_keyword("NULL")?;
+                        Expr::IsNull {
+                            operand: Box::new(lhs),
+                            negated,
+                        }
                     }
                 }
                 Infix::Comparison(op) => {
@@ -159,7 +190,7 @@ impl Parser {
                 } else if word("CONTAINS") {
                     Some(Infix::Binary(BinaryOp::Contains, 1))
                 } else if word("IS") {
-                    Some(Infix::IsNull)
+                    Some(Infix::Is)
                 } else if word("STARTS") && self.keyword_at(1, "WITH") {
                     Some(Infix::Binary(BinaryOp::StartsWith, 2))
                 } else if word("ENDS") && self.keyword_at(1, "WITH") {
@@ -217,10 +248,8 @@ impl Parser {
                 };
             } else if self.eat_punct(Punct::LBracket) {
                 expr = self.subscript(expr)?;
-            } else if self.at_punct(Punct::Colon)
-                && matches!(self.kind_at(1), Some(TokenKind::Word { .. }))
-            {
-                let labels = self.label_list()?;
+            } else if self.at_punct(Punct::Colon) && self.label_starts_at(1) {
+                let labels = self.colon_labels(true, self.label_pipe_allowed())?;
                 expr = Expr::HasLabels {
                     operand: Box::new(expr),
                     labels,
@@ -400,7 +429,7 @@ impl Parser {
 
     fn optional_predicate(&mut self) -> ParseResult<Option<Box<Expr>>> {
         if self.eat_keyword("WHERE") {
-            Ok(Some(Box::new(self.predicate()?)))
+            Ok(Some(Box::new(self.condition(true)?)))
         } else {
             Ok(None)
         }
@@ -431,7 +460,7 @@ impl Parser {
             }
             if is("CASE") {
                 self.pos += 1;
-                return self.case();
+                return self.pipe_ending(None, Self::case);
             }
             if is("EXISTS") && self.punct_at(1, Punct::LBrace) {
                 return self.exists_subquery();

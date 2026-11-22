@@ -1,10 +1,12 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
+use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::graph::GraphTx;
 use crate::graph::Label;
@@ -153,15 +155,17 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    pub(crate) fn has_labels(&self, node: NodeId, labels: &[String]) -> Result<bool, Error> {
-        let record = self.node(node)?;
-        for label in labels {
-            match self.tx.lookup_token::<Label>(label)? {
-                Some(token) if record.labels.contains(&token) => {}
-                _ => return Ok(false),
-            }
-        }
-        Ok(true)
+    pub(crate) fn node_has_labels(
+        &self,
+        record: &NodeRecord,
+        labels: &LabelExpr,
+    ) -> Result<bool, Error> {
+        labels.matches(!record.labels.is_empty(), &mut |name| {
+            Ok(self
+                .tx
+                .lookup_token::<Label>(name)?
+                .is_some_and(|token| record.labels.contains(&token)))
+        })
     }
 
     pub(crate) fn predicate(&self, expr: &Expr, row: &Row) -> Result<bool, Error> {
@@ -222,12 +226,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             Expr::HasLabels(operand, labels) => match self.eval(operand, row)? {
                 Datum::Null => Ok(Datum::Null),
-                Datum::Node(id) => Ok(Datum::Boolean(self.has_labels(id, labels)?)),
+                Datum::Node(id) => Ok(Datum::Boolean(
+                    self.node_has_labels(&self.node(id)?, labels)?,
+                )),
                 Datum::Relationship(id) => {
                     let rel_type = self.relationship_type(id)?;
-                    Ok(Datum::Boolean(
-                        labels.iter().all(|label| *label == rel_type),
-                    ))
+                    let Ok(found) =
+                        labels.matches::<Infallible>(true, &mut |name| Ok(name == rel_type));
+                    Ok(Datum::Boolean(found))
                 }
                 other => Err(type_error(format!(
                     "labels can only be tested on a node or a relationship, not a {}",
