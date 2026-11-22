@@ -1,4 +1,5 @@
 use super::*;
+use proptest::prelude::*;
 
 fn texts(terms: Vec<Term>) -> Vec<String> {
     terms.into_iter().map(|term| term.text).collect()
@@ -279,4 +280,204 @@ fn a_star_right_after_a_word_makes_it_a_prefix() {
         ]
     );
     assert!(clauses("* **").is_empty());
+}
+
+const POOL: &[char] = &[
+    'a',
+    'b',
+    'Z',
+    'k',
+    '0',
+    '7',
+    '9',
+    'e',
+    '\u{301}',
+    '\u{e9}',
+    '\u{c5}',
+    '\u{30a}',
+    '\u{130}',
+    '\u{3a3}',
+    '\u{ac00}',
+    '\u{d55c}',
+    '\u{ad6d}',
+    '\u{3131}',
+    '\u{314b}',
+    '\u{314f}',
+    '\u{1100}',
+    '\u{1161}',
+    '\u{11a8}',
+    '\u{ffa1}',
+    '\u{3042}',
+    '\u{304b}',
+    '\u{30ab}',
+    '\u{ff76}',
+    '\u{6771}',
+    '\u{4eac}',
+    '\u{2a6df}',
+    '\u{e01}',
+    '\u{e32}',
+    '\u{e31}',
+    '\u{e48}',
+    '\u{e52}',
+    '\u{e81}',
+    '\u{1780}',
+    '\u{1000}',
+    '\u{103a}',
+    '\u{915}',
+    '\u{94d}',
+    '\u{903}',
+    '\u{200d}',
+    '\u{200c}',
+    '\u{fe0f}',
+    '\u{fe00}',
+    '\u{0}',
+    '\u{7}',
+    '\u{1f}',
+    '\u{7f}',
+    '\u{85}',
+    '\u{feff}',
+    '\u{200b}',
+    ' ',
+    ' ',
+    '\t',
+    '\n',
+    '\r',
+    '\u{a0}',
+    '\u{3000}',
+    '\u{2028}',
+    '.',
+    ',',
+    '\'',
+    '"',
+    '*',
+    '-',
+    '_',
+    '\u{1f469}',
+    '\u{1f4bb}',
+    '\u{fb01}',
+    '\u{ff21}',
+    '\u{b2}',
+];
+
+fn mixed_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(POOL), 0..20)
+        .prop_map(|characters| characters.into_iter().collect())
+}
+
+fn joins_the_character_before(character: char) -> bool {
+    format!("a{character}").graphemes(true).count() == 1
+}
+
+const PURPOSES: [Purpose; 2] = [Purpose::Document, Purpose::Query];
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(5000))]
+
+    #[test]
+    fn no_term_is_empty_holds_whitespace_or_a_control_character(text in mixed_text()) {
+        for purpose in PURPOSES {
+            for term in terms(&text, purpose) {
+                prop_assert!(!term.text.is_empty(), "empty term from {text:?}");
+                prop_assert!(
+                    !term.text.chars().any(|character| character.is_whitespace() || character.is_control()),
+                    "{:?} from {text:?}",
+                    term.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_term_starts_with_a_character_that_joins_the_one_before_it(text in mixed_text()) {
+        for purpose in PURPOSES {
+            for term in terms(&text, purpose) {
+                let first = term.text.chars().next().unwrap();
+                prop_assert!(
+                    !joins_the_character_before(first),
+                    "{:?} from {text:?}",
+                    term.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn positions_start_at_zero_and_never_go_back(text in mixed_text()) {
+        let query = terms(&text, Purpose::Query);
+        let document = terms(&text, Purpose::Document);
+        for found in [&query, &document] {
+            if let Some(first) = found.first() {
+                prop_assert_eq!(first.position, 0, "{:?}", text);
+            }
+        }
+        prop_assert!(
+            query.windows(2).all(|pair| pair[0].position < pair[1].position),
+            "{query:?} from {text:?}"
+        );
+        let mut distinct: Vec<u32> = document.iter().map(|term| term.position).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        prop_assert!(
+            distinct.iter().copied().eq(0..u32::try_from(distinct.len()).unwrap()),
+            "{document:?} from {text:?}"
+        );
+        for term in &query {
+            prop_assert!(
+                distinct.binary_search(&term.position).is_ok(),
+                "{term:?} from {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_space_between_two_texts_gives_the_terms_of_each_in_turn(
+        left in mixed_text(),
+        right in mixed_text(),
+    ) {
+        let joined = format!("{left} {right}");
+        for purpose in PURPOSES {
+            let before = terms(&left, purpose);
+            let after = terms(&right, purpose);
+            let both = terms(&joined, purpose);
+            prop_assert_eq!(both.len(), before.len() + after.len(), "{:?}", joined);
+            let (head, tail) = both.split_at(before.len());
+            prop_assert_eq!(head, before.as_slice(), "{:?}", joined);
+            if let (Some(own), Some(shifted)) = (after.first(), tail.first()) {
+                let ceiling = before.last().map_or(0, |last| last.position);
+                prop_assert!(
+                    before.is_empty() || shifted.position > ceiling,
+                    "{:?}",
+                    joined
+                );
+                for (alone, together) in after.iter().zip(tail) {
+                    prop_assert_eq!(&alone.text, &together.text, "{:?}", joined);
+                    prop_assert_eq!(
+                        alone.position - own.position,
+                        together.position - shifted.position,
+                        "{:?}",
+                        joined
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typing_a_stored_term_finds_a_term_the_text_stored(text in mixed_text()) {
+        let stored: Vec<String> = terms(&text, Purpose::Document)
+            .into_iter()
+            .map(|term| term.text)
+            .collect();
+        for term in &stored {
+            let typed = terms(term, Purpose::Query);
+            prop_assert!(!typed.is_empty(), "{term:?} from {text:?} gives no query terms");
+            for found in typed {
+                prop_assert!(
+                    stored.contains(&found.text),
+                    "{term:?} typed gives {:?}, which {text:?} did not store",
+                    found.text
+                );
+            }
+        }
+    }
 }
