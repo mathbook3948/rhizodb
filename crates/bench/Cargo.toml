@@ -35,3 +35,7 @@ name = "bench"
 path = "src/main.rs"
 
 [workspace]
+
+[profile.dev.package.lbug]
+opt-level = 3
+debug = false
