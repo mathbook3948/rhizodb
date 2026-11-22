@@ -92,6 +92,7 @@ impl Taint {
 /// check of its argument types reads a part read as null. `size` and `keys` read only how many
 /// items or which keys their argument has, `coalesce` reads whether each argument it passes over
 /// is null, and the functions that return an item or a list of items keep the taint of each.
+/// Without taints, as outside the check, the result is clean.
 pub(crate) fn call(function: Function, args: &[Datum], taints: Vec<Taint>) -> (Taint, bool) {
     let first = taints.first().cloned().unwrap_or_default();
     let whole = first.is_whole();

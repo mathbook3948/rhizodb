@@ -210,6 +210,19 @@ impl<T: ReadTransaction> Env<'_, T> {
         result
     }
 
+    fn tracked_all(&self, exprs: &[Expr], row: &Row) -> Result<(Vec<Datum>, Vec<Taint>), Error> {
+        let mut values = Vec::with_capacity(exprs.len());
+        let mut taints = Vec::new();
+        for expr in exprs {
+            let (value, taint) = self.tracked(expr, row)?;
+            values.push(value);
+            if self.check.is_some() {
+                taints.push(taint);
+            }
+        }
+        Ok((values, taints))
+    }
+
     fn slot_taint(&self, slot: Slot) -> Taint {
         let Some(check) = self.check else {
             return Taint::Clean;
@@ -233,10 +246,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 self.slot_taint(*slot),
             )),
             Expr::List(items) => {
-                let (values, taints): (Vec<_>, Vec<_>) = items
-                    .iter()
-                    .map(|item| self.tracked(item, row))
-                    .collect::<Result<_, _>>()?;
+                let (values, taints) = self.tracked_all(items, row)?;
                 Ok((Datum::List(values), Taint::list(taints)))
             }
             Expr::Map(entries) => {
@@ -352,10 +362,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 ))
             }
             Expr::Call(function, args) => {
-                let (args, taints): (Vec<_>, Vec<_>) = args
-                    .iter()
-                    .map(|arg| self.tracked(arg, row))
-                    .collect::<Result<_, _>>()?;
+                let (args, taints) = self.tracked_all(args, row)?;
                 let (taint, doubtful) = taint::call(*function, &args, taints);
                 settle(self.call(*function, args), doubtful, taint)
             }
@@ -406,7 +413,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let mut doubtful = false;
                 for (item, taint) in items.into_iter().zip(taints) {
                     set(&mut local, comprehension.slot, item.clone());
-                    let kept = self.bound(comprehension.slot, taint.clone(), || {
+                    let kept = self.bound(comprehension.slot, taint, || {
                         if let Some(filter) = &comprehension.filter {
                             let (keep, unsure) = self.condition(filter, &local)?;
                             doubtful |= unsure;
@@ -416,12 +423,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                         }
                         match &comprehension.projection {
                             Some(projection) => self.tracked(projection, &local).map(Some),
-                            None => Ok(Some((item, taint))),
+                            None => Ok(Some((item, self.slot_taint(comprehension.slot)))),
                         }
                     })?;
                     if let Some((value, taint)) = kept {
                         values.push(value);
-                        value_taints.push(taint);
+                        if self.check.is_some() {
+                            value_taints.push(taint);
+                        }
                     }
                 }
                 let taint = if doubtful {
