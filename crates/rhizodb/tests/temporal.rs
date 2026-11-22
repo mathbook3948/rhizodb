@@ -161,6 +161,20 @@ fn a_duration_divided_by_a_float_is_exact() {
 }
 
 #[test]
+fn duration_strings_read_their_amounts_exactly() {
+    let db = db();
+    assert_eq!(
+        single(&db, "RETURN duration('PT9007199254740993S').seconds"),
+        int(9_007_199_254_740_993)
+    );
+    assert_eq!(
+        text(&db, "RETURN duration('PT0.1000000019S')"),
+        "PT0.100000001S"
+    );
+    assert_eq!(text(&db, "RETURN duration('P0,5D')"), "PT12H");
+}
+
+#[test]
 fn the_same_instant_at_different_offsets_compares_equal_but_is_not_equal() {
     let db = db();
     for (query, expected) in [

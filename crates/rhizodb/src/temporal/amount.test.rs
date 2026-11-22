@@ -44,3 +44,17 @@ fn thirds_carry_without_rounding() {
     assert_eq!(Amount::divided(1, 0.3).map(Amount::truncated), Some(3));
     assert_eq!(Amount::divided(1, 0.0), None);
 }
+
+#[test]
+fn decimal_text_reads_exactly() {
+    let seconds = |text| Decimal::parse(text).and_then(|value| Amount::times(1, value));
+    assert_eq!(
+        seconds("9007199254740993").map(Amount::truncated),
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(seconds("-0,5"), Some(Amount::quotient(-1, 2)));
+    assert_eq!(seconds("1e3").map(Amount::truncated), Some(1000));
+    for text in ["", "+", ".", "1.2.3", "1a", "--1"] {
+        assert_eq!(Decimal::parse(text), None, "{text}");
+    }
+}
