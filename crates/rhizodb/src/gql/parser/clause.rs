@@ -1,5 +1,6 @@
 use super::ParseResult;
 use super::Parser;
+use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
@@ -16,6 +17,8 @@ use crate::gql::ast::SortItem;
 use crate::gql::ast::Span;
 use crate::gql::ast::Unwind;
 use crate::gql::ast::With;
+use crate::gql::ast::Yield;
+use crate::gql::ast::YieldItem;
 use crate::gql::error::SyntaxError;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::lexer::Punct;
@@ -26,7 +29,7 @@ const CLAUSE_KEYWORDS: [&str; 15] = [
     "DETACH", "MERGE", "CALL", "FOREACH", "LOAD",
 ];
 
-const UNSUPPORTED_CLAUSE_KEYWORDS: [&str; 3] = ["CALL", "FOREACH", "LOAD"];
+const UNSUPPORTED_CLAUSE_KEYWORDS: [&str; 2] = ["FOREACH", "LOAD"];
 
 impl Parser {
     pub(super) fn at_clause_start(&self) -> bool {
@@ -71,6 +74,9 @@ impl Parser {
             let targets = self.comma_separated(Self::expression)?;
             return Ok(Clause::Delete(Delete { detach, targets }));
         }
+        if self.eat_keyword("CALL") {
+            return self.call_clause();
+        }
         if UNSUPPORTED_CLAUSE_KEYWORDS
             .iter()
             .any(|keyword| self.at_keyword(keyword))
@@ -109,6 +115,44 @@ impl Parser {
             patterns,
             filter,
         }))
+    }
+
+    fn call_clause(&mut self) -> ParseResult<Clause> {
+        let mut name = vec![self.name()?];
+        while self.eat_punct(Punct::Dot) {
+            name.push(self.name()?);
+        }
+        let args = if self.eat_punct(Punct::LParen) {
+            let args = if self.at_punct(Punct::RParen) {
+                Vec::new()
+            } else {
+                self.comma_separated(Self::expression)?
+            };
+            self.expect_punct(Punct::RParen)?;
+            Some(args)
+        } else {
+            None
+        };
+        let yields = if !self.eat_keyword("YIELD") {
+            None
+        } else if self.eat_punct(Punct::Star) {
+            Some(Yield::Star)
+        } else {
+            let items = self.comma_separated(Self::yield_item)?;
+            let filter = self.where_filter()?;
+            Some(Yield::Items { items, filter })
+        };
+        Ok(Clause::Call(Call { name, args, yields }))
+    }
+
+    fn yield_item(&mut self) -> ParseResult<YieldItem> {
+        let output = self.name()?;
+        let alias = if self.eat_keyword("AS") {
+            Some(self.name()?)
+        } else {
+            None
+        };
+        Ok(YieldItem { output, alias })
     }
 
     fn merge_clause(&mut self) -> ParseResult<Clause> {

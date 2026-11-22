@@ -1,7 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::graph::Graph;
+use crate::procedure::Procedure;
+use crate::procedure::Procedures;
 use crate::query;
 use crate::result::Parameters;
 use crate::result::QueryResult;
@@ -12,6 +15,7 @@ use crate::storage::redb_backend::RedbStorage;
 #[derive(Debug)]
 pub struct Database {
     graph: Graph<RedbStorage>,
+    procedures: Procedures,
 }
 
 impl Database {
@@ -19,6 +23,7 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::open(path)?)?,
+            procedures: Procedures::new(),
         })
     }
 
@@ -26,6 +31,7 @@ impl Database {
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::in_memory()?)?,
+            procedures: Procedures::new(),
         })
     }
 
@@ -34,6 +40,13 @@ impl Database {
     /// A query without updating clauses reads a snapshot. A query with updating clauses commits
     /// when it succeeds and leaves no trace when it fails.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute(&self.graph, query, parameters)
+        query::execute(&self.graph, &self.procedures, query, parameters)
+    }
+
+    /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
+    /// under the same name. Registration lasts as long as this `Database` value.
+    pub fn register_procedure(&mut self, procedure: Procedure) {
+        self.procedures
+            .insert(procedure.name.clone(), Arc::new(procedure));
     }
 }

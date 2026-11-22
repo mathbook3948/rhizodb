@@ -14,6 +14,7 @@ mod update;
 use crate::error::Error;
 use crate::gql::parser::parse;
 use crate::graph::Graph;
+use crate::procedure::Procedures;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::Storage;
@@ -25,12 +26,13 @@ use self::plan::Plan;
 /// every clause succeeded.
 pub(crate) fn execute<S: Storage>(
     graph: &Graph<S>,
+    procedures: &Procedures,
     query: &str,
     parameters: &Parameters,
 ) -> Result<QueryResult, Error> {
     let syntax = parse(query)?;
     let now = temporal::now();
-    match bind::bind(&syntax, query, parameters)? {
+    match bind::bind(&syntax, query, parameters, procedures)? {
         Plan::ReadOnly(program) => exec::run_read(&graph.read()?, &program, &now),
         Plan::Updating(program) => {
             let mut tx = graph.write()?;

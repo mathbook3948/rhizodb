@@ -1,6 +1,7 @@
 use crate::error::ErrorKind;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::UnaryOp;
+use crate::procedure::ValueType;
 use crate::temporal::Temporal;
 
 use super::datum::Datum;
@@ -140,4 +141,20 @@ pub(crate) fn slice_bound_error(bound: Shape) -> Option<ErrorKind> {
 /// The error a label test raises on an operand of `operand`, or none when it takes it.
 pub(crate) fn label_test_error(operand: Shape) -> Option<ErrorKind> {
     (operand != Shape::Node).then_some(ErrorKind::TypeMismatch)
+}
+
+/// The shapes a procedure parameter of type `accepts` takes.
+pub(crate) fn procedure_parameter(accepts: ValueType) -> &'static [Shape] {
+    match accepts {
+        ValueType::Boolean => &[Shape::Boolean],
+        ValueType::Integer => &[Shape::Integer],
+        ValueType::Float | ValueType::Number => NUMBER,
+        ValueType::String => &[Shape::String],
+        ValueType::List => &[Shape::List],
+        ValueType::Map => &[Shape::Map],
+        ValueType::Node => &[Shape::Node],
+        ValueType::Relationship => &[Shape::Relationship],
+        ValueType::Path => &[Shape::Path],
+        ValueType::Any => &[],
+    }
 }

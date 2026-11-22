@@ -57,6 +57,15 @@ pub enum ErrorKind {
     UnknownFunction,
     /// A function called with the wrong number of arguments.
     InvalidNumberOfArguments,
+    /// `CALL` names a procedure that is not registered.
+    ProcedureNotFound,
+    /// `YIELD` names an output the procedure does not declare.
+    UnknownProcedureOutput,
+    /// A `CALL` inside a larger query leaves out the arguments of a procedure that takes some.
+    /// Only a query that is a single `CALL` reads them from the query parameters.
+    InvalidArgumentPassingMode,
+    /// A procedure body failed, or returned a row whose length differs from its outputs.
+    ProcedureFailed,
     /// A query refers to a parameter that was not supplied.
     MissingParameter,
     /// The query text itself applies an operator or clause to a value of a type it does not
@@ -135,6 +144,18 @@ impl Error {
             message: message.into(),
             source: None,
             rejects_type: false,
+        }
+    }
+
+    /// A failure caused by `source`, such as an error a procedure body returned.
+    pub(crate) fn caused_by(
+        kind: ErrorKind,
+        message: impl Into<String>,
+        source: Box<dyn StdError + Send + Sync>,
+    ) -> Self {
+        Self {
+            source: Some(source),
+            ..Self::new(kind, message)
         }
     }
 

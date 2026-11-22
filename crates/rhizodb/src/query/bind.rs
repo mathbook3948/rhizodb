@@ -4,6 +4,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast;
 use crate::gql::ast::Direction;
+use crate::procedure::Procedures;
 use crate::result::Parameters;
 
 use super::datum::Datum;
@@ -11,6 +12,7 @@ use super::datum::from_parameter;
 use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
+use super::plan::CallClause;
 use super::plan::Case;
 use super::plan::Clause;
 use super::plan::Expr;
@@ -40,6 +42,7 @@ use super::shape::admits;
 use super::shape::binary_error;
 use super::shape::index_error;
 use super::shape::label_test_error;
+use super::shape::procedure_parameter;
 use super::shape::slice_bound_error;
 use super::shape::slice_error;
 use super::shape::unary_error;
@@ -50,10 +53,12 @@ pub(crate) fn bind(
     query: &ast::Query,
     source: &str,
     parameters: &Parameters,
+    procedures: &Procedures,
 ) -> Result<Plan, Error> {
     let mut binder = Binder {
         source,
         parameters,
+        procedures,
         slot_count: 0,
         closed: Vec::new(),
         expression_depth: 0,
@@ -207,6 +212,7 @@ enum PatternUse {
 struct Binder<'a> {
     source: &'a str,
     parameters: &'a Parameters,
+    procedures: &'a Procedures,
     slot_count: usize,
     closed: Vec<Expr>,
     expression_depth: usize,
@@ -242,7 +248,12 @@ impl Binder<'_> {
                     "RETURN must be the last clause",
                 ));
             }
-            if follows_update && matches!(clause, ast::Clause::Match(_) | ast::Clause::Unwind(_)) {
+            if follows_update
+                && matches!(
+                    clause,
+                    ast::Clause::Match(_) | ast::Clause::Unwind(_) | ast::Clause::Call(_)
+                )
+            {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
                     "WITH is needed between an updating clause and a reading clause",
@@ -272,6 +283,16 @@ impl Binder<'_> {
                     let slot = self.slot();
                     scope.insert(name, slot, Kind::Unknown);
                     clauses.push(Clause::Read(ReadClause::Unwind { expr, slot }));
+                }
+                ast::Clause::Call(call) => {
+                    let standalone = query.clauses.len() == 1;
+                    let (bound, columns) = self.call(call, &mut scope, standalone)?;
+                    if standalone {
+                        result_reads_variables = true;
+                        let slots = bound.yields.iter().map(|(_, slot)| *slot).collect();
+                        output = Some((slots, columns));
+                    }
+                    clauses.push(Clause::Read(ReadClause::Call(Box::new(bound))));
                 }
                 ast::Clause::With(with) => {
                     let (projection, next, _) =
@@ -374,7 +395,10 @@ impl Binder<'_> {
             if ends_without_return
                 && matches!(
                     clause,
-                    ast::Clause::Match(_) | ast::Clause::With(_) | ast::Clause::Unwind(_)
+                    ast::Clause::Match(_)
+                        | ast::Clause::With(_)
+                        | ast::Clause::Unwind(_)
+                        | ast::Clause::Call(_)
                 )
             {
                 return Err(error(
@@ -388,6 +412,106 @@ impl Binder<'_> {
             Pipeline { clauses, output },
             columns,
             result_reads_variables,
+        ))
+    }
+
+    fn call(
+        &mut self,
+        call: &ast::Call,
+        scope: &mut Scope,
+        standalone: bool,
+    ) -> Result<(CallClause, Vec<String>), Error> {
+        let name = names(&call.name).join(".");
+        let procedure = self.procedures.get(&name).cloned().ok_or_else(|| {
+            error(
+                ErrorKind::ProcedureNotFound,
+                format!("procedure `{name}` is not registered"),
+            )
+        })?;
+        let args = match &call.args {
+            Some(args) => {
+                if args.len() != procedure.parameters.len() {
+                    return Err(error(
+                        ErrorKind::InvalidNumberOfArguments,
+                        format!(
+                            "procedure `{name}` takes {} arguments, not {}",
+                            procedure.parameters.len(),
+                            args.len()
+                        ),
+                    ));
+                }
+                let bound = self.exprs(args, scope, &mut Mode::Plain)?;
+                for (arg, (_, accepts)) in args.iter().zip(&procedure.parameters) {
+                    self.expect_shape(arg, scope, procedure_parameter(*accepts));
+                }
+                bound
+            }
+            None if !standalone && !procedure.parameters.is_empty() => {
+                return Err(error(
+                    ErrorKind::InvalidArgumentPassingMode,
+                    format!("a CALL inside a query must pass the arguments of `{name}`"),
+                ));
+            }
+            None => procedure
+                .parameters
+                .iter()
+                .map(|(parameter, _)| Ok(Expr::Parameter(self.parameter(parameter)?)))
+                .collect::<Result<_, Error>>()?,
+        };
+        let all_outputs = || {
+            procedure
+                .outputs
+                .iter()
+                .map(|output| ast::YieldItem {
+                    output: ast::Name::new(output.as_str()),
+                    alias: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (items, filter) = match &call.yields {
+            Some(ast::Yield::Items { items, filter }) => (items.clone(), filter.as_ref()),
+            Some(ast::Yield::Star) => (all_outputs(), None),
+            None if standalone => (all_outputs(), None),
+            None => (Vec::new(), None),
+        };
+        let mut yields = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
+        for item in &items {
+            let output = &item.output.0;
+            let index = procedure
+                .outputs
+                .iter()
+                .position(|candidate| candidate == output)
+                .ok_or_else(|| {
+                    error(
+                        ErrorKind::UnknownProcedureOutput,
+                        format!("procedure `{name}` has no output `{output}`"),
+                    )
+                })?;
+            let target = item.alias.as_ref().unwrap_or(&item.output).0.as_str();
+            if scope.get(target).is_some() || columns.iter().any(|column| column == target) {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("variable `{target}` is already bound"),
+                ));
+            }
+            yields.push((index, self.slot()));
+            columns.push(target.to_owned());
+        }
+        for (column, (_, slot)) in columns.iter().zip(&yields) {
+            scope.insert(column, *slot, Kind::Unknown);
+        }
+        let filter = filter
+            .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
+            .transpose()?;
+        Ok((
+            CallClause {
+                procedure,
+                args,
+                yields,
+                filter,
+            },
+            columns,
         ))
     }
 

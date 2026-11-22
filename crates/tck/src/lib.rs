@@ -17,6 +17,7 @@ pub mod rhizo;
 pub mod run;
 pub mod scenario;
 pub mod side_effects;
+pub mod signature;
 pub mod steps;
 pub mod suite;
 pub mod value;

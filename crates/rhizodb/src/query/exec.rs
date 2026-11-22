@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
 use crate::graph::GraphTx;
+use crate::procedure::ValueType;
 use crate::result;
 use crate::result::QueryResult;
 use crate::result::Value;
@@ -16,9 +17,11 @@ use crate::temporal::DateTime;
 use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
+use super::datum::from_parameter;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::plan::CallClause;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
@@ -26,6 +29,9 @@ use super::plan::MatchClause;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
+use super::shape::Shape;
+use super::shape::admits;
+use super::shape::procedure_parameter;
 use super::update::Graveyard;
 
 /// Runs a read-only program. It only needs a read transaction.
@@ -147,7 +153,75 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(out)
             }
             ReadClause::Project(projection) => self.project(projection, rows),
+            ReadClause::Call(call) => self.call_procedure(call, rows),
         }
+    }
+
+    fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+        let procedure = &call.procedure;
+        let mut out = Vec::new();
+        for row in rows {
+            let mut args = Vec::new();
+            for (arg, (parameter, accepts)) in call.args.iter().zip(&procedure.parameters) {
+                let value = match self.eval(arg, &row)? {
+                    Datum::Integer(value) if *accepts == ValueType::Float => {
+                        Datum::Float(value as f64)
+                    }
+                    value => value,
+                };
+                if let Some(shape) = Shape::of(&value)
+                    && !admits(procedure_parameter(*accepts), shape)
+                {
+                    return Err(Error::rejecting_type(
+                        ErrorKind::InvalidArgumentValue,
+                        format!(
+                            "parameter `{parameter}` of `{}` cannot take a {}",
+                            procedure.name,
+                            value.type_name()
+                        ),
+                    ));
+                }
+                args.push(self.value(value, &Graveyard::default())?);
+            }
+            let results = (procedure.body)(&args).map_err(|source| {
+                Error::caused_by(
+                    ErrorKind::ProcedureFailed,
+                    format!("procedure `{}` failed: {source}", procedure.name),
+                    source,
+                )
+            })?;
+            if procedure.outputs.is_empty() {
+                out.push(row);
+                continue;
+            }
+            for result in results {
+                if result.len() != procedure.outputs.len() {
+                    return Err(Error::new(
+                        ErrorKind::ProcedureFailed,
+                        format!(
+                            "procedure `{}` returned a row of {} values for {} outputs",
+                            procedure.name,
+                            result.len(),
+                            procedure.outputs.len()
+                        ),
+                    ));
+                }
+                let mut next = row.clone();
+                for (index, slot) in &call.yields {
+                    if let Some(value) = result.get(*index) {
+                        set(&mut next, *slot, from_parameter(value));
+                    }
+                }
+                let keep = match &call.filter {
+                    Some(filter) => self.predicate(filter, &next)?,
+                    None => true,
+                };
+                if keep {
+                    out.push(next);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {

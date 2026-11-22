@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Direction;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::procedure::Procedure;
 
 use super::datum::Datum;
 use super::functions::Function;
@@ -48,6 +51,7 @@ pub(crate) enum ReadClause {
     Match(MatchClause),
     Unwind { expr: Expr, slot: Slot },
     Project(Box<Projection>),
+    Call(Box<CallClause>),
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +74,16 @@ pub(crate) struct MatchClause {
     pub(crate) filter: Option<Expr>,
     /// Slots the clause binds, set to null when an optional match finds nothing.
     pub(crate) introduced: Vec<Slot>,
+}
+
+/// A procedure call. Each row gets one row per result, with output `index` of the result in
+/// `slot` for every `(index, slot)` of `yields`. A procedure without outputs keeps each row once.
+#[derive(Clone, Debug)]
+pub(crate) struct CallClause {
+    pub(crate) procedure: Arc<Procedure>,
+    pub(crate) args: Vec<Expr>,
+    pub(crate) yields: Vec<(usize, Slot)>,
+    pub(crate) filter: Option<Expr>,
 }
 
 #[derive(Clone, Debug)]

@@ -16,7 +16,16 @@ GQL is the reference language, but the only public conformance suite is the open
 - A pattern used as a predicate is accepted only inside a `WHERE`.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
-- Procedures and `CALL` are not supported.
+- A procedure is a Rust function the host registers on a `Database` under a qualified name, and `CALL` runs it.
+- A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
+- Procedure names are case-sensitive.
+- Each procedure parameter declares the types it accepts, and arguments fall under the same checks as function arguments.
+- Every procedure parameter accepts null.
+- An integer argument to a float parameter arrives as a float.
+- A query that is a single `CALL` returns the `YIELD` items, or every output without `YIELD` or with `YIELD *`.
+- A query that is a single `CALL` may leave out the arguments, which are then read from the query parameters of the same names.
+- A `CALL` inside a larger query passes the arguments of a procedure that takes any, binds only its `YIELD` items, and rejects `YIELD *`.
+- A `CALL` gives one row per row the procedure returns, and a procedure without outputs keeps each row once.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
 - Parameters are data. They never take part in the type checks made on the query text.

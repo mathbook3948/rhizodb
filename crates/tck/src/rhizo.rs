@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use rhizodb::Database;
 use rhizodb::ErrorKind;
 use rhizodb::SyntaxErrorKind;
+use rhizodb::ValueType;
 
 use crate::engine::Engine;
 use crate::engine::Graph;
@@ -13,6 +14,7 @@ use crate::scenario::Procedure;
 use crate::side_effects::Entity;
 use crate::side_effects::GraphSnapshot;
 use crate::side_effects::PropertyEntry;
+use crate::signature::parse_signature;
 use crate::value::Direction;
 use crate::value::Node;
 use crate::value::Path;
@@ -59,7 +61,11 @@ impl Graph for BrokenGraph {
 }
 
 impl Graph for RhizoGraph {
-    fn register_procedure(&mut self, _procedure: &Procedure) {}
+    fn register_procedure(&mut self, procedure: &Procedure) {
+        if let Ok(registered) = table_procedure(procedure) {
+            self.database.register_procedure(registered);
+        }
+    }
 
     fn execute(
         &mut self,
@@ -122,6 +128,51 @@ impl RhizoGraph {
     }
 }
 
+fn table_procedure(procedure: &Procedure) -> Result<rhizodb::Procedure, String> {
+    let signature = parse_signature(&procedure.signature)?;
+    let inputs = signature.parameters.len();
+    let rows = procedure.rows.clone();
+    let mut registered = rhizodb::Procedure::new(signature.name, move |args| {
+        let args = args.iter().map(from_rhizo).collect::<Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for row in &rows {
+            let (row_inputs, row_outputs) = row.split_at(inputs.min(row.len()));
+            if row_inputs == args.as_slice() {
+                out.push(
+                    row_outputs
+                        .iter()
+                        .map(to_rhizo)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+        }
+        Ok(out)
+    });
+    for (name, kind) in signature.parameters {
+        registered = registered.parameter(name, value_type(&kind));
+    }
+    for (name, _) in signature.outputs {
+        registered = registered.output(name);
+    }
+    Ok(registered)
+}
+
+fn value_type(kind: &str) -> ValueType {
+    match kind.trim_end_matches('?') {
+        "BOOLEAN" => ValueType::Boolean,
+        "INTEGER" => ValueType::Integer,
+        "FLOAT" => ValueType::Float,
+        "NUMBER" => ValueType::Number,
+        "STRING" => ValueType::String,
+        "MAP" => ValueType::Map,
+        "NODE" => ValueType::Node,
+        "RELATIONSHIP" => ValueType::Relationship,
+        "PATH" => ValueType::Path,
+        kind if kind.starts_with("LIST") => ValueType::List,
+        _ => ValueType::Any,
+    }
+}
+
 fn record_properties(
     snapshot: &mut GraphSnapshot,
     entity: Entity,
@@ -181,6 +232,8 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::UnknownFunction => ("SyntaxError", "UnknownFunction"),
         ErrorKind::InvalidNumberOfArguments => ("SyntaxError", "InvalidNumberOfArguments"),
         ErrorKind::InvalidArgumentType => ("SyntaxError", "InvalidArgumentType"),
+        ErrorKind::ProcedureNotFound => ("ProcedureError", "ProcedureNotFound"),
+        ErrorKind::InvalidArgumentPassingMode => ("SyntaxError", "InvalidArgumentPassingMode"),
         ErrorKind::MissingParameter => ("ParameterMissing", "MissingParameter"),
         ErrorKind::InvalidArgumentValue => ("TypeError", "InvalidArgumentValue"),
         ErrorKind::TypeMismatch
