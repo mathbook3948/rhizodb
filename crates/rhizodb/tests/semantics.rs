@@ -222,9 +222,41 @@ fn next_to_an_aggregate_only_simple_keys_and_projected_names_are_visible() {
             "RETURN [x IN [1, 2] | count(*)]",
             ErrorKind::InvalidAggregation,
         ),
+        (
+            "UNWIND [1, 2] AS x WITH x + 1, count(*) AS c ORDER BY x + 1 + count(*) RETURN c",
+            ErrorKind::AmbiguousAggregationExpression,
+        ),
+        (
+            "UNWIND [1, 2] AS x WITH x + 1, count(*) AS c RETURN c",
+            ErrorKind::NoExpressionAlias,
+        ),
+        (
+            "UNWIND [1] AS a WITH a + 1, a + 1 RETURN 1",
+            ErrorKind::NoExpressionAlias,
+        ),
+        (
+            "UNWIND [1] AS a RETURN a + 1, a + 1",
+            ErrorKind::ColumnNameConflict,
+        ),
     ] {
         assert_eq!(error_kind(&db, query), kind, "{query}");
     }
+}
+
+#[test]
+fn an_aggregate_argument_cannot_call_rand() {
+    let db = db();
+    for query in [
+        "RETURN count(rand())",
+        "MATCH (n:Missing) RETURN collect(n.x + rand())",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::NonConstantExpression,
+            "{query}"
+        );
+    }
+    assert_eq!(ints(&run(&db, "RETURN count(*) + toInteger(rand())")), [1]);
 }
 
 #[test]
@@ -418,12 +450,43 @@ fn properties_reject_values_that_cannot_be_stored() {
 }
 
 #[test]
-fn reading_a_deleted_element_fails() {
+fn reading_a_deleted_element_fails_except_for_the_type_of_a_relationship() {
     let db = db();
-    run(&db, "CREATE ({x: 1})");
+    run(&db, "CREATE (:L {x: 1})-[:T {y: 2}]->()");
+    for query in [
+        "MATCH (n:L) DETACH DELETE n RETURN n.x",
+        "MATCH (n:L) DETACH DELETE n RETURN labels(n)",
+        "MATCH ()-[r]->() DELETE r RETURN r.y",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::DeletedEntityAccess,
+            "{query}"
+        );
+    }
     assert_eq!(
-        error_kind(&db, "MATCH (n) DELETE n RETURN n.x"),
-        ErrorKind::DeletedEntityAccess
+        run(&db, "MATCH ()-[r]->() DELETE r RETURN type(r), r:T"),
+        [vec![string("T"), boolean(true)]]
+    );
+}
+
+#[test]
+fn a_label_test_on_a_relationship_tests_its_type() {
+    let db = db();
+    run(&db, "CREATE ()-[:T]->(), ()-[:U]->()");
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r]->() RETURN type(r), r:T, r:T:T, r:T:U ORDER BY type(r)"
+        ),
+        [
+            vec![string("T"), boolean(true), boolean(true), boolean(false)],
+            vec![string("U"), boolean(false), boolean(false), boolean(false)],
+        ]
+    );
+    assert_eq!(
+        error_kind(&db, "MATCH p = ()-->() RETURN p:T"),
+        ErrorKind::InvalidArgumentType
     );
 }
 
@@ -984,6 +1047,11 @@ fn a_type_error_fails_before_any_row_reaches_it_in_every_place_an_expression_can
             "1 - 1",
         ),
         (
+            "MATCH (n) WHERE EXISTS { MATCH (n)-->(m) WITH m WHERE {} = 1 RETURN m } RETURN n",
+            "1 - 'a'",
+            "1 - 1",
+        ),
+        (
             "MATCH (n) RETURN [(n)-->(m) WHERE {} = 1 | m] AS l",
             "1 - 'a'",
             "1 - 1",
@@ -1166,7 +1234,6 @@ fn an_operator_on_a_variable_of_a_kind_the_text_fixes_fails_before_reading_data(
         "MATCH (n) RETURN -n",
         "MATCH (n) RETURN n + 1",
         "MATCH (n) RETURN NOT n",
-        "MATCH ()-[r]->() RETURN r:T",
         "MATCH p = ()-->() RETURN p:T",
         "MATCH p = ()-->() RETURN p[0..1]",
     ] {
@@ -1180,5 +1247,118 @@ fn an_operator_on_a_variable_of_a_kind_the_text_fixes_fails_before_reading_data(
     assert_eq!(
         run(&db, "MATCH (n:A) RETURN size(n + [1]) AS a, n['x'] AS b"),
         [vec![int(2), int(1)]]
+    );
+}
+
+#[test]
+fn a_full_exists_subquery_runs_from_the_outer_row_and_keeps_its_variables_inside() {
+    let db = db();
+    run(
+        &db,
+        "CREATE (a:A {i: 1})-[:R]->(:B {i: 1}), (a)-[:R]->(:B {i: 2}), (:A {i: 3})",
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) WITH count(m) AS c WHERE c = 2 RETURN c } \
+             RETURN n.i",
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) WHERE m.i = n.i } RETURN n.i",
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        error_kind(&db, "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) } RETURN m"),
+        ErrorKind::UndefinedVariable
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (n:A) WHERE EXISTS { MATCH (n)-->(m) SET m.i = 0 } RETURN n"
+        ),
+        ErrorKind::InvalidClauseComposition
+    );
+}
+
+#[test]
+fn a_value_error_in_the_query_text_does_not_hide_a_later_type_error() {
+    let db = db();
+    for query in [
+        "MATCH (n:Missing) RETURN [x IN [0, 'a'] | 1 / x] AS x",
+        "MATCH (n:Missing) RETURN [x IN [0, 1] | (1 / x) + [x IN ['a'] | -x][0]] AS x",
+        "MATCH (n:Missing) RETURN [x IN [9223372036854775807, 'a'] | x + 1 - true] AS x",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    assert!(run(&db, "MATCH (n:Missing) RETURN [x IN [0] | 1 / x] AS x").is_empty());
+    for query in [
+        "MATCH (n:Missing) RETURN coalesce(1 / 0, 'a') - 1 AS v",
+        "MATCH (n:Missing) RETURN [x IN [coalesce(1 / 0, 'a')] | x - 1] AS v",
+        "MATCH (n:Missing) RETURN CASE WHEN coalesce(1 / 0, 1) THEN 1 END AS v",
+    ] {
+        assert!(run(&db, query).is_empty(), "{query}");
+    }
+    assert_eq!(
+        error_kind(&db, "RETURN coalesce(1 / 0, 'a') - 1 AS v"),
+        ErrorKind::DivisionByZero
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN [x IN [0, 'a'] | 1 / x] AS x"),
+        ErrorKind::InvalidArgumentType
+    );
+}
+
+#[test]
+fn an_operand_that_may_be_null_still_fails_early_when_no_value_of_its_type_fits() {
+    let db = db();
+    run(&db, "CREATE (:A)");
+    for query in [
+        "MATCH (n:A) RETURN (n.x = 1) + 1",
+        "MATCH (n:A) RETURN (n.x STARTS WITH 'a') AND 1",
+        "OPTIONAL MATCH (n:Missing) RETURN n + 1",
+    ] {
+        fails_before_reading_data(&db, query);
+    }
+    assert_eq!(
+        single(&db, "MATCH (n:A) WITH n.x = 1 AS b RETURN b + 1"),
+        Value::Null
+    );
+}
+
+#[test]
+fn both_exists_forms_reject_a_variable_hidden_by_the_projection_next_to_them() {
+    let db = db();
+    run(&db, "CREATE (:C {x: 1})-[:R]->()");
+    for query in [
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { (n)-->() } RETURN k",
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { MATCH (n)-->() } RETURN k",
+        "MATCH (n:C) RETURN count(*) AS c ORDER BY EXISTS { MATCH (n)-->() }",
+        "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { UNWIND [n] AS m RETURN m } RETURN k",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::UndefinedVariable,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:C) WITH DISTINCT n.x AS k ORDER BY EXISTS { MATCH (m)-->() } RETURN k"
+        ),
+        [vec![int(1)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:C) WITH DISTINCT n.x AS k \
+             ORDER BY EXISTS { MATCH (m) WITH m AS n MATCH (n)-->() } RETURN k"
+        ),
+        [vec![int(1)]]
     );
 }

@@ -1,4 +1,5 @@
 use super::parse;
+use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
@@ -11,6 +12,8 @@ use crate::gql::ast::SetItem;
 use crate::gql::ast::SortDirection;
 use crate::gql::ast::Span;
 use crate::gql::ast::UnionKind;
+use crate::gql::ast::Yield;
+use crate::gql::ast::YieldItem;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::testing::error;
 use crate::gql::testing::sexp;
@@ -261,6 +264,7 @@ fn clauses_keep_their_source_order() {
             Clause::Set(_) => "set",
             Clause::Remove(_) => "remove",
             Clause::Delete(_) => "delete",
+            Clause::Call(_) => "call",
         })
         .collect();
     assert_eq!(
@@ -351,17 +355,70 @@ fn query_level_errors_report_offsets() {
 
 #[test]
 fn clauses_outside_the_supported_set_are_reported_as_unsupported() {
-    for source in [
-        "CALL db.labels()",
-        "FOREACH (x IN [1] | CREATE (:A))",
-        "LOAD CSV FROM 'f' AS r",
-    ] {
+    for source in ["FOREACH (x IN [1] | CREATE (:A))", "LOAD CSV FROM 'f' AS r"] {
         assert_eq!(
             error(source),
             (0, SyntaxErrorKind::UnsupportedFeature),
             "{source}"
         );
     }
+    assert_eq!(
+        error("MATCH (n) CALL { RETURN 1 AS x } RETURN x"),
+        (15, SyntaxErrorKind::UnsupportedFeature)
+    );
+}
+
+#[test]
+fn call_takes_a_qualified_name_optional_arguments_and_yield_items() {
+    assert_eq!(
+        only_clause("CALL db.labels"),
+        Clause::Call(Call {
+            name: vec![name("db"), name("labels")],
+            args: None,
+            yields: None,
+        })
+    );
+    assert_eq!(
+        only_clause("CALL p() YIELD *"),
+        Clause::Call(Call {
+            name: vec![name("p")],
+            args: Some(Vec::new()),
+            yields: Some(Yield::Star),
+        })
+    );
+    let clauses = single_query_clauses("CALL p(1, x) YIELD a AS b, c WHERE c RETURN b");
+    assert_eq!(
+        clauses.first(),
+        Some(&Clause::Call(Call {
+            name: vec![name("p")],
+            args: Some(vec![int(1), var("x")]),
+            yields: Some(Yield::Items {
+                items: vec![
+                    YieldItem {
+                        output: name("a"),
+                        alias: Some(name("b")),
+                    },
+                    YieldItem {
+                        output: name("c"),
+                        alias: None,
+                    },
+                ],
+                filter: Some(var("c")),
+            }),
+        }))
+    );
+}
+
+#[test]
+fn yield_star_only_ends_a_query_that_is_one_call() {
+    assert_eq!(
+        error("CALL p() YIELD * RETURN a"),
+        (17, SyntaxErrorKind::UnexpectedToken)
+    );
+    assert_eq!(
+        error("MATCH (n) CALL p() YIELD *"),
+        (25, SyntaxErrorKind::UnexpectedToken)
+    );
 }
 
 #[test]

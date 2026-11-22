@@ -222,6 +222,22 @@ fn shortest_path_is_reported_as_unsupported() {
 }
 
 #[test]
+fn length_bounds_need_the_star_and_cannot_be_negative() {
+    for (source, offset) in [
+        ("MATCH (a)-[:T..]->(b) RETURN a", 13),
+        ("MATCH (a)-[2]->(b) RETURN a", 11),
+        ("MATCH (a)-[*-2]->(b) RETURN a", 12),
+        ("MATCH (a)-[*1..-2]->(b) RETURN a", 15),
+    ] {
+        assert_eq!(
+            error(source),
+            (offset, SyntaxErrorKind::InvalidRelationshipPattern),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn malformed_patterns_report_offsets() {
     for (source, expected) in [
         ("MATCH (a RETURN a", (9, SyntaxErrorKind::UnexpectedToken)),

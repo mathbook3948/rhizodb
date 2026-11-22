@@ -2,11 +2,14 @@ mod clause;
 mod expression;
 mod pattern;
 
+use super::ast::Call;
+use super::ast::Clause;
 use super::ast::Name;
 use super::ast::Query;
 use super::ast::SingleQuery;
 use super::ast::Union;
 use super::ast::UnionKind;
+use super::ast::Yield;
 use super::error::SyntaxError;
 use super::error::SyntaxErrorKind;
 use super::lexer::Punct;
@@ -70,9 +73,29 @@ impl Parser {
     }
 
     fn single_query(&mut self) -> ParseResult<SingleQuery> {
+        let yields_star = |clause: &Clause| {
+            matches!(
+                clause,
+                Clause::Call(Call {
+                    yields: Some(Yield::Star),
+                    ..
+                })
+            )
+        };
         let mut clauses = vec![self.clause()?];
         while self.at_clause_start() {
+            if clauses.iter().any(yields_star) {
+                return Err(self.unexpected());
+            }
             clauses.push(self.clause()?);
+        }
+        if clauses.len() > 1 && clauses.iter().any(yields_star) {
+            let star = self
+                .pos
+                .checked_sub(1)
+                .and_then(|index| self.tokens.get(index))
+                .map_or(0, |token| token.start);
+            return Err(SyntaxError::new(star, SyntaxErrorKind::UnexpectedToken));
         }
         Ok(SingleQuery { clauses })
     }

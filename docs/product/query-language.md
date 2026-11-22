@@ -14,24 +14,58 @@ GQL is the reference language, but the only public conformance suite is the open
 - The first features are `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP` or `OFFSET`, `LIMIT`, `INSERT`, and the core expressions over the stored value types.
 - Further features are ordered by how many TCK scenarios they unlock.
 - A pattern used as a predicate is accepted only inside a `WHERE`.
+- `EXISTS { query }` runs the query from the current row with the outer variables in scope, and is true when the query gives a row.
+- A query inside `EXISTS` may end without `RETURN`.
+- A query inside `EXISTS` cannot update the graph.
+- A query inside `EXISTS` keeps the variables it binds to itself.
+- A variable that a projection hides from the expressions next to it is hidden inside both forms of `EXISTS` there.
 - A type error that the query text alone determines fails the query before it reads data, wherever it appears in the query.
 - An error that depends on values, such as overflow, division by zero, or the type of stored data, fails only when a row reaches it.
-- Procedures and `CALL` are not supported.
+- The check on the query text reads a value error as null and goes on.
+- The check reports a type error only when no value read as null was computed in the same expression step, so it reports only an error that evaluating the expression would really raise.
+- A type error the check skips this way still fails when a row reaches it.
+- A procedure is a Rust function the host registers on a `Database` under a qualified name.
+- `CALL` runs a registered procedure.
+- A procedure sees only its arguments, never the graph, so `CALL` is a reading clause.
+- Procedure names are case-sensitive.
+- Each procedure parameter declares the types it accepts.
+- Procedure arguments fall under the same checks as function arguments.
+- Every procedure parameter accepts null.
+- An integer argument to a float parameter arrives as a float.
+- A query that is a single `CALL` returns the `YIELD` items, or every output without `YIELD` or with `YIELD *`.
+- A query that is a single `CALL` may leave out the arguments, which are then read from the query parameters of the same names.
+- A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
+- A `CALL` inside a larger query passes the arguments of a procedure that takes any.
+- A `CALL` inside a larger query binds only its `YIELD` items.
+- A `CALL` inside a larger query rejects `YIELD *`.
+- A `CALL` gives one row per row the procedure returns.
+- A `CALL` of a procedure without outputs keeps each row once.
 - Patterns accept GQL's abbreviated edges `-`, `->`, and `<-`.
+- A label test on a relationship treats its type as its only label, so `r:T` is true when the type is `T`.
 - Inside an expression, a single `-` between parenthesized terms is always subtraction.
+- A malformed number literal is an invalid number where a value is expected, and an unexpected token anywhere else.
 - Parameters are data. They never take part in the type checks made on the query text.
-- An element deleted earlier in the same query is returned as it was when deleted, and reading its properties fails.
+- An element deleted earlier in the same query is returned as it was when deleted.
+- Reading the properties of an element deleted earlier in the same query fails.
+- The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
+- Reading the labels of a node deleted earlier in the same query fails.
 - A `MERGE` property that evaluates to null is an error.
 - `range()` has a length cap, so one query cannot exhaust the host's memory.
 - Floats convert to strings in the same form as the openCypher reference implementation.
 - Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
 - `length()` takes a path, and `size()` takes a list or a string.
+- An argument of `range()` that is not an integer fails with its own error kind, under the same early type-error rule.
+- Every other function argument of the wrong type, including a non-integer one where only an integer fits, fails as an ordinary argument type error.
 - `sum`, `avg`, `stDev`, `stDevP`, and the percentile aggregates take numbers only.
+- An aggregate argument cannot call `rand()`.
 - A percentile aggregate over a group with no rows is null and does not evaluate its percentile.
 - A null percentile makes a percentile aggregate null.
 - Operators, indexing, slicing, and label tests fall under the early type-error rule for every operand whose type the query text fixes, including node, relationship, and path variables.
+- The type the query text fixes leaves out null, so an operand that may be null, such as a comparison or an `OPTIONAL MATCH` variable, still fails early when no value of its type fits.
 - Aggregate arguments, pattern properties and filters, pattern predicates, and pattern comprehensions fall under the early type-error rule.
 - A reading clause that follows an updating clause needs a `WITH` between them.
+- A `WITH` item without an alias is reported only after the projection's expressions, including its `ORDER BY`, bind without error.
+- A column projected twice is reported after a `WITH` item without an alias.
 - `split()` by the empty string gives one string per character, so it gives an empty list for the empty string.
 - `toInteger()` and `toFloat()` read text only in the decimal number literal syntax with an optional sign and optional surrounding whitespace, and give null for anything else.
 - Temporal values follow openCypher: `date`, `localtime`, `time`, `localdatetime`, `datetime`, and `duration` build them from a map, a string, or another temporal value.
@@ -67,4 +101,3 @@ GQL is the reference language, but the only public conformance suite is the open
 ## Open
 
 - Regular expression matching with `=~`
-- `EXISTS` subqueries that contain a full query

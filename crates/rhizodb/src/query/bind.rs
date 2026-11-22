@@ -4,6 +4,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast;
 use crate::gql::ast::Direction;
+use crate::procedure::Procedures;
 use crate::result::Parameters;
 
 use super::datum::Datum;
@@ -11,6 +12,7 @@ use super::datum::from_parameter;
 use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
+use super::plan::CallClause;
 use super::plan::Case;
 use super::plan::Clause;
 use super::plan::Expr;
@@ -40,6 +42,7 @@ use super::shape::admits;
 use super::shape::binary_error;
 use super::shape::index_error;
 use super::shape::label_test_error;
+use super::shape::procedure_parameter;
 use super::shape::slice_bound_error;
 use super::shape::slice_error;
 use super::shape::unary_error;
@@ -50,10 +53,12 @@ pub(crate) fn bind(
     query: &ast::Query,
     source: &str,
     parameters: &Parameters,
+    procedures: &Procedures,
 ) -> Result<Plan, Error> {
     let mut binder = Binder {
         source,
         parameters,
+        procedures,
         slot_count: 0,
         closed: Vec::new(),
         expression_depth: 0,
@@ -71,7 +76,8 @@ pub(crate) fn bind(
     let mut columns: Option<Vec<String>> = None;
     let mut results_read_variables = false;
     for single in singles {
-        let (pipeline, part_columns, reads_variables) = binder.single_query(single)?;
+        let (pipeline, part_columns, reads_variables) =
+            binder.single_query(single, Scope::default(), false)?;
         results_read_variables |= reads_variables;
         match &columns {
             Some(first) if *first != part_columns => {
@@ -207,6 +213,7 @@ enum PatternUse {
 struct Binder<'a> {
     source: &'a str,
     parameters: &'a Parameters,
+    procedures: &'a Procedures,
     slot_count: usize,
     closed: Vec<Expr>,
     expression_depth: usize,
@@ -228,8 +235,9 @@ impl Binder<'_> {
     fn single_query(
         &mut self,
         query: &ast::SingleQuery,
+        mut scope: Scope,
+        subquery: bool,
     ) -> Result<(Pipeline<Clause>, Vec<String>, bool), Error> {
-        let mut scope = Scope::default();
         let mut clauses = Vec::new();
         let mut output = None;
         let mut result_reads_variables = false;
@@ -242,7 +250,12 @@ impl Binder<'_> {
                     "RETURN must be the last clause",
                 ));
             }
-            if follows_update && matches!(clause, ast::Clause::Match(_) | ast::Clause::Unwind(_)) {
+            if follows_update
+                && matches!(
+                    clause,
+                    ast::Clause::Match(_) | ast::Clause::Unwind(_) | ast::Clause::Call(_)
+                )
+            {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
                     "WITH is needed between an updating clause and a reading clause",
@@ -256,6 +269,12 @@ impl Binder<'_> {
                     | ast::Clause::Remove(_)
                     | ast::Clause::Delete(_)
             );
+            if subquery && follows_update {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "an EXISTS subquery cannot update the graph",
+                ));
+            }
             match clause {
                 ast::Clause::Match(found) => {
                     clauses.push(Clause::Read(self.match_clause(found, &mut scope)?));
@@ -273,6 +292,16 @@ impl Binder<'_> {
                     scope.insert(name, slot, Kind::Unknown);
                     clauses.push(Clause::Read(ReadClause::Unwind { expr, slot }));
                 }
+                ast::Clause::Call(call) => {
+                    let standalone = !subquery && query.clauses.len() == 1;
+                    let (bound, columns) = self.call(call, &mut scope, standalone)?;
+                    if standalone {
+                        result_reads_variables = true;
+                        let slots = bound.yields.iter().map(|(_, slot)| *slot).collect();
+                        output = Some((slots, columns));
+                    }
+                    clauses.push(Clause::Read(ReadClause::Call(Box::new(bound))));
+                }
                 ast::Clause::With(with) => {
                     let (projection, next, _) =
                         self.projection(&with.projection, &scope, true, with.filter.as_ref())?;
@@ -284,7 +313,7 @@ impl Binder<'_> {
                     let (projection, _, columns) =
                         self.projection(returned, &scope, false, None)?;
                     result_reads_variables =
-                        reads_variables(returned) || self.parameter_reads > reads_before;
+                        reads_variables(returned, &scope) || self.parameter_reads > reads_before;
                     output = Some((projection.outputs.clone(), columns));
                     clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
                 }
@@ -370,11 +399,14 @@ impl Binder<'_> {
                     }));
                 }
             }
-            let ends_without_return = index == last && output.is_none();
+            let ends_without_return = index == last && output.is_none() && !subquery;
             if ends_without_return
                 && matches!(
                     clause,
-                    ast::Clause::Match(_) | ast::Clause::With(_) | ast::Clause::Unwind(_)
+                    ast::Clause::Match(_)
+                        | ast::Clause::With(_)
+                        | ast::Clause::Unwind(_)
+                        | ast::Clause::Call(_)
                 )
             {
                 return Err(error(
@@ -388,6 +420,112 @@ impl Binder<'_> {
             Pipeline { clauses, output },
             columns,
             result_reads_variables,
+        ))
+    }
+
+    fn call(
+        &mut self,
+        call: &ast::Call,
+        scope: &mut Scope,
+        standalone: bool,
+    ) -> Result<(CallClause, Vec<String>), Error> {
+        let name = names(&call.name).join(".");
+        let procedure = self.procedures.get(&name).cloned().ok_or_else(|| {
+            error(
+                ErrorKind::ProcedureNotFound,
+                format!("procedure `{name}` is not registered"),
+            )
+        })?;
+        let args = match &call.args {
+            Some(args) => {
+                if args.len() != procedure.parameters.len() {
+                    return Err(error(
+                        ErrorKind::InvalidNumberOfArguments,
+                        format!(
+                            "procedure `{name}` takes {} arguments, not {}",
+                            procedure.parameters.len(),
+                            args.len()
+                        ),
+                    ));
+                }
+                let bound = self.exprs(args, scope, &mut Mode::Plain)?;
+                for (arg, (_, accepts)) in args.iter().zip(&procedure.parameters) {
+                    self.expect_shape(arg, scope, procedure_parameter(*accepts));
+                }
+                bound
+            }
+            None if !standalone && !procedure.parameters.is_empty() => {
+                return Err(error(
+                    ErrorKind::InvalidArgumentPassingMode,
+                    format!("a CALL inside a query must pass the arguments of `{name}`"),
+                ));
+            }
+            None => procedure
+                .parameters
+                .iter()
+                .map(|(parameter, _)| Ok(Expr::Parameter(self.parameter(parameter)?)))
+                .collect::<Result<_, Error>>()?,
+        };
+        let all_outputs = || {
+            procedure
+                .outputs
+                .iter()
+                .map(|output| ast::YieldItem {
+                    output: ast::Name::new(output.as_str()),
+                    alias: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let (items, filter) = match &call.yields {
+            Some(ast::Yield::Items { items, filter }) => (items.clone(), filter.as_ref()),
+            Some(ast::Yield::Star) if standalone => (all_outputs(), None),
+            Some(ast::Yield::Star) => {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "`YIELD *` is allowed only in a query that is a single `CALL`",
+                ));
+            }
+            None if standalone => (all_outputs(), None),
+            None => (Vec::new(), None),
+        };
+        let mut yields = Vec::new();
+        let mut columns: Vec<String> = Vec::new();
+        for item in &items {
+            let output = &item.output.0;
+            let index = procedure
+                .outputs
+                .iter()
+                .position(|candidate| candidate == output)
+                .ok_or_else(|| {
+                    error(
+                        ErrorKind::UnknownProcedureOutput,
+                        format!("procedure `{name}` has no output `{output}`"),
+                    )
+                })?;
+            let target = item.alias.as_ref().unwrap_or(&item.output).0.as_str();
+            if scope.get(target).is_some() || columns.iter().any(|column| column == target) {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("variable `{target}` is already bound"),
+                ));
+            }
+            yields.push((index, self.slot()));
+            columns.push(target.to_owned());
+        }
+        for (column, (_, slot)) in columns.iter().zip(&yields) {
+            scope.insert(column, *slot, Kind::Unknown);
+        }
+        let filter = filter
+            .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
+            .transpose()?;
+        Ok((
+            CallClause {
+                procedure,
+                args,
+                yields,
+                filter,
+            },
+            columns,
         ))
     }
 
@@ -680,10 +818,20 @@ impl Binder<'_> {
     }
 
     fn expect_shape(&mut self, expr: &ast::Expr, scope: &Scope, accepted: &[Shape]) {
+        self.expect_argument(expr, scope, accepted, None);
+    }
+
+    fn expect_argument(
+        &mut self,
+        expr: &ast::Expr,
+        scope: &Scope,
+        accepted: &[Shape],
+        kind: Option<ErrorKind>,
+    ) {
         if let Some(shape) = self.shape(expr, scope)
             && !admits(accepted, shape)
         {
-            self.reject(Some(ErrorKind::InvalidArgumentType), || {
+            self.reject(Some(kind.unwrap_or(ErrorKind::InvalidArgumentType)), || {
                 format!("a {shape:?} cannot be used here; expected one of {accepted:?}")
             });
         }
@@ -815,22 +963,18 @@ impl Binder<'_> {
             }
             ast::ProjectionItems::Items(explicit) => explicit,
         };
+        let missing_alias = is_with
+            && explicit
+                .iter()
+                .any(|item| item.alias.is_none() && !matches!(item.expr, ast::Expr::Variable(_)));
         for item in explicit {
-            if is_with && item.alias.is_none() && !matches!(item.expr, ast::Expr::Variable(_)) {
-                return Err(error(
-                    ErrorKind::NoExpressionAlias,
-                    "an expression in WITH needs an alias",
-                ));
-            }
             items.push((item.expr.clone(), self.column_name(item)));
         }
         let mut columns: Vec<String> = Vec::new();
+        let mut repeated = None;
         for (_, name) in &items {
             if columns.contains(name) {
-                return Err(error(
-                    ErrorKind::ColumnNameConflict,
-                    format!("column `{name}` is projected twice"),
-                ));
+                repeated.get_or_insert_with(|| name.clone());
             }
             columns.push(name.clone());
         }
@@ -931,6 +1075,18 @@ impl Binder<'_> {
             (Items::Plain(plain), order_by, visible)
         };
         let (items_bound, order_by, visible) = bound_items;
+        if missing_alias {
+            return Err(error(
+                ErrorKind::NoExpressionAlias,
+                "an expression in WITH needs an alias",
+            ));
+        }
+        if let Some(name) = repeated {
+            return Err(error(
+                ErrorKind::ColumnNameConflict,
+                format!("column `{name}` is projected twice"),
+            ));
+        }
         let skip = projection
             .skip
             .as_ref()
@@ -1206,7 +1362,12 @@ impl Binder<'_> {
                 }
                 let bound = self.exprs(&call.args, scope, mode)?;
                 for (index, arg) in call.args.iter().enumerate() {
-                    self.expect_shape(arg, scope, function.parameter(index));
+                    self.expect_argument(
+                        arg,
+                        scope,
+                        function.parameter(index),
+                        function.argument_error(),
+                    );
                 }
                 Expr::Call(function, bound)
             }
@@ -1279,7 +1440,8 @@ impl Binder<'_> {
                 }))
             }
             ast::Expr::Pattern(element) => {
-                let scope = &self.pattern_scope(scope, pattern_variables(element), mode)?;
+                let scope =
+                    &self.pattern_scope(scope, names_of(pattern_variables(element)), mode)?;
                 if let Some(name) =
                     pattern_variables(element).find(|name| scope.get(&name.0).is_none())
                 {
@@ -1307,7 +1469,7 @@ impl Binder<'_> {
                     let names = patterns
                         .iter()
                         .flat_map(|part| pattern_variables(&part.element));
-                    let scope = &self.pattern_scope(scope, names, mode)?;
+                    let scope = &self.pattern_scope(scope, names_of(names), mode)?;
                     Expr::Exists(Box::new(self.pattern_query(
                         patterns,
                         filter.as_ref(),
@@ -1315,11 +1477,21 @@ impl Binder<'_> {
                         mode,
                     )?))
                 }
-                ast::ExistsSubquery::Query(_) => {
-                    return Err(error(
-                        ErrorKind::Unsupported,
-                        "EXISTS with a full subquery is not supported",
-                    ));
+                ast::ExistsSubquery::Query(query) => {
+                    let mut free = Vec::new();
+                    collect_query_free(query, &mut Vec::new(), &mut free);
+                    let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
+                    let (pipeline, _, _) =
+                        self.root(|binder| binder.single_query(query, scope, true))?;
+                    let clauses = pipeline
+                        .clauses
+                        .into_iter()
+                        .filter_map(|clause| match clause {
+                            Clause::Read(clause) => Some(clause),
+                            Clause::Update(_) => None,
+                        })
+                        .collect();
+                    Expr::Subquery(clauses)
                 }
             },
             ast::Expr::PatternComprehension(comprehension) => {
@@ -1336,7 +1508,7 @@ impl Binder<'_> {
                     element: comprehension.element.clone(),
                 };
                 let mut inner =
-                    self.pattern_scope(scope, pattern_variables(&part.element), mode)?;
+                    self.pattern_scope(scope, names_of(pattern_variables(&part.element)), mode)?;
                 let mut introduced = Vec::new();
                 let pattern =
                     self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
@@ -1359,12 +1531,12 @@ impl Binder<'_> {
     fn pattern_scope<'n>(
         &self,
         scope: &Scope,
-        names: impl Iterator<Item = &'n ast::Name>,
+        names: impl Iterator<Item = &'n str>,
         mode: &Mode<'_>,
     ) -> Result<Scope, Error> {
         let mut visible = scope.clone();
-        let hidden = |name: &ast::Name| match mode {
-            Mode::Grouped(grouping) => grouping.input.get(&name.0).map(|_| {
+        let hidden = |name: &str| match mode {
+            Mode::Grouped(grouping) => grouping.input.get(name).map(|_| {
                 if grouping.ordering {
                     ErrorKind::UndefinedVariable
                 } else {
@@ -1373,7 +1545,7 @@ impl Binder<'_> {
             }),
             Mode::Projected(projected) => projected
                 .scope
-                .get(&name.0)
+                .get(name)
                 .map(|_| ErrorKind::UndefinedVariable),
             Mode::Plain | Mode::Constant => None,
         };
@@ -1389,12 +1561,12 @@ impl Binder<'_> {
             }
         }
         for name in names {
-            if visible.get(&name.0).is_none()
+            if visible.get(name).is_none()
                 && let Some(kind) = hidden(name)
             {
                 return Err(error(
                     kind,
-                    format!("`{}` is not visible next to this projection", name.0),
+                    format!("`{name}` is not visible next to this projection"),
                 ));
             }
         }
@@ -1441,6 +1613,12 @@ impl Binder<'_> {
                 return Err(error(
                     ErrorKind::NestedAggregation,
                     "an aggregate cannot contain another aggregate",
+                ));
+            }
+            if calls_rand(arg) {
+                return Err(error(
+                    ErrorKind::NonConstantExpression,
+                    "an aggregate cannot take a random value",
                 ));
             }
         }
@@ -1597,6 +1775,10 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
             ..Parts::default()
         },
         Expr::Exists(query) => Parts::matching(query, None),
+        Expr::Subquery(_) => Parts {
+            reads_graph: true,
+            ..Parts::default()
+        },
         Expr::PatternComprehension(query, projection) => {
             Parts::matching(query, Some(&**projection))
         }
@@ -1687,12 +1869,14 @@ fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::E
     }
 }
 
-fn reads_variables(projection: &ast::Projection) -> bool {
+fn reads_variables(projection: &ast::Projection, scope: &Scope) -> bool {
     match &projection.items {
         ast::ProjectionItems::Star(_) => true,
-        ast::ProjectionItems::Items(items) => items
-            .iter()
-            .any(|item| !free_variables(&item.expr).is_empty()),
+        ast::ProjectionItems::Items(items) => items.iter().any(|item| {
+            free_variables(&item.expr)
+                .iter()
+                .any(|name| scope.get(name).is_some())
+        }),
     }
 }
 
@@ -1735,8 +1919,8 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             bound.pop();
         }
         ast::Expr::Pattern(element) => collect_pattern_free(element, bound, free),
-        ast::Expr::Exists(subquery) => {
-            if let ast::ExistsSubquery::Pattern { patterns, filter } = subquery.as_ref() {
+        ast::Expr::Exists(subquery) => match subquery.as_ref() {
+            ast::ExistsSubquery::Pattern { patterns, filter } => {
                 for part in patterns {
                     collect_pattern_free(&part.element, bound, free);
                 }
@@ -1744,7 +1928,8 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
                     collect_free(filter, bound, free);
                 }
             }
-        }
+            ast::ExistsSubquery::Query(query) => collect_query_free(query, bound, free),
+        },
         ast::Expr::PatternComprehension(comprehension) => {
             collect_pattern_free(&comprehension.element, bound, free);
             for body in comprehension
@@ -1761,6 +1946,103 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             }
         }
     }
+}
+
+fn names_of<'n>(names: impl Iterator<Item = &'n ast::Name>) -> impl Iterator<Item = &'n str> {
+    names.map(|name| name.0.as_str())
+}
+
+fn collect_query_free<'a>(
+    query: &'a ast::SingleQuery,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    let depth = bound.len();
+    for clause in &query.clauses {
+        match clause {
+            ast::Clause::Match(clause) => {
+                for part in &clause.patterns {
+                    collect_pattern_free(&part.element, bound, free);
+                }
+                for part in &clause.patterns {
+                    bound.extend(names_of(pattern_variables(&part.element)));
+                    bound.extend(names_of(part.path_variable.iter()));
+                }
+                if let Some(filter) = &clause.filter {
+                    collect_free(filter, bound, free);
+                }
+            }
+            ast::Clause::Unwind(unwind) => {
+                collect_free(&unwind.expr, bound, free);
+                bound.push(&unwind.variable.0);
+            }
+            ast::Clause::Call(call) => {
+                for arg in call.args.iter().flatten() {
+                    collect_free(arg, bound, free);
+                }
+                if let Some(ast::Yield::Items { items, filter }) = &call.yields {
+                    bound.extend(
+                        items
+                            .iter()
+                            .map(|item| item.alias.as_ref().unwrap_or(&item.output).0.as_str()),
+                    );
+                    if let Some(filter) = filter {
+                        collect_free(filter, bound, free);
+                    }
+                }
+            }
+            ast::Clause::With(with) => {
+                if !collect_projection_free(&with.projection, with.filter.as_ref(), bound, free) {
+                    break;
+                }
+            }
+            ast::Clause::Return(projection) => {
+                collect_projection_free(projection, None, bound, free);
+                break;
+            }
+            ast::Clause::Merge(_)
+            | ast::Clause::Insert(_)
+            | ast::Clause::Set(_)
+            | ast::Clause::Remove(_)
+            | ast::Clause::Delete(_) => {}
+        }
+    }
+    bound.truncate(depth);
+}
+
+fn collect_projection_free<'a>(
+    projection: &'a ast::Projection,
+    filter: Option<&'a ast::Expr>,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) -> bool {
+    let (items, keeps_scope) = match &projection.items {
+        ast::ProjectionItems::Star(items) => (items, true),
+        ast::ProjectionItems::Items(items) => (items, false),
+    };
+    for item in items {
+        collect_free(&item.expr, bound, free);
+    }
+    bound.extend(
+        items
+            .iter()
+            .filter_map(|item| match (&item.alias, &item.expr) {
+                (Some(alias), _) => Some(alias.0.as_str()),
+                (None, ast::Expr::Variable(name)) => Some(name.0.as_str()),
+                (None, _) => None,
+            }),
+    );
+    let rest = projection
+        .order_by
+        .iter()
+        .map(|item| &item.expr)
+        .chain(&projection.skip)
+        .chain(&projection.limit)
+        .chain(filter);
+    for expr in rest {
+        collect_free(expr, bound, free);
+    }
+    keeps_scope
 }
 
 fn collect_pattern_free<'a>(
@@ -1790,6 +2072,11 @@ fn collect_pattern_free<'a>(
 
 fn contains_aggregate(expr: &ast::Expr) -> bool {
     aggregate_call(expr).is_some() || children(expr).into_iter().any(contains_aggregate)
+}
+
+fn calls_rand(expr: &ast::Expr) -> bool {
+    matches!(expr, ast::Expr::Function(call) if Function::lookup(&qualified_name(call)) == Some(Function::Rand))
+        || children(expr).into_iter().any(calls_rand)
 }
 
 fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {

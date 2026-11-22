@@ -6,6 +6,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
 use crate::graph::GraphTx;
+use crate::procedure::ValueType;
 use crate::result;
 use crate::result::QueryResult;
 use crate::result::Value;
@@ -16,9 +17,12 @@ use crate::temporal::DateTime;
 use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
+use super::datum::from_parameter;
+use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::plan::CallClause;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
@@ -26,6 +30,9 @@ use super::plan::MatchClause;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
+use super::shape::Shape;
+use super::shape::admits;
+use super::shape::procedure_parameter;
 use super::update::Graveyard;
 
 /// Runs a read-only program. It only needs a read transaction.
@@ -34,14 +41,17 @@ pub(crate) fn run_read<T: ReadTransaction>(
     program: &Program<ReadClause>,
     now: &DateTime,
 ) -> Result<QueryResult, Error> {
+    let graveyard = Graveyard::default();
     let env = Env {
         tx,
         slots: program.slot_count,
         now,
+        graveyard: &graveyard,
+        check: None,
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
-    materialize(&env, &Graveyard::default(), &program.columns, rows)
+    materialize(&env, &graveyard, &program.columns, rows)
 }
 
 /// Runs a program with updating clauses on a write transaction. The caller commits.
@@ -51,18 +61,22 @@ pub(crate) fn run_write<W: WriteTransaction>(
     now: &DateTime,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
+    let mut graveyard = Graveyard::default();
     Env {
         tx: &*tx,
         slots,
         now,
+        graveyard: &graveyard,
+        check: None,
     }
     .check_closed(&program.closed)?;
-    let mut graveyard = Graveyard::default();
     let rows = run(program, |clause, rows| match clause {
         Clause::Read(clause) => Env {
             tx: &*tx,
             slots,
             now,
+            graveyard: &graveyard,
+            check: None,
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => {
@@ -76,6 +90,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         tx: &*tx,
         slots,
         now,
+        graveyard: &graveyard,
+        check: None,
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -127,7 +143,11 @@ fn materialize<T: ReadTransaction>(
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
-    fn read_clause(&self, clause: &ReadClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    pub(crate) fn read_clause(
+        &self,
+        clause: &ReadClause,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         match clause {
             ReadClause::Match(found) => self.match_clause(found, rows),
             ReadClause::Unwind { expr, slot } => {
@@ -147,7 +167,75 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(out)
             }
             ReadClause::Project(projection) => self.project(projection, rows),
+            ReadClause::Call(call) => self.call_procedure(call, rows),
         }
+    }
+
+    fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+        let procedure = &call.procedure;
+        let mut out = Vec::new();
+        for row in rows {
+            let mut args = Vec::new();
+            for (arg, (parameter, accepts)) in call.args.iter().zip(&procedure.parameters) {
+                let value = match self.eval(arg, &row)? {
+                    Datum::Integer(value) if *accepts == ValueType::Float => {
+                        Datum::Float(value as f64)
+                    }
+                    value => value,
+                };
+                if let Some(shape) = Shape::of(&value)
+                    && !admits(procedure_parameter(*accepts), shape)
+                {
+                    return Err(Error::rejecting_type(
+                        ErrorKind::InvalidArgumentValue,
+                        format!(
+                            "parameter `{parameter}` of `{}` cannot take a {}",
+                            procedure.name,
+                            value.type_name()
+                        ),
+                    ));
+                }
+                args.push(self.value(value, self.graveyard)?);
+            }
+            let results = (procedure.body)(&args).map_err(|source| {
+                Error::caused_by(
+                    ErrorKind::ProcedureFailed,
+                    format!("procedure `{}` failed: {source}", procedure.name),
+                    source,
+                )
+            })?;
+            if procedure.outputs.is_empty() {
+                out.push(row);
+                continue;
+            }
+            for result in results {
+                if result.len() != procedure.outputs.len() {
+                    return Err(Error::new(
+                        ErrorKind::ProcedureFailed,
+                        format!(
+                            "procedure `{}` returned a row of {} values for {} outputs",
+                            procedure.name,
+                            result.len(),
+                            procedure.outputs.len()
+                        ),
+                    ));
+                }
+                let mut next = row.clone();
+                for (index, slot) in &call.yields {
+                    if let Some(value) = result.get(*index) {
+                        set(&mut next, *slot, from_parameter(value));
+                    }
+                }
+                let keep = match &call.filter {
+                    Some(filter) => self.predicate(filter, &next)?,
+                    None => true,
+                };
+                if keep {
+                    out.push(next);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
@@ -228,11 +316,17 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn check_closed(&self, closed: &[Expr]) -> Result<(), Error> {
+        let check = Check::default();
+        let checker = Env {
+            tx: self.tx,
+            slots: self.slots,
+            now: self.now,
+            graveyard: self.graveyard,
+            check: Some(&check),
+        };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
-            if let Err(error) = self.eval(expr, &row)
-                && error.is_type_error()
-            {
+            if let Err(error) = checker.eval(expr, &row) {
                 return Err(match error.kind() {
                     ErrorKind::TypeMismatch => error.with_kind(ErrorKind::InvalidArgumentType),
                     _ => error,

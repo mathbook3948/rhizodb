@@ -55,6 +55,33 @@ pub(crate) enum Clause {
     Set(Vec<SetItem>),
     Remove(Vec<RemoveItem>),
     Delete(Delete),
+    Call(Call),
+}
+
+/// `CALL name(args) YIELD items WHERE filter`. `args` is `None` when the parentheses are left
+/// out, and `yields` is `None` without `YIELD`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Call {
+    pub name: Vec<Name>,
+    pub args: Option<Vec<Expr>>,
+    pub yields: Option<Yield>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Yield {
+    /// `YIELD *`, which only a query that is a single `CALL` accepts.
+    Star,
+    Items {
+        items: Vec<YieldItem>,
+        filter: Option<Expr>,
+    },
+}
+
+/// `output AS alias`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct YieldItem {
+    pub output: Name,
+    pub alias: Option<Name>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

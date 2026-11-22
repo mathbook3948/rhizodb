@@ -174,6 +174,7 @@ fn rejects_the_type(db: &Database, query: &str) -> bool {
         Some(
             ErrorKind::InvalidArgumentType
                 | ErrorKind::InvalidArgumentValue
+                | ErrorKind::NonIntegerArgument
                 | ErrorKind::TypeMismatch
         )
     )
@@ -234,4 +235,36 @@ fn length_takes_a_path_and_size_takes_a_list_or_string() {
             "{query}"
         );
     }
+}
+
+#[test]
+fn a_range_argument_of_another_type_than_integer_is_a_non_integer_argument() {
+    let db = graph();
+    for query in [
+        "MATCH (n:Missing) RETURN range(0.0, 1)",
+        "RETURN range(0, 1, 'x')",
+        "WITH true AS b RETURN range(0, b)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::NonIntegerArgument,
+            "{query}"
+        );
+    }
+    for query in [
+        "RETURN substring(1, 1)",
+        "RETURN left('abc', 1.5)",
+        "RETURN right('abc', 'x')",
+        "RETURN datetime.fromepochmillis(1.5)",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        error_kind(&db, "WITH 1.5 AS f RETURN substring('abc', f)"),
+        ErrorKind::InvalidArgumentValue
+    );
 }

@@ -1,3 +1,55 @@
+clauses/call/Call1.feature: [10] In-query call to procedure should fail if too many explicit argument are given
+clauses/call/Call1.feature: [11] Standalone call to procedure should fail if implicit argument is missing
+clauses/call/Call1.feature: [12] In-query call to procedure that has outputs fails if no outputs are yielded
+clauses/call/Call1.feature: [13] Standalone call to unknown procedure should fail
+clauses/call/Call1.feature: [14] In-query call to unknown procedure should fail
+clauses/call/Call1.feature: [15] In-query procedure call should fail if shadowing an already bound variable
+clauses/call/Call1.feature: [16] In-query procedure call should fail if one of the argument expressions uses an aggregation function
+clauses/call/Call1.feature: [1] Standalone call to procedure that takes no arguments and yields no results
+clauses/call/Call1.feature: [2] Standalone call to procedure that takes no arguments and yields no results, called with implicit arguments
+clauses/call/Call1.feature: [3] In-query call to procedure that takes no arguments and yields no results
+clauses/call/Call1.feature: [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows
+clauses/call/Call1.feature: [5] Standalone call to STRING procedure that takes no arguments
+clauses/call/Call1.feature: [6] In-query call to STRING procedure that takes no arguments
+clauses/call/Call1.feature: [7] Standalone call to procedure should fail if explicit argument is missing
+clauses/call/Call1.feature: [8] In-query call to procedure should fail if explicit argument is missing
+clauses/call/Call1.feature: [9] Standalone call to procedure should fail if too many explicit argument are given
+clauses/call/Call2.feature: [1] In-query call to procedure with explicit arguments
+clauses/call/Call2.feature: [2] Standalone call to procedure with explicit arguments
+clauses/call/Call2.feature: [3] Standalone call to procedure with implicit arguments
+clauses/call/Call2.feature: [4] In-query call to procedure that takes arguments fails when trying to pass them implicitly
+clauses/call/Call2.feature: [5] Standalone call to procedure should fail if input type is wrong
+clauses/call/Call2.feature: [6] In-query call to procedure should fail if input type is wrong
+clauses/call/Call3.feature: [1] Standalone call to procedure with argument of type NUMBER accepts value of type INTEGER
+clauses/call/Call3.feature: [2] In-query call to procedure with argument of type NUMBER accepts value of type INTEGER
+clauses/call/Call3.feature: [3] Standalone call to procedure with argument of type NUMBER accepts value of type FLOAT
+clauses/call/Call3.feature: [4] In-query call to procedure with argument of type NUMBER accepts value of type FLOAT
+clauses/call/Call3.feature: [5] Standalone call to procedure with argument of type FLOAT accepts value of type INTEGER
+clauses/call/Call3.feature: [6] In-query call to procedure with argument of type FLOAT accepts value of type INTEGER
+clauses/call/Call4.feature: [1] Standalone call to procedure with null argument
+clauses/call/Call4.feature: [2] In-query call to procedure with null argument
+clauses/call/Call5.feature: [1] Explicit procedure result projection
+clauses/call/Call5.feature: [2] Explicit procedure result projection with RETURN *
+clauses/call/Call5.feature: [3] The order of yield items is irrelevant #1
+clauses/call/Call5.feature: [3] The order of yield items is irrelevant #2
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #1
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #10
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #11
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #2
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #3
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #4
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #5
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #6
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #7
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #8
+clauses/call/Call5.feature: [4] Rename outputs to unbound variable names #9
+clauses/call/Call5.feature: [5] Fail on renaming to an already bound variable name
+clauses/call/Call5.feature: [6] Fail on renaming all outputs to the same variable name
+clauses/call/Call5.feature: [7] Fail on in-query call to procedure with YIELD *
+clauses/call/Call5.feature: [8] Allow standalone call to procedure with YIELD *
+clauses/call/Call6.feature: [1] Calling the same STRING procedure twice using the same outputs in each call
+clauses/call/Call6.feature: [2] Project procedure results between query scopes with WITH clause
+clauses/call/Call6.feature: [3] Project procedure results between query scopes with WITH clause and rename the projection
 clauses/create/Create1.feature: [10] Create a single node with two properties and return them
 clauses/create/Create1.feature: [11] Create a single node with null properties should not return those properties
 clauses/create/Create1.feature: [12] CREATE does not lose precision on large integers
@@ -353,6 +405,7 @@ clauses/match/Match3.feature: [6] Matching a relationship pattern using a label 
 clauses/match/Match3.feature: [7] Matching nodes with many labels
 clauses/match/Match3.feature: [8] Matching using relationship predicate with multiples of the same type
 clauses/match/Match3.feature: [9] Get related to related to
+clauses/match/Match4.feature: [10] Fail on negative bound
 clauses/match/Match4.feature: [1] Handling fixed-length variable length pattern
 clauses/match/Match4.feature: [2] Simple variable length pattern
 clauses/match/Match4.feature: [3] Zero-length variable length pattern in the middle of the pattern
@@ -361,6 +414,7 @@ clauses/match/Match4.feature: [5] Matching variable length pattern with property
 clauses/match/Match4.feature: [6] Matching variable length patterns from a bound node
 clauses/match/Match4.feature: [7] Matching variable length patterns including a bound relationship
 clauses/match/Match4.feature: [8] Matching relationships into a list and matching variable length using the list
+clauses/match/Match4.feature: [9] Fail when asterisk operator is missing
 clauses/match/Match5.feature: [10] Handling symmetrically bounded variable length match, bounds are two
 clauses/match/Match5.feature: [11] Handling upper and lower bounded variable length match, empty interval 1
 clauses/match/Match5.feature: [12] Handling upper and lower bounded variable length match, empty interval 2
@@ -710,6 +764,7 @@ clauses/return/Return2.feature: [10] Return count aggregation over an empty grap
 clauses/return/Return2.feature: [11] RETURN does not lose precision on large integers
 clauses/return/Return2.feature: [12] Projecting a list of nodes and relationships
 clauses/return/Return2.feature: [13] Projecting a map of nodes and relationships
+clauses/return/Return2.feature: [14] Do not fail when returning type of deleted relationships
 clauses/return/Return2.feature: [15] Fail when returning properties of deleted nodes
 clauses/return/Return2.feature: [16] Fail when returning labels of deleted nodes
 clauses/return/Return2.feature: [17] Fail when returning properties of deleted relationships
@@ -747,6 +802,7 @@ clauses/return/Return6.feature: [11] Counting matches
 clauses/return/Return6.feature: [12] Counting matches per group
 clauses/return/Return6.feature: [13] Returning the minimum length of paths
 clauses/return/Return6.feature: [14] Aggregates in aggregates
+clauses/return/Return6.feature: [15] Using `rand()` in aggregations
 clauses/return/Return6.feature: [16] Aggregation on complex expressions
 clauses/return/Return6.feature: [17] Handle constants and parameters inside an expression which contains an aggregation expression
 clauses/return/Return6.feature: [18] Handle returned variables inside an expression which contains an aggregation expression
@@ -1127,6 +1183,7 @@ clauses/with-orderBy/WithOrderBy4.feature: [17] Handle projected variables insid
 clauses/with-orderBy/WithOrderBy4.feature: [18]  Handle projected property accesses inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [19] Fail if not projected variables are used inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [1] Sort by a projected expression
+clauses/with-orderBy/WithOrderBy4.feature: [20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression
 clauses/with-orderBy/WithOrderBy4.feature: [2] Sort by an alias of a projected expression
 clauses/with-orderBy/WithOrderBy4.feature: [3] Sort by two projected expressions with order priority being different than projection order
 clauses/with-orderBy/WithOrderBy4.feature: [4] Sort by one projected expression and one alias of a projected expression with order priority being different than projection order
@@ -1466,6 +1523,12 @@ expressions/existentialSubqueries/ExistentialSubquery1.feature: [1] Simple subqu
 expressions/existentialSubqueries/ExistentialSubquery1.feature: [2] Simple subquery with WHERE clause
 expressions/existentialSubqueries/ExistentialSubquery1.feature: [3] Simple subquery without WHERE clause, not existing pattern
 expressions/existentialSubqueries/ExistentialSubquery1.feature: [4] Simple subquery with WHERE clause, not existing pattern
+expressions/existentialSubqueries/ExistentialSubquery2.feature: [1] Full existential subquery
+expressions/existentialSubqueries/ExistentialSubquery2.feature: [2] Full existential subquery with aggregation
+expressions/existentialSubqueries/ExistentialSubquery2.feature: [3] Full existential subquery with update clause should fail
+expressions/existentialSubqueries/ExistentialSubquery3.feature: [1] Nested simple existential subquery
+expressions/existentialSubqueries/ExistentialSubquery3.feature: [2] Nested full existential subquery
+expressions/existentialSubqueries/ExistentialSubquery3.feature: [3] Nested full existential subquery with pattern predicate
 expressions/graph/Graph3.feature: [1] Creating node without label
 expressions/graph/Graph3.feature: [2] Creating node with two labels
 expressions/graph/Graph3.feature: [3] Ignore space when creating node with labels
@@ -1594,6 +1657,28 @@ expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #1
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #2
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #3
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #4
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #1
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #10
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #11
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #12
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #13
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #14
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #15
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #16
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #17
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #18
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #19
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #2
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #20
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #21
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #22
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #3
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #4
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #5
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #6
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #7
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #8
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #9
 expressions/list/List12.feature: [1] Collect and extract using a list comprehension
 expressions/list/List12.feature: [2] Collect and filter using a list comprehension
 expressions/list/List12.feature: [3] Size of list comprehension
@@ -1751,6 +1836,7 @@ expressions/literals/Literals5.feature: [23] Return a negative float with negati
 expressions/literals/Literals5.feature: [24] Return a negative float with negative upper case exponent without integer digits
 expressions/literals/Literals5.feature: [25] Return a positive float with one integer digit and maximum positive exponent
 expressions/literals/Literals5.feature: [26] Return a positive float with nine integer digit and maximum positive exponent
+expressions/literals/Literals5.feature: [27] Fail when float value is too large
 expressions/literals/Literals5.feature: [2] Return a short positive float without integer digits
 expressions/literals/Literals5.feature: [3] Return a long positive float
 expressions/literals/Literals5.feature: [4] Return a long positive float without integer digits
@@ -1801,6 +1887,7 @@ expressions/literals/Literals8.feature: [15] Return 20-deep nested maps
 expressions/literals/Literals8.feature: [16] Return 40-deep nested maps
 expressions/literals/Literals8.feature: [17] Return a map containing real and fake nested maps
 expressions/literals/Literals8.feature: [18] Return a complex map containing multiple mixed and nested values
+expressions/literals/Literals8.feature: [19] Fail on a map containing key starting with a number
 expressions/literals/Literals8.feature: [1] Return an empty map
 expressions/literals/Literals8.feature: [20] Fail on a map containing key with symbol
 expressions/literals/Literals8.feature: [21] Fail on a map containing key with dot
@@ -1865,6 +1952,7 @@ expressions/map/Map3.feature: [5] Using `keys()` and `IN` to check field existen
 expressions/mathematical/Mathematical11.feature: [1] Absolute function
 expressions/mathematical/Mathematical13.feature: [1] `sqrt()` returning float values
 expressions/mathematical/Mathematical2.feature: [1] Allow addition
+expressions/mathematical/Mathematical3.feature: [1] Fail for invalid Unicode hyphen in subtraction
 expressions/mathematical/Mathematical8.feature: [1] Arithmetic precedence test
 expressions/mathematical/Mathematical8.feature: [2] Arithmetic precedence with parenthesis test
 expressions/null/Null1.feature: [1] Property null check on non-null node

@@ -80,14 +80,23 @@ fn range_dots_do_not_turn_integers_into_floats() {
 }
 
 #[test]
-fn malformed_numbers_are_invalid_number_literals() {
-    for input in ["0x", "0xg", "0o8", "1e", "1e+", "12abc", "1.5x", "1e999"] {
-        assert_eq!(
-            error(input),
-            (0, SyntaxErrorKind::InvalidNumberLiteral),
-            "{input}"
-        );
+fn a_malformed_number_is_one_invalid_number_token() {
+    for input in ["0x", "0xg", "0o8", "1e", "1e+", "12abc", "1.5x", "1B2c3e67"] {
+        assert_eq!(kinds(input), vec![TokenKind::InvalidNumber], "{input}");
     }
+}
+
+#[test]
+fn a_float_past_the_64_bit_range_overflows() {
+    assert_eq!(error("1.34E999"), (0, SyntaxErrorKind::FloatOverflow));
+}
+
+#[test]
+fn a_character_outside_ascii_that_starts_no_token_is_an_invalid_unicode_character() {
+    assert_eq!(
+        error("42 \u{2014} 41"),
+        (3, SyntaxErrorKind::InvalidUnicodeCharacter)
+    );
 }
 
 #[test]

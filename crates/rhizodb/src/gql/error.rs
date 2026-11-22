@@ -15,6 +15,10 @@ pub enum SyntaxErrorKind {
     InvalidNumberLiteral,
     /// An integer literal outside the 64-bit signed range.
     IntegerOverflow,
+    /// A float literal too large for a 64-bit float.
+    FloatOverflow,
+    /// A character outside ASCII that starts no token, such as a dash look-alike.
+    InvalidUnicodeCharacter,
     /// An unknown escape sequence in a string literal.
     InvalidEscape,
     /// A malformed `\u` escape sequence.
@@ -25,6 +29,8 @@ pub enum SyntaxErrorKind {
     UnterminatedQuotedName,
     /// A block comment without its closing `*/`.
     UnterminatedComment,
+    /// Length bounds on a relationship without the `*` before them, or a negative bound.
+    InvalidRelationshipPattern,
     /// `UNION` and `UNION ALL` in one query.
     MixedUnion,
     /// Syntax that is recognized but not supported.
@@ -41,11 +47,14 @@ impl SyntaxErrorKind {
             Self::UnexpectedCharacter => "unexpected character",
             Self::InvalidNumberLiteral => "invalid number literal",
             Self::IntegerOverflow => "integer literal does not fit in 64 bits",
+            Self::FloatOverflow => "float literal does not fit in 64 bits",
+            Self::InvalidUnicodeCharacter => "invalid unicode character",
             Self::InvalidEscape => "invalid escape sequence",
             Self::InvalidUnicodeEscape => "invalid unicode escape sequence",
             Self::UnterminatedString => "unterminated string literal",
             Self::UnterminatedQuotedName => "unterminated quoted name",
             Self::UnterminatedComment => "unterminated comment",
+            Self::InvalidRelationshipPattern => "invalid relationship length",
             Self::MixedUnion => "UNION and UNION ALL cannot be mixed",
             Self::UnsupportedFeature => "unsupported feature",
             Self::NestingTooDeep => "query is nested too deeply",

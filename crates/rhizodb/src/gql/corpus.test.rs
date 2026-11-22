@@ -16,11 +16,13 @@ const QUERY_STEPS: [&str; 3] = [
     "When executing control query:",
 ];
 
-const PARSE_LEVEL_ERRORS: [&str; 4] = [
+const PARSE_LEVEL_ERRORS: [&str; 6] = [
     "UnexpectedSyntax",
     "InvalidNumberLiteral",
     "InvalidUnicodeLiteral",
+    "InvalidUnicodeCharacter",
     "IntegerOverflow",
+    "FloatingPointOverflow",
 ];
 
 struct CorpusQuery {
@@ -170,8 +172,6 @@ fn deferred_cause(query: &str) -> Option<&'static str> {
     let has = |word: &str| words.contains(&word);
     if has("merge") {
         Some("MERGE clause")
-    } else if has("call") {
-        Some("CALL clause")
     } else if has("foreach") {
         Some("FOREACH clause")
     } else if has("shortestpath") || has("allshortestpaths") {

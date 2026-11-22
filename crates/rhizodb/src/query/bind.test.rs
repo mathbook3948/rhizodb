@@ -1,4 +1,5 @@
 use crate::gql::parser::parse;
+use crate::procedure::Procedures;
 use crate::result::Parameters;
 
 use super::super::plan::Clause;
@@ -7,7 +8,14 @@ use super::super::plan::UpdateClause;
 use super::bind;
 
 fn closed_count(query: &str) -> usize {
-    match bind(&parse(query).unwrap(), query, &Parameters::new()).unwrap() {
+    match bind(
+        &parse(query).unwrap(),
+        query,
+        &Parameters::new(),
+        &Procedures::new(),
+    )
+    .unwrap()
+    {
         Plan::ReadOnly(program) => program.closed.len(),
         Plan::Updating(program) => program.closed.len(),
     }
@@ -41,8 +49,13 @@ fn the_closed_parts_inside_a_pattern_are_recorded_but_not_the_pattern() {
 }
 
 fn delete_retains(query: &str) -> Vec<bool> {
-    let Plan::Updating(program) = bind(&parse(query).unwrap(), query, &Parameters::new()).unwrap()
-    else {
+    let Plan::Updating(program) = bind(
+        &parse(query).unwrap(),
+        query,
+        &Parameters::new(),
+        &Procedures::new(),
+    )
+    .unwrap() else {
         panic!("{query} is not an updating query");
     };
     program
@@ -79,6 +92,28 @@ fn a_delete_whose_result_can_hold_an_element_retains_records() {
     assert_eq!(
         delete_retains("MATCH (n) DELETE n RETURN count(n) AS c"),
         [true]
+    );
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (n)-->() } AS e"),
+        [true]
+    );
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { UNWIND [n] AS x RETURN x } AS e"),
+        [true]
+    );
+}
+
+#[test]
+fn a_delete_followed_by_a_subquery_of_its_own_variables_retains_no_records() {
+    assert_eq!(
+        delete_retains("MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (m)-->() } AS e"),
+        [false]
+    );
+    assert_eq!(
+        delete_retains(
+            "MATCH (n) DETACH DELETE n RETURN EXISTS { MATCH (m) WITH m AS n RETURN n } AS e"
+        ),
+        [false]
     );
 }
 

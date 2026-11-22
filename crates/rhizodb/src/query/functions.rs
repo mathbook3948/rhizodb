@@ -442,6 +442,13 @@ impl Function {
             .unwrap_or(ANY)
     }
 
+    /// The error kind for an argument of a type the function does not take, when it differs
+    /// from the kind a type error has elsewhere: every argument of `range()` raises
+    /// [`ErrorKind::NonIntegerArgument`].
+    pub(crate) fn argument_error(self) -> Option<ErrorKind> {
+        (self == Function::Range).then_some(ErrorKind::NonIntegerArgument)
+    }
+
     fn name(self) -> &'static str {
         SIGNATURES
             .iter()
@@ -479,7 +486,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             if let Some(shape) = Shape::of(value)
                 && !admits(function.parameter(index), shape)
             {
-                return Err(invalid_value(function, value));
+                let error = invalid_value(function, value);
+                return Err(match function.argument_error() {
+                    Some(kind) => error.with_kind(kind),
+                    None => error,
+                });
             }
         }
         let count = args.len();
@@ -516,9 +527,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
-                Datum::Relationship(id) => Ok(Datum::String(
-                    self.tx.token_name(self.relationship(id)?.rel_type)?,
-                )),
+                Datum::Relationship(id) => Ok(Datum::String(self.relationship_type(id)?)),
                 other => Err(invalid(&other)),
             },
             Function::Keys | Function::Properties => {

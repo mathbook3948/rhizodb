@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::error::Error;
@@ -22,6 +23,7 @@ use super::datum::Datum;
 use super::plan::Expr;
 use super::plan::Slot;
 use super::temporals;
+use super::update::Graveyard;
 
 /// One row: a value for every slot of the query.
 pub(crate) type Row = Vec<Datum>;
@@ -33,6 +35,19 @@ pub(crate) struct Env<'a, T> {
     pub(crate) slots: usize,
     /// The instant the query started, which the clock functions other than `realtime` read.
     pub(crate) now: &'a DateTime,
+    /// What the query deleted so far.
+    pub(crate) graveyard: &'a Graveyard,
+    /// Set when evaluation only looks for the type errors the query text fixes.
+    pub(crate) check: Option<&'a Check>,
+}
+
+/// The state of an evaluation that only looks for type errors. A step that fails with a value
+/// error gives null instead, so the steps after it are still checked, and a type error counts
+/// only when no such null went into the step that raised it.
+#[derive(Debug, Default)]
+pub(crate) struct Check {
+    substituted: Cell<usize>,
+    found: Cell<bool>,
 }
 
 pub(crate) fn type_error(message: impl Into<String>) -> Error {
@@ -73,6 +88,15 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn relationship(&self, id: RelationshipId) -> Result<RelationshipRecord, Error> {
         self.tx.relationship(id)?.ok_or_else(deleted)
+    }
+
+    /// The type of a relationship, which stays readable after the query deleted it.
+    pub(crate) fn relationship_type(&self, id: RelationshipId) -> Result<String, Error> {
+        let rel_type = match self.graveyard.relationships.get(&id) {
+            Some(record) => record.rel_type,
+            None => self.relationship(id)?.rel_type,
+        };
+        Ok(self.tx.token_name(rel_type)?)
     }
 
     pub(crate) fn label_names(&self, record: &NodeRecord) -> Result<Vec<String>, Error> {
@@ -141,6 +165,36 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
+        let Some(check) = self.check else {
+            return self.eval_node(expr, row);
+        };
+        let before = check.substituted.get();
+        match self.eval_node(expr, row) {
+            Err(error)
+                if error.is_type_error()
+                    && (check.found.get() || check.substituted.get() == before) =>
+            {
+                check.found.set(true);
+                Err(error)
+            }
+            Err(_) => {
+                check.substituted.set(check.substituted.get() + 1);
+                Ok(Datum::Null)
+            }
+            result => result,
+        }
+    }
+
+    fn substituted_since(&self, before: usize) -> bool {
+        self.check
+            .is_some_and(|check| check.substituted.get() != before)
+    }
+
+    fn substitutions(&self) -> usize {
+        self.check.map_or(0, |check| check.substituted.get())
+    }
+
+    fn eval_node(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
         match expr {
             Expr::Constant(value) | Expr::Parameter(value) => Ok(value.clone()),
             Expr::Slot(slot) => Ok(row.get(*slot).cloned().unwrap_or(Datum::Null)),
@@ -165,8 +219,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             Expr::HasLabels(operand, labels) => match self.eval(operand, row)? {
                 Datum::Null => Ok(Datum::Null),
                 Datum::Node(id) => Ok(Datum::Boolean(self.has_labels(id, labels)?)),
+                Datum::Relationship(id) => {
+                    let rel_type = self.relationship_type(id)?;
+                    Ok(Datum::Boolean(
+                        labels.iter().all(|label| *label == rel_type),
+                    ))
+                }
                 other => Err(type_error(format!(
-                    "labels can only be tested on a node, not a {}",
+                    "labels can only be tested on a node or a relationship, not a {}",
                     other.type_name()
                 ))),
             },
@@ -234,7 +294,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
             }
             Expr::ListComprehension(comprehension) => {
-                let Some(items) = list_operand(self.eval(&comprehension.source, row)?)? else {
+                let before = self.substitutions();
+                let source = self.eval(&comprehension.source, row)?;
+                if self.substituted_since(before) {
+                    return Ok(Datum::Null);
+                }
+                let Some(items) = list_operand(source)? else {
                     return Ok(Datum::Null);
                 };
                 let mut local = row.clone();
@@ -254,7 +319,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(Datum::List(out))
             }
             Expr::Quantified(quantified) => {
-                let Some(items) = list_operand(self.eval(&quantified.source, row)?)? else {
+                let before = self.substitutions();
+                let source = self.eval(&quantified.source, row)?;
+                if self.substituted_since(before) {
+                    return Ok(Datum::Null);
+                }
+                let Some(items) = list_operand(source)? else {
                     return Ok(Datum::Null);
                 };
                 let mut local = row.clone();
@@ -289,6 +359,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                     Ok(false)
                 })?;
                 Ok(Datum::Boolean(found))
+            }
+            Expr::Subquery(clauses) => {
+                let mut rows = vec![row.clone()];
+                for clause in clauses {
+                    rows = self.read_clause(clause, rows)?;
+                }
+                Ok(Datum::Boolean(!rows.is_empty()))
             }
             Expr::PatternComprehension(query, projection) => {
                 let mut out = Vec::new();

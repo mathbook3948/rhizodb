@@ -272,6 +272,10 @@ impl Parser {
                 self.pos += 1;
                 Ok(Expr::Literal(Literal::Float(value)))
             }
+            TokenKind::InvalidNumber => Err(SyntaxError::new(
+                start,
+                SyntaxErrorKind::InvalidNumberLiteral,
+            )),
             TokenKind::String(text) => {
                 self.pos += 1;
                 Ok(Expr::Literal(Literal::String(text)))

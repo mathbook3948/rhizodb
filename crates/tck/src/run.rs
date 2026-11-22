@@ -13,7 +13,12 @@ pub fn run_scenario(
 ) -> Result<(), String> {
     let mut graph = engine.fresh_graph();
     for procedure in &scenario.procedures {
-        graph.register_procedure(procedure);
+        graph.register_procedure(procedure).map_err(|reason| {
+            format!(
+                "could not register procedure {}: {reason}",
+                procedure.signature
+            )
+        })?;
     }
     let no_parameters = BTreeMap::new();
     for query in graph_script
