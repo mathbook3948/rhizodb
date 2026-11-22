@@ -108,6 +108,16 @@ fn a_cluster_without_a_base_letter_separates_words() {
 }
 
 #[test]
+fn a_word_starts_and_ends_at_a_character_that_is_a_letter_or_digit() {
+    assert_eq!(document("क.가"), ["क", "가"]);
+    assert_eq!(document("a.가"), ["a", "가"]);
+    assert_eq!(document("가.a"), ["가", "a"]);
+    assert_eq!(document("\"\u{e31}x"), ["x"]);
+    assert_eq!(document("\"\u{e31}"), Vec::<String>::new());
+    assert_eq!(document("don't 3.14 e.g."), ["don't", "3.14", "e.g"]);
+}
+
+#[test]
 fn each_hangul_syllable_and_each_loose_jamo_is_a_unit_of_its_own() {
     let khieukh = "\u{110f}";
     assert_eq!(query("ㅋㅋㅋ"), [khieukh.repeat(2), khieukh.repeat(2)]);
