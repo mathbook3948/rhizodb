@@ -591,3 +591,7 @@ mod tests;
 #[cfg(test)]
 #[path = "graph/crash.test.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+#[path = "graph/maintenance.test.rs"]
+mod maintenance_tests;
