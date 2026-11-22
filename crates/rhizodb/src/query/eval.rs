@@ -246,6 +246,8 @@ impl<T: ReadTransaction> Env<'_, T> {
                     let (value, taint) = self.tracked(value, row)?;
                     if taint.is_tainted() {
                         taints.insert(key.clone(), taint);
+                    } else {
+                        taints.remove(key);
                     }
                     values.insert(key.clone(), value);
                 }

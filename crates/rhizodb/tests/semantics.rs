@@ -1351,6 +1351,7 @@ fn a_value_error_inside_a_list_or_map_hides_only_the_type_errors_that_read_it() 
         "MATCH (n:Missing) RETURN [1 / 0, 'a'][-1] - 1 AS v",
         "MATCH (n:Missing) RETURN {a: 1 / 0, b: 'x'}.b - 1 AS v",
         "MATCH (n:Missing) RETURN {a: 1 / 0, b: 'x'}['b'] - 1 AS v",
+        "MATCH (n:Missing) RETURN {a: 1 / 0, a: 'x'}.a - 1 AS v",
         "MATCH (n:Missing) RETURN [1 / 0, 'a'][1..][0] - 1 AS v",
         "MATCH (n:Missing) RETURN [1 / 0, ['a'][0] - 1] AS v",
         "MATCH (n:Missing) RETURN size([1 / 0]) - 'a' AS v",
