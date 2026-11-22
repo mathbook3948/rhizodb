@@ -19,7 +19,9 @@ A host often needs several queries to read one state of the graph or to take eff
 - A query that fails in a read transaction leaves the transaction usable.
 - A query that fails in a write transaction rolls back the whole transaction.
 - A write transaction that a failed query rolled back refuses every later query and its commit with its own error kind.
+- The `transaction` clock reads the instant the transaction began, for every query in it.
+- The `statement` clock reads the instant each query began.
 
 ## Open
 
-- Whether the `transaction` clock reads one instant per transaction instead of one per query
+None

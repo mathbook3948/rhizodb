@@ -26,3 +26,18 @@ fn a_failed_compile_is_not_kept() {
         );
     }
 }
+
+#[test]
+fn a_pattern_read_on_every_row_stays_compiled_while_others_come_and_go() {
+    let patterns = Patterns::default();
+    for length in 0..(CACHED_PATTERNS * 3) {
+        assert!(patterns.matches("hot", "h.t").unwrap());
+        assert!(
+            patterns
+                .matches(&"a".repeat(length), &format!("a{{{length}}}"))
+                .unwrap()
+        );
+    }
+    let compiled = patterns.compiled.borrow();
+    assert!(compiled.iter().any(|(pattern, _)| pattern == "h.t"));
+}

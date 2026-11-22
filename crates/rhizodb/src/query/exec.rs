@@ -12,7 +12,7 @@ use crate::result::QueryResult;
 use crate::result::Value;
 use crate::storage::ReadTransaction;
 use crate::storage::WriteTransaction;
-use crate::temporal::DateTime;
+use crate::temporal::Clocks;
 
 use super::compare::Key;
 use super::compare::order;
@@ -40,7 +40,7 @@ use super::update::Graveyard;
 pub(crate) fn run_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
-    now: &DateTime,
+    now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
     let patterns = Patterns::default();
@@ -61,7 +61,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
 pub(crate) fn run_write<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     program: &Program<Clause>,
-    now: &DateTime,
+    now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
     let mut graveyard = Graveyard::default();
