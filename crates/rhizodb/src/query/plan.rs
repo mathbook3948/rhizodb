@@ -194,6 +194,8 @@ pub(crate) struct NodePattern {
 pub(crate) struct RelationshipPattern {
     pub(crate) slot: Slot,
     pub(crate) bound: bool,
+    /// Set when no variable names the relationship, so nothing reads its slot.
+    pub(crate) anonymous: bool,
     /// In a pattern that creates, a single name.
     pub(crate) labels: Option<LabelExpr>,
     pub(crate) direction: Direction,

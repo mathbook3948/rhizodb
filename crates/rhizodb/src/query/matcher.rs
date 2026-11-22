@@ -359,14 +359,19 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
     ) -> Result<bool, Error> {
         let depth = walked.len() as u64;
         if depth >= hops.min {
-            let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
-            let accepted =
-                !step.relationship.bound || row.get(step.relationship.slot) == Some(&value);
-            if accepted {
-                set(row, step.relationship.slot, value);
-                if !self.arrive(index, step_index, step, current, row, trail, emit)? {
-                    return Ok(false);
+            let relationship = &step.relationship;
+            let accepted = if relationship.anonymous {
+                true
+            } else {
+                let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
+                let accepted = !relationship.bound || row.get(relationship.slot) == Some(&value);
+                if accepted {
+                    set(row, relationship.slot, value);
                 }
+                accepted
+            };
+            if accepted && !self.arrive(index, step_index, step, current, row, trail, emit)? {
+                return Ok(false);
             }
         }
         if hops.max.is_some_and(|max| depth >= max) {

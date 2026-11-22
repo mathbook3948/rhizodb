@@ -881,6 +881,7 @@ impl Binder<'_> {
         Ok(RelationshipPattern {
             slot,
             bound,
+            anonymous: relationship.variable.is_none(),
             labels: relationship.labels.clone(),
             direction: relationship.direction,
             length,
