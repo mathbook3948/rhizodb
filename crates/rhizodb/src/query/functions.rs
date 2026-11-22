@@ -482,16 +482,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                 return Err(invalid_value(function, value));
             }
         }
-        if let Function::Temporal(temporal) = function {
-            return self.call_temporal(temporal, args);
-        }
+        let count = args.len();
         let mut args = args.into_iter();
         let first = args.next().unwrap_or(Datum::Null);
         let second = args.next();
         let third = args.next();
         if !matches!(
             function,
-            Function::Pi | Function::E | Function::Rand | Function::Exists
+            Function::Pi | Function::E | Function::Rand | Function::Exists | Function::Temporal(_)
         ) && first.is_null()
         {
             return Ok(Datum::Null);
@@ -710,7 +708,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 Ok(Datum::String(text.replace(from.as_str(), to)))
             }
-            Function::Temporal(temporal) => self.call_temporal(temporal, vec![first]),
+            Function::Temporal(temporal) => {
+                let args = std::iter::once(first).chain(second).chain(third);
+                self.call_temporal(temporal, args.take(count).collect())
+            }
             Function::Split => {
                 let text = string_argument(function, first)?;
                 match second {
