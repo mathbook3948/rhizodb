@@ -369,7 +369,6 @@ impl DateTime {
     }
 }
 
-/// The instant the system clock reads now, in UTC.
 /// The instants the clock functions read: the statement clock is fixed for one query, the
 /// transaction clock for every query of one transaction.
 #[derive(Clone, Debug)]
@@ -397,6 +396,7 @@ impl Clocks {
     }
 }
 
+/// The instant the system clock reads now, in UTC.
 pub(crate) fn now() -> DateTime {
     let (epoch_second, nanosecond) = zone::system_now();
     DateTime::from_instant(epoch_second, nanosecond, &Zone::UTC).unwrap_or(DateTime {

@@ -220,3 +220,23 @@ fn the_transaction_clock_reads_one_instant_for_every_query_of_a_transaction() {
         .unwrap();
     assert_eq!(first.rows(), second.rows());
 }
+
+#[test]
+fn a_clock_call_without_arguments_reads_the_statement_clock_inside_a_transaction() {
+    let db = db();
+    let read = db.begin_read().unwrap();
+    thread::sleep(Duration::from_millis(5));
+    let clocks = read
+        .execute(
+            "RETURN datetime() = datetime.statement(), datetime() > datetime.transaction()",
+            &Parameters::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        clocks.rows(),
+        [vec![
+            rhizodb::Value::Boolean(true),
+            rhizodb::Value::Boolean(true)
+        ]]
+    );
+}

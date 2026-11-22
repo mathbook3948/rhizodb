@@ -22,13 +22,15 @@ pub(crate) struct Patterns {
 impl Patterns {
     /// Whether the regular expression `pattern` matches all of `text`.
     pub(crate) fn matches(&self, text: &str, pattern: &str) -> Result<bool, Error> {
-        if let Some((_, regex)) = self
-            .compiled
-            .borrow()
-            .iter()
-            .find(|(cached, _)| cached == pattern)
         {
-            return Ok(regex.is_match(text));
+            let mut compiled = self.compiled.borrow_mut();
+            if let Some(position) = compiled.iter().position(|(cached, _)| cached == pattern)
+                && let Some(entry) = compiled.remove(position)
+            {
+                let matched = entry.1.is_match(text);
+                compiled.push_back(entry);
+                return Ok(matched);
+            }
         }
         let regex = compile(pattern)?;
         let matched = regex.is_match(text);

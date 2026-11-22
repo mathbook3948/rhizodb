@@ -34,7 +34,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) tx: &'a GraphTx<T>,
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
-    /// The instant the query started, which the clock functions other than `realtime` read.
+    /// The statement and transaction instants, which the clock functions other than `realtime`
+    /// read.
     pub(crate) now: &'a Clocks,
     /// What the query deleted so far.
     pub(crate) graveyard: &'a Graveyard,
