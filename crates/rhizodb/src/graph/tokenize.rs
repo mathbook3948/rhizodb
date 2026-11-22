@@ -36,9 +36,9 @@ pub(crate) enum Purpose {
 }
 
 /// Splits `text` into lowercase terms at Unicode word boundaries, dropping control characters,
-/// so no term holds a zero byte. Hangul, Han, Hiragana, and
-/// Katakana runs become overlapping character pairs, because those scripts attach particles to
-/// words or leave out spaces. The same text always gives the same terms, in the same order.
+/// so no term holds a zero byte. Hangul, Han, Hiragana, and Katakana runs become overlapping
+/// character pairs, because those scripts attach particles to words or leave out spaces. The
+/// same text always gives the same terms, in the same order.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<String> {
     let mut terms = Vec::new();
     let mut run = Vec::new();
