@@ -87,8 +87,10 @@ impl Database {
     /// labelled `label`, and fills it from the nodes already there, in one write transaction.
     /// Text is put in Unicode normalization form NFKC, split into words at Unicode word
     /// boundaries, and lowercased, so composed and decomposed accents, ligatures, and full-width
-    /// letters match their plain forms. A property that holds a list of strings is indexed
-    /// string by string. Search it with
+    /// letters match their plain forms. Hangul, Han, kana, and scripts written without spaces
+    /// between words, such as Thai, are indexed as overlapping pairs of grapheme clusters, so a
+    /// query finds a word inside a longer run. A property that holds a list of strings is
+    /// indexed string by string. Search it with
     /// `CALL db.index.keyword.query(name, text, limit) YIELD node, score`.
     ///
     /// Creating an index that exists with the same definition changes nothing. It fails with

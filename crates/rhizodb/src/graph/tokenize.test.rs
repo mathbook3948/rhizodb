@@ -56,6 +56,22 @@ fn han_and_kana_without_spaces_form_one_run() {
 }
 
 #[test]
+fn thai_lao_khmer_and_myanmar_runs_pair_their_grapheme_clusters() {
+    assert_eq!(query("ภาษาไทย"), ["ภา", "าษ", "ษา", "าไ", "ไท", "ทย"]);
+    assert_eq!(query("ก่อน"), ["ก\u{e48}อ", "อน"]);
+    assert_eq!(query("ພາສາ"), ["ພາ", "າສ", "ສາ"]);
+    assert_eq!(query("ភាសា"), ["ភាសា"]);
+    assert_eq!(query("မြန်မာ"), ["မြန\u{103a}", "န\u{103a}မ", "မာ"]);
+    assert_eq!(document("ไทย"), ["ไท", "ทย", "ไ", "ท", "ย"]);
+}
+
+#[test]
+fn numbers_and_a_stray_mark_do_not_start_a_run() {
+    assert_eq!(query("ปี ๒๕๖๗"), ["ปี", "๒๕๖๗"]);
+    assert_eq!(query("a\u{e48}"), ["a\u{e48}"]);
+}
+
+#[test]
 fn latin_next_to_hangul_splits_into_a_word_and_a_run() {
     assert_eq!(query("RhizoDB에서"), ["rhizodb", "에서"]);
 }
@@ -67,6 +83,7 @@ fn every_query_term_of_a_text_is_a_document_term_of_it() {
         "東京都に行く",
         "Graph DATABASE",
         "a한b글",
+        "ภาษาไทยง่ายมาก",
     ] {
         let stored = document(text);
         for term in query(text) {

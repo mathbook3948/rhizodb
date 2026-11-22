@@ -32,8 +32,10 @@ A host that keeps people, places, and tasks for years must find them by words an
 - A keyword index reads strings and lists of strings, and ignores values of other types.
 - Text is put in Unicode normalization form NFKC, so canonically equivalent text and compatibility forms such as ligatures and full-width letters give the same terms.
 - Text splits into words at Unicode word boundaries and is lowercased.
-- A run of Hangul, Han, Hiragana, or Katakana is indexed as its overlapping character pairs and its single characters.
-- A query run of such characters looks for its character pairs, or for its one character when it has one.
+- A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of grapheme clusters and its single grapheme clusters.
+- Such a run starts at a letter, and digits stay words of their own.
+- A query run of such clusters looks for its pairs, or for its one cluster when it has one.
+- No text is split with a word dictionary.
 - A keyword query matches a node that holds any of its terms.
 - Keyword matches are ranked by BM25.
 - Each keyword index keeps its node count and total term count, and each posting keeps its node's term count, so ranking reads only the postings of the query terms.
@@ -55,5 +57,4 @@ A host that keeps people, places, and tasks for years must find them by words an
 
 - An approximate vector structure, such as HNSW, for indexes too large to scan
 - Indexes over relationship properties
-- Word segmentation for scripts written without spaces outside Hangul, Han, and kana, such as Thai
 - Phrase, prefix, and fuzzy keyword queries

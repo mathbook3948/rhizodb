@@ -235,6 +235,18 @@ fn japanese_and_chinese_text_is_found_without_spaces() {
 }
 
 #[test]
+fn thai_text_is_found_by_a_word_inside_it_and_not_by_shared_letters() {
+    let db = notes_db();
+    run(
+        &db,
+        "INSERT (:Note {name: 'th', body: 'ภาษาไทยง่ายมาก'}), (:Note {name: 'come', body: 'มาเร็ว'})",
+    );
+    assert_eq!(keyword(&db, "notes", "ภาษา"), ["th"]);
+    assert_eq!(keyword(&db, "notes", "ง่าย"), ["th"]);
+    assert_eq!(keyword(&db, "notes", "มา")[0], "come");
+}
+
+#[test]
 fn composed_and_decomposed_text_find_each_other() {
     let db = notes_db();
     let mut parameters = Parameters::new();
