@@ -354,13 +354,6 @@ impl IndexDefinition {
 }
 
 impl IndexKind {
-    pub(crate) fn search_kind(&self) -> SearchKind {
-        match self {
-            Self::Keyword { .. } => SearchKind::Keyword,
-            Self::Vector { .. } => SearchKind::Vector,
-        }
-    }
-
     fn entry(&self, values: &Properties) -> Option<Entry> {
         match self {
             IndexKind::Keyword { properties } => {
@@ -569,12 +562,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(bytes.map(|bytes| Index::decode(&bytes)).transpose()?)
     }
 
-    fn searched_index(
+    fn searched_index<F>(
         &self,
         name: &str,
         search: SearchKind,
         element: ElementKind,
-    ) -> Result<Index, GraphError> {
+        fields: impl FnOnce(&IndexKind) -> Option<F>,
+    ) -> Result<(u32, F), GraphError> {
         let what = match (search, element) {
             (SearchKind::Keyword, ElementKind::Node) => "keyword index over nodes",
             (SearchKind::Keyword, ElementKind::Relationship) => "keyword index over relationships",
@@ -582,10 +576,8 @@ impl<T: ReadTransaction> GraphTx<T> {
             (SearchKind::Vector, ElementKind::Relationship) => "vector index over relationships",
         };
         self.index(name)?
-            .filter(|index| {
-                index.definition.kind.search_kind() == search
-                    && index.definition.target.element_kind() == element
-            })
+            .filter(|index| index.definition.target.element_kind() == element)
+            .and_then(|index| Some((index.id, fields(&index.definition.kind)?)))
             .ok_or_else(|| GraphError::IndexNotFound(name.to_owned(), what))
     }
 
@@ -600,10 +592,14 @@ impl<T: ReadTransaction> GraphTx<T> {
         text: &str,
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let index = self.searched_index(name, SearchKind::Keyword, element)?;
+        let (id, ()) =
+            self.searched_index(name, SearchKind::Keyword, element, |kind| match kind {
+                IndexKind::Keyword { .. } => Some(()),
+                IndexKind::Vector { .. } => None,
+            })?;
         let totals = self
             .transaction
-            .get(Table::KeywordTotals, &keys::index_prefix(index.id))?
+            .get(Table::KeywordTotals, &keys::index_prefix(id))?
             .ok_or(GraphError::Corrupt("a keyword index has no totals"))?;
         let (documents, length) = decode_totals(&totals)?;
         if documents == 0 {
@@ -624,10 +620,10 @@ impl<T: ReadTransaction> GraphTx<T> {
             let clause_scores: BTreeMap<u64, f64> = match &clause {
                 Clause::Term(term) => {
                     let mut counts = BTreeMap::new();
-                    for (key, value) in self.transaction.scan_prefix(
-                        Table::KeywordPostings,
-                        &keys::posting_prefix(index.id, term),
-                    )? {
+                    for (key, value) in self
+                        .transaction
+                        .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(id, term))?
+                    {
                         counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
                     }
                     score(counts).collect()
@@ -644,7 +640,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     };
                     for (key, value) in self
                         .transaction
-                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(index.id, prefix))?
+                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(id, prefix))?
                     {
                         let term = keys::parse_posting_term(&key)?.as_bytes();
                         if current.as_deref() != Some(term) {
@@ -656,7 +652,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     merge(counts);
                     best_scores
                 }
-                Clause::Phrase(terms) => score(self.phrase_matches(index.id, terms)?).collect(),
+                Clause::Phrase(terms) => score(self.phrase_matches(id, terms)?).collect(),
             };
             for (element, value) in clause_scores {
                 *scores.entry(element).or_insert(0.0) += value;
@@ -728,13 +724,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         query: &[f64],
         limit: usize,
     ) -> Result<Vec<(u64, f64)>, GraphError> {
-        let index = self.searched_index(name, SearchKind::Vector, element)?;
-        let IndexKind::Vector {
-            dimension, metric, ..
-        } = index.definition.kind
-        else {
-            return Err(GraphError::IndexNotFound(name.to_owned(), "vector index"));
-        };
+        let (id, (dimension, metric)) =
+            self.searched_index(name, SearchKind::Vector, element, |kind| match kind {
+                IndexKind::Vector {
+                    dimension, metric, ..
+                } => Some((*dimension, *metric)),
+                IndexKind::Keyword { .. } => None,
+            })?;
         if usize::try_from(dimension).ok() != Some(query.len()) {
             return Err(GraphError::InvalidQueryVector(format!(
                 "index `{name}` holds vectors of {dimension} numbers, not {}",
@@ -755,7 +751,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut scored = Vec::new();
         for (key, value) in self
             .transaction
-            .scan_prefix(Table::Vectors, &keys::index_prefix(index.id))?
+            .scan_prefix(Table::Vectors, &keys::index_prefix(id))?
         {
             let stored = decode_vector(&value, dimension)?;
             scored.push((
