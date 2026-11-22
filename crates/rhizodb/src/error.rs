@@ -77,6 +77,10 @@ pub enum ErrorKind {
     /// rather than read off its text: an argument of the wrong type, such as `toUpper(x)` for a
     /// number `x`, or a percentile that differs between the rows of one group.
     InvalidArgumentValue,
+    /// A function argument that must be an integer, such as a bound or the step of `range()`, is
+    /// a value of another type. Like [`ErrorKind::InvalidArgumentType`], it fails before any data
+    /// is read when the query text decides the argument.
+    NonIntegerArgument,
     /// A property was read from a value that is not a node, relationship, or map.
     PropertyAccessOnNonEntity,
     /// A list was indexed with something that is not an integer.
@@ -120,6 +124,7 @@ impl ErrorKind {
         matches!(
             self,
             Self::InvalidArgumentType
+                | Self::NonIntegerArgument
                 | Self::TypeMismatch
                 | Self::PropertyAccessOnNonEntity
                 | Self::ListElementAccessByNonInteger

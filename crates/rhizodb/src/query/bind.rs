@@ -804,10 +804,20 @@ impl Binder<'_> {
     }
 
     fn expect_shape(&mut self, expr: &ast::Expr, scope: &Scope, accepted: &[Shape]) {
+        self.expect_argument(expr, scope, accepted, None);
+    }
+
+    fn expect_argument(
+        &mut self,
+        expr: &ast::Expr,
+        scope: &Scope,
+        accepted: &[Shape],
+        kind: Option<ErrorKind>,
+    ) {
         if let Some(shape) = self.shape(expr, scope)
             && !admits(accepted, shape)
         {
-            self.reject(Some(ErrorKind::InvalidArgumentType), || {
+            self.reject(Some(kind.unwrap_or(ErrorKind::InvalidArgumentType)), || {
                 format!("a {shape:?} cannot be used here; expected one of {accepted:?}")
             });
         }
@@ -1330,7 +1340,12 @@ impl Binder<'_> {
                 }
                 let bound = self.exprs(&call.args, scope, mode)?;
                 for (index, arg) in call.args.iter().enumerate() {
-                    self.expect_shape(arg, scope, function.parameter(index));
+                    self.expect_argument(
+                        arg,
+                        scope,
+                        function.parameter(index),
+                        function.argument_error(index),
+                    );
                 }
                 Expr::Call(function, bound)
             }

@@ -442,6 +442,13 @@ impl Function {
             .unwrap_or(ANY)
     }
 
+    /// The error kind for an argument at `index` of a type the function does not take, when it
+    /// differs from the kind a type error has elsewhere: a parameter that takes only integers
+    /// raises [`ErrorKind::NonIntegerArgument`].
+    pub(crate) fn argument_error(self, index: usize) -> Option<ErrorKind> {
+        (self.parameter(index) == INTEGER).then_some(ErrorKind::NonIntegerArgument)
+    }
+
     fn name(self) -> &'static str {
         SIGNATURES
             .iter()
@@ -479,7 +486,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             if let Some(shape) = Shape::of(value)
                 && !admits(function.parameter(index), shape)
             {
-                return Err(invalid_value(function, value));
+                let error = invalid_value(function, value);
+                return Err(match function.argument_error(index) {
+                    Some(kind) => error.with_kind(kind),
+                    None => error,
+                });
             }
         }
         let count = args.len();

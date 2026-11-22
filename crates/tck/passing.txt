@@ -1646,6 +1646,28 @@ expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #1
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #2
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #3
 expressions/list/List11.feature: [4] Fail on invalid arguments for `range()` #4
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #1
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #10
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #11
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #12
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #13
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #14
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #15
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #16
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #17
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #18
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #19
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #2
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #20
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #21
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #22
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #3
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #4
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #5
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #6
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #7
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #8
+expressions/list/List11.feature: [5] Fail on invalid argument types for `range()` #9
 expressions/list/List12.feature: [1] Collect and extract using a list comprehension
 expressions/list/List12.feature: [2] Collect and filter using a list comprehension
 expressions/list/List12.feature: [3] Size of list comprehension

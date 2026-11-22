@@ -35,6 +35,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - Floats convert to strings in the same form as the openCypher reference implementation.
 - Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
 - `length()` takes a path, and `size()` takes a list or a string.
+- A function argument that only an integer fits, such as a bound or the step of `range()`, fails with its own error kind when it has another type, under the same early type-error rule.
 - `sum`, `avg`, `stDev`, `stDevP`, and the percentile aggregates take numbers only.
 - A percentile aggregate over a group with no rows is null and does not evaluate its percentile.
 - A null percentile makes a percentile aggregate null.

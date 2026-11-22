@@ -242,6 +242,7 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::MapElementAccessByNonString => ("TypeError", "MapElementAccessByNonString"),
         ErrorKind::InvalidPropertyType => ("TypeError", "InvalidPropertyType"),
         ErrorKind::NumberOutOfRange => ("ArgumentError", "NumberOutOfRange"),
+        ErrorKind::NonIntegerArgument => ("ArgumentError", "InvalidArgumentType"),
         ErrorKind::DeleteConnectedNode => ("ConstraintVerificationFailed", "DeleteConnectedNode"),
         ErrorKind::DeletedEntityAccess => ("EntityNotFound", "DeletedEntityAccess"),
         _ => return QueryError::Unsupported,
