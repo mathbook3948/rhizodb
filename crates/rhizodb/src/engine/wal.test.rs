@@ -473,3 +473,20 @@ fn log_bytes(fs: &SimFs) -> u64 {
         })
         .sum()
 }
+
+#[test]
+fn a_damaged_header_of_a_last_segment_that_holds_records_is_corruption() {
+    for byte in [0, 30, 100] {
+        let fs = filled(40);
+        let sequences = segment_files(&fs, BASE).unwrap();
+        let last = *sequences.last().unwrap();
+        assert!(sequences.len() > 1);
+        damage(&fs, last, 0, byte);
+        let error = lsns(&fs, &header(0, 1)).expect_err("the damaged header was not noticed");
+        assert!(error.is_corrupt(), "byte {byte}: {error}");
+        assert!(
+            segment_files(&fs, BASE).unwrap().contains(&last),
+            "the segment was removed"
+        );
+    }
+}

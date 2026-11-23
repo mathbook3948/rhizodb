@@ -152,6 +152,17 @@ impl<F: FileSystem> Wal<F> {
                 Some(Ok(decoded)) => decoded,
                 Some(Err(error @ EngineError::Unsupported(_))) => return Err(error),
                 _ if last && index > 0 => {
+                    let seed = SegmentHeader {
+                        sequence,
+                        salt: identity.salt,
+                        ..SegmentHeader::default()
+                    }
+                    .record_seed();
+                    if sealed_record_after(seed, &bytes, 0).is_some() {
+                        return Err(EngineError::corrupt(format!(
+                            "the header of log segment {sequence} is damaged, but synced records follow it"
+                        )));
+                    }
                     drop(file);
                     fs.remove(&name)?;
                     fs.sync_names()?;
