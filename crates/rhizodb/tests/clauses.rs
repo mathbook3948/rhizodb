@@ -238,6 +238,25 @@ fn skip_and_limit_page_through_ordered_rows() {
 }
 
 #[test]
+fn a_limited_order_keeps_rows_with_equal_keys_in_their_order() {
+    let db = db();
+    let rows = run(
+        &db,
+        "UNWIND range(1, 40) AS x RETURN x ORDER BY x % 3 SKIP 2 LIMIT 5",
+    );
+    assert_eq!(ints(&rows), [9, 12, 15, 18, 21]);
+    let rows = run(
+        &db,
+        "UNWIND range(1, 40) AS x RETURN x ORDER BY x % 4 DESC LIMIT 12",
+    );
+    assert_eq!(ints(&rows), [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 2, 6]);
+    let rows = run(&db, "UNWIND range(1, 4) AS x RETURN x ORDER BY -x LIMIT 9");
+    assert_eq!(ints(&rows), [4, 3, 2, 1]);
+    let rows = run(&db, "UNWIND range(1, 4) AS x RETURN x ORDER BY x LIMIT 0");
+    assert_eq!(ints(&rows), Vec::<i64>::new());
+}
+
+#[test]
 fn unwind_expands_lists_and_drops_null() {
     let db = db();
     assert_eq!(ints(&run(&db, "UNWIND [1, 2, 3] AS x RETURN x")), [1, 2, 3]);

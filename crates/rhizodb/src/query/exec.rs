@@ -352,16 +352,23 @@ impl<T: ReadTransaction> Env<'_, T> {
                     .collect()))
             });
         }
-        if !projection.order_by.is_empty() {
-            rows = self.sort(rows, &projection.order_by)?;
-        }
         let empty = vec![Datum::Null; self.slots];
-        if let Some(skip) = &projection.skip {
-            let skip = self.count(skip, &empty, "SKIP")?;
+        let skip = match &projection.skip {
+            Some(skip) => self.count(skip, &empty, "SKIP")?,
+            None => 0,
+        };
+        let limit = match &projection.limit {
+            Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
+            None => None,
+        };
+        if !projection.order_by.is_empty() {
+            let kept = limit.map(|limit| skip.saturating_add(limit));
+            rows = self.sort(rows, &projection.order_by, kept)?;
+        }
+        if skip > 0 {
             rows = rows.into_iter().skip(skip).collect();
         }
-        if let Some(limit) = &projection.limit {
-            let limit = self.count(limit, &empty, "LIMIT")?;
+        if let Some(limit) = limit {
             rows.truncate(limit);
         }
         if let Some(filter) = &projection.filter {
@@ -414,16 +421,22 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn sort(&self, rows: Vec<Row>, order_by: &[(Expr, SortDirection)]) -> Result<Vec<Row>, Error> {
+    fn sort(
+        &self,
+        rows: Vec<Row>,
+        order_by: &[(Expr, SortDirection)],
+        kept: Option<usize>,
+    ) -> Result<Vec<Row>, Error> {
         let mut keyed = Vec::with_capacity(rows.len());
-        for row in rows {
+        for (position, row) in rows.into_iter().enumerate() {
             let keys = order_by
                 .iter()
                 .map(|(expr, _)| self.eval(expr, &row))
                 .collect::<Result<Vec<_>, _>>()?;
-            keyed.push((keys, row));
+            keyed.push((keys, position, row));
         }
-        keyed.sort_by(|(a, _), (b, _)| {
+        let compare = |(a, a_position, _): &(Vec<Datum>, usize, Row),
+                       (b, b_position, _): &(Vec<Datum>, usize, Row)| {
             for ((x, y), (_, direction)) in a.iter().zip(b).zip(order_by) {
                 let ordering = order(x, y);
                 let ordering = match direction {
@@ -434,9 +447,21 @@ impl<T: ReadTransaction> Env<'_, T> {
                     return ordering;
                 }
             }
-            Ordering::Equal
-        });
-        Ok(keyed.into_iter().map(|(_, row)| row).collect())
+            a_position.cmp(b_position)
+        };
+        if let Some(kept) = kept
+            && kept < keyed.len()
+        {
+            match kept.checked_sub(1) {
+                Some(last) => {
+                    keyed.select_nth_unstable_by(last, compare);
+                    keyed.truncate(kept);
+                }
+                None => keyed.clear(),
+            }
+        }
+        keyed.sort_unstable_by(compare);
+        Ok(keyed.into_iter().map(|(_, _, row)| row).collect())
     }
 
     /// Turns a runtime value into a public value, reading graph elements as they are now and
