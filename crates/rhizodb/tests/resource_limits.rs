@@ -6,11 +6,16 @@ use rhizodb::Database;
 use rhizodb::ErrorKind;
 use rhizodb::IndexTarget;
 use rhizodb::Parameters;
+use rhizodb::Procedure;
 use rhizodb::SyntaxErrorKind;
 use rhizodb::Value;
+use rhizodb::ValueType;
 use support::*;
 
 const CHILD_LIMIT: Duration = Duration::from_secs(300);
+
+/// How deep a value in a query may nest lists and maps.
+const MAX_VALUE_NESTING: usize = 128;
 
 /// The deepest list a host can build, clone, and drop on a 2 MiB stack with room to spare, in
 /// the profile the test runs in.
@@ -29,34 +34,144 @@ fn parameter(name: &str, value: Value) -> Parameters {
 }
 
 #[test]
-#[ignore = "bug: converting a parameter recurses once per nesting level, so a nested list the \
-            host builds, clones, and drops on a 2 MiB stack aborts the process with a stack \
-            overflow inside execute instead of failing with an error"]
-fn a_deeply_nested_parameter_fails_or_answers_without_a_stack_overflow() {
-    let test = "a_deeply_nested_parameter_fails_or_answers_without_a_stack_overflow";
+fn a_parameter_nested_past_the_value_limit_fails_without_recursing_over_it() {
+    let test = "a_parameter_nested_past_the_value_limit_fails_without_recursing_over_it";
     if !isolated(test, CHILD_LIMIT) {
         return;
     }
     let db = db();
+    let deep = parameter("p", nested_list(HOST_SAFE_DEPTH));
     on_small_stack(|| {
-        let value = nested_list(HOST_SAFE_DEPTH);
-        drop(value.clone());
         for query in [
             "RETURN $p IS NULL",
             "RETURN size($p)",
             "INSERT (:N {p: $p})",
         ] {
-            match db.execute(query, &parameter("p", value.clone())) {
-                Ok(_) => {}
-                Err(error) => assert!(
-                    matches!(
-                        error.kind(),
-                        ErrorKind::InvalidPropertyType | ErrorKind::NumberOutOfRange
-                    ),
-                    "{query}: {error}"
-                ),
-            }
+            let error = db.execute(query, &deep).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NestingTooDeep, "{query}: {error}");
         }
+    });
+    assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(0));
+}
+
+fn nested_value(depth: usize) -> Value {
+    let mut value = Value::Integer(1);
+    for level in 0..depth {
+        value = if level % 2 == 0 {
+            Value::List(vec![value])
+        } else {
+            Value::Map([("k".to_owned(), value)].into())
+        };
+    }
+    value
+}
+
+#[test]
+fn a_value_nested_to_the_limit_is_read_compared_grouped_and_returned_on_a_small_stack() {
+    let db = db();
+    on_small_stack(|| {
+        let full = parameter("p", nested_value(MAX_VALUE_NESTING));
+        assert_eq!(
+            db.execute("RETURN $p = $p, $p < $p, $p IS NULL", &full)
+                .unwrap()
+                .rows(),
+            [vec![boolean(true), Value::Null, boolean(false)]]
+        );
+        assert_eq!(
+            db.execute("RETURN $p", &full).unwrap().rows(),
+            [vec![nested_value(MAX_VALUE_NESTING)]]
+        );
+        let inner = parameter("p", nested_value(MAX_VALUE_NESTING - 1));
+        for query in [
+            "UNWIND [$p, $p] AS x RETURN DISTINCT x",
+            "UNWIND [$p, $p] AS x RETURN x ORDER BY x",
+            "UNWIND [$p, $p] AS x RETURN x, count(*)",
+            "UNWIND [$p] AS x RETURN collect(x)[0]",
+            "RETURN [$p][0]",
+            "RETURN [x IN [$p] | x][0]",
+            "RETURN ([] + $p)",
+        ] {
+            assert_eq!(
+                db.execute(query, &inner).unwrap().rows()[0][0],
+                nested_value(MAX_VALUE_NESTING - 1),
+                "{query}"
+            );
+        }
+        let error = db
+            .execute(
+                "RETURN $p",
+                &parameter("p", nested_value(MAX_VALUE_NESTING + 1)),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NestingTooDeep, "{error}");
+    });
+}
+
+#[test]
+fn a_query_that_builds_a_value_past_the_nesting_limit_fails() {
+    let db = db();
+    let inner = parameter("p", nested_list(MAX_VALUE_NESTING));
+    on_small_stack(|| {
+        for query in [
+            "RETURN [$p]",
+            "RETURN {k: $p}",
+            "RETURN [x IN [1] | $p]",
+            "UNWIND [1] AS x RETURN collect($p)",
+            "RETURN [1] + {k: $p[0]}",
+            "RETURN {k: $p[0]} + [1]",
+        ] {
+            let error = db.execute(query, &inner).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NestingTooDeep, "{query}: {error}");
+        }
+        assert_eq!(
+            db.execute("RETURN size([1] + $p), size($p + {k: 1})", &inner)
+                .unwrap()
+                .rows(),
+            [vec![int(2), int(2)]]
+        );
+        let text = format!(
+            "WITH 1 AS x {} RETURN x",
+            "WITH [x] AS x ".repeat(MAX_VALUE_NESTING + 1)
+        );
+        assert_eq!(error_kind(&db, &text), ErrorKind::NestingTooDeep);
+        let text = format!(
+            "WITH 1 AS x {} RETURN size(x)",
+            "WITH [x] AS x ".repeat(MAX_VALUE_NESTING)
+        );
+        assert_eq!(single(&db, &text), int(1));
+        let text = format!(
+            "UNWIND [1] AS x WITH collect(x) AS x {} RETURN size(x)",
+            "UNWIND [1] AS y WITH collect(x) AS x ".repeat(MAX_VALUE_NESTING)
+        );
+        assert_eq!(error_kind(&db, &text), ErrorKind::NestingTooDeep);
+    });
+}
+
+#[test]
+fn a_procedure_result_nested_past_the_value_limit_fails() {
+    let mut db = db();
+    db.register_procedure(
+        Procedure::new("test.deep", |args| {
+            let depth = match args.first() {
+                Some(Value::Integer(depth)) => *depth as usize,
+                _ => 0,
+            };
+            Ok(vec![vec![nested_list(depth)]])
+        })
+        .parameter("depth", ValueType::Integer)
+        .output("value"),
+    )
+    .unwrap();
+    on_small_stack(|| {
+        let query = |depth: usize| {
+            db.execute(
+                &format!("CALL test.deep({depth}) YIELD value RETURN size(value)"),
+                &Parameters::new(),
+            )
+        };
+        assert_eq!(query(MAX_VALUE_NESTING).unwrap().rows(), [vec![int(1)]]);
+        let error = query(HOST_SAFE_DEPTH).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NestingTooDeep, "{error}");
     });
 }
 
@@ -92,6 +207,14 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
         format!("RETURN 1{}", " + 1".repeat(depth)),
         format!("MATCH (n) WHERE {}true RETURN n", "NOT ".repeat(depth)),
         format!("RETURN {}", "exists { MATCH (a) WHERE ".repeat(depth)),
+        format!(
+            "MATCH (n:{}A{}) RETURN n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        ),
+        format!("RETURN {}1{}", "{a: ".repeat(depth), "}".repeat(depth)),
+        format!("RETURN null{}", "[0]".repeat(depth)),
+        format!("RETURN {}1", "- ".repeat(depth)),
     ];
     on_small_stack(|| {
         for text in &texts {
@@ -103,23 +226,23 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
                 &text[..40]
             );
         }
+        let text = format!(
+            "RETURN 'a' =~ '{}a{}'",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        );
+        assert_eq!(error_kind(&db, &text), ErrorKind::InvalidRegex);
     });
 }
 
 #[test]
-#[cfg_attr(
-    debug_assertions,
-    ignore = "bug: in a debug build, a chain of 92 NOT or + operators, which the parser accepts \
-              below its nesting limit of 128, aborts the process with a stack overflow on a 2 MiB \
-              stack, so the limit leaves no headroom for debug builds of hosts"
-)]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {
         return;
     }
     let db = db();
-    let texts: Vec<String> = [40, 80, 100, 120, 126]
+    let texts: Vec<String> = [20, 40, 63, 64, 80, 100, 120, 126, 127, 128]
         .into_iter()
         .flat_map(|depth: usize| {
             [
@@ -134,6 +257,59 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     " END".repeat(depth)
                 ),
                 format!("RETURN {}1{}", "abs(".repeat(depth), ")".repeat(depth)),
+                format!("RETURN {}1{}", "{a: ".repeat(depth), "}".repeat(depth)),
+                format!("RETURN null{}", "[0]".repeat(depth)),
+                format!("RETURN null{}", "[0..1]".repeat(depth)),
+                format!("RETURN null{}", ".a".repeat(depth)),
+                format!("RETURN {}1", "- ".repeat(depth)),
+                format!("RETURN true{}", " AND true".repeat(depth)),
+                format!("RETURN 1{}", " IS NULL".repeat(depth)),
+                format!(
+                    "RETURN {}1{}",
+                    "[x IN [".repeat(depth),
+                    "] | x]".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}true{}",
+                    "all(x IN [".repeat(depth),
+                    "] WHERE x)".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}true{}",
+                    "exists { MATCH (a) WHERE ".repeat(depth),
+                    " }".repeat(depth)
+                ),
+                format!(
+                    "MATCH (a) WHERE {}true{} RETURN a",
+                    "exists { (a)--() WHERE ".repeat(depth),
+                    " }".repeat(depth)
+                ),
+                format!(
+                    "MATCH (a) RETURN {}1{}",
+                    "[(a)--() | ".repeat(depth),
+                    "]".repeat(depth)
+                ),
+                format!(
+                    "MATCH (n) WHERE n:{}A{} RETURN n",
+                    "(".repeat(depth),
+                    ")".repeat(depth)
+                ),
+                format!(
+                    "RETURN 'a' =~ '{}a{}'",
+                    "(".repeat(depth.min(64)),
+                    ")".repeat(depth.min(64))
+                ),
+                format!(
+                    "UNWIND [1] AS x WITH x, count(*) AS c ORDER BY {}x{} RETURN c",
+                    "[".repeat(depth),
+                    "]".repeat(depth)
+                ),
+                format!(
+                    "INSERT (n:N {{p: {}1{}}}) SET n.q = {}true RETURN n.q",
+                    "(".repeat(depth),
+                    ")".repeat(depth),
+                    "NOT ".repeat(depth)
+                ),
             ]
         })
         .collect();

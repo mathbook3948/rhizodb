@@ -90,6 +90,9 @@ pub enum ErrorKind {
     ListElementAccessByNonInteger,
     /// A map was indexed with something that is not a string.
     MapElementAccessByNonString,
+    /// A list or map nests deeper than a value in a query may: a parameter, a value a procedure
+    /// returned, or a value the query builds.
+    NestingTooDeep,
     /// A value cannot be stored as a property: a map, a graph element, a list holding null, or a
     /// list nested past the stored limit.
     InvalidPropertyType,

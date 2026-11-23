@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::fmt::Display;
 
 use regex_automata::meta::Regex;
-use regex_syntax::Parser;
+use regex_syntax::ParserBuilder;
 use regex_syntax::hir::Hir;
 use regex_syntax::hir::Look;
 
@@ -12,6 +12,7 @@ use crate::error::ErrorKind;
 
 const COMPILED_SIZE_LIMIT: usize = 10 << 20;
 const CACHED_PATTERNS: usize = 8;
+const NEST_LIMIT: u32 = 64;
 
 /// The patterns one query compiled, so a pattern that many rows read compiles once.
 #[derive(Debug, Default)]
@@ -44,7 +45,9 @@ impl Patterns {
 }
 
 fn compile(pattern: &str) -> Result<Regex, Error> {
-    let hir = Parser::new()
+    let hir = ParserBuilder::new()
+        .nest_limit(NEST_LIMIT)
+        .build()
         .parse(pattern)
         .map_err(|error| invalid(pattern, syntax_reason(&error)))?;
     let whole = Hir::concat(vec![Hir::look(Look::Start), hir, Hir::look(Look::End)]);

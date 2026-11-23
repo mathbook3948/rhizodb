@@ -26,8 +26,16 @@ use crate::temporal::Clocks;
 use super::compare::Comparison;
 use super::compare::compare;
 use super::compare::equals;
+use super::datum;
 use super::datum::Datum;
+use super::functions::Function;
+use super::plan::AggregateFunction;
+use super::plan::Case;
 use super::plan::Expr;
+use super::plan::ListComprehension;
+use super::plan::PatternQuery;
+use super::plan::Quantified;
+use super::plan::ReadClause;
 use super::plan::Slot;
 use super::regex::Patterns;
 use super::taint;
@@ -342,274 +350,356 @@ impl<T: ReadTransaction> Env<'_, T> {
                 row.get(*slot).cloned().unwrap_or(Datum::Null),
                 self.slot_taint(*slot),
             )),
-            Expr::List(items) => {
-                let (values, taints) = self.tracked_all(items, row)?;
-                Ok((Datum::List(values), Taint::list(taints)))
-            }
-            Expr::Map(entries) => {
-                let mut values = BTreeMap::new();
-                let mut taints = BTreeMap::new();
-                for (key, value) in entries {
-                    let (value, taint) = self.tracked(value, row)?;
-                    if taint.is_tainted() {
-                        taints.insert(key.clone(), taint);
-                    } else {
-                        taints.remove(key);
-                    }
-                    values.insert(key.clone(), value);
-                }
-                Ok((Datum::Map(values), Taint::map(taints)))
-            }
-            Expr::Property(base, key) => {
-                let (base, taint) = self.tracked(base, row)?;
-                settle(
-                    self.property(&base, key),
-                    taint.is_whole(),
-                    taint.entry(key),
-                )
-            }
-            Expr::Index(base, index) => {
-                let (base, base_taint) = self.tracked(base, row)?;
-                let (index, index_taint) = self.tracked(index, row)?;
-                let taint = if index_taint.is_tainted() {
-                    Taint::Whole
-                } else {
-                    base_taint.at(&base, &index)
-                };
-                settle(
-                    self.index(base, index),
-                    base_taint.is_whole() || index_taint.is_whole(),
-                    taint,
-                )
-            }
-            Expr::Slice(base, from, to) => {
-                let (base, base_taint) = self.tracked(base, row)?;
-                let (from, from_taint) = self.slice_bound(from.as_deref(), row)?;
-                let (to, to_taint) = self.slice_bound(to.as_deref(), row)?;
-                let doubtful =
-                    base_taint.is_whole() || from_taint.is_whole() || to_taint.is_whole();
-                let taint = match base_taint {
-                    _ if from_taint.is_tainted() || to_taint.is_tainted() => Taint::Whole,
-                    Taint::List(items) => Taint::list(
-                        sliced(items, from.as_ref(), to.as_ref())
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default(),
-                    ),
-                    other => other.flatten(),
-                };
-                settle(slice(base, from.as_ref(), to.as_ref()), doubtful, taint)
-            }
-            Expr::HasLabels(operand, labels) => {
-                let (operand, taint) = self.tracked(operand, row)?;
-                settle(
-                    self.has_labels(operand, labels),
-                    taint.is_whole(),
-                    taint.flatten(),
-                )
-            }
-            Expr::Not(operand) => {
-                let (operand, taint) = self.tracked(operand, row)?;
-                settle(
-                    truth(&operand).map(|value| from_truth(value.map(|value| !value))),
-                    taint.is_whole(),
-                    taint.flatten(),
-                )
-            }
-            Expr::Negate(operand) => {
-                let (operand, taint) = self.tracked(operand, row)?;
-                settle(negate(operand), taint.is_whole(), taint.flatten())
-            }
-            Expr::UnaryPlus(operand) => {
-                let (operand, taint) = self.tracked(operand, row)?;
-                settle(unary_plus(operand), taint.is_whole(), taint.flatten())
-            }
-            Expr::Binary(op, lhs, rhs) => {
-                let (lhs, lhs_taint) = self.tracked(lhs, row)?;
-                let (rhs, rhs_taint) = self.tracked(rhs, row)?;
-                let result = match (op, &lhs, &rhs) {
-                    (BinaryOp::RegexMatch, Datum::String(text), Datum::String(pattern)) => {
-                        self.patterns.matches(text, pattern).map(Datum::Boolean)
-                    }
-                    _ => binary(*op, lhs, rhs),
-                };
-                settle(
-                    result,
-                    lhs_taint.is_whole() || rhs_taint.is_whole(),
-                    Taint::when(lhs_taint.is_tainted() || rhs_taint.is_tainted()),
-                )
-            }
-            Expr::Comparison(first, rest) => {
-                let (mut left, first_taint) = self.tracked(first, row)?;
-                let mut tainted = first_taint.is_tainted();
-                let mut result = Some(true);
-                for (op, operand) in rest {
-                    let (right, taint) = self.tracked(operand, row)?;
-                    tainted |= taint.is_tainted();
-                    result = and(result, comparison(*op, &left, &right));
-                    left = right;
-                }
-                Ok((from_truth(result), Taint::when(tainted)))
-            }
-            Expr::IsNull { operand, negated } => {
-                let (operand, taint) = self.tracked(operand, row)?;
-                Ok((
-                    Datum::Boolean(operand.is_null() != *negated),
-                    Taint::when(taint.is_whole()),
-                ))
-            }
-            Expr::Call(function, args) => {
-                let (args, taints) = self.tracked_all(args, row)?;
-                let (taint, doubtful) = taint::call(*function, &args, taints);
-                settle(self.call(*function, args), doubtful, taint)
-            }
-            Expr::Admit(function, argument) => {
-                let (value, taint) = self.tracked(argument, row)?;
-                let doubtful = taint.is_tainted();
-                settle(
-                    function.admit(&value).map(|()| value),
-                    doubtful,
-                    Taint::Whole,
-                )
-            }
-            Expr::Case(case) => {
-                let scrutinee = case
-                    .scrutinee
-                    .as_ref()
-                    .map(|scrutinee| self.tracked(scrutinee, row))
-                    .transpose()?;
-                for (when, then) in &case.branches {
-                    let (hit, doubtful) = match &scrutinee {
-                        Some((scrutinee, scrutinee_taint)) => {
-                            let (when, when_taint) = self.tracked(when, row)?;
-                            (
-                                equals(scrutinee, &when) == Some(true),
-                                scrutinee_taint.is_tainted() || when_taint.is_tainted(),
-                            )
-                        }
-                        None => {
-                            let (truth, doubtful) = self.condition(when, row)?;
-                            (truth == Some(true), doubtful)
-                        }
-                    };
-                    if doubtful {
-                        return Ok((Datum::Null, Taint::Whole));
-                    }
-                    if hit {
-                        return self.tracked(then, row);
-                    }
-                }
-                match &case.otherwise {
-                    Some(otherwise) => self.tracked(otherwise, row),
-                    None => Ok((Datum::Null, Taint::Clean)),
-                }
-            }
-            Expr::ListComprehension(comprehension) => {
-                let (source, source_taint) = self.tracked(&comprehension.source, row)?;
-                if source_taint.is_whole() {
-                    return Ok((Datum::Null, Taint::Whole));
-                }
-                let Some(items) = list_operand(source)? else {
-                    return Ok((Datum::Null, Taint::Clean));
-                };
-                let taints = source_taint.items();
-                let mut local = row.clone();
-                let mut values = Vec::new();
-                let mut value_taints = Vec::new();
-                let mut doubtful = false;
-                for (item, taint) in items.into_iter().zip(taints) {
-                    set(&mut local, comprehension.slot, item.clone());
-                    let kept = self.bound(comprehension.slot, taint, || {
-                        if let Some(filter) = &comprehension.filter {
-                            let (keep, unsure) = self.condition(filter, &local)?;
-                            doubtful |= unsure;
-                            if unsure || keep != Some(true) {
-                                return Ok(None);
-                            }
-                        }
-                        match &comprehension.projection {
-                            Some(projection) => self.tracked(projection, &local).map(Some),
-                            None => Ok(Some((item, self.slot_taint(comprehension.slot)))),
-                        }
-                    })?;
-                    if let Some((value, taint)) = kept {
-                        values.push(value);
-                        if self.check.is_some() {
-                            value_taints.push(taint);
-                        }
-                    }
-                }
-                let taint = if doubtful {
-                    Taint::Whole
-                } else {
-                    Taint::list(value_taints)
-                };
-                Ok((Datum::List(values), taint))
-            }
-            Expr::Quantified(quantified) => {
-                let (source, source_taint) = self.tracked(&quantified.source, row)?;
-                if source_taint.is_whole() {
-                    return Ok((Datum::Null, Taint::Whole));
-                }
-                let Some(items) = list_operand(source)? else {
-                    return Ok((Datum::Null, Taint::Clean));
-                };
-                let taints = source_taint.items();
-                let mut local = row.clone();
-                let mut trues = 0usize;
-                let mut falses = 0usize;
-                let mut nulls = 0usize;
-                let mut doubtful = false;
-                for (item, taint) in items.into_iter().zip(taints) {
-                    set(&mut local, quantified.slot, item);
-                    let (truth, unsure) = self.bound(quantified.slot, taint, || {
-                        self.condition(&quantified.predicate, &local)
-                    })?;
-                    doubtful |= unsure;
-                    match truth {
-                        Some(true) => trues += 1,
-                        Some(false) => falses += 1,
-                        None => nulls += 1,
-                    }
-                }
-                let unknown = nulls > 0;
-                let result = from_truth(match quantified.quantifier {
-                    Quantifier::All if falses > 0 => Some(false),
-                    Quantifier::All => (!unknown).then_some(true),
-                    Quantifier::Any if trues > 0 => Some(true),
-                    Quantifier::Any => (!unknown).then_some(false),
-                    Quantifier::None if trues > 0 => Some(false),
-                    Quantifier::None => (!unknown).then_some(true),
-                    Quantifier::Single if trues > 1 => Some(false),
-                    Quantifier::Single if unknown => None,
-                    Quantifier::Single => Some(trues == 1),
-                });
-                Ok((result, Taint::when(doubtful)))
-            }
-            Expr::Exists(query) => {
-                let mut found = false;
-                self.match_query(query, row, &mut |_| {
-                    found = true;
-                    Ok(false)
-                })?;
-                Ok((Datum::Boolean(found), Taint::Clean))
-            }
-            Expr::Subquery(clauses) => {
-                let mut rows = vec![row.clone()];
-                for clause in clauses {
-                    rows = self.read_clause(clause, rows)?;
-                }
-                Ok((Datum::Boolean(!rows.is_empty()), Taint::Clean))
-            }
+            Expr::List(items) => self.list(items, row),
+            Expr::Map(entries) => self.map(entries, row),
+            Expr::Property(base, key) => self.property_of(base, key, row),
+            Expr::Index(base, index) => self.indexed(base, index, row),
+            Expr::Slice(base, from, to) => self.sliced_value(base, from, to, row),
+            Expr::HasLabels(operand, labels) => self.labels_test(operand, labels, row),
+            Expr::Not(operand) => self.not(operand, row),
+            Expr::Negate(operand) => self.negated(operand, row),
+            Expr::UnaryPlus(operand) => self.plus(operand, row),
+            Expr::Binary(op, lhs, rhs) => self.binary(*op, lhs, rhs, row),
+            Expr::Comparison(first, rest) => self.comparison(first, rest, row),
+            Expr::IsNull { operand, negated } => self.is_null(operand, *negated, row),
+            Expr::Call(function, args) => self.called(*function, args, row),
+            Expr::Admit(function, argument) => self.admitted(*function, argument, row),
+            Expr::Case(case) => self.case(case, row),
+            Expr::ListComprehension(comprehension) => self.comprehension(comprehension, row),
+            Expr::Quantified(quantified) => self.quantified(quantified, row),
+            Expr::Exists(query) => self.exists(query, row),
+            Expr::Subquery(clauses) => self.subquery(clauses, row),
             Expr::PatternComprehension(query, projection) => {
-                let mut out = Vec::new();
-                self.match_query(query, row, &mut |matched| {
-                    out.push(self.eval(projection, matched)?);
-                    Ok(true)
-                })?;
-                Ok((Datum::List(out), Taint::Clean))
+                self.pattern_comprehension(query, projection, row)
             }
         }
+    }
+
+    fn list(&self, items: &[Expr], row: &Row) -> Result<(Datum, Taint), Error> {
+        let (values, taints) = self.tracked_all(items, row)?;
+        Ok((datum::list(values)?, Taint::list(taints)))
+    }
+
+    fn map(&self, entries: &[(String, Expr)], row: &Row) -> Result<(Datum, Taint), Error> {
+        let mut values = BTreeMap::new();
+        let mut taints = BTreeMap::new();
+        for (key, value) in entries {
+            let (value, taint) = self.tracked(value, row)?;
+            if taint.is_tainted() {
+                taints.insert(key.clone(), taint);
+            } else {
+                taints.remove(key);
+            }
+            values.insert(key.clone(), value);
+        }
+        Ok((datum::map(values)?, Taint::map(taints)))
+    }
+
+    fn property_of(&self, base: &Expr, key: &str, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (base, taint) = self.tracked(base, row)?;
+        settle(
+            self.property(&base, key),
+            taint.is_whole(),
+            taint.entry(key),
+        )
+    }
+
+    fn indexed(&self, base: &Expr, index: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (base, base_taint) = self.tracked(base, row)?;
+        let (index, index_taint) = self.tracked(index, row)?;
+        let taint = if index_taint.is_tainted() {
+            Taint::Whole
+        } else {
+            base_taint.at(&base, &index)
+        };
+        settle(
+            self.index(base, index),
+            base_taint.is_whole() || index_taint.is_whole(),
+            taint,
+        )
+    }
+
+    fn sliced_value(
+        &self,
+        base: &Expr,
+        from: &Option<Box<Expr>>,
+        to: &Option<Box<Expr>>,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (base, base_taint) = self.tracked(base, row)?;
+        let (from, from_taint) = self.slice_bound(from.as_deref(), row)?;
+        let (to, to_taint) = self.slice_bound(to.as_deref(), row)?;
+        let doubtful = base_taint.is_whole() || from_taint.is_whole() || to_taint.is_whole();
+        let taint = match base_taint {
+            _ if from_taint.is_tainted() || to_taint.is_tainted() => Taint::Whole,
+            Taint::List(items) => Taint::list(
+                sliced(items, from.as_ref(), to.as_ref())
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+            ),
+            other => other.flatten(),
+        };
+        settle(slice(base, from.as_ref(), to.as_ref()), doubtful, taint)
+    }
+
+    fn labels_test(
+        &self,
+        operand: &Expr,
+        labels: &LabelExpr,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (operand, taint) = self.tracked(operand, row)?;
+        settle(
+            self.has_labels(operand, labels),
+            taint.is_whole(),
+            taint.flatten(),
+        )
+    }
+
+    fn not(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (operand, taint) = self.tracked(operand, row)?;
+        settle(
+            truth(&operand).map(|value| from_truth(value.map(|value| !value))),
+            taint.is_whole(),
+            taint.flatten(),
+        )
+    }
+
+    fn negated(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (operand, taint) = self.tracked(operand, row)?;
+        settle(negate(operand), taint.is_whole(), taint.flatten())
+    }
+
+    fn plus(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (operand, taint) = self.tracked(operand, row)?;
+        settle(unary_plus(operand), taint.is_whole(), taint.flatten())
+    }
+
+    fn binary(
+        &self,
+        op: BinaryOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (lhs, lhs_taint) = self.tracked(lhs, row)?;
+        let (rhs, rhs_taint) = self.tracked(rhs, row)?;
+        let result = match (op, &lhs, &rhs) {
+            (BinaryOp::RegexMatch, Datum::String(text), Datum::String(pattern)) => {
+                self.patterns.matches(text, pattern).map(Datum::Boolean)
+            }
+            _ => binary(op, lhs, rhs),
+        };
+        settle(
+            result,
+            lhs_taint.is_whole() || rhs_taint.is_whole(),
+            Taint::when(lhs_taint.is_tainted() || rhs_taint.is_tainted()),
+        )
+    }
+
+    fn comparison(
+        &self,
+        first: &Expr,
+        rest: &[(ComparisonOp, Expr)],
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (mut left, first_taint) = self.tracked(first, row)?;
+        let mut tainted = first_taint.is_tainted();
+        let mut result = Some(true);
+        for (op, operand) in rest {
+            let (right, taint) = self.tracked(operand, row)?;
+            tainted |= taint.is_tainted();
+            result = and(result, comparison(*op, &left, &right));
+            left = right;
+        }
+        Ok((from_truth(result), Taint::when(tainted)))
+    }
+
+    fn is_null(&self, operand: &Expr, negated: bool, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (operand, taint) = self.tracked(operand, row)?;
+        Ok((
+            Datum::Boolean(operand.is_null() != negated),
+            Taint::when(taint.is_whole()),
+        ))
+    }
+
+    fn called(
+        &self,
+        function: Function,
+        args: &[Expr],
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (args, taints) = self.tracked_all(args, row)?;
+        let (taint, doubtful) = taint::call(function, &args, taints);
+        settle(self.call(function, args), doubtful, taint)
+    }
+
+    fn admitted(
+        &self,
+        function: AggregateFunction,
+        argument: &Expr,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (value, taint) = self.tracked(argument, row)?;
+        let doubtful = taint.is_tainted();
+        settle(
+            function.admit(&value).map(|()| value),
+            doubtful,
+            Taint::Whole,
+        )
+    }
+
+    fn case(&self, case: &Case, row: &Row) -> Result<(Datum, Taint), Error> {
+        let scrutinee = case
+            .scrutinee
+            .as_ref()
+            .map(|scrutinee| self.tracked(scrutinee, row))
+            .transpose()?;
+        for (when, then) in &case.branches {
+            let (hit, doubtful) = match &scrutinee {
+                Some((scrutinee, scrutinee_taint)) => {
+                    let (when, when_taint) = self.tracked(when, row)?;
+                    (
+                        equals(scrutinee, &when) == Some(true),
+                        scrutinee_taint.is_tainted() || when_taint.is_tainted(),
+                    )
+                }
+                None => {
+                    let (truth, doubtful) = self.condition(when, row)?;
+                    (truth == Some(true), doubtful)
+                }
+            };
+            if doubtful {
+                return Ok((Datum::Null, Taint::Whole));
+            }
+            if hit {
+                return self.tracked(then, row);
+            }
+        }
+        match &case.otherwise {
+            Some(otherwise) => self.tracked(otherwise, row),
+            None => Ok((Datum::Null, Taint::Clean)),
+        }
+    }
+
+    fn comprehension(
+        &self,
+        comprehension: &ListComprehension,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (source, source_taint) = self.tracked(&comprehension.source, row)?;
+        if source_taint.is_whole() {
+            return Ok((Datum::Null, Taint::Whole));
+        }
+        let Some(items) = list_operand(source)? else {
+            return Ok((Datum::Null, Taint::Clean));
+        };
+        let taints = source_taint.items();
+        let mut local = row.clone();
+        let mut values = Vec::new();
+        let mut value_taints = Vec::new();
+        let mut doubtful = false;
+        for (item, taint) in items.into_iter().zip(taints) {
+            set(&mut local, comprehension.slot, item.clone());
+            let kept = self.bound(comprehension.slot, taint, || {
+                if let Some(filter) = &comprehension.filter {
+                    let (keep, unsure) = self.condition(filter, &local)?;
+                    doubtful |= unsure;
+                    if unsure || keep != Some(true) {
+                        return Ok(None);
+                    }
+                }
+                match &comprehension.projection {
+                    Some(projection) => self.tracked(projection, &local).map(Some),
+                    None => Ok(Some((item, self.slot_taint(comprehension.slot)))),
+                }
+            })?;
+            if let Some((value, taint)) = kept {
+                values.push(value);
+                if self.check.is_some() {
+                    value_taints.push(taint);
+                }
+            }
+        }
+        let taint = if doubtful {
+            Taint::Whole
+        } else {
+            Taint::list(value_taints)
+        };
+        Ok((datum::list(values)?, taint))
+    }
+
+    fn quantified(&self, quantified: &Quantified, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (source, source_taint) = self.tracked(&quantified.source, row)?;
+        if source_taint.is_whole() {
+            return Ok((Datum::Null, Taint::Whole));
+        }
+        let Some(items) = list_operand(source)? else {
+            return Ok((Datum::Null, Taint::Clean));
+        };
+        let taints = source_taint.items();
+        let mut local = row.clone();
+        let mut trues = 0usize;
+        let mut falses = 0usize;
+        let mut nulls = 0usize;
+        let mut doubtful = false;
+        for (item, taint) in items.into_iter().zip(taints) {
+            set(&mut local, quantified.slot, item);
+            let (truth, unsure) = self.bound(quantified.slot, taint, || {
+                self.condition(&quantified.predicate, &local)
+            })?;
+            doubtful |= unsure;
+            match truth {
+                Some(true) => trues += 1,
+                Some(false) => falses += 1,
+                None => nulls += 1,
+            }
+        }
+        let unknown = nulls > 0;
+        let result = from_truth(match quantified.quantifier {
+            Quantifier::All if falses > 0 => Some(false),
+            Quantifier::All => (!unknown).then_some(true),
+            Quantifier::Any if trues > 0 => Some(true),
+            Quantifier::Any => (!unknown).then_some(false),
+            Quantifier::None if trues > 0 => Some(false),
+            Quantifier::None => (!unknown).then_some(true),
+            Quantifier::Single if trues > 1 => Some(false),
+            Quantifier::Single if unknown => None,
+            Quantifier::Single => Some(trues == 1),
+        });
+        Ok((result, Taint::when(doubtful)))
+    }
+
+    fn exists(&self, query: &PatternQuery, row: &Row) -> Result<(Datum, Taint), Error> {
+        let mut found = false;
+        self.match_query(query, row, &mut |_| {
+            found = true;
+            Ok(false)
+        })?;
+        Ok((Datum::Boolean(found), Taint::Clean))
+    }
+
+    fn subquery(&self, clauses: &[ReadClause], row: &Row) -> Result<(Datum, Taint), Error> {
+        let mut rows = vec![row.clone()];
+        for clause in clauses {
+            rows = self.read_clause(clause, rows)?;
+        }
+        Ok((Datum::Boolean(!rows.is_empty()), Taint::Clean))
+    }
+
+    fn pattern_comprehension(
+        &self,
+        query: &PatternQuery,
+        projection: &Expr,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let mut out = Vec::new();
+        self.match_query(query, row, &mut |matched| {
+            out.push(self.eval(projection, matched)?);
+            Ok(true)
+        })?;
+        Ok((datum::list(out)?, Taint::Clean))
     }
 
     fn slice_bound(
@@ -865,10 +955,12 @@ fn add(lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
             Ok(Datum::List(a))
         }
         (Datum::List(mut a), b) => {
+            datum::check_item(&b)?;
             a.push(b);
             Ok(Datum::List(a))
         }
         (a, Datum::List(mut b)) => {
+            datum::check_item(&a)?;
             b.insert(0, a);
             Ok(Datum::List(b))
         }

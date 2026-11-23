@@ -80,8 +80,8 @@ impl Statements {
             .map(|name| {
                 parameters
                     .get(name)
-                    .map(from_parameter)
                     .ok_or_else(|| bind::missing_parameter(name))
+                    .and_then(from_parameter)
             })
             .collect::<Result<_, Error>>()?;
         Ok((plan, values))

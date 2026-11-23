@@ -40,66 +40,93 @@ impl Parser {
     }
 
     pub(super) fn clause(&mut self) -> ParseResult<Clause> {
-        if self.at_keyword("MATCH") || self.at_keyword("OPTIONAL") {
-            return self.match_clause();
-        }
-        if self.eat_keyword("INSERT") || self.eat_keyword("CREATE") {
-            return Ok(Clause::Insert(self.pattern_parts()?));
-        }
-        if self.eat_keyword("MERGE") {
-            return self.merge_clause();
-        }
-        if self.eat_keyword("RETURN") {
-            return Ok(Clause::Return(self.projection()?));
-        }
-        if self.eat_keyword("WITH") {
-            let projection = self.projection()?;
-            let filter = self.where_filter()?;
-            return Ok(Clause::With(With { projection, filter }));
-        }
-        if self.eat_keyword("UNWIND") {
-            let expr = self.expression()?;
-            self.expect_keyword("AS")?;
-            let variable = self.name()?;
-            return Ok(Clause::Unwind(Unwind { expr, variable }));
-        }
-        if self.eat_keyword("FILTER") {
-            self.eat_keyword("WHERE");
-            return Ok(Clause::Filter(self.predicate()?));
-        }
-        if self.eat_keyword("LET") {
-            return Ok(Clause::Let(self.comma_separated(|parser| {
-                let variable = parser.name()?;
-                parser.expect_punct(Punct::Eq)?;
-                Ok((variable, parser.expression()?))
-            })?));
-        }
-        if self.eat_keyword("SET") {
-            return Ok(Clause::Set(self.comma_separated(Self::set_item)?));
-        }
-        if self.eat_keyword("REMOVE") {
-            return Ok(Clause::Remove(self.comma_separated(Self::remove_item)?));
-        }
-        if self.at_keyword("DELETE") || self.at_keyword("DETACH") {
-            let detach = self.eat_keyword("DETACH");
-            self.expect_keyword("DELETE")?;
-            let targets = self.comma_separated(Self::expression)?;
-            return Ok(Clause::Delete(Delete { detach, targets }));
-        }
-        if self.at_keyword("CALL") {
-            if self.punct_at(1, Punct::LBrace) || self.punct_at(1, Punct::LParen) {
+        let parse: fn(&mut Self) -> ParseResult<Clause> =
+            if self.at_keyword("MATCH") || self.at_keyword("OPTIONAL") {
+                Self::match_clause
+            } else if self.eat_keyword("INSERT") || self.eat_keyword("CREATE") {
+                Self::insert_clause
+            } else if self.eat_keyword("MERGE") {
+                Self::merge_clause
+            } else if self.eat_keyword("RETURN") {
+                Self::return_clause
+            } else if self.eat_keyword("WITH") {
+                Self::with_clause
+            } else if self.eat_keyword("UNWIND") {
+                Self::unwind_clause
+            } else if self.eat_keyword("FILTER") {
+                Self::filter_clause
+            } else if self.eat_keyword("LET") {
+                Self::let_clause
+            } else if self.eat_keyword("SET") {
+                Self::set_clause
+            } else if self.eat_keyword("REMOVE") {
+                Self::remove_clause
+            } else if self.at_keyword("DELETE") || self.at_keyword("DETACH") {
+                Self::delete_clause
+            } else if self.at_keyword("CALL") {
+                if self.punct_at(1, Punct::LBrace) || self.punct_at(1, Punct::LParen) {
+                    return Err(self.unsupported());
+                }
+                self.pos += 1;
+                Self::call_clause
+            } else if UNSUPPORTED_CLAUSE_KEYWORDS
+                .iter()
+                .any(|keyword| self.at_keyword(keyword))
+            {
                 return Err(self.unsupported());
-            }
-            self.pos += 1;
-            return self.call_clause();
-        }
-        if UNSUPPORTED_CLAUSE_KEYWORDS
-            .iter()
-            .any(|keyword| self.at_keyword(keyword))
-        {
-            return Err(self.unsupported());
-        }
-        Err(self.unexpected())
+            } else {
+                return Err(self.unexpected());
+            };
+        parse(self)
+    }
+
+    fn insert_clause(&mut self) -> ParseResult<Clause> {
+        Ok(Clause::Insert(self.pattern_parts()?))
+    }
+
+    fn return_clause(&mut self) -> ParseResult<Clause> {
+        Ok(Clause::Return(self.projection()?))
+    }
+
+    fn with_clause(&mut self) -> ParseResult<Clause> {
+        let projection = self.projection()?;
+        let filter = self.where_filter()?;
+        Ok(Clause::With(With { projection, filter }))
+    }
+
+    fn unwind_clause(&mut self) -> ParseResult<Clause> {
+        let expr = self.expression()?;
+        self.expect_keyword("AS")?;
+        let variable = self.name()?;
+        Ok(Clause::Unwind(Unwind { expr, variable }))
+    }
+
+    fn filter_clause(&mut self) -> ParseResult<Clause> {
+        self.eat_keyword("WHERE");
+        Ok(Clause::Filter(self.predicate()?))
+    }
+
+    fn let_clause(&mut self) -> ParseResult<Clause> {
+        Ok(Clause::Let(self.comma_separated(|parser| {
+            let variable = parser.name()?;
+            parser.expect_punct(Punct::Eq)?;
+            Ok((variable, parser.expression()?))
+        })?))
+    }
+
+    fn set_clause(&mut self) -> ParseResult<Clause> {
+        Ok(Clause::Set(self.comma_separated(Self::set_item)?))
+    }
+
+    fn remove_clause(&mut self) -> ParseResult<Clause> {
+        Ok(Clause::Remove(self.comma_separated(Self::remove_item)?))
+    }
+
+    fn delete_clause(&mut self) -> ParseResult<Clause> {
+        let detach = self.eat_keyword("DETACH");
+        self.expect_keyword("DELETE")?;
+        let targets = self.comma_separated(Self::expression)?;
+        Ok(Clause::Delete(Delete { detach, targets }))
     }
 
     pub(super) fn comma_separated<T>(
