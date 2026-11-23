@@ -269,9 +269,16 @@ pub(crate) struct Aggregate {
 }
 
 impl Aggregate {
-    /// Whether the aggregate is `count(*)`, which counts rows without reading them.
-    pub(crate) fn counts_rows(&self) -> bool {
-        self.function == AggregateFunction::Count && self.argument.is_none()
+    /// Whether the aggregate counts rows in which `slot` is never null: `count(*)`, or
+    /// `count(x)` without `DISTINCT` when `x` is that slot.
+    pub(crate) fn counts_rows_binding(&self, slot: Slot) -> bool {
+        self.function == AggregateFunction::Count
+            && !self.distinct
+            && match &self.argument {
+                None => true,
+                Some(Expr::Slot(held)) => *held == slot,
+                Some(_) => false,
+            }
     }
 }
 

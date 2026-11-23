@@ -312,9 +312,7 @@ fn node_meta_with_wrong_label_counts_is_caught() {
         |write| {
             let key = meta::meta_key(0);
             let mut chunk = write.get(Table::NodeChunks, &key).unwrap().unwrap();
-            if let Some(count) = chunk.last_mut() {
-                *count += 1;
-            }
+            meta::miscount_first_label(&mut chunk);
             write.put(Table::NodeChunks, &key, &chunk).unwrap();
         },
         IntegrityViolation::NonCanonicalNodeMeta(0),
@@ -333,6 +331,95 @@ fn unreadable_node_meta_is_caught() {
             table: Table::NodeChunks,
             key: meta::meta_key(0).to_vec(),
         },
+    );
+}
+
+fn put_delta(write: &mut Write<'_>, group: u64, delta: meta::Delta) {
+    write
+        .put(
+            Table::NodeChunks,
+            &meta::delta_key(group, delta.slot),
+            &delta.encode(group),
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_node_meta_delta_that_does_not_amend_its_chunk_is_caught() {
+    assert_caught(
+        |write| {
+            put_delta(
+                write,
+                0,
+                meta::Delta {
+                    slot: 0,
+                    before: None,
+                    after: Some(LabelSetId(PERSON_SET)),
+                },
+            );
+        },
+        IntegrityViolation::StrayNodeMetaDelta(ALICE),
+    );
+}
+
+#[test]
+fn a_node_meta_delta_without_a_chunk_is_caught() {
+    assert_caught(
+        |write| {
+            put_delta(
+                write,
+                7,
+                meta::Delta {
+                    slot: 3,
+                    before: None,
+                    after: Some(LabelSetId(PERSON_SET)),
+                },
+            );
+        },
+        IntegrityViolation::StrayNodeMetaDelta(meta::node_at(7, 3)),
+    );
+}
+
+#[test]
+fn a_node_meta_delta_that_changes_nothing_is_caught() {
+    assert_caught(
+        |write| {
+            let chunk = write
+                .get(Table::NodeChunks, &meta::meta_key(0))
+                .unwrap()
+                .unwrap();
+            let state = MetaBytes::parse(0, &chunk).unwrap().label_set(1).unwrap();
+            put_delta(
+                write,
+                0,
+                meta::Delta {
+                    slot: 1,
+                    before: state,
+                    after: state,
+                },
+            );
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
+    );
+}
+
+#[test]
+fn more_node_meta_deltas_than_a_group_keeps_are_caught() {
+    assert_caught(
+        |write| {
+            for slot in 100..100 + meta::MAX_DELTAS + 1 {
+                put_delta(
+                    write,
+                    0,
+                    meta::Delta {
+                        slot,
+                        before: None,
+                        after: Some(LabelSetId(PERSON_SET)),
+                    },
+                );
+            }
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
     );
 }
 

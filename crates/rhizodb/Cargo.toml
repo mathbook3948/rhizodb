@@ -18,6 +18,7 @@ proptest = "1.12.0"
 tempfile = "3.27.0"
 
 [dependencies]
+crc32fast = "1.5.5"
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 redb = "5.0.0"
 regex-automata = "0.4.18"

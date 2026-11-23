@@ -25,7 +25,7 @@ use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
-use super::matcher::counted_label;
+use super::matcher::counted_nodes;
 use super::plan::CallClause;
 use super::plan::Callee;
 use super::plan::Clause;
@@ -217,15 +217,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             } = &projection.items
         {
             let mut groups = Groups::new(keys, aggregates);
-            if let Some(label) = counted_label(found)
+            if let Some((slot, label)) = counted_nodes(found)
                 && keys.is_empty()
                 && aggregates
                     .iter()
-                    .all(|(aggregate, _)| aggregate.counts_rows())
+                    .all(|(aggregate, _)| aggregate.counts_rows_binding(slot))
             {
-                let count = match self.label_token(label)? {
-                    Some(label) => self.tx.count_nodes_with_label(label)?,
-                    None => 0,
+                let count = match label {
+                    None => self.tx.count_nodes()?,
+                    Some(label) => match self.label_token(label)? {
+                        Some(label) => self.tx.count_nodes_with_label(label)?,
+                        None => 0,
+                    },
                 };
                 let count = usize::try_from(count).unwrap_or(usize::MAX);
                 groups.count_rows(count.saturating_mul(rows.len()));

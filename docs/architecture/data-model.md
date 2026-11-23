@@ -24,11 +24,19 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Label set ID 0 is the empty set and has no stored entry.
 - Label sets are never deleted.
 - A node meta chunk lists the label sets its group uses and stores each slot's position in that list, with no positions when the group uses one label set.
-- A node meta chunk keeps the live count of each label in its group.
-- Counting the nodes of one label reads only the label counts of each group.
+- A node meta chunk keeps the live count of its group and of each label in its group.
+- Counting the nodes of one label, or all nodes, reads only the counts of each group.
+- A count trusts each delta's state in the chunk, and every other read of a delta checks it against the chunk.
 - A label scan walks the node meta chunks in group order and yields node IDs in ascending order.
 - There is no table from label to node ID.
-- A write transaction edits node meta in memory and writes each changed chunk once, at commit.
+- A write transaction edits node meta in memory and writes it once, at commit.
+- A write transaction decodes all slots of a group only when it rewrites the group's chunk or a read needs every slot.
+- A commit that changes a few slots of a group with a stored chunk writes one small delta per changed slot beside the chunk instead of rewriting it.
+- A delta holds its slot's state in the chunk and its state now, so a count applies it without reading the chunk's slots.
+- A group keeps at most 64 deltas, and a commit that would leave more rewrites the chunk and deletes them.
+- A node meta chunk keeps one checksum over its counts and dictionary and one over its slots, so a count checks only the first.
+- A node meta chunk holds its group inside its first checksum, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
+- Node meta checksums are CRC-32, which needs no dependency outside the allowed licenses.
 - A write transaction reads each ID and token counter once and writes it once, at commit.
 - Opening a database written before node meta moves each node's labels into node meta and empties the old label index, in the opening write transaction.
 - Stored property values are null-free.

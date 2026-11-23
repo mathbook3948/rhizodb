@@ -39,6 +39,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - The redb backend also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
 - Node meta is checked against a model of node labels over random sequences of node and label edits, commits, rollbacks, reopens, and power losses.
 - A commit that writes node meta is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
+- Node meta is corrupted byte by byte, in its stored entries and in the database file, and every read must then fail as corrupt data or answer as before.
 - Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.

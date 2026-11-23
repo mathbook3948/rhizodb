@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -55,12 +54,17 @@ pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
 use index::Element;
-use meta::Cached;
+use meta::Delta;
+use meta::Flush;
+use meta::GroupEdit;
 use meta::LabelSetCache;
 use meta::LabelSetId;
 use meta::Meta;
 use meta::MetaBytes;
 use meta::MetaEdit;
+use meta::MetaHead;
+use meta::Part;
+use meta::Slot;
 
 const FORMAT_VERSION: u32 = 8;
 const OLDEST_FORMAT_VERSION: u32 = 1;
@@ -299,7 +303,7 @@ pub(crate) struct GraphTx<T> {
     own_tokens: CommittedTokens,
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
-    meta: BTreeMap<u64, MetaEdit>,
+    meta: BTreeMap<u64, GroupEdit>,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -493,40 +497,67 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(labels)
     }
 
-    fn with_meta<R>(
-        &self,
-        group: u64,
-        read: impl FnOnce(Meta<'_>) -> Result<R, GraphError>,
-    ) -> Result<Option<R>, GraphError> {
-        if let Some(edit) = self.meta.get(&group) {
-            return read(Meta::Edited(edit)).map(Some);
-        }
-        self.transaction
-            .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
-                read(Meta::Stored(MetaBytes::parse(bytes)?))
-            })
-    }
-
     fn visit_meta(
         &self,
-        mut visit: impl FnMut(u64, Meta<'_>) -> Result<(), GraphError>,
+        check_deltas: bool,
+        mut visit: impl FnMut(Meta<'_>) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
         let mut edits = self.meta.iter().peekable();
+        let mut edited_group = None;
+        let mut chunk_group = None;
+        let mut chunk = Vec::new();
         self.transaction
             .visit_prefix(Table::NodeChunks, &[], |key, value| {
-                let Some(group) = meta::parse_meta_key(key)? else {
+                let Some((group, part)) = meta::parse_key(key)? else {
                     return Ok(());
                 };
+                if edited_group == Some(group) {
+                    return Ok(());
+                }
                 while let Some((edited, edit)) = edits.next_if(|(edited, _)| **edited < group) {
-                    visit(*edited, Meta::Edited(edit))?;
+                    visit(Meta::Edited {
+                        group: *edited,
+                        edit: edit.view()?,
+                    })?;
                 }
                 if let Some((_, edit)) = edits.next_if(|(edited, _)| **edited == group) {
-                    return visit(group, Meta::Edited(edit));
+                    edited_group = Some(group);
+                    return visit(Meta::Edited {
+                        group,
+                        edit: edit.view()?,
+                    });
                 }
-                visit(group, Meta::Stored(MetaBytes::parse(value)?))
+                match part {
+                    Part::Chunk => {
+                        chunk_group = Some(group);
+                        if check_deltas {
+                            chunk.clear();
+                            chunk.extend_from_slice(value);
+                        }
+                        visit(Meta::Chunk {
+                            group,
+                            bytes: value,
+                        })
+                    }
+                    Part::Delta(slot) if chunk_group == Some(group) => {
+                        let delta = Delta::parse(key, value)?;
+                        if check_deltas
+                            && MetaBytes::trusted(&chunk)?.label_set(slot)? != delta.before
+                        {
+                            return Err(GraphError::Corrupt(
+                                "a node meta delta does not amend its chunk",
+                            ));
+                        }
+                        visit(Meta::Delta { group, delta })
+                    }
+                    Part::Delta(_) => Err(GraphError::Corrupt("a node meta delta has no chunk")),
+                }
             })?;
         for (group, edit) in edits {
-            visit(*group, Meta::Edited(edit))?;
+            visit(Meta::Edited {
+                group: *group,
+                edit: edit.view()?,
+            })?;
         }
         Ok(())
     }
@@ -534,9 +565,41 @@ impl<T: ReadTransaction> GraphTx<T> {
     /// The label set of the node with ID `id`, or `None` when there is no such node.
     pub(crate) fn node_label_set(&self, id: NodeId) -> Result<Option<LabelSetId>, GraphError> {
         let (group, slot) = meta::locate(id);
-        Ok(self
-            .with_meta(group, |meta| Ok(meta.label_set(slot)))?
-            .flatten())
+        if let Some(edit) = self.meta.get(&group) {
+            return edit.label_set(slot);
+        }
+        let key = meta::delta_key(group, slot);
+        let delta = self
+            .transaction
+            .get_with(Table::NodeChunks, &key, |bytes| Delta::parse(&key, bytes))?;
+        let chunk =
+            self.transaction
+                .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
+                    MetaBytes::parse(group, bytes)?.label_set(slot)
+                })?;
+        match (chunk, delta) {
+            (Some(state), None) => Ok(state),
+            (Some(state), Some(delta)) if delta.before == state => Ok(delta.after),
+            (Some(_), Some(_)) => Err(GraphError::Corrupt(
+                "a node meta delta does not amend its chunk",
+            )),
+            (None, Some(_)) => Err(GraphError::Corrupt("a node meta delta has no chunk")),
+            (None, None) => {
+                let mut stray = false;
+                self.transaction.visit_prefix(
+                    Table::NodeChunks,
+                    &meta::group_prefix(group),
+                    |_, _| {
+                        stray = true;
+                        Ok::<(), GraphError>(())
+                    },
+                )?;
+                if stray {
+                    return Err(GraphError::Corrupt("a node meta delta has no chunk"));
+                }
+                Ok(None)
+            }
+        }
     }
 
     pub(crate) fn node_labels(
@@ -560,47 +623,83 @@ impl<T: ReadTransaction> GraphTx<T> {
         if self.meta.contains_key(&group) {
             return Ok(self.node_labels(id)?.map(|labels| read(&labels)));
         }
-        match reader.group(group, || self.load_meta(group))? {
-            Cached::Absent => Ok(None),
-            Cached::Found { meta, sets } => match meta.code(slot) {
-                None => Ok(None),
-                Some(code) => sets
-                    .get(code)
-                    .map(|labels| read(labels))
-                    .ok_or(GraphError::Corrupt(
-                        "a node meta code is outside its dictionary",
-                    ))
-                    .map(Some),
+        reader.with_labels(group, slot, || self.load_meta(group), read)
+    }
+
+    fn stored_group(&self, group: u64) -> Result<Option<meta::StoredGroup>, GraphError> {
+        let mut chunk: Option<Box<[u8]>> = None;
+        let mut deltas = Vec::new();
+        self.transaction.visit_prefix(
+            Table::NodeChunks,
+            &meta::group_prefix(group),
+            |key, value| {
+                match meta::parse_key(key)? {
+                    Some((_, Part::Chunk)) => {
+                        MetaBytes::parse(group, value)?;
+                        chunk = Some(value.into());
+                    }
+                    Some((_, Part::Delta(_))) => {
+                        let delta = Delta::parse(key, value)?;
+                        let Some(bytes) = &chunk else {
+                            return Err(GraphError::Corrupt("a node meta delta has no chunk"));
+                        };
+                        if MetaBytes::trusted(bytes)?.label_set(delta.slot)? != delta.before {
+                            return Err(GraphError::Corrupt(
+                                "a node meta delta does not amend its chunk",
+                            ));
+                        }
+                        deltas.push(delta);
+                    }
+                    None => {}
+                }
+                Ok::<(), GraphError>(())
             },
-        }
+        )?;
+        Ok(chunk.map(|chunk| (chunk, deltas)))
     }
 
     fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
-        let Some(bytes) =
-            self.transaction
-                .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
-                    Ok::<_, GraphError>(Box::<[u8]>::from(bytes))
-                })?
-        else {
+        let Some((bytes, deltas)) = self.stored_group(group)? else {
             return Ok(None);
         };
-        let sets = MetaBytes::parse(&bytes)?
+        let sets = MetaBytes::trusted(&bytes)?
+            .head()
             .dictionary()
             .map(|set| self.label_set(set))
             .collect::<Result<_, _>>()?;
-        Ok(Some((bytes, sets)))
+        let deltas = deltas
+            .into_iter()
+            .map(|delta| {
+                let labels = delta.after.map(|set| self.label_set(set)).transpose()?;
+                Ok((delta.slot, labels))
+            })
+            .collect::<Result<_, GraphError>>()?;
+        Ok(Some((bytes, sets, deltas)))
+    }
+
+    fn carries(&self, state: Slot, label: Token<Label>) -> Result<bool, GraphError> {
+        match state {
+            None => Ok(false),
+            Some(set) => Ok(self.label_set(set)?.binary_search(&label).is_ok()),
+        }
     }
 
     pub(crate) fn node_ids(&self) -> Result<Vec<NodeId>, GraphError> {
         let mut ids = Vec::new();
-        self.visit_meta(|group, meta| {
-            match meta {
-                Meta::Stored(stored) => ids.extend(
-                    stored
+        self.visit_meta(true, |entry| {
+            match entry {
+                Meta::Chunk { group, bytes } => ids.extend(
+                    MetaBytes::parse(group, bytes)?
                         .live_codes()
                         .map(|(slot, _)| meta::node_at(group, slot)),
                 ),
-                Meta::Edited(edit) => {
+                Meta::Delta { group, delta } => amend(
+                    &mut ids,
+                    meta::node_at(group, delta.slot),
+                    delta.before.is_some(),
+                    delta.after.is_some(),
+                )?,
+                Meta::Edited { group, edit } => {
                     ids.extend(edit.live().map(|(slot, _)| meta::node_at(group, slot)));
                 }
             }
@@ -615,25 +714,39 @@ impl<T: ReadTransaction> GraphTx<T> {
         label: Token<Label>,
     ) -> Result<Vec<NodeId>, GraphError> {
         let mut ids = Vec::new();
-        self.visit_meta(|group, meta| {
-            match meta {
-                Meta::Stored(stored) => {
-                    if stored.label_count(label) == 0 {
+        self.visit_meta(true, |entry| {
+            match entry {
+                Meta::Chunk { group, bytes } => {
+                    let stored = MetaBytes::parse(group, bytes)?;
+                    if stored.head().label_count(label) == 0 {
                         return Ok(());
                     }
                     let carries = stored
+                        .head()
                         .dictionary()
-                        .map(|set| Ok(self.label_set(set)?.binary_search(&label).is_ok()))
+                        .map(|set| self.carries(Some(set), label))
                         .collect::<Result<Vec<bool>, GraphError>>()?;
                     for (slot, code) in stored.live_codes() {
-                        if carries.get(code) == Some(&true) {
-                            ids.push(meta::node_at(group, slot));
+                        match carries.get(code) {
+                            Some(true) => ids.push(meta::node_at(group, slot)),
+                            Some(false) => {}
+                            None => {
+                                return Err(GraphError::Corrupt(
+                                    "a node meta code is outside its dictionary",
+                                ));
+                            }
                         }
                     }
                 }
-                Meta::Edited(edit) => {
+                Meta::Delta { group, delta } => amend(
+                    &mut ids,
+                    meta::node_at(group, delta.slot),
+                    self.carries(delta.before, label)?,
+                    self.carries(delta.after, label)?,
+                )?,
+                Meta::Edited { group, edit } => {
                     for (slot, set) in edit.live() {
-                        if self.label_set(set)?.binary_search(&label).is_ok() {
+                        if self.carries(Some(set), label)? {
                             ids.push(meta::node_at(group, slot));
                         }
                     }
@@ -644,18 +757,43 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(ids)
     }
 
-    /// How many nodes carry `label`, from the label counts each group keeps.
+    /// How many nodes there are, from the live count each group keeps. Like a label count, it
+    /// checks only the head of each chunk and trusts each delta's state in the chunk.
+    pub(crate) fn count_nodes(&self) -> Result<u64, GraphError> {
+        let mut count = 0u64;
+        self.visit_meta(false, |entry| {
+            count = match entry {
+                Meta::Chunk { group, bytes } => count + MetaHead::parse(group, bytes)?.live(),
+                Meta::Delta { delta, .. } => (count + u64::from(delta.after.is_some()))
+                    .checked_sub(u64::from(delta.before.is_some()))
+                    .ok_or(GraphError::Corrupt(
+                        "a node meta delta does not amend its chunk",
+                    ))?,
+                Meta::Edited { edit, .. } => count + edit.live().count() as u64,
+            };
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    /// How many nodes carry `label`, from the label counts each group keeps. A count checks only
+    /// the head of each chunk and trusts each delta's state in the chunk.
     pub(crate) fn count_nodes_with_label(&self, label: Token<Label>) -> Result<u64, GraphError> {
         let mut count = 0u64;
-        self.visit_meta(|_, meta| {
-            count += match meta {
-                Meta::Stored(stored) => stored.label_count(label),
-                Meta::Edited(edit) => {
-                    let mut carrying = 0;
+        self.visit_meta(false, |entry| {
+            count = match entry {
+                Meta::Chunk { group, bytes } => {
+                    count + MetaHead::parse(group, bytes)?.label_count(label)
+                }
+                Meta::Delta { delta, .. } => (count + u64::from(self.carries(delta.after, label)?))
+                    .checked_sub(u64::from(self.carries(delta.before, label)?))
+                    .ok_or(GraphError::Corrupt(
+                        "a node meta delta does not amend its chunk",
+                    ))?,
+                Meta::Edited { edit, .. } => {
+                    let mut carrying = count;
                     for (_, set) in edit.live() {
-                        if self.label_set(set)?.binary_search(&label).is_ok() {
-                            carrying += 1;
-                        }
+                        carrying += u64::from(self.carries(Some(set), label)?);
                     }
                     carrying
                 }
@@ -780,28 +918,47 @@ impl<T: WriteTransaction> GraphTx<T> {
                 .put(Table::Metadata, &key, &next.to_be_bytes())?;
         }
         for (group, edit) in std::mem::take(&mut self.meta) {
-            let key = meta::meta_key(group);
-            match edit.encode(|set| self.label_set(set))? {
-                Some(chunk) => self.transaction.put(Table::NodeChunks, &key, &chunk)?,
-                None => self.transaction.delete(Table::NodeChunks, &key)?,
+            match edit.flush()? {
+                Flush::Rewrite { view, stale } => {
+                    let key = meta::meta_key(group);
+                    match view.encode(group, |set| self.label_set(set))? {
+                        Some(chunk) => self.transaction.put(Table::NodeChunks, &key, &chunk)?,
+                        None => self.transaction.delete(Table::NodeChunks, &key)?,
+                    }
+                    for slot in stale {
+                        self.transaction
+                            .delete(Table::NodeChunks, &meta::delta_key(group, slot))?;
+                    }
+                }
+                Flush::Deltas { put, delete } => {
+                    for delta in put {
+                        self.transaction.put(
+                            Table::NodeChunks,
+                            &meta::delta_key(group, delta.slot),
+                            &delta.encode(group),
+                        )?;
+                    }
+                    for slot in delete {
+                        self.transaction
+                            .delete(Table::NodeChunks, &meta::delta_key(group, slot))?;
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn meta_edit(&mut self, group: u64) -> Result<&mut MetaEdit, GraphError> {
-        match self.meta.entry(group) {
-            btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
-            btree_map::Entry::Vacant(entry) => {
-                let edit = self
-                    .transaction
-                    .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
-                        MetaBytes::parse(bytes)?.to_edit()
-                    })?
-                    .unwrap_or_default();
-                Ok(entry.insert(edit))
-            }
+    fn meta_edit(&mut self, group: u64) -> Result<&mut GroupEdit, GraphError> {
+        if !self.meta.contains_key(&group) {
+            let edit = match self.stored_group(group)? {
+                Some((chunk, deltas)) => GroupEdit::load(Some(chunk), deltas)?,
+                None => GroupEdit::load(None, Vec::new())?,
+            };
+            self.meta.insert(group, edit);
         }
+        self.meta
+            .get_mut(&group)
+            .ok_or(GraphError::Corrupt("a node meta edit vanished"))
     }
 
     fn intern_label_set(
@@ -870,7 +1027,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                 let set = self.intern_label_set(&record.labels)?;
                 edit.put(meta::locate(id).1, set);
             }
-            if let Some(chunk) = edit.encode(|set| self.label_set(set))? {
+            if let Some(chunk) = edit.encode(group, |set| self.label_set(set))? {
                 self.transaction
                     .put(Table::NodeChunks, &meta::meta_key(group), &chunk)?;
             }
@@ -911,7 +1068,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.transaction
             .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
         let (group, slot) = meta::locate(id);
-        self.meta_edit(group)?.put(slot, set);
+        self.meta_edit(group)?.set(slot, Some(set))?;
         self.reindex(id.0, None, Some(Element::Node(record)))?;
         Ok(id)
     }
@@ -1037,7 +1194,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.transaction
             .delete(Table::Nodes, &keys::element_key(id.0))?;
         let (group, slot) = meta::locate(id);
-        self.meta_edit(group)?.remove(slot);
+        self.meta_edit(group)?.set(slot, None)?;
         Ok(Some(record))
     }
 
@@ -1061,7 +1218,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         } else {
             let set = self.intern_label_set(&record.labels)?;
             let (group, slot) = meta::locate(id);
-            self.meta_edit(group)?.put(slot, set);
+            self.meta_edit(group)?.set(slot, Some(set))?;
         }
         self.reindex(
             id.0,
@@ -1134,5 +1291,25 @@ mod node_meta_tests;
 mod node_meta_crash_tests;
 
 #[cfg(test)]
+#[path = "graph/node_meta_corrupt.test.rs"]
+mod node_meta_corrupt_tests;
+
+#[cfg(test)]
 #[path = "graph/upgrade.test.rs"]
 mod upgrade_tests;
+
+fn amend(ids: &mut Vec<NodeId>, node: NodeId, was: bool, is: bool) -> Result<(), GraphError> {
+    match (ids.binary_search(&node), was, is) {
+        (Ok(at), true, false) => {
+            ids.remove(at);
+        }
+        (Err(at), false, true) => ids.insert(at, node),
+        (Ok(_), true, true) | (Err(_), false, false) => {}
+        _ => {
+            return Err(GraphError::Corrupt(
+                "a node meta delta does not amend its chunk",
+            ));
+        }
+    }
+    Ok(())
+}

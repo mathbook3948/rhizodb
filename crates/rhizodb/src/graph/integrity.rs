@@ -29,9 +29,12 @@ use super::index::document_length;
 use super::index::encode_totals;
 use super::keys;
 use super::meta;
+use super::meta::Delta;
+use super::meta::Flush;
 use super::meta::LabelSetId;
 use super::meta::MetaBytes;
 use super::meta::MetaEdit;
+use super::meta::Part;
 use super::records::Properties;
 use super::tokenize;
 
@@ -91,6 +94,7 @@ pub(crate) enum IntegrityViolation {
     MissingNodeMeta(NodeId),
     MissingNodeRecord(NodeId),
     NonCanonicalNodeMeta(u64),
+    StrayNodeMetaDelta(NodeId),
     DuplicateIndexId(u32),
     MissingIndexEntry {
         table: Table,
@@ -350,44 +354,62 @@ impl<T: ReadTransaction> GraphTx<T> {
         label_sets: &LabelSets,
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<BTreeMap<NodeId, NodeRecord>, GraphError> {
-        let mut chunks: BTreeMap<Vec<u8>, Vec<u8>> = self
+        let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = self
             .transaction
             .scan_prefix(Table::NodeChunks, &[])?
             .into_iter()
             .collect();
         for (group, edit) in &self.meta {
-            let key = meta::meta_key(*group).to_vec();
-            let pending = edit.encode(|set| self.label_set(set))?;
-            match pending {
-                Some(value) => chunks.insert(key, value),
-                None => chunks.remove(&key),
-            };
+            match edit.clone().flush()? {
+                Flush::Rewrite { view, stale } => {
+                    let key = meta::meta_key(*group).to_vec();
+                    match view.encode(*group, |set| self.label_set(set))? {
+                        Some(value) => entries.insert(key, value),
+                        None => entries.remove(&key),
+                    };
+                    for slot in stale {
+                        entries.remove(meta::delta_key(*group, slot).as_slice());
+                    }
+                }
+                Flush::Deltas { put, delete } => {
+                    for delta in put {
+                        entries.insert(
+                            meta::delta_key(*group, delta.slot).to_vec(),
+                            delta.encode(*group).to_vec(),
+                        );
+                    }
+                    for slot in delete {
+                        entries.remove(meta::delta_key(*group, slot).as_slice());
+                    }
+                }
+            }
         }
-        let mut live = BTreeMap::new();
-        for (key, value) in chunks {
-            let decoded = meta::parse_meta_key(&key).ok().flatten().zip(
-                MetaBytes::parse(&value)
-                    .ok()
-                    .and_then(|bytes| bytes.to_edit().ok()),
-            );
-            let Some((group, edit)) = decoded else {
-                violations.push(IntegrityViolation::Undecodable {
+        let mut groups: BTreeMap<u64, StoredGroup> = BTreeMap::new();
+        for (key, value) in entries {
+            match meta::parse_key(&key) {
+                Ok(Some((group, Part::Chunk))) => {
+                    groups.entry(group).or_default().chunk = Some(value);
+                }
+                Ok(Some((group, Part::Delta(_)))) => {
+                    groups.entry(group).or_default().deltas.push((key, value));
+                }
+                Ok(None) | Err(_) => violations.push(IntegrityViolation::Undecodable {
                     table: Table::NodeChunks,
                     key,
-                });
+                }),
+            }
+        }
+        let mut live = BTreeMap::new();
+        for (group, stored) in groups {
+            let Some(edit) = check_group(group, stored, label_sets, violations)? else {
                 continue;
             };
-            let mut known = true;
             for (slot, set) in edit.live() {
                 let node = meta::node_at(group, slot);
                 if !label_sets.contains_key(&set) {
-                    known = false;
                     violations.push(IntegrityViolation::UnknownLabelSet { node, set: set.0 });
                 }
                 live.insert(node, set);
-            }
-            if known && canonical(&edit, label_sets)? != Some(value) {
-                violations.push(IntegrityViolation::NonCanonicalNodeMeta(group));
             }
         }
         let mut nodes = BTreeMap::new();
@@ -616,8 +638,70 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 }
 
-fn canonical(edit: &MetaEdit, label_sets: &LabelSets) -> Result<Option<Vec<u8>>, GraphError> {
-    edit.encode(|set| {
+#[derive(Default)]
+struct StoredGroup {
+    chunk: Option<Vec<u8>>,
+    deltas: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn check_group(
+    group: u64,
+    stored: StoredGroup,
+    label_sets: &LabelSets,
+    violations: &mut Vec<IntegrityViolation>,
+) -> Result<Option<MetaEdit>, GraphError> {
+    let undecodable = |key: Vec<u8>| IntegrityViolation::Undecodable {
+        table: Table::NodeChunks,
+        key,
+    };
+    let Some(chunk) = stored.chunk else {
+        for (key, value) in stored.deltas {
+            match Delta::parse(&key, &value) {
+                Ok(delta) => violations.push(IntegrityViolation::StrayNodeMetaDelta(
+                    meta::node_at(group, delta.slot),
+                )),
+                Err(_) => violations.push(undecodable(key)),
+            }
+        }
+        return Ok(None);
+    };
+    let Some(mut edit) = MetaBytes::parse(group, &chunk)
+        .ok()
+        .and_then(|bytes| bytes.to_edit().ok())
+    else {
+        violations.push(undecodable(meta::meta_key(group).to_vec()));
+        return Ok(None);
+    };
+    let known = edit.live().all(|(_, set)| label_sets.contains_key(&set));
+    let mut canonical = !known || encode(group, &edit, label_sets)? == Some(chunk);
+    canonical &= stored.deltas.len() <= meta::MAX_DELTAS;
+    for (key, value) in stored.deltas {
+        let Ok(delta) = Delta::parse(&key, &value) else {
+            violations.push(undecodable(key));
+            continue;
+        };
+        if edit.label_set(delta.slot) != delta.before {
+            violations.push(IntegrityViolation::StrayNodeMetaDelta(meta::node_at(
+                group, delta.slot,
+            )));
+            continue;
+        }
+        canonical &= delta.before != delta.after;
+        edit.set(delta.slot, delta.after);
+    }
+    canonical &= !edit.is_empty();
+    if !canonical {
+        violations.push(IntegrityViolation::NonCanonicalNodeMeta(group));
+    }
+    Ok(Some(edit))
+}
+
+fn encode(
+    group: u64,
+    edit: &MetaEdit,
+    label_sets: &LabelSets,
+) -> Result<Option<Vec<u8>>, GraphError> {
+    edit.encode(group, |set| {
         label_sets.get(&set).cloned().ok_or(GraphError::Corrupt(
             "a node has a label set that does not exist",
         ))

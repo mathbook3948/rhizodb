@@ -103,7 +103,8 @@ impl<'p> Groups<'p> {
     }
 
     /// Adds `rows` rows to the one group of a projection without keys whose aggregates all
-    /// [count rows](Aggregate::counts_rows), so they need not be read.
+    /// [count rows](Aggregate::counts_rows_binding) whose counted slot is never null, so they
+    /// need not be read.
     pub(crate) fn count_rows(&mut self, rows: usize) {
         if self.groups.is_empty() {
             let accumulators = self
@@ -116,6 +117,7 @@ impl<'p> Groups<'p> {
         for (_, accumulators) in &mut self.groups {
             for accumulator in accumulators {
                 accumulator.rows += rows;
+                accumulator.counted += rows;
             }
         }
     }

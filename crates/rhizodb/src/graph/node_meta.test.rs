@@ -111,7 +111,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 }
 
-fn names(
+pub(super) fn names(
     read: &GraphTx<impl ReadTransaction>,
     universe: &[&'static str],
 ) -> BTreeMap<Token<Label>, &'static str> {
@@ -121,7 +121,10 @@ fn names(
         .collect()
 }
 
-fn token_names(names: &BTreeMap<Token<Label>, &'static str>, labels: &[Token<Label>]) -> Labels {
+pub(super) fn token_names(
+    names: &BTreeMap<Token<Label>, &'static str>,
+    labels: &[Token<Label>],
+) -> Labels {
     labels
         .iter()
         .map(|label| {
@@ -132,7 +135,7 @@ fn token_names(names: &BTreeMap<Token<Label>, &'static str>, labels: &[Token<Lab
         .collect()
 }
 
-fn ids_without_a_node_worth_asking(model: &Model) -> BTreeSet<u64> {
+pub(super) fn ids_without_a_node_worth_asking(model: &Model) -> BTreeSet<u64> {
     let mut probes: BTreeSet<u64> = (0..=model.next / GROUP + 1)
         .flat_map(|group| {
             let start = group * GROUP;
@@ -357,7 +360,7 @@ fn apply(
     Ok(())
 }
 
-fn open(fs: &SimFs) -> Graph<RedbStorage> {
+pub(super) fn open(fs: &SimFs) -> Graph<RedbStorage> {
     Graph::open(sim_backend::storage(fs).unwrap()).unwrap()
 }
 
@@ -679,4 +682,57 @@ fn readers_during_writes_see_the_snapshot_they_began_at() {
             assert!(reader.join().unwrap() > 0, "a reader saw a later version");
         }
     });
+}
+
+fn stored_parts(read: &GraphTx<impl ReadTransaction>) -> (usize, usize) {
+    let mut chunks = 0;
+    let mut deltas = 0;
+    for (key, _) in read
+        .transaction
+        .scan_prefix(Table::NodeChunks, &[])
+        .unwrap()
+    {
+        match meta::parse_key(&key).unwrap().unwrap().1 {
+            meta::Part::Chunk => chunks += 1,
+            meta::Part::Delta(_) => deltas += 1,
+        }
+    }
+    (chunks, deltas)
+}
+
+#[test]
+fn one_node_commits_to_a_stored_group_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
+    let fs = SimFs::new();
+    let graph = open(&fs);
+    let mut model = Model::default();
+    let mut write = graph.write().unwrap();
+    for _ in 0..200 {
+        create(&mut write, &mut model, labels_of(1), None);
+    }
+    write.commit().unwrap();
+    assert_eq!(stored_parts(&graph.read().unwrap()), (1, 0));
+    for round in 0..3 * meta::MAX_DELTAS {
+        let mut write = graph.write().unwrap();
+        apply(&mut write, &mut model, &Op::AddLabel(round, 2)).unwrap();
+        write.commit().unwrap();
+        let read = graph.read().unwrap();
+        let expected = (round + 1) % (meta::MAX_DELTAS + 1);
+        assert_eq!(stored_parts(&read), (1, expected), "after commit {round}");
+        check(&read, &model).unwrap();
+    }
+    let mut write = graph.write().unwrap();
+    apply(&mut write, &mut model, &Op::RemoveLabel(190, 2)).unwrap();
+    apply(&mut write, &mut model, &Op::AddLabel(190, 2)).unwrap();
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    let held = (3 * meta::MAX_DELTAS) % (meta::MAX_DELTAS + 1);
+    assert_eq!(
+        stored_parts(&read),
+        (1, held),
+        "a slot changed back keeps its delta"
+    );
+    drop(read);
+    drop(graph);
+    let graph = open(&fs);
+    check(&graph.read().unwrap(), &model).unwrap();
 }

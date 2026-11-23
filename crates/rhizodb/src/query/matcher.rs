@@ -27,6 +27,7 @@ use super::plan::NodePattern;
 use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
+use super::plan::Slot;
 use super::plan::Step;
 
 /// Receives each complete match. Returning `false` stops the search.
@@ -243,9 +244,9 @@ fn holds(
     Ok(true)
 }
 
-/// The label whose nodes a match clause matches one each, with nothing else to test, as in
-/// `MATCH (n:Label)`.
-pub(crate) fn counted_label(found: &MatchClause) -> Option<&str> {
+/// The nodes a match clause matches one each, with nothing else to test, as in `MATCH (n)` or
+/// `MATCH (n:Label)`: the slot each match binds, and the label, if any.
+pub(crate) fn counted_nodes(found: &MatchClause) -> Option<(Slot, Option<&str>)> {
     let [part] = found.patterns.as_slice() else {
         return None;
     };
@@ -258,8 +259,10 @@ pub(crate) fn counted_label(found: &MatchClause) -> Option<&str> {
         && !start.bound
         && start.properties.is_none();
     match &start.labels {
-        Some(LabelExpr::Name(name)) if simple => Some(&name.0),
-        _ => None,
+        _ if !simple => None,
+        None => Some((start.slot, None)),
+        Some(LabelExpr::Name(name)) => Some((start.slot, Some(&name.0))),
+        Some(_) => None,
     }
 }
 

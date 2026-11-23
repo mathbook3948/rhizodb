@@ -568,13 +568,26 @@ pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
         write.delete(Table::LabelSetByTokens, &value).unwrap();
     }
     let mut labels = BTreeMap::new();
+    let mut groups = BTreeMap::new();
     for (key, value) in write.scan_prefix(Table::NodeChunks, &[]).unwrap() {
-        let group = meta::parse_meta_key(&key).unwrap().unwrap();
-        for (slot, set) in MetaBytes::parse(&value).unwrap().to_edit().unwrap().live() {
+        match meta::parse_key(&key).unwrap().unwrap() {
+            (group, meta::Part::Chunk) => {
+                let edit = MetaBytes::parse(group, &value).unwrap().to_edit().unwrap();
+                groups.insert(group, edit);
+            }
+            (group, meta::Part::Delta(_)) => {
+                let delta = meta::Delta::parse(&key, &value).unwrap();
+                let edit: &mut MetaEdit = groups.get_mut(&group).unwrap();
+                edit.set(delta.slot, delta.after);
+            }
+        }
+        write.delete(Table::NodeChunks, &key).unwrap();
+    }
+    for (group, edit) in groups {
+        for (slot, set) in edit.live() {
             let held = sets.get(&set.0).cloned().unwrap_or_else(|| Arc::from([]));
             labels.insert(meta::node_at(group, slot), held);
         }
-        write.delete(Table::NodeChunks, &key).unwrap();
     }
     for (key, value) in write.scan_prefix(Table::Nodes, &[]).unwrap() {
         let node = NodeId(decode_u64(&key).unwrap());

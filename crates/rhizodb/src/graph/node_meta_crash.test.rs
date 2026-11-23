@@ -188,3 +188,15 @@ fn a_crash_inside_a_commit_of_many_nodes_leaves_the_graph_before_or_after_it() {
 fn a_crash_inside_a_commit_that_empties_a_group_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, empty_a_group);
 }
+
+fn fold_deltas(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+    for id in (1..160).step_by(2).take(meta::MAX_DELTAS) {
+        relabel(write, model, id, 1);
+    }
+}
+
+#[test]
+fn a_crash_inside_a_commit_that_folds_deltas_into_their_chunk_leaves_the_graph_before_or_after_it()
+{
+    crash_at_every_operation(40, fold_deltas);
+}
