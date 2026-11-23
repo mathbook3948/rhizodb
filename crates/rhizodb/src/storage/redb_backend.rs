@@ -1,7 +1,10 @@
 use std::cell::OnceCell;
+use std::cmp::Ordering;
+use std::ops::Bound;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use redb::AccessGuard;
 use redb::Database;
 use redb::ReadOnlyTable;
 use redb::ReadableDatabase;
@@ -10,7 +13,9 @@ use redb::TableDefinition;
 use redb::backends::InMemoryBackend;
 use self_cell::self_cell;
 
+use super::Cursor;
 use super::Entry;
+use super::Reach;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
@@ -222,7 +227,131 @@ fn collect_range<T: ReadableTable<&'static [u8], &'static [u8]>>(
     Ok(entries)
 }
 
+const MAX_STEPS: usize = 8;
+
+type Guard<'a> = AccessGuard<'a, &'static [u8]>;
+
+/// A read cursor that keeps its place and the value it read last.
+pub(crate) struct ReadCursor<'a> {
+    table: &'a OpenTable,
+    place: Option<Place<'a>>,
+    last: Option<(Vec<u8>, Option<Guard<'a>>)>,
+}
+
+struct Place<'a> {
+    cursor: redb::Cursor<'a, &'static [u8], &'static [u8]>,
+    reached: Vec<u8>,
+    ahead: Option<(Guard<'a>, Guard<'a>)>,
+}
+
+impl<'a> Place<'a> {
+    fn step_to(
+        &mut self,
+        key: &[u8],
+        steps: usize,
+    ) -> Result<Option<Option<Guard<'a>>>, StorageError> {
+        for _ in 0..=steps {
+            let entry = match self.ahead.take() {
+                Some(entry) => Some(entry),
+                None => self.cursor.next().map_err(StorageError::new)?,
+            };
+            let (ordering, value) = match entry {
+                None => (Ordering::Greater, None),
+                Some((found, value)) => match found.value().cmp(key) {
+                    Ordering::Less => continue,
+                    Ordering::Equal => (Ordering::Equal, Some(value)),
+                    Ordering::Greater => {
+                        self.ahead = Some((found, value));
+                        (Ordering::Greater, None)
+                    }
+                },
+            };
+            self.reached.clear();
+            self.reached.extend_from_slice(key);
+            return Ok(Some(value.filter(|_| ordering == Ordering::Equal)));
+        }
+        Ok(None)
+    }
+}
+
+impl<'a> ReadCursor<'a> {
+    fn seek(&mut self, key: &[u8]) -> Result<Option<Guard<'a>>, StorageError> {
+        let cursor = self
+            .table
+            .lower_bound(Bound::Included(key))
+            .map_err(StorageError::new)?;
+        let place = self.place.insert(Place {
+            cursor,
+            reached: Vec::new(),
+            ahead: None,
+        });
+        Ok(place.step_to(key, 0)?.flatten())
+    }
+
+    fn find(&mut self, key: &[u8], reach: Reach) -> Result<Option<Guard<'a>>, StorageError> {
+        match (reach, &mut self.place) {
+            (Reach::Step, Some(place)) if key > place.reached.as_slice() => {
+                match place.step_to(key, MAX_STEPS)? {
+                    Some(found) => Ok(found),
+                    None => self.seek(key),
+                }
+            }
+            (Reach::Lookup, Some(_)) => self.table.get(key).map_err(StorageError::new),
+            _ => self.seek(key),
+        }
+    }
+}
+
+impl Cursor for ReadCursor<'_> {
+    fn get_with<R, E: From<StorageError>>(
+        &mut self,
+        key: &[u8],
+        reach: Reach,
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        let cached = matches!(&self.last, Some((last, _)) if last == key);
+        if !cached {
+            let found = self.find(key, reach)?;
+            let (last, value) = self.last.get_or_insert_with(|| (Vec::new(), None));
+            last.clear();
+            last.extend_from_slice(key);
+            *value = found;
+        }
+        match &self.last {
+            Some((_, Some(value))) => read(value.value()).map(Some),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// A write transaction's cursor, which looks each key up on its own.
+pub(crate) struct WriteCursor<'a> {
+    transaction: &'a RedbWrite,
+    table: Table,
+}
+
+impl Cursor for WriteCursor<'_> {
+    fn get_with<R, E: From<StorageError>>(
+        &mut self,
+        key: &[u8],
+        _reach: Reach,
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.transaction.get_with(self.table, key, read)
+    }
+}
+
 impl ReadTransaction for RedbRead {
+    type Cursor<'a> = ReadCursor<'a>;
+
+    fn cursor(&self, table: Table) -> Result<ReadCursor<'_>, StorageError> {
+        Ok(ReadCursor {
+            table: self.table(table)?,
+            place: None,
+            last: None,
+        })
+    }
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let value = self.table(table)?.get(key).map_err(StorageError::new)?;
         Ok(value.map(|guard| guard.value().to_vec()))
@@ -261,6 +390,15 @@ impl ReadTransaction for RedbRead {
 }
 
 impl ReadTransaction for RedbWrite {
+    type Cursor<'a> = WriteCursor<'a>;
+
+    fn cursor(&self, table: Table) -> Result<WriteCursor<'_>, StorageError> {
+        Ok(WriteCursor {
+            transaction: self,
+            table,
+        })
+    }
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_table(table, |table| {
             let value = table.get(key).map_err(StorageError::new)?;

@@ -681,6 +681,12 @@ impl Storage for CountingStorage {
 }
 
 impl ReadTransaction for CountingWrite {
+    type Cursor<'a> = <RedbWrite as ReadTransaction>::Cursor<'a>;
+
+    fn cursor(&self, table: Table) -> Result<Self::Cursor<'_>, StorageError> {
+        self.inner.cursor(table)
+    }
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(table, key)
     }

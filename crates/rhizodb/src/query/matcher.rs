@@ -35,7 +35,7 @@ pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
 
 type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
 
-struct Search<'s, 'e, T> {
+struct Search<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     patterns: &'s [PatternPart],
     used: Vec<RelationshipId>,
@@ -121,7 +121,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(true);
         }
         if !labels_known {
-            let labelled = self.tx.with_node(id, |node| match &pattern.labels {
+            let labelled = self.with_node(id, |node| match &pattern.labels {
                 Some(labels) => self.node_labelled(&node, labels),
                 None => Ok(true),
             })?;
@@ -133,9 +133,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(true);
         };
         let expected = self.expected_properties(expected, row)?;
-        let matches = self
-            .tx
-            .with_node(id, |node| holds(&expected, |key| Ok(node.property(key)?)))?;
+        let matches = self.with_node(id, |node| holds(&expected, |key| Ok(node.property(key)?)))?;
         Ok(matches == Some(true))
     }
 

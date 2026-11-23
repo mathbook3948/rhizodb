@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -9,9 +10,11 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
+use crate::graph::EncodedNode;
 use crate::graph::GraphTx;
 use crate::graph::Label;
 use crate::graph::NodeId;
+use crate::graph::NodeReader;
 use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
@@ -36,7 +39,7 @@ use super::update::Graveyard;
 pub(crate) type Row = Vec<Datum>;
 
 /// Evaluates expressions and matches patterns against one transaction's view of the graph.
-pub(crate) struct Env<'a, T> {
+pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) tx: &'a GraphTx<T>,
     /// How many slots each row of the query has.
     pub(crate) slots: usize,
@@ -51,6 +54,8 @@ pub(crate) struct Env<'a, T> {
     pub(crate) patterns: &'a Patterns,
     /// Set when evaluation only looks for the type errors the query text fixes.
     pub(crate) check: Option<&'a Check>,
+    /// The reader of node records, opened on the first read.
+    pub(crate) nodes: RefCell<Option<NodeReader<'a, T>>>,
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step
@@ -95,7 +100,25 @@ fn overflow() -> Error {
 
 impl<T: ReadTransaction> Env<'_, T> {
     pub(crate) fn node(&self, id: NodeId) -> Result<NodeRecord, Error> {
-        self.tx.node(id)?.ok_or_else(deleted)
+        self.with_node(id, |node| Ok(node.decode()?))?
+            .ok_or_else(deleted)
+    }
+
+    /// Calls `read` with the stored record of the node with ID `id`, if there is one. A read
+    /// started inside `read` looks the record up on its own.
+    pub(crate) fn with_node<R>(
+        &self,
+        id: NodeId,
+        read: impl FnOnce(EncodedNode<'_>) -> Result<R, Error>,
+    ) -> Result<Option<R>, Error> {
+        let Ok(mut nodes) = self.nodes.try_borrow_mut() else {
+            return self.tx.with_node(id, read);
+        };
+        let reader = match &mut *nodes {
+            Some(reader) => reader,
+            empty => empty.insert(self.tx.node_reader()?),
+        };
+        reader.with_node(id, read)
     }
 
     pub(crate) fn relationship(&self, id: RelationshipId) -> Result<RelationshipRecord, Error> {
@@ -133,10 +156,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
         let stored = match (value, token) {
             (Datum::Node(id), Some(token)) => {
-                self.tx.with_node(*id, |node| node.property(token))?
+                self.with_node(*id, |node| Ok(node.property(token)?))?
             }
             (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
-            (Datum::Node(id), None) => self.tx.node(*id)?.map(|_| None),
+            (Datum::Node(id), None) => self.with_node(*id, |_| Ok(None))?,
             (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
             _ => return Ok(None),
         };
@@ -540,8 +563,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         match operand {
             Datum::Null => Ok(Datum::Null),
             Datum::Node(id) => Ok(Datum::Boolean(
-                self.tx
-                    .with_node(id, |node| self.node_has_labels(&node.labels()?, labels))?
+                self.with_node(id, |node| self.node_has_labels(&node.labels()?, labels))?
                     .ok_or_else(deleted)?,
             )),
             Datum::Relationship(id) => {

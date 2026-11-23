@@ -9,6 +9,8 @@ use std::sync::RwLock;
 use std::thread;
 use std::thread::ThreadId;
 
+use crate::storage::Cursor;
+use crate::storage::Reach;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
@@ -324,7 +326,58 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
     Ok(value)
 }
 
+const NEAR: u64 = 8;
+
+/// Reads node records through one storage cursor. A node with an ID just after the one the
+/// cursor reached last is read by stepping the cursor forward. A node just after the one read
+/// last, wherever the cursor is, starts a new run there. Any other node is looked up without
+/// moving the cursor.
+pub(crate) struct NodeReader<'a, T: ReadTransaction + 'a> {
+    cursor: T::Cursor<'a>,
+    reached: Option<NodeId>,
+    last: Option<NodeId>,
+}
+
+fn near(from: Option<NodeId>, to: NodeId) -> bool {
+    from.is_some_and(|from| to.0.checked_sub(from.0).is_some_and(|ahead| ahead <= NEAR))
+}
+
+impl<T: ReadTransaction> NodeReader<'_, T> {
+    /// Calls `read` with the stored record of the node with ID `id`, if there is one.
+    pub(crate) fn with_node<R, E: From<GraphError>>(
+        &mut self,
+        id: NodeId,
+        read: impl FnOnce(EncodedNode<'_>) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        let reach = if self.reached.is_none() || near(self.reached, id) {
+            Reach::Step
+        } else if self.last != Some(id) && near(self.last, id) {
+            Reach::Seek
+        } else {
+            Reach::Lookup
+        };
+        if reach != Reach::Lookup {
+            self.reached = Some(id);
+        }
+        self.last = Some(id);
+        self.cursor
+            .get_with(&keys::element_key(id.0), reach, |bytes| {
+                Ok::<_, GraphError>(read(EncodedNode(bytes)))
+            })
+            .map_err(E::from)?
+            .transpose()
+    }
+}
+
 impl<T: ReadTransaction> GraphTx<T> {
+    pub(crate) fn node_reader(&self) -> Result<NodeReader<'_, T>, GraphError> {
+        Ok(NodeReader {
+            cursor: self.transaction.cursor(Table::Nodes)?,
+            reached: None,
+            last: None,
+        })
+    }
+
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
         self.with_node(id, |node| node.decode())
     }

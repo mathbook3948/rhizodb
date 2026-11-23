@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -112,6 +113,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             graveyard: &*self.graveyard,
             patterns: self.patterns,
             check: None,
+            nodes: RefCell::default(),
         }
     }
 

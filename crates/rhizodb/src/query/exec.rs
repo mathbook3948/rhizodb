@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -56,6 +57,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        nodes: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
@@ -80,6 +82,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        nodes: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clause, rows| match clause {
@@ -91,6 +94,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             graveyard: &graveyard,
             patterns: &patterns,
             check: None,
+            nodes: RefCell::default(),
         }
         .read_clause(clause, rows),
         Clause::Update(clause) => Writer {
@@ -114,6 +118,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        nodes: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -381,6 +386,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             graveyard: self.graveyard,
             patterns: self.patterns,
             check: Some(&check),
+            nodes: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
