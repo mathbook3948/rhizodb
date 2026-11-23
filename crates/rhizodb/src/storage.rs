@@ -17,6 +17,7 @@ pub(crate) enum Table {
     Relationships,
     Outgoing,
     Incoming,
+    /// The label index of format versions before node meta, which only their upgrade reads.
     LabelIndex,
     Indexes,
     KeywordPostings,
@@ -24,10 +25,13 @@ pub(crate) enum Table {
     KeywordTotals,
     Vectors,
     PropertyEntries,
+    NodeChunks,
+    LabelSets,
+    LabelSetByTokens,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 14] = [
+    pub(crate) const ALL: [Table; 17] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -42,7 +46,16 @@ impl Table {
         Table::KeywordTotals,
         Table::Vectors,
         Table::PropertyEntries,
+        Table::NodeChunks,
+        Table::LabelSets,
+        Table::LabelSetByTokens,
     ];
+
+    /// Whether only the upgrade of an older format version reads the table, so a new database
+    /// does not create it.
+    pub(crate) const fn is_legacy(self) -> bool {
+        matches!(self, Table::LabelIndex)
+    }
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -60,6 +73,9 @@ impl Table {
             Table::KeywordTotals => "keyword_totals",
             Table::Vectors => "vectors",
             Table::PropertyEntries => "property_entries",
+            Table::NodeChunks => "node_chunks",
+            Table::LabelSets => "label_sets",
+            Table::LabelSetByTokens => "label_set_by_tokens",
         }
     }
 }

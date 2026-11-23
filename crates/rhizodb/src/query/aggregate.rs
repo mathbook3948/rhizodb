@@ -102,6 +102,24 @@ impl<'p> Groups<'p> {
         Ok(())
     }
 
+    /// Adds `rows` rows to the one group of a projection without keys whose aggregates all
+    /// [count rows](Aggregate::counts_rows), so they need not be read.
+    pub(crate) fn count_rows(&mut self, rows: usize) {
+        if self.groups.is_empty() {
+            let accumulators = self
+                .aggregates
+                .iter()
+                .map(|_| Accumulator::default())
+                .collect();
+            self.groups.push((Vec::new(), accumulators));
+        }
+        for (_, accumulators) in &mut self.groups {
+            for accumulator in accumulators {
+                accumulator.rows += rows;
+            }
+        }
+    }
+
     /// One row per group with keys, aggregates, and final expressions filled in. Without keys,
     /// even no rows make one group.
     pub(crate) fn finish<T: ReadTransaction>(

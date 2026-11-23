@@ -5,8 +5,6 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::graph;
 use crate::graph::Adjacent;
-use crate::graph::EncodedNode;
-use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
@@ -24,6 +22,7 @@ use super::eval::set;
 use super::eval::type_error;
 use super::plan::Expr;
 use super::plan::Hops;
+use super::plan::MatchClause;
 use super::plan::NodePattern;
 use super::plan::PatternPart;
 use super::plan::PatternQuery;
@@ -100,13 +99,17 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn node_labelled(&self, node: &EncodedNode<'_>, labels: &LabelExpr) -> Result<bool, Error> {
+    fn node_labelled(&self, id: NodeId, labels: &LabelExpr) -> Result<Option<bool>, Error> {
         match labels {
-            LabelExpr::Name(name) => match self.tx.lookup_token::<Label>(&name.0)? {
-                Some(label) => Ok(node.has_label(label)?),
-                None => Ok(false),
-            },
-            labels => self.node_has_labels(&node.labels()?, labels),
+            LabelExpr::Name(name) => {
+                let label = self.label_token(&name.0)?;
+                self.with_labels(id, |found| {
+                    label.is_some_and(|label| found.binary_search(&label).is_ok())
+                })
+            }
+            labels => self
+                .with_labels(id, |found| self.node_has_labels(found, labels))?
+                .transpose(),
         }
     }
 
@@ -121,10 +124,10 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(true);
         }
         if !labels_known {
-            let labelled = self.with_node(id, |node| match &pattern.labels {
-                Some(labels) => self.node_labelled(&node, labels),
-                None => Ok(true),
-            })?;
+            let labelled = match &pattern.labels {
+                Some(labels) => self.node_labelled(id, labels)?,
+                None => self.with_labels(id, |_| true)?,
+            };
             if labelled != Some(true) {
                 return Ok(false);
             }
@@ -176,7 +179,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok((sought.nodes, labels_known && sought.labelled));
         }
         let nodes = match pattern.labels.as_ref().and_then(LabelExpr::required) {
-            Some(label) => match self.tx.lookup_token::<Label>(&label.0)? {
+            Some(label) => match self.label_token(&label.0)? {
                 Some(token) => self.tx.node_ids_with_label(token)?,
                 None => Vec::new(),
             },
@@ -238,6 +241,26 @@ fn holds(
         }
     }
     Ok(true)
+}
+
+/// The label whose nodes a match clause matches one each, with nothing else to test, as in
+/// `MATCH (n:Label)`.
+pub(crate) fn counted_label(found: &MatchClause) -> Option<&str> {
+    let [part] = found.patterns.as_slice() else {
+        return None;
+    };
+    let start = &part.start;
+    let simple = !found.optional
+        && found.filter.is_none()
+        && part.path.is_none()
+        && part.steps.is_empty()
+        && part.seeks.is_empty()
+        && !start.bound
+        && start.properties.is_none();
+    match &start.labels {
+        Some(LabelExpr::Name(name)) if simple => Some(&name.0),
+        _ => None,
+    }
 }
 
 fn label_scan_decides(pattern: &NodePattern) -> bool {

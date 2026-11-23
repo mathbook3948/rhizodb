@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -25,6 +28,7 @@ mod index;
 #[cfg(test)]
 pub(crate) mod integrity;
 mod keys;
+mod meta;
 mod records;
 mod tokenize;
 mod value_key;
@@ -40,6 +44,7 @@ pub(crate) use index::ElementKind;
 pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
+pub(crate) use meta::LabelReader;
 pub(crate) use records::EncodedNode;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
@@ -50,11 +55,18 @@ pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
 use index::Element;
+use meta::Cached;
+use meta::LabelSetCache;
+use meta::LabelSetId;
+use meta::Meta;
+use meta::MetaBytes;
+use meta::MetaEdit;
 
-const FORMAT_VERSION: u32 = 7;
+const FORMAT_VERSION: u32 = 8;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
+const NODE_META_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -149,6 +161,7 @@ pub(crate) struct Graph<S> {
     writer: Arc<Mutex<Option<ThreadId>>>,
     committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
     committed_tokens: Arc<CommittedTokens>,
+    committed_label_sets: Arc<LabelSetCache>,
 }
 
 /// The tokens of every name space by name, as committed. A committed token never changes, and
@@ -183,15 +196,7 @@ impl<S: Storage> Graph<S> {
     /// in the same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
-            let mut tx = GraphTx {
-                transaction: storage.begin_write()?,
-                _writer: None,
-                index_definitions: OnceLock::new(),
-                catalog: None,
-                tokens: Arc::default(),
-                reads_committed_tokens: false,
-                own_tokens: CommittedTokens::default(),
-            };
+            let mut tx = GraphTx::bare(storage.begin_write()?);
             let found = match tx
                 .transaction
                 .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
@@ -209,6 +214,9 @@ impl<S: Storage> Graph<S> {
             if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
                 tx.tag_index_targets()?;
             }
+            if found.is_some_and(|found| found < NODE_META_FORMAT_VERSION) {
+                tx.move_labels_to_node_meta()?;
+            }
             if upgrade {
                 tx.transaction.put(
                     Table::Metadata,
@@ -222,21 +230,13 @@ impl<S: Storage> Graph<S> {
                 tx.commit()?;
             }
         }
-        let definitions = GraphTx {
-            transaction: storage.begin_read()?,
-            _writer: None,
-            index_definitions: OnceLock::new(),
-            catalog: None,
-            tokens: Arc::default(),
-            reads_committed_tokens: false,
-            own_tokens: CommittedTokens::default(),
-        }
-        .index_definitions()?;
+        let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
         Ok(Self {
             storage,
             writer: Arc::default(),
             committed_index_definitions: Arc::new(Mutex::new(definitions)),
             committed_tokens: Arc::default(),
+            committed_label_sets: Arc::default(),
         })
     }
 
@@ -251,6 +251,10 @@ impl<S: Storage> Graph<S> {
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: true,
             own_tokens: CommittedTokens::default(),
+            label_sets: Arc::clone(&self.committed_label_sets),
+            own_label_sets: LabelSetCache::default(),
+            meta: BTreeMap::new(),
+            counters: Vec::new(),
         })
     }
 
@@ -275,6 +279,10 @@ impl<S: Storage> Graph<S> {
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: false,
             own_tokens: CommittedTokens::default(),
+            label_sets: Arc::clone(&self.committed_label_sets),
+            own_label_sets: LabelSetCache::default(),
+            meta: BTreeMap::new(),
+            counters: Vec::new(),
         })
     }
 }
@@ -289,6 +297,28 @@ pub(crate) struct GraphTx<T> {
     tokens: Arc<CommittedTokens>,
     reads_committed_tokens: bool,
     own_tokens: CommittedTokens,
+    label_sets: Arc<LabelSetCache>,
+    own_label_sets: LabelSetCache,
+    meta: BTreeMap<u64, MetaEdit>,
+    counters: Vec<(Vec<u8>, u64)>,
+}
+
+impl<T> GraphTx<T> {
+    fn bare(transaction: T) -> Self {
+        Self {
+            transaction,
+            _writer: None,
+            index_definitions: OnceLock::new(),
+            catalog: None,
+            tokens: Arc::default(),
+            reads_committed_tokens: false,
+            own_tokens: CommittedTokens::default(),
+            label_sets: Arc::default(),
+            own_label_sets: LabelSetCache::default(),
+            meta: BTreeMap::new(),
+            counters: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -379,11 +409,20 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
-        self.with_node(id, |node| node.decode())
+        let Some(labels) = self.node_labels(id)? else {
+            return Ok(None);
+        };
+        let properties = self
+            .with_node(id, |node| node.properties())?
+            .ok_or(GraphError::Corrupt("a live node has no record"))?;
+        Ok(Some(NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        }))
     }
 
-    /// A node's stored record, left encoded so the caller decodes only the parts it reads.
-    /// Calls `read` with the stored record of the node with ID `id`, if there is one.
+    /// Calls `read` with the stored properties of the node with ID `id`, if there is one, left
+    /// encoded so the caller decodes only the parts it reads.
     pub(crate) fn with_node<R, E: From<GraphError>>(
         &self,
         id: NodeId,
@@ -424,29 +463,204 @@ impl<T: ReadTransaction> GraphTx<T> {
             .transpose()?)
     }
 
+    /// The labels of the label set `set`.
+    pub(crate) fn label_set(&self, set: LabelSetId) -> Result<Arc<[Token<Label>]>, GraphError> {
+        if set == LabelSetId::EMPTY {
+            return Ok(Arc::from([]));
+        }
+        if let Some(labels) = self
+            .label_sets
+            .labels(set)
+            .or_else(|| self.own_label_sets.labels(set))
+        {
+            return Ok(labels);
+        }
+        let labels = self
+            .transaction
+            .get_with(
+                Table::LabelSets,
+                &set.0.to_be_bytes(),
+                meta::parse_label_set,
+            )?
+            .ok_or(GraphError::Corrupt(
+                "a node has a label set that does not exist",
+            ))?;
+        if self.reads_committed_tokens {
+            self.label_sets.insert(set, Arc::clone(&labels));
+        } else {
+            self.own_label_sets.insert(set, Arc::clone(&labels));
+        }
+        Ok(labels)
+    }
+
+    fn with_meta<R>(
+        &self,
+        group: u64,
+        read: impl FnOnce(Meta<'_>) -> Result<R, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        if let Some(edit) = self.meta.get(&group) {
+            return read(Meta::Edited(edit)).map(Some);
+        }
+        self.transaction
+            .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
+                read(Meta::Stored(MetaBytes::parse(bytes)?))
+            })
+    }
+
+    fn visit_meta(
+        &self,
+        mut visit: impl FnMut(u64, Meta<'_>) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let mut edits = self.meta.iter().peekable();
+        self.transaction
+            .visit_prefix(Table::NodeChunks, &[], |key, value| {
+                let Some(group) = meta::parse_meta_key(key)? else {
+                    return Ok(());
+                };
+                while let Some((edited, edit)) = edits.next_if(|(edited, _)| **edited < group) {
+                    visit(*edited, Meta::Edited(edit))?;
+                }
+                if let Some((_, edit)) = edits.next_if(|(edited, _)| **edited == group) {
+                    return visit(group, Meta::Edited(edit));
+                }
+                visit(group, Meta::Stored(MetaBytes::parse(value)?))
+            })?;
+        for (group, edit) in edits {
+            visit(*group, Meta::Edited(edit))?;
+        }
+        Ok(())
+    }
+
+    /// The label set of the node with ID `id`, or `None` when there is no such node.
+    pub(crate) fn node_label_set(&self, id: NodeId) -> Result<Option<LabelSetId>, GraphError> {
+        let (group, slot) = meta::locate(id);
+        Ok(self
+            .with_meta(group, |meta| Ok(meta.label_set(slot)))?
+            .flatten())
+    }
+
+    pub(crate) fn node_labels(
+        &self,
+        id: NodeId,
+    ) -> Result<Option<Arc<[Token<Label>]>>, GraphError> {
+        self.node_label_set(id)?
+            .map(|set| self.label_set(set))
+            .transpose()
+    }
+
+    /// Calls `read` with the labels of the node with ID `id`, if there is such a node, reading
+    /// its group's node meta through `reader`.
+    pub(crate) fn with_labels<R>(
+        &self,
+        reader: &mut LabelReader,
+        id: NodeId,
+        read: impl FnOnce(&[Token<Label>]) -> R,
+    ) -> Result<Option<R>, GraphError> {
+        let (group, slot) = meta::locate(id);
+        if self.meta.contains_key(&group) {
+            return Ok(self.node_labels(id)?.map(|labels| read(&labels)));
+        }
+        match reader.group(group, || self.load_meta(group))? {
+            Cached::Absent => Ok(None),
+            Cached::Found { meta, sets } => match meta.code(slot) {
+                None => Ok(None),
+                Some(code) => sets
+                    .get(code)
+                    .map(|labels| read(labels))
+                    .ok_or(GraphError::Corrupt(
+                        "a node meta code is outside its dictionary",
+                    ))
+                    .map(Some),
+            },
+        }
+    }
+
+    fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
+        let Some(bytes) =
+            self.transaction
+                .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
+                    Ok::<_, GraphError>(Box::<[u8]>::from(bytes))
+                })?
+        else {
+            return Ok(None);
+        };
+        let sets = MetaBytes::parse(&bytes)?
+            .dictionary()
+            .map(|set| self.label_set(set))
+            .collect::<Result<_, _>>()?;
+        Ok(Some((bytes, sets)))
+    }
+
     pub(crate) fn node_ids(&self) -> Result<Vec<NodeId>, GraphError> {
         let mut ids = Vec::new();
-        self.transaction.visit_prefix(Table::Nodes, &[], |key, _| {
-            ids.push(NodeId(decode_u64(key)?));
-            Ok::<(), GraphError>(())
+        self.visit_meta(|group, meta| {
+            for slot in 0..meta::SLOTS {
+                if meta.label_set(slot).is_some() {
+                    ids.push(meta::node_at(group, slot));
+                }
+            }
+            Ok(())
         })?;
         Ok(ids)
     }
 
+    /// The nodes that carry `label`, in ascending ID order.
     pub(crate) fn node_ids_with_label(
         &self,
         label: Token<Label>,
     ) -> Result<Vec<NodeId>, GraphError> {
         let mut ids = Vec::new();
-        self.transaction.visit_prefix(
-            Table::LabelIndex,
-            &keys::label_prefix(label),
-            |key, _| {
-                ids.push(keys::parse_label_key(key)?);
-                Ok::<(), GraphError>(())
-            },
-        )?;
+        self.visit_meta(|group, meta| {
+            match meta {
+                Meta::Stored(stored) => {
+                    if stored.label_count(label) == 0 {
+                        return Ok(());
+                    }
+                    let carries = stored
+                        .dictionary()
+                        .map(|set| Ok(self.label_set(set)?.binary_search(&label).is_ok()))
+                        .collect::<Result<Vec<bool>, GraphError>>()?;
+                    for slot in 0..meta::SLOTS {
+                        if stored
+                            .code(slot)
+                            .is_some_and(|code| carries.get(code) == Some(&true))
+                        {
+                            ids.push(meta::node_at(group, slot));
+                        }
+                    }
+                }
+                Meta::Edited(edit) => {
+                    for (slot, set) in edit.live() {
+                        if self.label_set(set)?.binary_search(&label).is_ok() {
+                            ids.push(meta::node_at(group, slot));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
         Ok(ids)
+    }
+
+    /// How many nodes carry `label`, from the label counts each group keeps.
+    pub(crate) fn count_nodes_with_label(&self, label: Token<Label>) -> Result<u64, GraphError> {
+        let mut count = 0u64;
+        self.visit_meta(|_, meta| {
+            count += match meta {
+                Meta::Stored(stored) => stored.label_count(label),
+                Meta::Edited(edit) => {
+                    let mut carrying = 0;
+                    for (_, set) in edit.live() {
+                        if self.label_set(set)?.binary_search(&label).is_ok() {
+                            carrying += 1;
+                        }
+                    }
+                    carrying
+                }
+            };
+            Ok(())
+        })?;
+        Ok(count)
     }
 
     /// Fails with `NodeHasRelationships` while any relationship still touches the node.
@@ -538,7 +752,8 @@ impl<T: ReadTransaction> GraphTx<T> {
 }
 
 impl<T: WriteTransaction> GraphTx<T> {
-    pub(crate) fn commit(self) -> Result<(), GraphError> {
+    pub(crate) fn commit(mut self) -> Result<(), GraphError> {
+        self.flush()?;
         let Some(Catalog {
             shared,
             changed: true,
@@ -555,6 +770,113 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {
         Ok(self.transaction.rollback()?)
+    }
+
+    fn flush(&mut self) -> Result<(), GraphError> {
+        for (key, next) in std::mem::take(&mut self.counters) {
+            self.transaction
+                .put(Table::Metadata, &key, &next.to_be_bytes())?;
+        }
+        for (group, edit) in std::mem::take(&mut self.meta) {
+            let key = meta::meta_key(group);
+            match edit.encode(|set| self.label_set(set))? {
+                Some(chunk) => self.transaction.put(Table::NodeChunks, &key, &chunk)?,
+                None => self.transaction.delete(Table::NodeChunks, &key)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn meta_edit(&mut self, group: u64) -> Result<&mut MetaEdit, GraphError> {
+        match self.meta.entry(group) {
+            btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            btree_map::Entry::Vacant(entry) => {
+                let edit = self
+                    .transaction
+                    .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
+                        MetaBytes::parse(bytes)?.to_edit()
+                    })?
+                    .unwrap_or_default();
+                Ok(entry.insert(edit))
+            }
+        }
+    }
+
+    fn intern_label_set(
+        &mut self,
+        labels: &BTreeSet<Token<Label>>,
+    ) -> Result<LabelSetId, GraphError> {
+        if labels.is_empty() {
+            return Ok(LabelSetId::EMPTY);
+        }
+        let labels: Arc<[Token<Label>]> = labels.iter().copied().collect();
+        let key = meta::label_set_key(&labels);
+        if let Some(set) = self
+            .label_sets
+            .id(&key)
+            .or_else(|| self.own_label_sets.id(&key))
+        {
+            return Ok(set);
+        }
+        let stored = self
+            .transaction
+            .get(Table::LabelSetByTokens, &key)?
+            .map(|bytes| decode_u32(&bytes))
+            .transpose()?;
+        let set = match stored {
+            Some(id) => LabelSetId(id),
+            None => {
+                let mut id = self.next_counter(keys::NEXT_LABEL_SET_KEY)?;
+                if id == u64::from(LabelSetId::EMPTY.0) {
+                    id = self.next_counter(keys::NEXT_LABEL_SET_KEY)?;
+                }
+                let id = u32::try_from(id).map_err(|_| GraphError::IdSpaceExhausted)?;
+                self.transaction
+                    .put(Table::LabelSets, &id.to_be_bytes(), &key)?;
+                self.transaction
+                    .put(Table::LabelSetByTokens, &key, &id.to_be_bytes())?;
+                LabelSetId(id)
+            }
+        };
+        self.own_label_sets.insert(set, labels);
+        Ok(set)
+    }
+
+    fn move_labels_to_node_meta(&mut self) -> Result<(), GraphError> {
+        let mut groups = BTreeSet::new();
+        self.transaction.visit_prefix(Table::Nodes, &[], |key, _| {
+            groups.insert(meta::locate(NodeId(decode_u64(key)?)).0);
+            Ok::<(), GraphError>(())
+        })?;
+        for group in groups {
+            let start = keys::element_key(meta::node_at(group, 0).0);
+            let end = group
+                .checked_add(1)
+                .and_then(|after| after.checked_mul(meta::SLOTS as u64))
+                .map_or([0xff; 9].to_vec(), |after| {
+                    keys::element_key(after).to_vec()
+                });
+            let mut edit = MetaEdit::default();
+            for (key, value) in self.transaction.scan_range(Table::Nodes, &start, &end)? {
+                let id = NodeId(decode_u64(&key)?);
+                let record = NodeRecord::decode_with_labels(&value)?;
+                for label in &record.labels {
+                    self.transaction
+                        .delete(Table::LabelIndex, &keys::label_key(*label, id))?;
+                }
+                self.transaction.put(Table::Nodes, &key, &record.encode())?;
+                let set = self.intern_label_set(&record.labels)?;
+                edit.put(meta::locate(id).1, set);
+            }
+            if let Some(chunk) = edit.encode(|set| self.label_set(set))? {
+                self.transaction
+                    .put(Table::NodeChunks, &meta::meta_key(group), &chunk)?;
+            }
+        }
+        for (key, _) in self.transaction.scan_prefix(Table::LabelIndex, &[])? {
+            self.transaction.delete(Table::LabelIndex, &key)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn intern_token<K: TokenKind>(
@@ -583,12 +905,11 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     pub(crate) fn create_node(&mut self, record: &NodeRecord) -> Result<NodeId, GraphError> {
         let id = NodeId(self.next_counter(keys::NEXT_NODE_ID_KEY)?);
+        let set = self.intern_label_set(&record.labels)?;
         self.transaction
             .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
-        for label in &record.labels {
-            self.transaction
-                .put(Table::LabelIndex, &keys::label_key(*label, id), &[])?;
-        }
+        let (group, slot) = meta::locate(id);
+        self.meta_edit(group)?.put(slot, set);
         self.reindex(id.0, None, Some(Element::Node(record)))?;
         Ok(id)
     }
@@ -666,12 +987,9 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        let added = self.edit_node(node, |record| record.labels.insert(label))?;
-        if added {
-            self.transaction
-                .put(Table::LabelIndex, &keys::label_key(label, node), &[])?;
-        }
-        Ok(())
+        self.edit_node(node, |record| {
+            record.labels.insert(label);
+        })
     }
 
     pub(crate) fn remove_label(
@@ -679,12 +997,9 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        let removed = self.edit_node(node, |record| record.labels.remove(&label))?;
-        if removed {
-            self.transaction
-                .delete(Table::LabelIndex, &keys::label_key(label, node))?;
-        }
-        Ok(())
+        self.edit_node(node, |record| {
+            record.labels.remove(&label);
+        })
     }
 
     /// Removes the relationship and returns its record, or returns `None` when it does not exist.
@@ -717,17 +1032,16 @@ impl<T: WriteTransaction> GraphTx<T> {
             return Ok(None);
         };
         self.reindex(id.0, Some(Element::Node(&record)), None)?;
-        for label in &record.labels {
-            self.transaction
-                .delete(Table::LabelIndex, &keys::label_key(*label, id))?;
-        }
         self.transaction
             .delete(Table::Nodes, &keys::element_key(id.0))?;
+        let (group, slot) = meta::locate(id);
+        self.meta_edit(group)?.remove(slot);
         Ok(Some(record))
     }
 
     fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
-        self.with_node(id, |_| Ok::<_, GraphError>(()))?
+        self.node_label_set(id)?
+            .map(|_| ())
             .ok_or(GraphError::NodeNotFound(id))
     }
 
@@ -739,8 +1053,14 @@ impl<T: WriteTransaction> GraphTx<T> {
         let before = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
         let mut record = before.clone();
         let result = edit(&mut record);
-        self.transaction
-            .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
+        if record.labels == before.labels {
+            self.transaction
+                .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
+        } else {
+            let set = self.intern_label_set(&record.labels)?;
+            let (group, slot) = meta::locate(id);
+            self.meta_edit(group)?.put(slot, set);
+        }
         self.reindex(
             id.0,
             Some(Element::Node(&before)),
@@ -773,13 +1093,20 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn next_counter(&mut self, key: &[u8]) -> Result<u64, GraphError> {
-        let current = match self.transaction.get(Table::Metadata, key)? {
-            Some(bytes) => decode_u64(&bytes)?,
-            None => 0,
+        let index = match self.counters.iter().position(|(held, _)| held == key) {
+            Some(index) => index,
+            None => {
+                let stored = match self.transaction.get(Table::Metadata, key)? {
+                    Some(bytes) => decode_u64(&bytes)?,
+                    None => 0,
+                };
+                self.counters.push((key.to_vec(), stored));
+                self.counters.len() - 1
+            }
         };
-        let next = current.checked_add(1).ok_or(GraphError::IdSpaceExhausted)?;
-        self.transaction
-            .put(Table::Metadata, key, &next.to_be_bytes())?;
+        let held = &mut self.counters[index].1;
+        let current = *held;
+        *held = current.checked_add(1).ok_or(GraphError::IdSpaceExhausted)?;
         Ok(current)
     }
 }

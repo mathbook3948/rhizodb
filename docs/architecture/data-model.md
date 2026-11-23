@@ -14,10 +14,23 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each kind of token has its own token space.
 - The database remembers each committed token that a read transaction looks up, and a write transaction never adds to that memory.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
-- Keys of the node, relationship, adjacency, and label tables are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency and label members.
+- Keys of the node, relationship, and adjacency tables are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency members.
 - Each relationship is indexed twice, under its source node for outgoing scans and under its target node for incoming scans.
 - An adjacency index entry holds the node at the other end, so a traversal reads no relationship record.
-- Each node label has an index from label to node ID.
+- Nodes fall into row groups of 4096 consecutive IDs.
+- Each row group with a live node has one node meta chunk, keyed by the group, that holds a live bitmap and each live node's label set.
+- A node record holds the node's properties, and the node's labels live only in node meta.
+- Each distinct set of labels is interned once to a `u32` label set ID in two tables, one by ID and one by labels.
+- Label set ID 0 is the empty set and has no stored entry.
+- Label sets are never deleted.
+- A node meta chunk lists the label sets its group uses and stores each slot's position in that list, with no positions when the group uses one label set.
+- A node meta chunk keeps the live count of each label in its group.
+- Counting the nodes of one label reads only the label counts of each group.
+- A label scan walks the node meta chunks in group order and yields node IDs in ascending order.
+- There is no table from label to node ID.
+- A write transaction edits node meta in memory and writes each changed chunk once, at commit.
+- A write transaction reads each ID and token counter once and writes it once, at commit.
+- Opening a database written before node meta moves each node's labels into node meta and empties the old label index, in the opening write transaction.
 - Stored property values are null-free.
 - Setting a property to null removes it.
 - A stored value is a boolean, integer, float, string, byte string, temporal value, or a list of stored values.

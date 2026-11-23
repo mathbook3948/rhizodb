@@ -489,3 +489,108 @@ fn a_newer_format_version_is_rejected_on_open() {
         Err(GraphError::UnsupportedFormatVersion(found)) if found == newer
     ));
 }
+
+#[test]
+fn a_database_of_format_seven_moves_its_labels_to_node_meta_and_passes_the_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.redb");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("format-7.redb");
+    std::fs::copy(fixture, &path).unwrap();
+    let before = RedbStorage::open(&path).unwrap();
+    let read = before.begin_read().unwrap();
+    assert_eq!(
+        read.get(Table::Metadata, keys::FORMAT_VERSION_KEY).unwrap(),
+        Some(7u32.to_be_bytes().to_vec())
+    );
+    assert!(!read.scan_prefix(Table::LabelIndex, &[]).unwrap().is_empty());
+    drop(read);
+
+    let graph = Graph::open(before).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction
+            .scan_prefix(Table::LabelIndex, &[])
+            .unwrap(),
+        Vec::new()
+    );
+    let person = read.lookup_token::<Label>("Person").unwrap().unwrap();
+    let people = read.node_ids_with_label(person).unwrap();
+    assert_eq!(people.len(), 6);
+    assert_eq!(read.count_nodes_with_label(person).unwrap(), 6);
+    assert_eq!(people.last(), Some(&NodeId(4209)));
+}
+
+#[test]
+fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let person: Token<Label> = write.intern_token("Person").unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..5000 {
+        ids.push(write.create_node(&node_with(&[person])).unwrap());
+    }
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    write.delete_node(ids[10]).unwrap();
+    write.remove_label(ids[4500], person).unwrap();
+    let late = write.create_node(&node_with(&[person])).unwrap();
+    let mut expected: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|id| *id != ids[10] && *id != ids[4500])
+        .collect();
+    expected.push(late);
+    assert_eq!(write.node_ids_with_label(person).unwrap(), expected);
+    assert_eq!(write.count_nodes_with_label(person).unwrap(), 4999);
+    assert_eq!(write.node_ids().unwrap().len(), 5000);
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.node_ids_with_label(person).unwrap(), expected);
+    assert_eq!(read.count_nodes_with_label(person).unwrap(), 4999);
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+}
+
+/// Rewrites a database of the current format in the layout of format 7, which kept each node's
+/// labels at the front of its record and in a label index, so a test can open it as an older
+/// version.
+pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
+    let mut sets = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::LabelSets, &[]).unwrap() {
+        sets.insert(
+            decode_u32(&key).unwrap(),
+            meta::parse_label_set(&value).unwrap(),
+        );
+        write.delete(Table::LabelSets, &key).unwrap();
+        write.delete(Table::LabelSetByTokens, &value).unwrap();
+    }
+    let mut labels = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::NodeChunks, &[]).unwrap() {
+        let group = meta::parse_meta_key(&key).unwrap().unwrap();
+        for (slot, set) in MetaBytes::parse(&value).unwrap().to_edit().unwrap().live() {
+            let held = sets.get(&set.0).cloned().unwrap_or_else(|| Arc::from([]));
+            labels.insert(meta::node_at(group, slot), held);
+        }
+        write.delete(Table::NodeChunks, &key).unwrap();
+    }
+    for (key, value) in write.scan_prefix(Table::Nodes, &[]).unwrap() {
+        let node = NodeId(decode_u64(&key).unwrap());
+        let held = labels.get(&node).cloned().unwrap_or_else(|| Arc::from([]));
+        let mut record = Vec::new();
+        crate::value::put_varint(&mut record, held.len());
+        for label in held.iter() {
+            record.extend_from_slice(&label.id().to_be_bytes());
+            write
+                .put(Table::LabelIndex, &keys::label_key(*label, node), &[])
+                .unwrap();
+        }
+        record.extend_from_slice(&value);
+        write.put(Table::Nodes, &key, &record).unwrap();
+    }
+    write
+        .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
+        .unwrap();
+}

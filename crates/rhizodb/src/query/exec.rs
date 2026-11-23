@@ -25,6 +25,7 @@ use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::matcher::counted_label;
 use super::plan::CallClause;
 use super::plan::Callee;
 use super::plan::Clause;
@@ -60,6 +61,8 @@ pub(crate) fn run_read<T: ReadTransaction>(
         check: None,
         nodes: RefCell::default(),
         keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -89,6 +92,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         check: None,
         nodes: RefCell::default(),
         keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -102,6 +107,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
             check: None,
             nodes: RefCell::default(),
             keys: RefCell::default(),
+            labels: RefCell::default(),
+            label_tokens: RefCell::default(),
         }
         .read_clauses(
             clause,
@@ -136,6 +143,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         check: None,
         nodes: RefCell::default(),
         keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -208,6 +217,21 @@ impl<T: ReadTransaction> Env<'_, T> {
             } = &projection.items
         {
             let mut groups = Groups::new(keys, aggregates);
+            if let Some(label) = counted_label(found)
+                && keys.is_empty()
+                && aggregates
+                    .iter()
+                    .all(|(aggregate, _)| aggregate.counts_rows())
+            {
+                let count = match self.label_token(label)? {
+                    Some(label) => self.tx.count_nodes_with_label(label)?,
+                    None => 0,
+                };
+                let count = usize::try_from(count).unwrap_or(usize::MAX);
+                groups.count_rows(count.saturating_mul(rows.len()));
+                let rows = groups.finish(self, finals)?;
+                return Ok((self.arrange(projection, rows)?, 2));
+            }
             for row in &rows {
                 self.match_patterns(&found.patterns, row, &mut |matched| {
                     let keep = match &found.filter {
@@ -455,6 +479,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             check: Some(&check),
             nodes: RefCell::default(),
             keys: RefCell::default(),
+            labels: RefCell::default(),
+            label_tokens: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {

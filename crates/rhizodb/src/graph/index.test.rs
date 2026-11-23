@@ -490,6 +490,7 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
         write.commit().unwrap();
 
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         previous
             .put(
@@ -544,6 +545,7 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
             .unwrap();
         write.commit().unwrap();
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         previous
             .put(
                 Table::Metadata,
@@ -775,6 +777,7 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
             .unwrap();
         write.commit().unwrap();
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         previous
             .put(
@@ -832,6 +835,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
         write.commit().unwrap();
 
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         for (key, value) in previous.scan_prefix(Table::KeywordPostings, &[]).unwrap() {
             previous

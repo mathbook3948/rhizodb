@@ -268,6 +268,13 @@ pub(crate) struct Aggregate {
     pub(crate) extra: Option<Expr>,
 }
 
+impl Aggregate {
+    /// Whether the aggregate is `count(*)`, which counts rows without reading them.
+    pub(crate) fn counts_rows(&self) -> bool {
+        self.function == AggregateFunction::Count && self.argument.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AggregateFunction {
     Count,

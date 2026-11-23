@@ -300,58 +300,111 @@ fn an_adjacency_entry_under_the_wrong_type_is_caught() {
     );
 }
 
+const PERSON_SET: u32 = 1;
+
+fn person_set_key() -> Vec<u8> {
+    meta::label_set_key(&[Token::new(PERSON)])
+}
+
 #[test]
-fn a_node_label_missing_from_the_label_index_is_caught() {
+fn node_meta_with_wrong_label_counts_is_caught() {
+    assert_caught(
+        |write| {
+            let key = meta::meta_key(0);
+            let mut chunk = write.get(Table::NodeChunks, &key).unwrap().unwrap();
+            if let Some(count) = chunk.last_mut() {
+                *count += 1;
+            }
+            write.put(Table::NodeChunks, &key, &chunk).unwrap();
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
+    );
+}
+
+#[test]
+fn unreadable_node_meta_is_caught() {
     assert_caught(
         |write| {
             write
-                .delete(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), ALICE),
-                )
+                .put(Table::NodeChunks, &meta::meta_key(0), &[1, 2, 3])
                 .unwrap();
         },
-        IntegrityViolation::MissingLabelIndexEntry {
-            label: PERSON,
+        IntegrityViolation::Undecodable {
+            table: Table::NodeChunks,
+            key: meta::meta_key(0).to_vec(),
+        },
+    );
+}
+
+#[test]
+fn a_node_record_without_node_meta_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .put(Table::Nodes, &keys::element_key(40), &[0])
+                .unwrap();
+        },
+        IntegrityViolation::MissingNodeMeta(NodeId(40)),
+    );
+}
+
+#[test]
+fn a_live_node_without_a_record_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .delete(Table::Nodes, &keys::element_key(CAROL.0))
+                .unwrap();
+        },
+        IntegrityViolation::MissingNodeRecord(CAROL),
+    );
+}
+
+#[test]
+fn a_node_whose_label_set_is_gone_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .delete(Table::LabelSets, &PERSON_SET.to_be_bytes())
+                .unwrap();
+            write
+                .delete(Table::LabelSetByTokens, &person_set_key())
+                .unwrap();
+        },
+        IntegrityViolation::UnknownLabelSet {
             node: ALICE,
+            set: PERSON_SET,
         },
     );
 }
 
 #[test]
-fn a_label_index_entry_the_node_does_not_carry_is_caught() {
+fn label_set_tables_that_disagree_are_caught() {
     assert_caught(
         |write| {
             write
                 .put(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), CAROL),
-                    &[],
+                    Table::LabelSetByTokens,
+                    &person_set_key(),
+                    &7u32.to_be_bytes(),
                 )
                 .unwrap();
         },
-        IntegrityViolation::OrphanLabelIndexEntry {
-            label: PERSON,
-            node: CAROL,
-        },
+        IntegrityViolation::LabelSetTablesDisagree(PERSON_SET),
     );
 }
 
 #[test]
-fn a_label_index_entry_for_a_missing_node_is_caught() {
+fn a_label_set_counter_behind_its_label_sets_is_caught() {
     assert_caught(
         |write| {
             write
-                .put(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), NodeId(40)),
-                    &[],
-                )
+                .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
                 .unwrap();
         },
-        IntegrityViolation::OrphanLabelIndexEntry {
-            label: PERSON,
-            node: NodeId(40),
+        IntegrityViolation::CounterNotAboveAllocated {
+            counter: Counter::LabelSetId,
+            highest: u64::from(PERSON_SET),
         },
     );
 }

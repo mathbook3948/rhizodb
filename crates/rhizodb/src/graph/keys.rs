@@ -10,6 +10,7 @@ use super::ids::Token;
 pub(crate) const FORMAT_VERSION_KEY: &[u8] = b"format_version";
 pub(crate) const NEXT_NODE_ID_KEY: &[u8] = b"next_node_id";
 pub(crate) const NEXT_RELATIONSHIP_ID_KEY: &[u8] = b"next_relationship_id";
+pub(crate) const NEXT_LABEL_SET_KEY: &[u8] = b"next_label_set";
 
 pub(crate) fn next_token_key(tag: u8) -> [u8; 11] {
     let mut key = *b"next_token\0";
@@ -66,23 +67,11 @@ pub(crate) fn parse_adjacency_key(
     Ok((rel_type, relationship))
 }
 
-pub(crate) fn label_prefix(label: Token<Label>) -> [u8; 4] {
-    label.id().to_be_bytes()
-}
-
 pub(crate) fn label_key(label: Token<Label>, node: NodeId) -> [u8; 12] {
     let mut key = [0u8; 12];
     key[..4].copy_from_slice(&label.id().to_be_bytes());
     key[4..].copy_from_slice(&node.0.to_be_bytes());
     key
-}
-
-pub(crate) fn parse_label_key(key: &[u8]) -> Result<NodeId, DecodeError> {
-    let mut reader = Reader::new(key);
-    reader.u32()?;
-    let node = NodeId(reader.u64()?);
-    reader.finish()?;
-    Ok(node)
 }
 
 pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";

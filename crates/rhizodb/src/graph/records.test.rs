@@ -17,17 +17,32 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
-    fn an_encoded_node_reads_the_labels_and_each_property_its_record_holds(
-        labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
+    fn an_encoded_node_reads_each_property_its_record_holds(
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
-        label in (0u32..5).prop_map(Token::new),
     ) {
-        let record = NodeRecord { labels: labels.clone(), properties };
-        prop_assert_eq!(EncodedNode(&record.encode()).labels().unwrap(), labels.clone());
-        prop_assert_eq!(EncodedNode(&record.encode()).has_label(label).unwrap(), labels.contains(&label));
+        let record = NodeRecord { labels: BTreeSet::new(), properties };
         let read = EncodedNode(&record.encode()).property(key).unwrap();
         prop_assert!(agrees(read, record.properties.get(&key)));
+        let decoded = EncodedNode(&record.encode()).properties().unwrap();
+        prop_assert_eq!(decoded.len(), record.properties.len());
+    }
+
+    #[test]
+    fn a_record_written_before_node_meta_reads_its_labels_and_properties(
+        labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
+        properties in properties(),
+    ) {
+        let mut legacy = Vec::new();
+        put_varint(&mut legacy, labels.len());
+        for label in &labels {
+            legacy.extend_from_slice(&label.id().to_be_bytes());
+        }
+        let record = NodeRecord { labels: labels.clone(), properties };
+        legacy.extend_from_slice(&record.encode());
+        let read = NodeRecord::decode_with_labels(&legacy).unwrap();
+        prop_assert_eq!(read.labels, labels);
+        prop_assert_eq!(read.properties.len(), record.properties.len());
     }
 
     #[test]

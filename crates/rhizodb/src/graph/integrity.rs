@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
 use crate::storage::Table;
@@ -27,6 +28,10 @@ use super::index::Target;
 use super::index::document_length;
 use super::index::encode_totals;
 use super::keys;
+use super::meta;
+use super::meta::LabelSetId;
+use super::meta::MetaBytes;
+use super::meta::MetaEdit;
 use super::records::Properties;
 use super::tokenize;
 
@@ -39,6 +44,7 @@ pub(crate) enum Counter {
     RelationshipId,
     Token(u8),
     IndexId,
+    LabelSetId,
 }
 
 /// One way a stored graph breaks an invariant of the key layout.
@@ -77,14 +83,14 @@ pub(crate) enum IntegrityViolation {
         node: NodeId,
         relationship: RelationshipId,
     },
-    MissingLabelIndexEntry {
-        label: u32,
+    LabelSetTablesDisagree(u32),
+    UnknownLabelSet {
         node: NodeId,
+        set: u32,
     },
-    OrphanLabelIndexEntry {
-        label: u32,
-        node: NodeId,
-    },
+    MissingNodeMeta(NodeId),
+    MissingNodeRecord(NodeId),
+    NonCanonicalNodeMeta(u64),
     DuplicateIndexId(u32),
     MissingIndexEntry {
         table: Table,
@@ -100,6 +106,8 @@ pub(crate) enum IntegrityViolation {
     },
 }
 
+type LabelSets = BTreeMap<LabelSetId, Arc<[Token<Label>]>>;
+
 type Adjacency = BTreeMap<(NodeId, u32, RelationshipId), NodeId>;
 
 impl<T: ReadTransaction> GraphTx<T> {
@@ -108,9 +116,9 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut violations = Vec::new();
         self.check_format_version(&mut violations)?;
         let named = self.check_tokens(&mut violations)?;
-        let nodes = self.load_nodes(&mut violations)?;
+        let label_sets = self.load_label_sets(&mut violations)?;
+        let nodes = self.load_nodes(&label_sets, &mut violations)?;
         let relationships = self.load_relationships(&mut violations)?;
-        let label_index = self.load_label_index(&mut violations)?;
         let outgoing = self.load_adjacency(Table::Outgoing, &mut violations)?;
         let incoming = self.load_adjacency(Table::Incoming, &mut violations)?;
         let indexes = self.load_indexes(&mut violations)?;
@@ -127,8 +135,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         for properties in property_sets {
             check_properties(properties, &mut check_named);
         }
-        for record in nodes.values() {
-            for label in &record.labels {
+        for labels in label_sets.values() {
+            for label in labels.iter() {
                 check_named(Label::TAG, label.id());
             }
         }
@@ -144,28 +152,6 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
             for property in covered_properties(&index.definition.kind) {
                 check_named(PropertyKey::TAG, property.id());
-            }
-        }
-
-        for (node, record) in &nodes {
-            for label in &record.labels {
-                if !label_index.contains(&(label.id(), *node)) {
-                    violations.push(IntegrityViolation::MissingLabelIndexEntry {
-                        label: label.id(),
-                        node: *node,
-                    });
-                }
-            }
-        }
-        for (label, node) in &label_index {
-            let labelled = nodes
-                .get(node)
-                .is_some_and(|record| record.labels.iter().any(|held| held.id() == *label));
-            if !labelled {
-                violations.push(IntegrityViolation::OrphanLabelIndexEntry {
-                    label: *label,
-                    node: *node,
-                });
             }
         }
 
@@ -213,7 +199,14 @@ impl<T: ReadTransaction> GraphTx<T> {
 
         self.check_index_entries(&indexes, &nodes, &relationships, &mut violations)?;
 
-        self.check_counters(&nodes, &relationships, &named, &indexes, &mut violations)?;
+        self.check_counters(
+            &nodes,
+            &relationships,
+            &named,
+            &indexes,
+            &label_sets,
+            &mut violations,
+        )?;
         Ok(violations)
     }
 
@@ -302,21 +295,125 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(by_id.into_keys().collect())
     }
 
-    fn load_nodes(
+    fn load_label_sets(
         &self,
         violations: &mut Vec<IntegrityViolation>,
-    ) -> Result<BTreeMap<NodeId, NodeRecord>, GraphError> {
-        let mut nodes = BTreeMap::new();
-        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
-            match (decode_u64(&key), NodeRecord::decode(&value)) {
-                (Ok(id), Ok(record)) => {
-                    nodes.insert(NodeId(id), record);
+    ) -> Result<LabelSets, GraphError> {
+        let mut by_id = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::LabelSets, &[])? {
+            let parsed = <[u8; 4]>::try_from(key.as_slice())
+                .ok()
+                .map(u32::from_be_bytes)
+                .filter(|id| *id != LabelSetId::EMPTY.0)
+                .zip(meta::parse_label_set(&value).ok());
+            match parsed {
+                Some((id, labels)) => {
+                    by_id.insert(LabelSetId(id), labels);
                 }
-                _ => violations.push(IntegrityViolation::Undecodable {
-                    table: Table::Nodes,
+                None => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::LabelSets,
                     key,
                 }),
             }
+        }
+        let mut by_key = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::LabelSetByTokens, &[])? {
+            match (meta::parse_label_set(&key), decode_u32(&value)) {
+                (Ok(_), Ok(id)) => {
+                    by_key.insert(key, id);
+                }
+                _ => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::LabelSetByTokens,
+                    key,
+                }),
+            }
+        }
+        for (id, labels) in &by_id {
+            if by_key.get(&meta::label_set_key(labels)) != Some(&id.0) {
+                violations.push(IntegrityViolation::LabelSetTablesDisagree(id.0));
+            }
+        }
+        for (key, id) in &by_key {
+            let agrees = by_id
+                .get(&LabelSetId(*id))
+                .is_some_and(|labels| meta::label_set_key(labels) == *key);
+            if !agrees {
+                violations.push(IntegrityViolation::LabelSetTablesDisagree(*id));
+            }
+        }
+        by_id.insert(LabelSetId::EMPTY, Arc::from([]));
+        Ok(by_id)
+    }
+
+    fn load_nodes(
+        &self,
+        label_sets: &LabelSets,
+        violations: &mut Vec<IntegrityViolation>,
+    ) -> Result<BTreeMap<NodeId, NodeRecord>, GraphError> {
+        let mut chunks: BTreeMap<Vec<u8>, Vec<u8>> = self
+            .transaction
+            .scan_prefix(Table::NodeChunks, &[])?
+            .into_iter()
+            .collect();
+        for (group, edit) in &self.meta {
+            let key = meta::meta_key(*group).to_vec();
+            let pending = edit.encode(|set| self.label_set(set))?;
+            match pending {
+                Some(value) => chunks.insert(key, value),
+                None => chunks.remove(&key),
+            };
+        }
+        let mut live = BTreeMap::new();
+        for (key, value) in chunks {
+            let decoded = meta::parse_meta_key(&key).ok().flatten().zip(
+                MetaBytes::parse(&value)
+                    .ok()
+                    .and_then(|bytes| bytes.to_edit().ok()),
+            );
+            let Some((group, edit)) = decoded else {
+                violations.push(IntegrityViolation::Undecodable {
+                    table: Table::NodeChunks,
+                    key,
+                });
+                continue;
+            };
+            let mut known = true;
+            for (slot, set) in edit.live() {
+                let node = meta::node_at(group, slot);
+                if !label_sets.contains_key(&set) {
+                    known = false;
+                    violations.push(IntegrityViolation::UnknownLabelSet { node, set: set.0 });
+                }
+                live.insert(node, set);
+            }
+            if known && canonical(&edit, label_sets)? != Some(value) {
+                violations.push(IntegrityViolation::NonCanonicalNodeMeta(group));
+            }
+        }
+        let mut nodes = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
+            let (Ok(id), Ok(properties)) =
+                (decode_u64(&key), NodeRecord::decode_properties(&value))
+            else {
+                violations.push(IntegrityViolation::Undecodable {
+                    table: Table::Nodes,
+                    key,
+                });
+                continue;
+            };
+            let id = NodeId(id);
+            let Some(set) = live.remove(&id) else {
+                violations.push(IntegrityViolation::MissingNodeMeta(id));
+                continue;
+            };
+            let labels = label_sets
+                .get(&set)
+                .map(|labels| labels.iter().copied().collect())
+                .unwrap_or_default();
+            nodes.insert(id, NodeRecord { labels, properties });
+        }
+        for node in live.into_keys() {
+            violations.push(IntegrityViolation::MissingNodeRecord(node));
         }
         Ok(nodes)
     }
@@ -338,26 +435,6 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         Ok(relationships)
-    }
-
-    fn load_label_index(
-        &self,
-        violations: &mut Vec<IntegrityViolation>,
-    ) -> Result<BTreeSet<(u32, NodeId)>, GraphError> {
-        let mut entries = BTreeSet::new();
-        for (key, value) in self.transaction.scan_prefix(Table::LabelIndex, &[])? {
-            match keys::parse_label_key(&key) {
-                Ok(node) if value.is_empty() => {
-                    let label = u32::from_be_bytes([key[0], key[1], key[2], key[3]]);
-                    entries.insert((label, node));
-                }
-                _ => violations.push(IntegrityViolation::Undecodable {
-                    table: Table::LabelIndex,
-                    key,
-                }),
-            }
-        }
-        Ok(entries)
     }
 
     fn load_adjacency(
@@ -476,10 +553,16 @@ impl<T: ReadTransaction> GraphTx<T> {
         relationships: &BTreeMap<RelationshipId, RelationshipRecord>,
         named: &BTreeSet<(u8, u32)>,
         indexes: &[Index],
+        label_sets: &LabelSets,
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<(), GraphError> {
         let mut check = |counter: Counter, key: &[u8], highest: Option<u64>| {
-            let next = match self.transaction.get(Table::Metadata, key)? {
+            let pending = self.counters.iter().find(|(held, _)| held == key);
+            let stored = match pending {
+                Some((_, next)) => Some(next.to_be_bytes().to_vec()),
+                None => self.transaction.get(Table::Metadata, key)?,
+            };
+            let next = match stored {
                 Some(bytes) => match decode_u64(&bytes) {
                     Ok(next) => next,
                     Err(_) => {
@@ -512,6 +595,15 @@ impl<T: ReadTransaction> GraphTx<T> {
             keys::NEXT_INDEX_ID_KEY,
             indexes.iter().map(|index| u64::from(index.id)).max(),
         )?;
+        check(
+            Counter::LabelSetId,
+            keys::NEXT_LABEL_SET_KEY,
+            label_sets
+                .keys()
+                .next_back()
+                .filter(|set| **set != LabelSetId::EMPTY)
+                .map(|set| u64::from(set.0)),
+        )?;
         for tag in TOKEN_TAGS {
             let highest = named
                 .iter()
@@ -522,6 +614,14 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         Ok(())
     }
+}
+
+fn canonical(edit: &MetaEdit, label_sets: &LabelSets) -> Result<Option<Vec<u8>>, GraphError> {
+    edit.encode(|set| {
+        label_sets.get(&set).cloned().ok_or(GraphError::Corrupt(
+            "a node has a label set that does not exist",
+        ))
+    })
 }
 
 fn covered_properties(kind: &IndexKind) -> &[Token<PropertyKey>] {

@@ -52,13 +52,14 @@ impl RedbStorage {
         let read = database.begin_read().map_err(StorageError::new)?;
         let complete = Table::ALL
             .into_iter()
+            .filter(|table| !table.is_legacy())
             .all(|table| read.open_table(definition(table)).is_ok());
         drop(read);
         if complete {
             return Ok(Self { database });
         }
         let transaction = database.begin_write().map_err(StorageError::new)?;
-        for table in Table::ALL {
+        for table in Table::ALL.into_iter().filter(|table| !table.is_legacy()) {
             transaction
                 .open_table(definition(table))
                 .map_err(StorageError::new)?;

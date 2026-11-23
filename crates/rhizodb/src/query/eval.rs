@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+
 use std::convert::Infallible;
 
 use crate::error::Error;
@@ -13,6 +13,7 @@ use crate::gql::ast::Quantifier;
 use crate::graph::EncodedNode;
 use crate::graph::GraphTx;
 use crate::graph::Label;
+use crate::graph::LabelReader;
 use crate::graph::NodeId;
 use crate::graph::NodeReader;
 use crate::graph::NodeRecord;
@@ -58,6 +59,10 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) nodes: RefCell<Option<NodeReader<'a, T>>>,
     /// The property keys looked up so far that have a token.
     pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
+    /// The reader of node labels, opened on the first read.
+    pub(crate) labels: RefCell<LabelReader>,
+    /// The labels looked up so far that have a token.
+    pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step
@@ -102,8 +107,44 @@ fn overflow() -> Error {
 
 impl<T: ReadTransaction> Env<'_, T> {
     pub(crate) fn node(&self, id: NodeId) -> Result<NodeRecord, Error> {
-        self.with_node(id, |node| Ok(node.decode()?))?
-            .ok_or_else(deleted)
+        let labels = self
+            .with_labels(id, |labels| labels.iter().copied().collect())?
+            .ok_or_else(deleted)?;
+        let properties = self
+            .with_node(id, |node| Ok(node.properties()?))?
+            .ok_or_else(deleted)?;
+        Ok(NodeRecord { labels, properties })
+    }
+
+    /// Calls `read` with the labels of the node with ID `id`, if there is such a node. A read
+    /// started inside `read` looks the labels up on its own.
+    pub(crate) fn with_labels<R>(
+        &self,
+        id: NodeId,
+        read: impl FnOnce(&[Token<Label>]) -> R,
+    ) -> Result<Option<R>, Error> {
+        let Ok(mut reader) = self.labels.try_borrow_mut() else {
+            return Ok(self.tx.node_labels(id)?.map(|labels| read(&labels)));
+        };
+        Ok(self.tx.with_labels(&mut reader, id, read)?)
+    }
+
+    pub(crate) fn label_token(&self, name: &str) -> Result<Option<Token<Label>>, Error> {
+        if let Some((_, token)) = self
+            .label_tokens
+            .borrow()
+            .iter()
+            .find(|(held, _)| held == name)
+        {
+            return Ok(Some(*token));
+        }
+        let token = self.tx.lookup_token::<Label>(name)?;
+        if let Some(token) = token {
+            self.label_tokens
+                .borrow_mut()
+                .push((name.to_owned(), token));
+        }
+        Ok(token)
     }
 
     /// Calls `read` with the stored record of the node with ID `id`, if there is one. A read
@@ -198,14 +239,13 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn node_has_labels(
         &self,
-        found: &BTreeSet<Token<Label>>,
+        found: &[Token<Label>],
         labels: &LabelExpr,
     ) -> Result<bool, Error> {
         labels.matches(!found.is_empty(), &mut |name| {
             Ok(self
-                .tx
-                .lookup_token::<Label>(name)?
-                .is_some_and(|token| found.contains(&token)))
+                .label_token(name)?
+                .is_some_and(|token| found.binary_search(&token).is_ok()))
         })
     }
 
@@ -576,8 +616,8 @@ impl<T: ReadTransaction> Env<'_, T> {
         match operand {
             Datum::Null => Ok(Datum::Null),
             Datum::Node(id) => Ok(Datum::Boolean(
-                self.with_node(id, |node| self.node_has_labels(&node.labels()?, labels))?
-                    .ok_or_else(deleted)?,
+                self.with_labels(id, |found| self.node_has_labels(found, labels))?
+                    .ok_or_else(deleted)??,
             )),
             Datum::Relationship(id) => {
                 let rel_type = self.relationship_type(id)?;

@@ -115,6 +115,8 @@ impl<W: WriteTransaction> Writer<'_, W> {
             check: None,
             nodes: RefCell::default(),
             keys: RefCell::default(),
+            labels: RefCell::default(),
+            label_tokens: RefCell::default(),
         }
     }
 

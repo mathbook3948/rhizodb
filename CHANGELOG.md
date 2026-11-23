@@ -7,6 +7,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 ### Added
 
 - Embedded property graph storage on redb, with a versioned on-disk format that upgrades older databases on open.
+- Node labels kept as interned label sets in one node meta chunk per 4096 node IDs, so label tests read no node record and `MATCH (n:Label) RETURN count(*)` reads one chunk per 4096 nodes.
 - GQL queries through `Database::execute`, with Cypher `CREATE` accepted as GQL `INSERT`.
 - Temporal values: dates, times, datetimes with zones, and durations.
 - Host-registered procedures callable with `CALL`, outside the `db` namespace that built-in procedures reserve, and full `EXISTS { ... }` subqueries.

@@ -70,58 +70,42 @@ fn find_property(
     Ok(None)
 }
 
-/// A node record as stored, read one part at a time instead of decoded whole.
+/// A node's stored properties, read one at a time instead of decoded whole. The node's labels
+/// live in its group's node meta.
 #[derive(Debug)]
 pub(crate) struct EncodedNode<'a>(pub(super) &'a [u8]);
 
 impl EncodedNode<'_> {
-    pub(crate) fn labels(&self) -> Result<BTreeSet<Token<Label>>, GraphError> {
-        Ok(read_labels(&mut Reader::new(self.0))?)
-    }
-
-    /// Whether the node has the label `label`, decoding nothing else.
-    pub(crate) fn has_label(&self, label: Token<Label>) -> Result<bool, GraphError> {
-        let mut reader = Reader::new(self.0);
-        for _ in 0..reader.varint()? {
-            if Token::new(reader.u32()?) == label {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     /// The value of `key`, decoding none of the other values.
     pub(crate) fn property(
         &self,
         key: Token<PropertyKey>,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        let mut reader = Reader::new(self.0);
-        let label_count = reader.varint()?;
-        reader.take(
-            label_count
-                .checked_mul(4)
-                .ok_or(DecodeError::LengthOverflow)?,
-        )?;
-        Ok(find_property(&mut reader, key)?)
+        Ok(find_property(&mut Reader::new(self.0), key)?)
     }
 
-    pub(crate) fn decode(&self) -> Result<NodeRecord, GraphError> {
-        Ok(NodeRecord::decode(self.0)?)
+    pub(crate) fn properties(&self) -> Result<Properties, GraphError> {
+        Ok(NodeRecord::decode_properties(self.0)?)
     }
 }
 
 impl NodeRecord {
+    /// The stored node record, which holds the properties. The labels go to node meta.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        put_varint(&mut out, self.labels.len());
-        for label in &self.labels {
-            out.extend_from_slice(&label.id().to_be_bytes());
-        }
         encode_properties(&self.properties, &mut out);
         out
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+    pub(crate) fn decode_properties(bytes: &[u8]) -> Result<Properties, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        let properties = decode_properties(&mut reader)?;
+        reader.finish()?;
+        Ok(properties)
+    }
+
+    /// A node record written before node meta, which held the labels ahead of the properties.
+    pub(crate) fn decode_with_labels(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
         let labels = read_labels(&mut reader)?;
         let properties = decode_properties(&mut reader)?;
