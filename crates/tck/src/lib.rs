@@ -9,6 +9,7 @@ pub mod error;
 #[cfg(test)]
 mod fake;
 pub mod feature;
+pub mod kuzu;
 pub mod literal;
 pub mod matching;
 pub mod parser;

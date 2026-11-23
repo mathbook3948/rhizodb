@@ -39,7 +39,15 @@ A database that returns wrong results or loses data after a crash is worse than 
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.
 - Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
-- The parser is fuzzed.
+- The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
+- A damaged database file must make opening or the query fail with an error, never panic or hang.
+- Every input the fuzzer found a failure with is checked in and replayed by an integration test.
+- The nightly fuzz run skips panics raised inside redb on damaged files and fails on any other.
+- Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
+- Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
+- Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.
+- Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
+- The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
 - Code and tests taken from other projects keep their source and license.
 
 ## Open
