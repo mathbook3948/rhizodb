@@ -16,6 +16,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A database at rest is one file.
 - The write-ahead log is a separate log made of segment files next to the database file.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.
+- A range delete of the storage trait is logged as the delete of each key it removes.
 - Every WAL record carries a log sequence number (LSN) and a checksum of its own.
 - Each WAL segment starts with a header holding the database id, the segment number, and the segment's first LSN.
 - A WAL segment can be shipped to another node and replayed there on its own.

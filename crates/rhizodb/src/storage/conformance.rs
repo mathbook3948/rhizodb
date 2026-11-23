@@ -26,10 +26,14 @@ type Case<H> = (&'static str, fn(&mut H));
 /// Runs every conformance case on a store from a fresh harness, and fails naming each case
 /// that failed.
 pub(crate) fn run<H: Harness>(mut fresh: impl FnMut() -> H) {
-    let cases: [Case<H>; 18] = [
+    let cases: [Case<H>; 19] = [
         ("reads_what_was_committed", reads_what_was_committed),
         ("a_put_replaces_the_value", a_put_replaces_the_value),
         ("a_delete_removes_its_key", a_delete_removes_its_key),
+        (
+            "a_range_delete_removes_keys_from_start_to_end",
+            a_range_delete_removes_keys_from_start_to_end,
+        ),
         (
             "every_table_keeps_its_own_entries",
             every_table_keeps_its_own_entries,
@@ -205,6 +209,69 @@ fn a_delete_removes_its_key<H: Harness>(harness: &mut H) {
         dump(&store.begin_read().unwrap(), Table::Nodes),
         entries(&[(b"b", b"3")])
     );
+}
+
+fn a_range_delete_removes_keys_from_start_to_end<H: Harness>(harness: &mut H) {
+    let store = harness.open();
+    let all: [(&[u8], &[u8]); 6] = [
+        (b"a", b"1"),
+        (b"b", b"2"),
+        (b"ba", b"3"),
+        (b"bb", b"4"),
+        (b"c", b"5"),
+        (b"\xFF", b"6"),
+    ];
+    put_all(&store, Table::NodeColumns, &all);
+    put_all(&store, Table::NodeChunks, &all);
+    let mut write = store.begin_write().unwrap();
+    write.delete_range(Table::NodeColumns, b"c", b"b").unwrap();
+    write.delete_range(Table::NodeColumns, b"b", b"b").unwrap();
+    write.delete_range(Table::NodeColumns, b"d", b"e").unwrap();
+    assert_eq!(
+        dump(&write, Table::NodeColumns),
+        entries(&all),
+        "an empty or reversed range deletes nothing"
+    );
+    write.delete_range(Table::NodeColumns, b"b", b"bb").unwrap();
+    assert_eq!(
+        dump(&write, Table::NodeColumns),
+        entries(&[(b"a", b"1"), (b"bb", b"4"), (b"c", b"5"), (b"\xFF", b"6")]),
+        "the write sees its own range delete"
+    );
+    write.put(Table::NodeColumns, b"b", b"7").unwrap();
+    write.commit().unwrap();
+    let read = store.begin_read().unwrap();
+    assert_eq!(
+        dump(&read, Table::NodeColumns),
+        entries(&[
+            (b"a", b"1"),
+            (b"b", b"7"),
+            (b"bb", b"4"),
+            (b"c", b"5"),
+            (b"\xFF", b"6")
+        ])
+    );
+    assert_eq!(
+        dump(&read, Table::NodeChunks),
+        entries(&all),
+        "other tables keep theirs"
+    );
+    drop(read);
+    let mut write = store.begin_write().unwrap();
+    write
+        .delete_range(Table::NodeColumns, b"", b"\xFF\xFF")
+        .unwrap();
+    write.rollback().unwrap();
+    assert_eq!(
+        dump(&store.begin_read().unwrap(), Table::NodeColumns).len(),
+        5
+    );
+    let mut write = store.begin_write().unwrap();
+    write
+        .delete_range(Table::NodeColumns, b"", b"\xFF\xFF")
+        .unwrap();
+    write.commit().unwrap();
+    assert!(dump(&store.begin_read().unwrap(), Table::NodeColumns).is_empty());
 }
 
 fn every_table_keeps_its_own_entries<H: Harness>(harness: &mut H) {

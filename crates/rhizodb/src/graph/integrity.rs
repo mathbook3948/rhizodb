@@ -37,6 +37,7 @@ use super::meta::LabelSetId;
 use super::meta::MetaBytes;
 use super::meta::MetaEdit;
 use super::meta::Part;
+use super::properties::ColumnWrite;
 use super::records::Properties;
 use super::tokenize;
 
@@ -448,11 +449,25 @@ impl<T: ReadTransaction> GraphTx<T> {
             .into_iter()
             .collect();
         for (id, edit) in &self.columns {
-            for (key, value) in self.column_writes(*id, edit.clone())? {
-                match value {
-                    Some(value) => entries.insert(key.to_vec(), value),
-                    None => entries.remove(key.as_slice()),
-                };
+            for write in self.column_writes(*id, edit.clone())? {
+                match write {
+                    ColumnWrite::Put(key, value) => {
+                        entries.insert(key.to_vec(), value);
+                    }
+                    ColumnWrite::Delete(key) => {
+                        entries.remove(key.as_slice());
+                    }
+                    ColumnWrite::DeleteDeltas((group, token)) => {
+                        let (start, end) = columns::delta_range(group, token);
+                        let doomed: Vec<Vec<u8>> = entries
+                            .range(start.to_vec()..end.to_vec())
+                            .map(|(key, _)| key.clone())
+                            .collect();
+                        for key in doomed {
+                            entries.remove(&key);
+                        }
+                    }
+                }
             }
         }
         let mut stored: BTreeMap<columns::ColumnId, StoredGroup> = BTreeMap::new();

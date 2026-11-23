@@ -182,6 +182,10 @@ pub(crate) trait WriteTransaction: ReadTransaction {
 
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError>;
 
+    /// Deletes every key from `start`, inclusive, to `end`, exclusive. An empty or reversed range
+    /// deletes nothing.
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError>;
+
     fn commit(self) -> Result<(), StorageError>;
 
     fn rollback(self) -> Result<(), StorageError>;

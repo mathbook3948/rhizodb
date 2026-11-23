@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use crate::value::DecodeError;
 use crate::value::PropertyValue;
@@ -62,6 +61,11 @@ pub(crate) fn delta_key(group: u64, token: Token<PropertyKey>, slot: usize) -> [
 }
 
 /// The prefix of every entry of one column.
+/// The start, inclusive, and the end, exclusive, of the keys of every delta of a column.
+pub(crate) fn delta_range(group: u64, token: Token<PropertyKey>) -> ([u8; KEY], [u8; KEY]) {
+    (key(group, token, 1), key(group, token, SLOTS as u32 + 1))
+}
+
 pub(crate) fn column_prefix(group: u64, token: Token<PropertyKey>) -> [u8; 12] {
     let mut prefix = [0u8; 12];
     prefix.copy_from_slice(&chunk_key(group, token)[..12]);
@@ -712,12 +716,7 @@ pub(crate) fn encode_delta(
     bytes
 }
 
-/// The slot and value of the delta stored under `key`, which must name a delta, checked against
-/// its checksum.
-pub(crate) fn parse_delta(
-    key: &[u8],
-    bytes: &[u8],
-) -> Result<(usize, Option<PropertyValue>), GraphError> {
+fn checked_delta<'a>(key: &[u8], bytes: &'a [u8]) -> Result<(usize, Option<&'a [u8]>), GraphError> {
     let (_, _, Part::Delta(slot)) = parse_key(key)? else {
         return Err(GraphError::Corrupt("a property column key names no delta"));
     };
@@ -731,28 +730,48 @@ pub(crate) fn parse_delta(
     }
     match bytes[0] {
         ABSENT if body == 1 => Ok((slot, None)),
-        PRESENT => {
-            let mut reader = Reader::new(&bytes[1..body]);
-            let value = reader.value()?;
-            reader.finish()?;
-            Ok((slot, Some(value)))
-        }
+        PRESENT if body > 1 => Ok((slot, Some(&bytes[1..body]))),
+        PRESENT => Err(DecodeError::UnexpectedEnd.into()),
         _ => Err(GraphError::Corrupt(
             "a property column delta holds no slot state",
         )),
     }
 }
 
-/// One column in a write transaction: the head of its stored chunk, the slots the stored
-/// deltas and this transaction changed with their values now, and what commit needs to store
-/// the column as a rewritten chunk or as deltas beside the stored one.
+/// The slot and value of the delta stored under `key`, which must name a delta, checked against
+/// its checksum.
+pub(crate) fn parse_delta(
+    key: &[u8],
+    bytes: &[u8],
+) -> Result<(usize, Option<PropertyValue>), GraphError> {
+    let (slot, value) = checked_delta(key, bytes)?;
+    let value = value
+        .map(|value| {
+            let mut reader = Reader::new(value);
+            let value = reader.value()?;
+            reader.finish()?;
+            Ok::<PropertyValue, GraphError>(value)
+        })
+        .transpose()?;
+    Ok((slot, value))
+}
+
+/// The slot of the delta stored under `key`, and whether the slot holds a value, checked against
+/// the delta's checksum without decoding the value.
+pub(crate) fn delta_state(key: &[u8], bytes: &[u8]) -> Result<(usize, bool), GraphError> {
+    checked_delta(key, bytes).map(|(slot, value)| (slot, value.is_some()))
+}
+
+/// One column in a write transaction: the head of its stored chunk, the slots of its stored
+/// deltas with whether each holds a value, the slots this transaction changed with their values
+/// now, and what commit needs to store the column as a rewritten chunk or as deltas beside the
+/// stored one. A slot the transaction did not change reads as stored.
 #[derive(Clone, Debug)]
 pub(crate) struct ColumnEdit {
     stored: Option<StoredHead>,
     present: usize,
-    stored_deltas: BTreeSet<usize>,
+    stored_deltas: Vec<(usize, bool)>,
     current: BTreeMap<usize, Option<PropertyValue>>,
-    touched: BTreeSet<usize>,
     fresh: usize,
     rewrite: bool,
 }
@@ -760,25 +779,27 @@ pub(crate) struct ColumnEdit {
 /// What commit writes for one edited column.
 #[derive(Debug)]
 pub(crate) enum ColumnFlush {
-    /// Store the column as a chunk of its stored values with `values` applied, or delete its
-    /// chunk when no value is left, and delete the deltas at `stale`.
+    /// Store the column as a chunk of its stored values, with its stored deltas and then
+    /// `values` applied, or delete its chunk when no value is left, and delete the deltas at
+    /// `stale`.
     Rewrite {
         values: BTreeMap<usize, Option<PropertyValue>>,
-        stale: BTreeSet<usize>,
+        stale: Vec<usize>,
     },
     /// Keep the chunk. Each touched slot, with whether the chunk holds a value there, gets a
     /// delta, or loses its stored one when its value is the chunk's again.
     Deltas {
         touched: Vec<(usize, bool, Option<PropertyValue>)>,
-        stored: BTreeSet<usize>,
+        stored: Vec<usize>,
     },
 }
 
 impl ColumnEdit {
-    /// The column as stored: the head of its chunk, if any, and its deltas, which need a chunk.
+    /// The column as stored: the head of its chunk, if any, and the slots of its deltas with
+    /// whether each holds a value. Deltas need a chunk.
     pub(crate) fn load(
         stored: Option<StoredHead>,
-        deltas: Vec<(usize, Option<PropertyValue>)>,
+        mut deltas: Vec<(usize, bool)>,
     ) -> Result<Self, GraphError> {
         let Some(head) = stored else {
             if !deltas.is_empty() {
@@ -787,40 +808,47 @@ impl ColumnEdit {
             return Ok(Self {
                 stored: None,
                 present: 0,
-                stored_deltas: BTreeSet::new(),
+                stored_deltas: Vec::new(),
                 current: BTreeMap::new(),
-                touched: BTreeSet::new(),
                 fresh: 0,
                 rewrite: true,
             });
         };
+        deltas.sort_unstable_by_key(|(slot, _)| *slot);
+        if deltas.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(GraphError::Corrupt(
+                "a property column holds two deltas for one slot",
+            ));
+        }
         let mut present = head.count;
-        let mut stored_deltas = BTreeSet::new();
-        let mut current = BTreeMap::new();
-        for (slot, value) in deltas {
-            present = (present + usize::from(value.is_some()))
-                .checked_sub(usize::from(head.has(slot)))
+        for (slot, holds) in &deltas {
+            present = (present + usize::from(*holds))
+                .checked_sub(usize::from(head.has(*slot)))
                 .ok_or(GraphError::Corrupt("a property column counts below zero"))?;
-            stored_deltas.insert(slot);
-            current.insert(slot, value);
         }
         Ok(Self {
             stored: Some(head),
             present,
-            stored_deltas,
-            current,
-            touched: BTreeSet::new(),
+            stored_deltas: deltas,
+            current: BTreeMap::new(),
             fresh: 0,
             rewrite: false,
         })
     }
 
-    /// The slot's value as the transaction sees it, when it differs from the stored chunk's
-    /// or the chunk holds none there: `Some(None)` for no value, `None` to read the chunk.
+    fn stored_delta(&self, slot: usize) -> Option<bool> {
+        self.stored_deltas
+            .binary_search_by_key(&slot, |(held, _)| *held)
+            .ok()
+            .map(|index| self.stored_deltas[index].1)
+    }
+
+    /// The slot's value as the transaction sees it, when the transaction changed it or the
+    /// column stores none there: `Some(None)` for no value, `None` to read the stored column.
     pub(crate) fn current(&self, slot: usize) -> Option<Option<&PropertyValue>> {
         match self.current.get(&slot) {
             Some(value) => Some(value.as_ref()),
-            None if !self.chunk_has(slot) => Some(None),
+            None if self.stored_delta(slot).is_none() && !self.chunk_has(slot) => Some(None),
             None => None,
         }
     }
@@ -832,7 +860,9 @@ impl ColumnEdit {
     fn has(&self, slot: usize) -> bool {
         match self.current.get(&slot) {
             Some(value) => value.is_some(),
-            None => self.chunk_has(slot),
+            None => self
+                .stored_delta(slot)
+                .unwrap_or_else(|| self.chunk_has(slot)),
         }
     }
 
@@ -842,8 +872,8 @@ impl ColumnEdit {
         let had = self.has(slot);
         self.present =
             (self.present + usize::from(value.is_some())).saturating_sub(usize::from(had));
-        if !self.rewrite && self.touched.insert(slot) {
-            if !self.stored_deltas.contains(&slot) {
+        if !self.rewrite && !self.current.contains_key(&slot) {
+            if self.stored_delta(slot).is_none() {
                 self.fresh += 1;
             }
             self.rewrite = self.stored_deltas.len() + self.fresh > MAX_DELTAS;
@@ -852,24 +882,23 @@ impl ColumnEdit {
     }
 
     pub(crate) fn flush(self) -> ColumnFlush {
+        let stored = self.stored_deltas.iter().map(|(slot, _)| *slot).collect();
         if self.rewrite || self.stored.is_none() || self.present == 0 {
             return ColumnFlush::Rewrite {
                 values: self.current,
-                stale: self.stored_deltas,
+                stale: stored,
             };
         }
+        let head = self.stored;
         let touched = self
-            .touched
-            .iter()
-            .map(|slot| {
-                let value = self.current.get(slot).cloned().flatten();
-                (*slot, self.chunk_has(*slot), value)
+            .current
+            .into_iter()
+            .map(|(slot, value)| {
+                let had = head.as_ref().is_some_and(|head| head.has(slot));
+                (slot, had, value)
             })
             .collect();
-        ColumnFlush::Deltas {
-            touched,
-            stored: self.stored_deltas,
-        }
+        ColumnFlush::Deltas { touched, stored }
     }
 }
 

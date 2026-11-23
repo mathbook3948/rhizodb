@@ -50,6 +50,8 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A query reads only the columns of the properties it reads.
 - A commit that changes a few slots of a column writes one small delta per changed slot beside the chunk, holding the slot's value now.
 - A column keeps at most 64 deltas, and a commit that would leave more rewrites the chunk and deletes them.
+- A write that changes a column reads only the state of each stored delta, and decodes the stored deltas' values only to rewrite the chunk.
+- A rewrite deletes all of a column's deltas with one range delete.
 - A delta whose value is the chunk's value again is deleted, with values compared bit for bit, so `-0.0` and `0.0` differ.
 - A property column chunk keeps one checksum over its head and bitmap and one over each block of 64 values, and a varying block's checksum covers the end of the value before it.
 - A property column chunk holds its group and key inside its head checksum, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
@@ -157,6 +159,10 @@ proptest! {
         let bytes = encode_delta(GROUP, token(), slot, value.as_ref().map(Cell::of));
         let (read_slot, read) = parse_delta(&delta_key(GROUP, token(), slot), &bytes).unwrap();
         prop_assert_eq!(read_slot, slot);
+        prop_assert_eq!(
+            delta_state(&delta_key(GROUP, token(), slot), &bytes).unwrap(),
+            (slot, value.is_some())
+        );
         match (&read, &value) {
             (Some(read), Some(value)) => prop_assert!(same_bits(read, value)),
             (None, None) => {}
@@ -550,20 +556,28 @@ fn a_changed_or_cut_delta_or_one_under_another_key_fails_its_check() {
                     result.as_ref().is_err_and(is_corruption),
                     "{value:?} byte {at}"
                 );
+                let state = delta_state(&key, &changed);
+                assert!(
+                    state.as_ref().is_err_and(is_corruption),
+                    "{value:?} byte {at}"
+                );
             }
         }
         for cut in 0..bytes.len() {
             assert!(parse_delta(&key, &bytes[..cut]).is_err_and(|error| is_corruption(&error)));
+            assert!(delta_state(&key, &bytes[..cut]).is_err_and(|error| is_corruption(&error)));
         }
         let mut padded = bytes.clone();
         padded.push(0);
         assert!(parse_delta(&key, &padded).is_err_and(|error| is_corruption(&error)));
+        assert!(delta_state(&key, &padded).is_err_and(|error| is_corruption(&error)));
         for other in [
             delta_key(GROUP, token(), 18),
             delta_key(GROUP, Token::new(8), 17),
             delta_key(GROUP + 1, token(), 17),
         ] {
             assert!(parse_delta(&other, &bytes).is_err_and(|error| is_corruption(&error)));
+            assert!(delta_state(&other, &bytes).is_err_and(|error| is_corruption(&error)));
         }
         assert!(
             parse_delta(&chunk_key(GROUP, token()), &bytes)
@@ -584,13 +598,25 @@ fn a_resealed_delta_with_an_unknown_state_or_trailing_bytes_fails_as_corruption(
     PropertyValue::Integer(3).encode_into(&mut tagged);
     let mut trailing = tagged.clone();
     trailing.push(0);
-    for body in [vec![2], vec![ABSENT, 0], vec![PRESENT], trailing] {
+    for body in [vec![2], vec![ABSENT, 0], vec![PRESENT], trailing.clone()] {
         let result = parse_delta(&key, &seal(&body));
         assert!(
             result.as_ref().is_err_and(is_corruption),
             "{body:?}: {result:?}"
         );
     }
+    for body in [vec![2], vec![ABSENT, 0], vec![PRESENT]] {
+        let result = delta_state(&key, &seal(&body));
+        assert!(
+            result.as_ref().is_err_and(is_corruption),
+            "{body:?}: {result:?}"
+        );
+    }
+    assert_eq!(
+        delta_state(&key, &seal(&trailing)).unwrap(),
+        (2, true),
+        "the state alone leaves the value to the read that decodes it"
+    );
     assert_eq!(
         parse_delta(&key, &seal(&tagged)).unwrap().1,
         Some(PropertyValue::Integer(3))
@@ -640,8 +666,7 @@ fn integer(value: i64) -> Option<PropertyValue> {
 #[test]
 fn an_edit_writes_deltas_until_the_column_would_keep_more_than_the_limit() {
     for stored in [0, 1, MAX_DELTAS - 1, MAX_DELTAS] {
-        let deltas: Vec<(usize, Option<PropertyValue>)> =
-            (0..stored).map(|slot| (1000 + slot, integer(1))).collect();
+        let deltas: Vec<(usize, bool)> = (0..stored).map(|slot| (1000 + slot, true)).collect();
         for fresh in [1, MAX_DELTAS - stored, MAX_DELTAS - stored + 1] {
             let mut edit = ColumnEdit::load(Some(stored_head(0..200)), deltas.clone()).unwrap();
             for slot in 0..fresh {
@@ -656,7 +681,7 @@ fn an_edit_writes_deltas_until_the_column_would_keep_more_than_the_limit() {
                 ColumnFlush::Rewrite { values, stale } => {
                     assert!(rewrite, "{stored} stored and {fresh} fresh rewrite");
                     assert_eq!(stale.len(), stored);
-                    assert_eq!(values.len(), stored + fresh);
+                    assert_eq!(values.len(), fresh + usize::from(stored > 0));
                 }
                 ColumnFlush::Deltas {
                     touched,
@@ -679,29 +704,51 @@ fn an_edit_of_a_column_without_a_chunk_or_left_empty_rewrites_it() {
     assert_eq!(fresh.current(4), Some(Some(&PropertyValue::Integer(1))));
     assert_eq!(fresh.current(5), Some(None));
     assert!(matches!(fresh.flush(), ColumnFlush::Rewrite { .. }));
-    let mut emptied = ColumnEdit::load(Some(stored_head(0..2)), vec![(5, integer(9))]).unwrap();
+    let mut emptied = ColumnEdit::load(Some(stored_head(0..2)), vec![(5, true)]).unwrap();
     for slot in [0, 1, 5] {
         emptied.set(slot, None);
     }
     match emptied.flush() {
         ColumnFlush::Rewrite { values, stale } => {
             assert!(values.values().all(Option::is_none));
-            assert_eq!(stale, [5].into());
+            assert_eq!(stale, vec![5]);
         }
         other => panic!("an emptied column keeps {other:?}"),
     }
-    let error = ColumnEdit::load(None, vec![(1, integer(1))]).unwrap_err();
+    let error = ColumnEdit::load(None, vec![(1, true)]).unwrap_err();
+    assert!(is_corruption(&error));
+    let error = ColumnEdit::load(Some(stored_head(0..2)), vec![(1, true), (1, false)]).unwrap_err();
     assert!(is_corruption(&error));
 }
 
 #[test]
-fn an_edit_reads_its_own_values_then_the_deltas_then_the_chunk() {
-    let mut edit =
-        ColumnEdit::load(Some(stored_head(0..3)), vec![(1, None), (7, integer(70))]).unwrap();
+fn an_edit_counts_the_values_its_stored_deltas_hold_and_lack() {
+    let deltas = vec![(9, true), (1, false), (5, true)];
+    let mut edit = ColumnEdit::load(Some(stored_head(0..2)), deltas.clone()).unwrap();
+    for slot in [1, 0, 5] {
+        edit.set(slot, None);
+    }
+    assert!(
+        matches!(edit.flush(), ColumnFlush::Deltas { .. }),
+        "slot 9 still holds a value, and slot 1 held none to lose"
+    );
+    let mut edit = ColumnEdit::load(Some(stored_head(0..2)), deltas).unwrap();
+    for slot in [0, 5, 9] {
+        edit.set(slot, None);
+    }
+    match edit.flush() {
+        ColumnFlush::Rewrite { stale, .. } => assert_eq!(stale, vec![1, 5, 9]),
+        other => panic!("an emptied column keeps {other:?}"),
+    }
+}
+
+#[test]
+fn an_edit_reads_its_own_values_and_leaves_stored_ones_to_the_stored_column() {
+    let mut edit = ColumnEdit::load(Some(stored_head(0..3)), vec![(1, false), (7, true)]).unwrap();
     assert_eq!(edit.current(0), None, "the chunk holds slot 0");
-    assert_eq!(edit.current(1), Some(None));
-    assert_eq!(edit.current(7), Some(Some(&PropertyValue::Integer(70))));
-    assert_eq!(edit.current(8), Some(None));
+    assert_eq!(edit.current(1), None, "a delta holds slot 1");
+    assert_eq!(edit.current(7), None, "a delta holds slot 7");
+    assert_eq!(edit.current(8), Some(None), "nothing stored holds slot 8");
     edit.set(0, None);
     edit.set(8, integer(80));
     assert_eq!(edit.current(0), Some(None));

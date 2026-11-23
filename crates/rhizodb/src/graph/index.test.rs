@@ -734,6 +734,11 @@ impl WriteTransaction for CountingWrite {
         self.inner.delete(table, key)
     }
 
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete_range(table, start, end)
+    }
+
     fn commit(self) -> Result<(), StorageError> {
         self.inner.commit()
     }

@@ -28,6 +28,11 @@ pub(crate) enum Op {
         table: usize,
         key: Vec<u8>,
     },
+    DeleteRange {
+        table: usize,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    },
     Commit,
     Rollback,
     DropWrite,
@@ -127,6 +132,11 @@ fn op() -> impl Strategy<Value = Op> {
             length,
         }),
         2 => (table(), key()).prop_map(|(table, key)| Op::Delete { table, key }),
+        1 => (table(), key(), key()).prop_map(|(table, start, end)| Op::DeleteRange {
+            table,
+            start,
+            end,
+        }),
         2 => Just(Op::Commit),
         1 => Just(Op::Rollback),
         1 => Just(Op::DropWrite),
@@ -210,6 +220,17 @@ impl Model {
                     if let Some(writer) = &mut writer {
                         writer.transaction.delete(TABLES[*table], key).unwrap();
                         writer.pending.remove(&(*table, key.clone()));
+                    }
+                }
+                Op::DeleteRange { table, start, end } => {
+                    if let Some(writer) = &mut writer {
+                        writer
+                            .transaction
+                            .delete_range(TABLES[*table], start, end)
+                            .unwrap();
+                        writer
+                            .pending
+                            .retain(|(held, key), _| *held != *table || key < start || key >= end);
                     }
                 }
                 Op::Commit => {

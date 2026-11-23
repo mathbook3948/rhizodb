@@ -553,6 +553,13 @@ impl WriteTransaction for RedbWrite {
         self.with_table_mut(table, |table| table.remove(key).map(drop))
     }
 
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        if start >= end {
+            return Ok(());
+        }
+        self.with_table_mut(table, |table| table.retain_in(start..end, |_, _| false))
+    }
+
     fn commit(self) -> Result<(), StorageError> {
         self.cell
             .into_owner()

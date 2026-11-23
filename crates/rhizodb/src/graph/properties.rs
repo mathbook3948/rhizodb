@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::storage::ReadTransaction;
@@ -44,8 +45,15 @@ impl From<GraphError> for Visit {
 
 type StoredColumn = (Option<Column>, Vec<(usize, Option<PropertyValue>)>);
 
-/// A write to the column table: the key and the value, or `None` to delete the key.
-pub(crate) type ColumnWrite = ([u8; 16], Option<Vec<u8>>);
+/// A write to the column table.
+pub(crate) enum ColumnWrite {
+    /// Stores the value under the key.
+    Put([u8; 16], Vec<u8>),
+    /// Deletes the key.
+    Delete([u8; 16]),
+    /// Deletes every delta of the column.
+    DeleteDeltas(ColumnId),
+}
 
 impl<T: ReadTransaction> GraphTx<T> {
     fn load_column(&self, (group, token): ColumnId) -> Result<StoredColumn, GraphError> {
@@ -231,6 +239,23 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut writes = Vec::new();
         match edit.flush() {
             ColumnFlush::Rewrite { values, stale } => {
+                let mut changes = BTreeMap::new();
+                if !stale.is_empty() {
+                    self.transaction.visit_prefix(
+                        Table::NodeColumns,
+                        &columns::column_prefix(group, token),
+                        |key, value| {
+                            if let Part::Delta(slot) = columns::parse_key(key)?.2
+                                && !values.contains_key(&slot)
+                            {
+                                let (slot, value) = columns::parse_delta(key, value)?;
+                                changes.insert(slot, value);
+                            }
+                            Ok::<(), GraphError>(())
+                        },
+                    )?;
+                }
+                changes.extend(values);
                 let rewritten = self
                     .transaction
                     .get_with(Table::NodeColumns, &key, |bytes| {
@@ -239,20 +264,24 @@ impl<T: ReadTransaction> GraphTx<T> {
                         columns::encode_chunk(
                             group,
                             token,
-                            &columns::merged(chunk.cells(), &values)?,
+                            &columns::merged(chunk.cells(), &changes)?,
                         )
                     })?;
                 let chunk = match rewritten {
                     Some(chunk) => chunk,
-                    None => columns::encode_chunk(
+                    None if stale.is_empty() => columns::encode_chunk(
                         group,
                         token,
-                        &columns::merged(std::iter::empty(), &values)?,
+                        &columns::merged(std::iter::empty(), &changes)?,
                     )?,
+                    None => return Err(GraphError::Corrupt("a property column lost its chunk")),
                 };
-                writes.push((key, chunk));
-                for slot in stale {
-                    writes.push((columns::delta_key(group, token, slot), None));
+                writes.push(match chunk {
+                    Some(chunk) => ColumnWrite::Put(key, chunk),
+                    None => ColumnWrite::Delete(key),
+                });
+                if !stale.is_empty() {
+                    writes.push(ColumnWrite::DeleteDeltas((group, token)));
                 }
             }
             ColumnFlush::Deltas { touched, stored } => {
@@ -264,12 +293,13 @@ impl<T: ReadTransaction> GraphTx<T> {
                         };
                         let after = after.as_ref().map(Cell::of);
                         if !columns::same_state(before, after) {
-                            writes.push((
+                            writes.push(ColumnWrite::Put(
                                 columns::delta_key(group, token, *slot),
-                                Some(columns::encode_delta(group, token, *slot, after)),
+                                columns::encode_delta(group, token, *slot, after),
                             ));
-                        } else if stored.contains(slot) {
-                            writes.push((columns::delta_key(group, token, *slot), None));
+                        } else if stored.binary_search(slot).is_ok() {
+                            writes
+                                .push(ColumnWrite::Delete(columns::delta_key(group, token, *slot)));
                         }
                     }
                     Ok::<(), GraphError>(())
@@ -302,7 +332,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                     Part::Delta(_) if head.is_none() => {
                         return Err(GraphError::Corrupt("a property column delta has no chunk"));
                     }
-                    Part::Delta(_) => deltas.push(columns::parse_delta(key, value)?),
+                    Part::Delta(_) => deltas.push(columns::delta_state(key, value)?),
                 }
                 Ok::<(), GraphError>(())
             },
@@ -343,10 +373,19 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     pub(crate) fn flush_columns(&mut self) -> Result<(), GraphError> {
         for (id, edit) in std::mem::take(&mut self.columns) {
-            for (key, value) in self.column_writes(id, edit)? {
-                match value {
-                    Some(value) => self.transaction.put(Table::NodeColumns, &key, &value)?,
-                    None => self.transaction.delete(Table::NodeColumns, &key)?,
+            for write in self.column_writes(id, edit)? {
+                match write {
+                    ColumnWrite::Put(key, value) => {
+                        self.transaction.put(Table::NodeColumns, &key, &value)?;
+                    }
+                    ColumnWrite::Delete(key) => {
+                        self.transaction.delete(Table::NodeColumns, &key)?
+                    }
+                    ColumnWrite::DeleteDeltas((group, token)) => {
+                        let (start, end) = columns::delta_range(group, token);
+                        self.transaction
+                            .delete_range(Table::NodeColumns, &start, &end)?;
+                    }
                 }
             }
         }
