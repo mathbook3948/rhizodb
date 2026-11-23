@@ -64,6 +64,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
+- Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts.
 - A log that ends before the checkpoint's LSN is corruption.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a temporary name and renamed into place once its header is synced, and opening removes a leftover temporary file.
@@ -85,11 +86,12 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
 - A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
 - A key longer than 1 KiB lives in a run too, and its cell keeps its first 64 bytes after the page prefix, so most comparisons read no run.
-- An item larger than an extent is a chain of runs, each naming the next.
+- An item larger than an extent is a chain of runs, each naming the next run and the slot of its extent.
+- A chained item is placed from its last run to its first, so the first run of a catalog lies in an open extent the header names.
 - A run's header names its table, its role, and the first bytes, length, and hash of the key it belongs to.
 - Each page owns the runs of its long keys, which are rewritten with it, while a value's run stays until its entry changes.
 - A checkpoint packs cells greedily on the rightmost path of a table, so appends leave full pages, and spreads cells evenly elsewhere.
-- A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child.
+- A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child until the root has several children or is a leaf.
 - Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
 - The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
 - The extent table records each extent's slot, written and live blocks, state, and purpose, and keeps room for a replication scheme and the term that opened it.
@@ -99,7 +101,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Commits go on into a new memtable while a background checkpoint runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
-- A failed checkpoint poisons the engine and leaves the frozen memtable serving reads.
+- A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
+- A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
 - Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, less the tests that read redb files.
 - The engine is checked byte for byte against the redb backend over random operations.

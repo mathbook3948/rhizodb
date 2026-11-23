@@ -222,17 +222,30 @@ fn damage_before_the_last_segment_is_corruption() {
 }
 
 #[test]
-fn damage_in_the_last_segment_ends_the_log_there() {
+fn damage_to_the_last_record_ends_the_log_there() {
     let fs = filled(40);
     let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
-    damage(&fs, last, 1, 20);
+    let file = fs
+        .open(&segment_name(BASE, last), wal_block().unwrap())
+        .unwrap();
+    let blocks = file.block_count().unwrap();
+    damage(&fs, last, blocks - 1, 20);
     let (mut wal, seen) = lsns(&fs, &header(0, 1)).unwrap();
-    let survivors = seen.len() as u64;
-    assert!(survivors < 40);
-    assert_eq!(seen, (1..=survivors).collect::<Vec<_>>());
-    wal.append(record(survivors + 1), 0).unwrap();
+    assert_eq!(seen, (1..=39).collect::<Vec<_>>());
+    wal.append(record(40), 0).unwrap();
     let (_, again) = lsns(&fs, &header(0, 1)).unwrap();
-    assert_eq!(again, (1..=survivors + 1).collect::<Vec<_>>());
+    assert_eq!(again, (1..=40).collect::<Vec<_>>());
+}
+
+#[test]
+fn damage_before_a_synced_record_of_the_last_segment_is_corruption() {
+    for byte in [0, 20, 60] {
+        let fs = filled(40);
+        let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
+        damage(&fs, last, 1, byte);
+        let error = lsns(&fs, &header(0, 1)).expect_err("damage was not noticed");
+        assert!(error.is_corrupt(), "byte {byte}: {error}");
+    }
 }
 
 #[test]

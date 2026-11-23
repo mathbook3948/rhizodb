@@ -22,6 +22,7 @@ const SEED: u64 = 0x5EED;
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 struct Store {
+    fs: MemFs,
     pages: Arc<Pages<MemFile>>,
     extents: ExtentTable,
     roots: BTreeMap<TableId, Root>,
@@ -34,6 +35,7 @@ impl Store {
         let fs = MemFs::default();
         let file = fs.create("db", BlockSize::new(BLOCK).unwrap()).unwrap();
         Self {
+            fs,
             pages: Arc::new(Pages::new(file, SEED, 256)),
             extents: ExtentTable::default(),
             roots: BTreeMap::new(),
@@ -74,6 +76,10 @@ impl Store {
         self.extents = extents;
         self.header.checkpoint_lsn = lsn;
         self.header.generation = generation;
+    }
+
+    fn pages_file(&self) -> MemFile {
+        self.fs.open("db", BlockSize::new(BLOCK).unwrap()).unwrap()
     }
 
     fn tree(&self) -> Tree {
@@ -340,4 +346,76 @@ proptest! {
             store.verify(&model)?;
         }
     }
+}
+
+#[test]
+fn deleting_all_but_two_keys_of_a_deep_tree_leaves_no_chain_of_single_children() {
+    let mut store = Store::new();
+    let mut model = Model::new();
+    let key = |index: u64| [vec![b'p'; 900], index.to_be_bytes().to_vec()].concat();
+    let changes: BTreeMap<_, _> = (0..20_000)
+        .map(|index| (key(index), Some(b"v".to_vec())))
+        .collect();
+    apply(&mut model, &changes);
+    store.checkpoint(&changes);
+    assert!(store.roots[&TABLE].level >= 3);
+    let doomed: BTreeMap<_, _> = (0..19_998).map(|index| (key(index), None)).collect();
+    apply(&mut model, &doomed);
+    store.checkpoint(&doomed);
+    store.verify(&model).unwrap();
+    let root = store.roots[&TABLE];
+    if root.level > 0 {
+        let cached =
+            crate::engine::tree::fetch(&*store.pages, TABLE, root.page, root.level).unwrap();
+        assert!(
+            cached.0.cells > 1,
+            "the root {root:?} is a branch with one child"
+        );
+    }
+}
+
+#[test]
+fn a_catalog_longer_than_an_extent_reads_back_from_the_header_alone() {
+    let mut store = Store::new();
+    for index in 0..120_000u64 {
+        store.extents.entries.insert(
+            ExtentId(1_000_000 + index),
+            crate::engine::extent::ExtentEntry {
+                slot: 50_000_000 + index,
+                written: 0,
+                live: 0,
+                state: crate::engine::extent::ExtentState::Sealed,
+                purpose: crate::engine::extent::Purpose::Tree,
+                scheme: 0,
+                opened_term: 0,
+            },
+        );
+    }
+    store.extents.next_extent = ExtentId(2_000_000);
+    let changes: BTreeMap<_, _> = [(b"k".to_vec(), Some(b"v".to_vec()))].into_iter().collect();
+    store.checkpoint(&changes);
+    assert!(store.catalog.len() >= 2, "{:?}", store.catalog);
+    assert!(
+        store
+            .catalog
+            .iter()
+            .map(|run| run.at.extent())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            >= 2
+    );
+    let fresh: Arc<Pages<MemFile>> = Arc::new(Pages::new(store.pages_file(), SEED, 16));
+    for open in store.extents.open_extents().unwrap() {
+        if !open.id.is_none() {
+            fresh.place_extent(open.id, open.slot);
+        }
+    }
+    let source: Arc<dyn PageSource> = Arc::clone(&fresh) as Arc<dyn PageSource>;
+    let (catalog, runs) = load_catalog(&source, store.catalog[0], &|id, slot| {
+        fresh.place_extent(id, slot)
+    })
+    .unwrap();
+    assert_eq!(runs, store.catalog);
+    assert_eq!(catalog.extents, store.extents);
+    assert_eq!(catalog.roots, store.roots);
 }

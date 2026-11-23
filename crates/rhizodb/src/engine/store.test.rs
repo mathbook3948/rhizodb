@@ -423,3 +423,37 @@ fn range_deletes_stay_deleted_across_checkpoints_and_a_reopen() {
         );
     }
 }
+
+#[test]
+fn a_checkpoint_that_meets_a_damaged_page_reports_corruption_from_then_on() {
+    let fs = SimFs::new();
+    let options = EngineOptions {
+        memtable_limit: u64::MAX,
+        wal_limit: u64::MAX,
+        ..tiny(CheckpointMode::Inline)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    fill(&engine, 3);
+    engine.checkpoint().unwrap();
+    let extents = engine.extents();
+    drop(engine);
+    let tree_extent = extents
+        .entries
+        .values()
+        .find(|entry| entry.purpose == crate::engine::extent::Purpose::Tree)
+        .unwrap();
+    let file = fs.open(NAME, block_size().unwrap()).unwrap();
+    for block in 0..tree_extent.written {
+        let at = physical_block(tree_extent.slot, block).unwrap();
+        let mut bytes = vec![0; BLOCK];
+        file.read(at, &mut bytes).unwrap();
+        bytes[100] ^= 1;
+        file.write(at, &bytes).unwrap();
+    }
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    fill(&engine, 1);
+    let error = engine.checkpoint().unwrap_err();
+    assert!(error.is_corrupt(), "{error}");
+    let refused = engine.begin_write().map(drop).unwrap_err();
+    assert!(refused.is_corrupt(), "{refused}");
+}

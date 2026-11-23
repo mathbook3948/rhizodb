@@ -194,24 +194,27 @@ impl<F: FileSystem> Wal<F> {
                         at += padded(length);
                     }
                     Ok((record, _)) => {
-                        if last {
-                            break;
-                        }
                         return Err(EngineError::corrupt(format!(
                             "log segment {sequence} holds LSN {} where {lsn} was next",
                             record.lsn
                         )));
                     }
+                    Err(NotRecord::Refused(error)) => return Err(error),
+                    Err(NotRecord::End | NotRecord::Invalid(_)) if last => {
+                        if let Some(later) = sealed_record_after(seed, &bytes, at) {
+                            return Err(EngineError::corrupt(format!(
+                                "log segment {sequence} is damaged at LSN {lsn}, before a synced \
+                                 record at byte {later}"
+                            )));
+                        }
+                        break;
+                    }
                     Err(NotRecord::End) => break,
                     Err(NotRecord::Invalid(reason)) => {
-                        if last {
-                            break;
-                        }
                         return Err(EngineError::corrupt(format!(
                             "log segment {sequence} is damaged before its end: {reason}"
                         )));
                     }
-                    Err(NotRecord::Refused(error)) => return Err(error),
                 }
             }
             let used = (at / WAL_BLOCK) as u64;
@@ -365,6 +368,17 @@ impl<F: FileSystem> Wal<F> {
         fs.sync_names()?;
         Ok(())
     }
+}
+
+fn sealed_record_after(seed: u64, bytes: &[u8], at: usize) -> Option<usize> {
+    (at + WAL_BLOCK..bytes.len())
+        .step_by(WAL_BLOCK)
+        .find(|start| {
+            !matches!(
+                decode_record(seed, &bytes[*start..]),
+                Err(NotRecord::End | NotRecord::Invalid(_))
+            )
+        })
 }
 
 fn check_segment(

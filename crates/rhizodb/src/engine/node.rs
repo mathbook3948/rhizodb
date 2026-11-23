@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 
 use super::blob::BlobRef;
+use super::blob::RUN_PAYLOAD_LIMIT;
 use super::blob::RunRef;
+use super::blob::run_blocks;
 use super::codec::Reader;
 use super::codec::put_u16;
 use super::codec::put_u32;
@@ -209,7 +211,10 @@ fn read_blob(reader: &mut Reader<'_>) -> Result<BlobRef, EngineError> {
         length: reader.u64()?,
         checksum: reader.u64()?,
     };
-    if blob.first.at.is_null() || blob.first.blocks == 0 {
+    let first_payload = usize::try_from(blob.length)
+        .unwrap_or(usize::MAX)
+        .min(RUN_PAYLOAD_LIMIT);
+    if blob.first.at.is_null() || blob.first.blocks != run_blocks(first_payload) {
         return Err(reader.bad("run pointer"));
     }
     Ok(blob)

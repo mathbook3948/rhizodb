@@ -99,7 +99,12 @@ impl<B: BlockFile> Pages<B> {
     }
 
     fn physical(&self, at: BlockRef, blocks: u32) -> Result<u64, EngineError> {
-        if blocks == 0 || at.block() + blocks > EXTENT_BLOCKS {
+        if blocks == 0
+            || at
+                .block()
+                .checked_add(blocks)
+                .is_none_or(|end| end > EXTENT_BLOCKS)
+        {
             return Err(EngineError::corrupt(format!(
                 "{blocks} blocks at {at:?} cross the end of their extent"
             )));
@@ -157,9 +162,9 @@ impl<B: BlockFile> PageSource for Pages<B> {
     }
 
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError> {
+        let first = self.physical(run.at, run.blocks)?;
         let mut bytes = vec![0; run.blocks as usize * BLOCK];
-        self.file
-            .read(self.physical(run.at, run.blocks)?, &mut bytes)?;
+        self.file.read(first, &mut bytes)?;
         Ok(bytes)
     }
 

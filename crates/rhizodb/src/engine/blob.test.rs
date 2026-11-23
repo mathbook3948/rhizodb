@@ -22,6 +22,7 @@ fn spec<'a>(payload: &'a [u8], owner: &'a [u8], next: RunRef) -> RunSpec<'a> {
         generation: 2,
         total: payload.len() as u64 + 10,
         next,
+        next_slot: if next.at.is_null() { 0 } else { 11 },
         owner,
         payload,
     }
@@ -43,6 +44,7 @@ fn a_run_round_trips_with_its_owner() {
     assert_eq!(header.kind, PageKind::ValueRun);
     assert_eq!(decoded.payload, payload.as_slice());
     assert_eq!(decoded.next, next);
+    assert_eq!(decoded.next_slot, 11);
     assert_eq!(decoded.total, 9010);
     assert_eq!(decoded.owner_length, 100);
     assert_eq!(decoded.owner_head, &owner[..64]);

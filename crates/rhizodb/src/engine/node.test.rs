@@ -15,7 +15,9 @@ fn blob(index: usize, length: usize) -> BlobRef {
     BlobRef {
         first: RunRef {
             at: BlockRef::new(ExtentId(3), index as u32).unwrap(),
-            blocks: 1,
+            blocks: crate::engine::blob::run_blocks(
+                length.min(crate::engine::blob::RUN_PAYLOAD_LIMIT),
+            ),
             lsn: 4,
         },
         length: length as u64,

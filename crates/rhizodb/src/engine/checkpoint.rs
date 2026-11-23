@@ -17,6 +17,7 @@ use super::error::EngineError;
 use super::extent::ExtentTable;
 use super::extent::Purpose;
 use super::layout::BLOCK;
+use super::layout::ExtentId;
 use super::layout::TableId;
 use super::memtable::Bytes;
 use super::memtable::Slot;
@@ -233,14 +234,17 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         length: usize,
         lsn: u64,
     ) -> Result<Vec<RunRef>, EngineError> {
-        split_runs(length)
+        let mut runs = split_runs(length)
             .into_iter()
+            .rev()
             .map(|payload| {
                 let blocks = run_blocks(payload);
                 let at = extents.place(purpose, blocks, |id, slot| pages.place_extent(id, slot))?;
                 Ok(RunRef { at, blocks, lsn })
             })
-            .collect()
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        runs.reverse();
+        Ok(runs)
     }
 
     fn write_runs(
@@ -255,6 +259,17 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         let mut offset = 0;
         for (index, (run, size)) in runs.iter().zip(&sizes).enumerate() {
             let next = runs.get(index + 1).copied().unwrap_or_default();
+            let next_slot = if next.at.is_null() {
+                0
+            } else {
+                self.extents
+                    .entries
+                    .get(&next.at.extent())
+                    .map(|entry| entry.slot)
+                    .ok_or_else(|| {
+                        EngineError::corrupt("a run was planned outside the extent table")
+                    })?
+            };
             let encoded = RunSpec {
                 role,
                 table,
@@ -263,6 +278,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                 generation: self.generation,
                 total: bytes.len() as u64,
                 next,
+                next_slot,
                 owner,
                 payload: &bytes[offset..offset + size],
             }
@@ -626,6 +642,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                         Child::Fresh { content, .. } => self.write_node(table, level, &content)?,
                         Child::Existing { page, .. } => page,
                     };
+                    let (page, level) = self.collapse(table, page, level)?;
                     return Ok(Some(Root {
                         page,
                         level,
@@ -646,6 +663,26 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                 }
             }
         }
+    }
+
+    fn collapse(
+        &mut self,
+        table: TableId,
+        mut page: ChildRef,
+        mut level: u8,
+    ) -> Result<(ChildRef, u8), EngineError> {
+        while level > 0 {
+            let cached = fetch(self.source(), table, page, level)?;
+            let node = Node::parse(cached.0, &cached.1, table)?;
+            if node.cells() > 1 {
+                break;
+            }
+            let child = node.child(0)?;
+            self.extents.free(page.at, 1)?;
+            page = child;
+            level -= 1;
+        }
+        Ok((page, level))
     }
 
     /// Writes the catalog for `roots` and this checkpoint's extent table, and frees `previous`.
@@ -681,10 +718,13 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
     }
 }
 
-/// Reads the catalog a header points to, with the runs it lies in.
+/// Reads the catalog a header points to, with the runs it lies in. Its first run lies in an open
+/// extent the header names, and each run names the slot of the next, so `place` learns where every
+/// later run lies before the extent table is read.
 pub(crate) fn load_catalog(
     source: &Arc<dyn PageSource>,
     first: RunRef,
+    place: &dyn Fn(ExtentId, u64),
 ) -> Result<(Catalog, Vec<RunRef>), EngineError> {
     let mut payload = Vec::new();
     let mut runs = Vec::new();
@@ -705,8 +745,11 @@ pub(crate) fn load_catalog(
         run.blocks = run_blocks(length as usize);
         let bytes = source.run_bytes(run)?;
         let (_, decoded) = decode_run(source.seed(), &bytes, run, Role::Catalog)?;
-        if *total.get_or_insert(decoded.total) != decoded.total
-            || (payload.len() + decoded.payload.len()) as u64 > decoded.total
+        let total = *total.get_or_insert(decoded.total);
+        let most_runs = usize::try_from(total / RUN_PAYLOAD_LIMIT as u64 + 1).unwrap_or(usize::MAX);
+        if decoded.total != total
+            || (payload.len() + decoded.payload.len()) as u64 > total
+            || runs.len() >= most_runs
         {
             return Err(EngineError::corrupt(
                 "the catalog's runs disagree on its length",
@@ -717,6 +760,7 @@ pub(crate) fn load_catalog(
         if decoded.next.at.is_null() {
             break;
         }
+        place(decoded.next.at.extent(), decoded.next_slot);
         run = decoded.next;
     }
     if Some(payload.len() as u64) != total {

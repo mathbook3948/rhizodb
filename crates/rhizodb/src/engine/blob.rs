@@ -12,7 +12,7 @@ use super::page::PageHeader;
 use super::page::PageKind;
 
 /// The bytes of a run before its payload.
-pub(crate) const RUN_HEADER: usize = PAGE_HEADER + 109;
+pub(crate) const RUN_HEADER: usize = PAGE_HEADER + 117;
 
 /// The most payload one run holds: a whole extent less its header.
 pub(crate) const RUN_PAYLOAD_LIMIT: usize = EXTENT_BLOCKS as usize * BLOCK - RUN_HEADER;
@@ -76,6 +76,9 @@ pub(crate) struct BlobRef {
 pub(crate) struct Run<'a> {
     pub(crate) total: u64,
     pub(crate) next: RunRef,
+    /// The slot of the next run's extent, so a chain can be followed before the extent table is
+    /// read.
+    pub(crate) next_slot: u64,
     pub(crate) role: Role,
     pub(crate) owner_length: u32,
     pub(crate) owner_head: &'a [u8],
@@ -120,6 +123,7 @@ pub(crate) struct RunSpec<'a> {
     pub(crate) generation: u64,
     pub(crate) total: u64,
     pub(crate) next: RunRef,
+    pub(crate) next_slot: u64,
     pub(crate) owner: &'a [u8],
     pub(crate) payload: &'a [u8],
 }
@@ -140,11 +144,12 @@ impl RunSpec<'_> {
         put_u64(&mut out, self.next.at.raw());
         put_u32(&mut out, self.next.blocks);
         put_u64(&mut out, self.next.lsn);
+        put_u64(&mut out, self.next_slot);
         out.push(self.role.code());
         let (length, head, hash) = owner_of(self.owner);
         put_u32(&mut out, length);
         out.extend_from_slice(head);
-        out.resize(PAGE_HEADER + 37 + OWNER_HEAD, 0);
+        out.resize(PAGE_HEADER + 45 + OWNER_HEAD, 0);
         put_u64(&mut out, hash);
         out.resize(RUN_HEADER, 0);
         out.extend_from_slice(self.payload);
@@ -189,6 +194,7 @@ pub(crate) fn decode_run<'a>(
         blocks: reader.u32()?,
         lsn: reader.u64()?,
     };
+    let next_slot = reader.u64()?;
     let found_role = Role::from_code(reader.u8()?).ok_or_else(|| reader.bad("role"))?;
     let owner_length = reader.u32()?;
     let owner_head = reader.take(OWNER_HEAD)?;
@@ -197,7 +203,7 @@ pub(crate) fn decode_run<'a>(
     if found_role != role
         || run_blocks(payload_length) != run.blocks
         || owner_head[head_length..].iter().any(|byte| *byte != 0)
-        || (next.at.is_null() && (next.blocks, next.lsn) != (0, 0))
+        || (next.at.is_null() && (next.blocks, next.lsn, next_slot) != (0, 0, 0))
         || (!next.at.is_null() && (next.blocks == 0 || next.blocks > EXTENT_BLOCKS))
     {
         return Err(EngineError::corrupt(format!(
@@ -213,6 +219,7 @@ pub(crate) fn decode_run<'a>(
         Run {
             total,
             next,
+            next_slot,
             role,
             owner_length,
             owner_head: &owner_head[..head_length],

@@ -127,7 +127,12 @@ impl ExtentTable {
     /// Records that `blocks` blocks from `at` are no longer reachable.
     pub(crate) fn free(&mut self, at: BlockRef, blocks: u32) -> Result<(), EngineError> {
         let entry = self.entry_mut(at.extent())?;
-        if at.block() + blocks > entry.written || blocks > entry.live {
+        if at
+            .block()
+            .checked_add(blocks)
+            .is_none_or(|end| end > entry.written)
+            || blocks > entry.live
+        {
             return Err(EngineError::corrupt(format!(
                 "{blocks} blocks at {at:?} were freed but are not live"
             )));

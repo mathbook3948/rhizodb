@@ -157,6 +157,7 @@ struct Shared<F: FileSystem> {
     droppable: Mutex<Option<u64>>,
     running: Mutex<bool>,
     finished: Condvar,
+    failure: Mutex<Option<(bool, String)>>,
     poisoned: AtomicBool,
 }
 
@@ -281,7 +282,8 @@ impl<F: FileSystem + 'static> Engine<F> {
                 blocks: 1,
                 lsn: header.catalog_lsn,
             };
-            let (catalog, runs) = load_catalog(&source, first)?;
+            let (catalog, runs) =
+                load_catalog(&source, first, &|id, slot| pages.place_extent(id, slot))?;
             if catalog.extents.next_extent != header.next_extent {
                 return Err(EngineError::corrupt(
                     "the header and catalog disagree on extents",
@@ -371,6 +373,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             droppable: Mutex::new(None),
             running: Mutex::new(false),
             finished: Condvar::new(),
+            failure: Mutex::new(None),
             poisoned: AtomicBool::new(false),
         });
         let (jobs, worker) = match options.checkpoint {
@@ -415,7 +418,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     fn commit(&self, writer: &mut Writer<F>, staged: Staged) -> Result<(), EngineError> {
         let shared = &*self.shared;
         if shared.is_poisoned() {
-            return Err(EngineError::Poisoned);
+            return Err(shared.refusal());
         }
         if staged.ops.is_empty() {
             return Ok(());
@@ -431,7 +434,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         )?;
         let wal = writer.wal.as_mut().ok_or(EngineError::Poisoned)?;
         if let Err(error) = wal.append(record, hlc) {
-            shared.poison();
+            shared.poison_with(&error);
             return Err(error);
         }
         writer.last_lsn = lsn;
@@ -480,14 +483,14 @@ impl<F: FileSystem + 'static> Engine<F> {
         let mut writer = lock(&self.shared.writer);
         self.shared.wait_for_checkpoint();
         if self.shared.is_poisoned() {
-            return Err(EngineError::Poisoned);
+            return Err(self.shared.refusal());
         }
         if let Some(job) = self.shared.freeze(&mut writer) {
             self.shared.run_checkpoint(job, false);
         }
         self.shared.drop_segments(&mut writer);
         if self.shared.is_poisoned() {
-            return Err(EngineError::Poisoned);
+            return Err(self.shared.refusal());
         }
         Ok(())
     }
@@ -517,6 +520,20 @@ impl<F: FileSystem + 'static> Engine<F> {
 impl<F: FileSystem + 'static> Shared<F> {
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison_with(&self, error: &EngineError) {
+        lock(&self.failure).get_or_insert((error.is_corrupt(), error.to_string()));
+        self.poison();
+    }
+
+    fn refusal(&self) -> EngineError {
+        match &*lock(&self.failure) {
+            Some((true, cause)) => {
+                EngineError::corrupt(format!("an earlier checkpoint failed: {cause}"))
+            }
+            _ => EngineError::Poisoned,
+        }
     }
 
     fn poison(&self) {
@@ -586,7 +603,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                 drop(published);
                 *lock(&self.droppable) = Some(job.first_segment);
             }
-            Err(_) => self.poison(),
+            Err(error) => self.poison_with(&error),
         }
         finish.completed = true;
     }
@@ -732,7 +749,7 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
     fn begin_write(&self) -> Result<EngineWrite<'_, F>, StorageError> {
         let writer = lock(&self.shared.writer);
         if self.shared.is_poisoned() {
-            return Err(EngineError::Poisoned.into());
+            return Err(self.shared.refusal().into());
         }
         let view = lock(&self.shared.published).view.clone();
         Ok(EngineWrite {

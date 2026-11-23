@@ -95,7 +95,11 @@ impl Checker<'_> {
             .entries
             .get(&at.extent())
             .ok_or_else(|| problem(format!("{at:?} lies outside every extent")))?;
-        if at.block() + blocks > entry.written {
+        if at
+            .block()
+            .checked_add(blocks)
+            .is_none_or(|end| end > entry.written)
+        {
             return Err(problem(format!(
                 "{blocks} blocks at {at:?} reach past the extent's {} written blocks",
                 entry.written
