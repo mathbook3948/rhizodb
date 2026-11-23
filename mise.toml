@@ -30,9 +30,9 @@ run = [
 ]
 
 [tasks.storage-deep]
-description = "Run the storage, engine, node meta, and property column tests with 100 times the random cases that check runs, as the nightly workflow does"
+description = "Run the storage, engine, database crash, node meta, and property column tests with 100 times the random cases that check runs, as the nightly workflow does"
 env = { RHIZODB_TEST_SCALE = "100" }
-run = "cargo test --release --package rhizodb --lib -- storage:: engine:: graph::meta graph::node_meta graph::columns graph::upgrade"
+run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: graph::meta graph::node_meta graph::columns graph::upgrade"
 
 [tasks.random-deep]
 description = "Run the randomized integration tests (isolation history check, kill-and-reopen, model of random transactions, damaged files) with 100 times the cases that check runs"

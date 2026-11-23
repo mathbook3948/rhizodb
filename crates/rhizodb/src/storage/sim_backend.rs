@@ -1,4 +1,7 @@
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use redb::BackendError;
 use redb::StorageBackend;
@@ -20,6 +23,7 @@ const FILE: &str = "graph.redb";
 #[derive(Debug)]
 pub(crate) struct SimBackend {
     file: SimFile,
+    capacity: Option<Arc<AtomicU64>>,
 }
 
 fn sector() -> BlockSize {
@@ -48,7 +52,27 @@ impl SimBackend {
             }
             Err(error) => return Err(error),
         };
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            capacity: None,
+        })
+    }
+
+    /// Fails a write or a growth past the byte length that `capacity` holds with
+    /// [`io::ErrorKind::StorageFull`], as a full disk does, while reads keep working.
+    pub(crate) fn with_capacity(mut self, capacity: Arc<AtomicU64>) -> Self {
+        self.capacity = Some(capacity);
+        self
+    }
+
+    fn fits(&self, end: u64) -> io::Result<()> {
+        match &self.capacity {
+            Some(capacity) if end > capacity.load(Ordering::Relaxed) => Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "no space left on the simulated device",
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -72,6 +96,9 @@ impl StorageBackend for SimBackend {
                 io::Error::new(io::ErrorKind::InvalidInput, "length is not whole sectors").into(),
             );
         }
+        if self.capacity.is_some() && len > self.len()? {
+            self.fits(len)?;
+        }
         Ok(self.file.set_block_count(len / SECTOR_SIZE as u64)?)
     }
 
@@ -81,6 +108,7 @@ impl StorageBackend for SimBackend {
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let (first, covered) = sectors(offset, data.len())?;
+        self.fits(first * SECTOR_SIZE as u64 + covered as u64)?;
         let skip = (offset - first * SECTOR_SIZE as u64) as usize;
         if skip == 0 && covered == data.len() {
             return Ok(self.file.write(first, data)?);
@@ -100,4 +128,21 @@ impl StorageBackend for SimBackend {
 /// A redb database on `fs`.
 pub(crate) fn storage(fs: &SimFs) -> Result<RedbStorage, StorageError> {
     RedbStorage::with_backend(SimBackend::open(fs).map_err(StorageError::new)?)
+}
+
+/// The byte length of the database file on `fs`.
+pub(crate) fn length(fs: &SimFs) -> io::Result<u64> {
+    Ok(fs.open(FILE, sector())?.block_count()? * SECTOR_SIZE as u64)
+}
+
+/// A redb database on `fs` whose file cannot grow past the byte length `capacity` holds.
+pub(crate) fn storage_with_capacity(
+    fs: &SimFs,
+    capacity: Arc<AtomicU64>,
+) -> Result<RedbStorage, StorageError> {
+    RedbStorage::with_backend(
+        SimBackend::open(fs)
+            .map_err(StorageError::new)?
+            .with_capacity(capacity),
+    )
 }

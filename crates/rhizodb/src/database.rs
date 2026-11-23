@@ -234,3 +234,7 @@ impl Database {
         Ok(dropped)
     }
 }
+
+#[cfg(test)]
+#[path = "database_crash.test.rs"]
+mod crash_tests;
