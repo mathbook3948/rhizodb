@@ -8,7 +8,7 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 
 ## Decisions
 
-- redb handles disk storage.
+- redb handles disk storage until RhizoDB's own engine, decided in the storage engine doc, ships.
 - The storage layer sits behind a trait so it can be swapped.
 - Values are stored as bytes in a format RhizoDB defines, and the format carries a version.
 - Each format version can hold everything the older versions hold.
