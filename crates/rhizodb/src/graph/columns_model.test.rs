@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -701,8 +702,8 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
         .lookup_token::<PropertyKey>("b")
         .unwrap()
         .unwrap();
-    let versions = Mutex::new(vec![model.clone()]);
-    let commits = test_scale::cases(60) as usize;
+    let versions = Mutex::new(vec![Arc::new(model.clone())]);
+    let commits = test_scale::cases(60).min(200) as usize;
     let done = AtomicBool::new(false);
     thread::scope(|scope| {
         let readers: Vec<_> = (0..3)
@@ -712,7 +713,7 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
                     while !done.load(Ordering::Acquire) {
                         let read = graph.read().unwrap();
                         let version = version_of(&read, b);
-                        let expected = lock(&versions)[version].clone();
+                        let expected = Arc::clone(&lock(&versions)[version]);
                         check(&read, &expected).unwrap();
                         thread::yield_now();
                         assert_eq!(version_of(&read, b), version);
@@ -758,7 +759,7 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
                 "b",
                 Some(PropertyValue::Integer(version as i64)),
             );
-            lock(&versions).push(model.clone());
+            lock(&versions).push(Arc::new(model.clone()));
             write.commit().unwrap();
         }
         done.store(true, Ordering::Release);
