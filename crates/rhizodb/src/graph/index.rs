@@ -756,12 +756,14 @@ impl<T: ReadTransaction> GraphTx<T> {
             let clause_scores: BTreeMap<u64, f64> = match &clause {
                 Clause::Term(term) => {
                     let mut counts = BTreeMap::new();
-                    for (key, value) in self
-                        .transaction
-                        .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(id, term))?
-                    {
-                        counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
-                    }
+                    self.transaction.visit_prefix(
+                        Table::KeywordPostings,
+                        &keys::posting_prefix(id, term),
+                        |key, value| -> Result<(), GraphError> {
+                            counts.insert(keys::parse_posting_element(key)?, decode_counts(value)?);
+                            Ok(())
+                        },
+                    )?;
                     score(counts).collect()
                 }
                 Clause::Prefix(prefix) => {
@@ -774,17 +776,19 @@ impl<T: ReadTransaction> GraphTx<T> {
                             *held = held.max(value);
                         }
                     };
-                    for (key, value) in self
-                        .transaction
-                        .scan_prefix(Table::KeywordPostings, &keys::term_prefix(id, prefix))?
-                    {
-                        let term = keys::parse_posting_term(&key)?.as_bytes();
-                        if current.as_deref() != Some(term) {
-                            merge(std::mem::take(&mut counts));
-                            current = Some(term.to_vec());
-                        }
-                        counts.insert(keys::parse_posting_element(&key)?, decode_counts(&value)?);
-                    }
+                    self.transaction.visit_prefix(
+                        Table::KeywordPostings,
+                        &keys::term_prefix(id, prefix),
+                        |key, value| -> Result<(), GraphError> {
+                            let term = keys::parse_posting_term(key)?.as_bytes();
+                            if current.as_deref() != Some(term) {
+                                merge(std::mem::take(&mut counts));
+                                current = Some(term.to_vec());
+                            }
+                            counts.insert(keys::parse_posting_element(key)?, decode_counts(value)?);
+                            Ok(())
+                        },
+                    )?;
                     merge(counts);
                     best_scores
                 }
@@ -798,11 +802,16 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn postings(&self, index: u32, term: &str) -> Result<BTreeMap<u64, Posting>, GraphError> {
-        self.transaction
-            .scan_prefix(Table::KeywordPostings, &keys::posting_prefix(index, term))?
-            .into_iter()
-            .map(|(key, value)| Ok((keys::parse_posting_element(&key)?, decode_posting(&value)?)))
-            .collect()
+        let mut postings = BTreeMap::new();
+        self.transaction.visit_prefix(
+            Table::KeywordPostings,
+            &keys::posting_prefix(index, term),
+            |key, value| -> Result<(), GraphError> {
+                postings.insert(keys::parse_posting_element(key)?, decode_posting(value)?);
+                Ok(())
+            },
+        )?;
+        Ok(postings)
     }
 
     fn phrase_matches(
