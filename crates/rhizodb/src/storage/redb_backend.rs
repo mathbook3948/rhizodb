@@ -44,6 +44,14 @@ impl RedbStorage {
     }
 
     fn with_all_tables(database: Database) -> Result<Self, StorageError> {
+        let read = database.begin_read().map_err(StorageError::new)?;
+        let complete = Table::ALL
+            .into_iter()
+            .all(|table| read.open_table(definition(table)).is_ok());
+        drop(read);
+        if complete {
+            return Ok(Self { database });
+        }
         let transaction = database.begin_write().map_err(StorageError::new)?;
         for table in Table::ALL {
             transaction
