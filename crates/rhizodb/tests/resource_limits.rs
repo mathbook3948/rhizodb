@@ -186,9 +186,6 @@ fn variable_length_paths_over_a_chain_of_a_thousand_answer_on_a_small_stack() {
 }
 
 #[test]
-#[ignore = "bug: variable-length expansion recurses once per hop, so a match over a chain of 20000 \
-            relationships aborts the process with a stack overflow on a 2 MiB stack, and on a \
-            chain of 2000 in a debug build"]
 fn a_variable_length_path_over_a_long_chain_answers_without_a_stack_overflow() {
     let test = "a_variable_length_path_over_a_long_chain_answers_without_a_stack_overflow";
     if !isolated(test, CHILD_LIMIT) {
@@ -201,6 +198,30 @@ fn a_variable_length_path_over_a_long_chain_answers_without_a_stack_overflow() {
             single(&db, "MATCH (a:C {i: 0})-[:NEXT*]->(b) RETURN count(b)"),
             int(20_000)
         );
+        assert_eq!(
+            single(
+                &db,
+                "MATCH p = (:C {i: 20000})<-[:NEXT*15000..]-(b) RETURN sum(length(p))"
+            ),
+            int((15_000..=20_000).sum::<i64>())
+        );
+        assert_eq!(
+            single(
+                &db,
+                "MATCH (a:C {i: 0}) RETURN exists { (a)-[*19999..]->(b) WHERE b.i > 0 }"
+            ),
+            boolean(true)
+        );
+        let text = format!(
+            "MATCH (a:C {{i: 0}}){} RETURN count(*)",
+            "-->()".repeat(20_000)
+        );
+        assert_eq!(single(&db, &text), int(1));
+        let text = format!(
+            "MATCH (a:C {{i: 0}}){}, (b:C {{i: 20000}}) RETURN count(*)",
+            "-[*1]->()".repeat(20_000)
+        );
+        assert_eq!(single(&db, &text), int(1));
     });
 }
 

@@ -24,4 +24,5 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- A variable-length relationship over a long path, or a pattern of many steps, no longer overflows the stack and aborts the host process, because matching keeps its search on the heap.
 - A damaged database file on which redb panics fails with `ErrorKind::CorruptData` instead of ending the host process, and every later operation on that `Database` fails the same way until the file is opened again. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.

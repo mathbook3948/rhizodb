@@ -28,7 +28,6 @@ use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
 use super::plan::Slot;
-use super::plan::Step;
 
 /// Receives each complete match. Returning `false` stops the search.
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
@@ -52,6 +51,47 @@ struct Search<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     patterns: &'s [PatternPart],
     used: Vec<RelationshipId>,
+    trails: Vec<PathIds>,
+}
+
+#[derive(Debug)]
+enum Frame {
+    /// The start nodes of a pattern part not tried yet.
+    Part {
+        index: usize,
+        candidates: std::vec::IntoIter<NodeId>,
+        known: Known,
+    },
+    /// The relationships of a single-hop step not tried yet. `extended` is set while the trail
+    /// ends with the one tried last.
+    Hop {
+        index: usize,
+        step_index: usize,
+        adjacents: std::vec::IntoIter<Adjacent>,
+        extended: bool,
+    },
+    /// One node of a variable-length walk, which began where the trail had `base` relationships.
+    Walk {
+        index: usize,
+        step_index: usize,
+        hops: Hops,
+        base: usize,
+        node: NodeId,
+        state: WalkState,
+    },
+}
+
+#[derive(Debug)]
+enum WalkState {
+    /// The walk ending at the node is yet to be matched against the rest of the pattern.
+    Arriving,
+    /// The walk ending at the node was matched, and the walks through it are yet to be tried.
+    Arrived,
+    /// The relationships that extend the walk not tried yet.
+    Expanding {
+        adjacents: std::vec::IntoIter<Adjacent>,
+        extended: bool,
+    },
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
@@ -66,9 +106,16 @@ impl<T: ReadTransaction> Env<'_, T> {
             env: self,
             patterns,
             used: Vec::new(),
+            trails: vec![
+                PathIds {
+                    nodes: Vec::new(),
+                    relationships: Vec::new(),
+                };
+                patterns.len()
+            ],
         };
         let mut row = row.clone();
-        search.part(0, &mut row, emit)?;
+        search.run(&mut row, emit)?;
         Ok(())
     }
 
@@ -296,197 +343,314 @@ fn label_scan_decides(pattern: &NodePattern) -> bool {
 }
 
 impl<T: ReadTransaction> Search<'_, '_, T> {
-    fn part(&mut self, index: usize, row: &mut Row, emit: &mut Emit<'_>) -> Result<bool, Error> {
-        let patterns = self.patterns;
-        let Some(part) = patterns.get(index) else {
+    fn run(&mut self, row: &mut Row, emit: &mut Emit<'_>) -> Result<bool, Error> {
+        let mut frames = Vec::new();
+        if !self.begin_part(0, row, &mut frames, emit)? {
+            return Ok(false);
+        }
+        while let Some(frame) = frames.last_mut() {
+            let more = match frame {
+                Frame::Part {
+                    index,
+                    candidates,
+                    known,
+                } => {
+                    let (index, known) = (*index, *known);
+                    match candidates.next() {
+                        Some(id) => self.start(index, id, known, row, &mut frames, emit)?,
+                        None => {
+                            frames.pop();
+                            true
+                        }
+                    }
+                }
+                Frame::Hop {
+                    index,
+                    step_index,
+                    adjacents,
+                    extended,
+                } => {
+                    let (index, step_index) = (*index, *step_index);
+                    if std::mem::take(extended) {
+                        self.retract(index);
+                    }
+                    match self.next_hop(index, step_index, adjacents, row)? {
+                        Some(adjacent) => {
+                            *extended = true;
+                            self.extend(index, &adjacent);
+                            self.arrive(index, step_index, adjacent.other, row, &mut frames, emit)?
+                        }
+                        None => {
+                            frames.pop();
+                            true
+                        }
+                    }
+                }
+                Frame::Walk {
+                    index,
+                    step_index,
+                    hops,
+                    base,
+                    node,
+                    state,
+                } => {
+                    let (index, step_index, hops, base, node) =
+                        (*index, *step_index, *hops, *base, *node);
+                    let depth = self.trails[index].relationships.len() - base;
+                    match state {
+                        WalkState::Arriving => {
+                            *state = WalkState::Arrived;
+                            if (depth as u64) < hops.min {
+                                true
+                            } else {
+                                self.walk_end(
+                                    index,
+                                    step_index,
+                                    base,
+                                    node,
+                                    row,
+                                    &mut frames,
+                                    emit,
+                                )?
+                            }
+                        }
+                        WalkState::Arrived => {
+                            if hops.max.is_some_and(|max| depth as u64 >= max) {
+                                frames.pop();
+                            } else {
+                                let relationship =
+                                    &self.patterns[index].steps[step_index].relationship;
+                                *state = WalkState::Expanding {
+                                    adjacents: self.env.expand(node, relationship)?.into_iter(),
+                                    extended: false,
+                                };
+                            }
+                            true
+                        }
+                        WalkState::Expanding {
+                            adjacents,
+                            extended,
+                        } => {
+                            if std::mem::take(extended) {
+                                self.retract(index);
+                            }
+                            match self.next_walk(index, step_index, adjacents, row)? {
+                                Some(adjacent) => {
+                                    *extended = true;
+                                    self.extend(index, &adjacent);
+                                    frames.push(Frame::Walk {
+                                        index,
+                                        step_index,
+                                        hops,
+                                        base,
+                                        node: adjacent.other,
+                                        state: WalkState::Arriving,
+                                    });
+                                }
+                                None => {
+                                    frames.pop();
+                                }
+                            }
+                            true
+                        }
+                    }
+                }
+            };
+            if !more {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn begin_part(
+        &mut self,
+        index: usize,
+        row: &mut Row,
+        frames: &mut Vec<Frame>,
+        emit: &mut Emit<'_>,
+    ) -> Result<bool, Error> {
+        let Some(part) = self.patterns.get(index) else {
             return emit(row);
         };
         let (candidates, known) = self.env.start_candidates(part, row)?;
-        for id in candidates {
-            if !self.env.node_matches(id, &part.start, known, row)? {
-                continue;
-            }
-            set(row, part.start.slot, Datum::Node(id));
-            let mut trail = PathIds {
-                nodes: vec![id],
-                relationships: Vec::new(),
-            };
-            if !self.step(index, 0, id, row, &mut trail, emit)? {
-                return Ok(false);
-            }
-        }
+        frames.push(Frame::Part {
+            index,
+            candidates: candidates.into_iter(),
+            known,
+        });
         Ok(true)
     }
 
-    fn step(
+    fn start(
         &mut self,
         index: usize,
-        step_index: usize,
-        current: NodeId,
+        id: NodeId,
+        known: Known,
         row: &mut Row,
-        trail: &mut PathIds,
+        frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let patterns = self.patterns;
-        let part = &patterns[index];
-        let Some(step) = part.steps.get(step_index) else {
-            if let Some(path) = part.path {
-                set(row, path, Datum::Path(trail.clone()));
-            }
-            return self.part(index + 1, row, emit);
-        };
-        match step.relationship.length {
-            None => {
-                for adjacent in self.env.expand(current, &step.relationship)? {
-                    if self.used.contains(&adjacent.relationship) {
-                        continue;
-                    }
-                    let relationship = &step.relationship;
-                    if relationship.bound
-                        && row.get(relationship.slot)
-                            != Some(&Datum::Relationship(adjacent.relationship))
-                    {
-                        continue;
-                    }
-                    if !self
-                        .env
-                        .relationship_matches(adjacent.relationship, relationship, row)?
-                    {
-                        continue;
-                    }
-                    set(
-                        row,
-                        relationship.slot,
-                        Datum::Relationship(adjacent.relationship),
-                    );
-                    self.used.push(adjacent.relationship);
-                    trail.relationships.push(adjacent.relationship);
-                    trail.nodes.push(adjacent.other);
-                    let more =
-                        self.arrive(index, step_index, step, adjacent.other, row, trail, emit);
-                    trail.nodes.pop();
-                    trail.relationships.pop();
-                    self.used.pop();
-                    if !more? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            Some(hops) => {
-                let mut walked = Vec::new();
-                self.hops(
-                    index,
-                    step_index,
-                    step,
-                    hops,
-                    current,
-                    &mut walked,
-                    row,
-                    trail,
-                    emit,
-                )
-            }
-        }
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the search threads its whole state through recursion"
-    )]
-    fn hops(
-        &mut self,
-        index: usize,
-        step_index: usize,
-        step: &Step,
-        hops: Hops,
-        current: NodeId,
-        walked: &mut Vec<RelationshipId>,
-        row: &mut Row,
-        trail: &mut PathIds,
-        emit: &mut Emit<'_>,
-    ) -> Result<bool, Error> {
-        let depth = walked.len() as u64;
-        if depth >= hops.min {
-            let relationship = &step.relationship;
-            let accepted = if relationship.anonymous {
-                true
-            } else {
-                let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
-                let accepted = !relationship.bound || row.get(relationship.slot) == Some(&value);
-                if accepted {
-                    set(row, relationship.slot, value);
-                }
-                accepted
-            };
-            if accepted && !self.arrive(index, step_index, step, current, row, trail, emit)? {
-                return Ok(false);
-            }
-        }
-        if hops.max.is_some_and(|max| depth >= max) {
+        let start = &self.patterns[index].start;
+        if !self.env.node_matches(id, start, known, row)? {
             return Ok(true);
         }
-        for adjacent in self.env.expand(current, &step.relationship)? {
-            if self.used.contains(&adjacent.relationship)
-                || !self
-                    .env
-                    .relationship_matches(adjacent.relationship, &step.relationship, row)?
+        set(row, start.slot, Datum::Node(id));
+        self.trails[index] = PathIds {
+            nodes: vec![id],
+            relationships: Vec::new(),
+        };
+        self.begin_step(index, 0, id, row, frames, emit)
+    }
+
+    fn begin_step(
+        &mut self,
+        index: usize,
+        step_index: usize,
+        current: NodeId,
+        row: &mut Row,
+        frames: &mut Vec<Frame>,
+        emit: &mut Emit<'_>,
+    ) -> Result<bool, Error> {
+        let part = &self.patterns[index];
+        let Some(step) = part.steps.get(step_index) else {
+            if let Some(path) = part.path {
+                set(row, path, Datum::Path(self.trails[index].clone()));
+            }
+            return self.begin_part(index + 1, row, frames, emit);
+        };
+        frames.push(match step.relationship.length {
+            None => Frame::Hop {
+                index,
+                step_index,
+                adjacents: self.env.expand(current, &step.relationship)?.into_iter(),
+                extended: false,
+            },
+            Some(hops) => Frame::Walk {
+                index,
+                step_index,
+                hops,
+                base: self.trails[index].relationships.len(),
+                node: current,
+                state: WalkState::Arriving,
+            },
+        });
+        Ok(true)
+    }
+
+    fn next_hop(
+        &self,
+        index: usize,
+        step_index: usize,
+        adjacents: &mut std::vec::IntoIter<Adjacent>,
+        row: &mut Row,
+    ) -> Result<Option<Adjacent>, Error> {
+        let relationship = &self.patterns[index].steps[step_index].relationship;
+        for adjacent in adjacents {
+            if self.used.contains(&adjacent.relationship) {
+                continue;
+            }
+            if relationship.bound
+                && row.get(relationship.slot) != Some(&Datum::Relationship(adjacent.relationship))
             {
                 continue;
             }
-            self.used.push(adjacent.relationship);
-            walked.push(adjacent.relationship);
-            trail.relationships.push(adjacent.relationship);
-            trail.nodes.push(adjacent.other);
-            let more = self.hops(
-                index,
-                step_index,
-                step,
-                hops,
-                adjacent.other,
-                walked,
+            if !self
+                .env
+                .relationship_matches(adjacent.relationship, relationship, row)?
+            {
+                continue;
+            }
+            set(
                 row,
-                trail,
-                emit,
+                relationship.slot,
+                Datum::Relationship(adjacent.relationship),
             );
-            trail.nodes.pop();
-            trail.relationships.pop();
-            walked.pop();
-            self.used.pop();
-            if !more? {
-                return Ok(false);
+            return Ok(Some(adjacent));
+        }
+        Ok(None)
+    }
+
+    fn next_walk(
+        &self,
+        index: usize,
+        step_index: usize,
+        adjacents: &mut std::vec::IntoIter<Adjacent>,
+        row: &Row,
+    ) -> Result<Option<Adjacent>, Error> {
+        let relationship = &self.patterns[index].steps[step_index].relationship;
+        for adjacent in adjacents {
+            if !self.used.contains(&adjacent.relationship)
+                && self
+                    .env
+                    .relationship_matches(adjacent.relationship, relationship, row)?
+            {
+                return Ok(Some(adjacent));
             }
         }
-        Ok(true)
+        Ok(None)
+    }
+
+    fn extend(&mut self, index: usize, adjacent: &Adjacent) {
+        self.used.push(adjacent.relationship);
+        let trail = &mut self.trails[index];
+        trail.relationships.push(adjacent.relationship);
+        trail.nodes.push(adjacent.other);
+    }
+
+    fn retract(&mut self, index: usize) {
+        self.used.pop();
+        let trail = &mut self.trails[index];
+        trail.relationships.pop();
+        trail.nodes.pop();
     }
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "the search threads its whole state through recursion"
+        reason = "ending a walk needs both the walk and the search state"
     )]
+    fn walk_end(
+        &mut self,
+        index: usize,
+        step_index: usize,
+        base: usize,
+        node: NodeId,
+        row: &mut Row,
+        frames: &mut Vec<Frame>,
+        emit: &mut Emit<'_>,
+    ) -> Result<bool, Error> {
+        let relationship = &self.patterns[index].steps[step_index].relationship;
+        if !relationship.anonymous {
+            let walked = &self.trails[index].relationships[base..];
+            let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
+            if relationship.bound && row.get(relationship.slot) != Some(&value) {
+                return Ok(true);
+            }
+            set(row, relationship.slot, value);
+        }
+        self.arrive(index, step_index, node, row, frames, emit)
+    }
+
     fn arrive(
         &mut self,
         index: usize,
         step_index: usize,
-        step: &Step,
         node: NodeId,
         row: &mut Row,
-        trail: &mut PathIds,
+        frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        if step.node.bound {
-            if row.get(step.node.slot) != Some(&Datum::Node(node)) {
+        let pattern = &self.patterns[index].steps[step_index].node;
+        if pattern.bound {
+            if row.get(pattern.slot) != Some(&Datum::Node(node)) {
                 return Ok(true);
             }
         } else {
-            set(row, step.node.slot, Datum::Node(node));
+            set(row, pattern.slot, Datum::Node(node));
         }
-        if !self
-            .env
-            .node_matches(node, &step.node, Known::NOTHING, row)?
-        {
+        if !self.env.node_matches(node, pattern, Known::NOTHING, row)? {
             return Ok(true);
         }
-        self.step(index, step_index + 1, node, row, trail, emit)
+        self.begin_step(index, step_index + 1, node, row, frames, emit)
     }
 }
