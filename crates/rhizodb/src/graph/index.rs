@@ -100,40 +100,82 @@ impl VectorMetric {
         };
         (smallest..=LARGEST_SQUARED_LENGTH).contains(&dot(vector, vector))
     }
+}
 
-    fn score(self, query: &[f64], query_norm: f64, stored: &[[u8; 8]]) -> f64 {
-        match self {
-            Self::Cosine => dot_stored(query, stored) / (query_norm * norm_stored(stored)),
-            Self::Euclidean => {
-                0.0 - query
-                    .iter()
-                    .zip(numbers(stored))
-                    .map(|(left, right)| (left - right) * (left - right))
-                    .sum::<f64>()
-                    .sqrt()
-            }
-            Self::DotProduct => dot_stored(query, stored),
+const LANES: usize = 4;
+
+const ITERATOR_SUM_START: f64 = -0.0;
+
+struct Batch {
+    ids: [u64; LANES],
+    numbers: Vec<[f64; LANES]>,
+    len: usize,
+}
+
+impl Batch {
+    fn new(dimension: usize) -> Self {
+        Self {
+            ids: [0; LANES],
+            numbers: vec![[0.0; LANES]; dimension],
+            len: 0,
         }
     }
-}
 
-fn numbers(stored: &[[u8; 8]]) -> impl Iterator<Item = f64> {
-    stored.iter().map(|bytes| f64::from_be_bytes(*bytes))
-}
+    fn push(&mut self, id: u64, stored: &[[u8; 8]]) {
+        for (row, bytes) in self.numbers.iter_mut().zip(stored) {
+            row[self.len] = f64::from_be_bytes(*bytes);
+        }
+        self.ids[self.len] = id;
+        self.len += 1;
+    }
 
-fn dot_stored(query: &[f64], stored: &[[u8; 8]]) -> f64 {
-    query
-        .iter()
-        .zip(numbers(stored))
-        .map(|(left, right)| left * right)
-        .sum()
-}
+    fn is_full(&self) -> bool {
+        self.len == LANES
+    }
 
-fn norm_stored(stored: &[[u8; 8]]) -> f64 {
-    numbers(stored)
-        .map(|number| number * number)
-        .sum::<f64>()
-        .sqrt()
+    fn score_into(
+        &mut self,
+        metric: VectorMetric,
+        query: &[f64],
+        query_norm: f64,
+        scored: &mut Vec<(u64, f64)>,
+    ) {
+        let mut sums = [ITERATOR_SUM_START; LANES];
+        let mut squares = [ITERATOR_SUM_START; LANES];
+        match metric {
+            VectorMetric::Cosine => {
+                for (left, row) in query.iter().zip(&self.numbers) {
+                    for lane in 0..LANES {
+                        sums[lane] += left * row[lane];
+                        squares[lane] += row[lane] * row[lane];
+                    }
+                }
+            }
+            VectorMetric::Euclidean => {
+                for (left, row) in query.iter().zip(&self.numbers) {
+                    for lane in 0..LANES {
+                        sums[lane] += (left - row[lane]) * (left - row[lane]);
+                    }
+                }
+            }
+            VectorMetric::DotProduct => {
+                for (left, row) in query.iter().zip(&self.numbers) {
+                    for lane in 0..LANES {
+                        sums[lane] += left * row[lane];
+                    }
+                }
+            }
+        }
+        for lane in 0..self.len {
+            let score = match metric {
+                VectorMetric::Cosine => sums[lane] / (query_norm * squares[lane].sqrt()),
+                VectorMetric::Euclidean => 0.0 - sums[lane].sqrt(),
+                VectorMetric::DotProduct => sums[lane],
+            };
+            scored.push((self.ids[lane], score));
+        }
+        self.len = 0;
+    }
 }
 
 fn dot(left: &[f64], right: &[f64]) -> f64 {
@@ -838,18 +880,22 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         let query_norm = norm(query);
         let mut scored = Vec::new();
+        let mut batch = Batch::new(query.len());
         self.transaction.visit_prefix(
             Table::Vectors,
             &keys::index_prefix(id),
             |key, value| -> Result<(), GraphError> {
-                let stored = stored_vector(value, query.len())?;
-                scored.push((
+                batch.push(
                     keys::parse_index_entry_key(key)?,
-                    metric.score(query, query_norm, stored),
-                ));
+                    stored_vector(value, query.len())?,
+                );
+                if batch.is_full() {
+                    batch.score_into(metric, query, query_norm, &mut scored);
+                }
                 Ok(())
             },
         )?;
+        batch.score_into(metric, query, query_norm, &mut scored);
         Ok(best(scored, limit))
     }
 
