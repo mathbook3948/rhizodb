@@ -24,6 +24,7 @@ const TAG_LOCAL_DATETIME: u8 = 9;
 const TAG_OFFSET_DATETIME: u8 = 10;
 const TAG_ZONED_DATETIME: u8 = 11;
 const TAG_DURATION: u8 = 12;
+const TAG_SINGLE_FLOATS: u8 = 13;
 
 /// A stored property value. Null is never stored: setting a property to null removes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +67,18 @@ impl fmt::Display for DecodeError {
 
 impl Error for DecodeError {}
 
+fn single_floats(items: &[PropertyValue]) -> Option<impl Iterator<Item = f32>> {
+    let single = |item: &PropertyValue| match item {
+        PropertyValue::Float(value) => {
+            let narrow = *value as f32;
+            (f64::from(narrow).to_bits() == value.to_bits()).then_some(narrow)
+        }
+        _ => None,
+    };
+    (!items.is_empty() && items.iter().all(|item| single(item).is_some()))
+        .then(|| items.iter().filter_map(single))
+}
+
 impl PropertyValue {
     #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -98,13 +111,22 @@ impl PropertyValue {
                 put_varint(out, value.len());
                 out.extend_from_slice(value);
             }
-            Self::List(items) => {
-                out.push(TAG_LIST);
-                put_varint(out, items.len());
-                for item in items {
-                    item.encode_into(out);
+            Self::List(items) => match single_floats(items) {
+                Some(floats) => {
+                    out.push(TAG_SINGLE_FLOATS);
+                    put_varint(out, items.len());
+                    for float in floats {
+                        out.extend_from_slice(&float.to_bits().to_be_bytes());
+                    }
                 }
-            }
+                None => {
+                    out.push(TAG_LIST);
+                    put_varint(out, items.len());
+                    for item in items {
+                        item.encode_into(out);
+                    }
+                }
+            },
             Self::Temporal(value) => encode_temporal(value, out),
         }
     }
@@ -269,6 +291,25 @@ impl<'a> Reader<'a> {
                 }
                 Ok(PropertyValue::List(items))
             }
+            TAG_SINGLE_FLOATS => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                let count = self.varint()?;
+                let bytes = self.take(count.checked_mul(4).ok_or(DecodeError::LengthOverflow)?)?;
+                Ok(PropertyValue::List(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| {
+                            PropertyValue::Float(f64::from(f32::from_bits(u32::from_be_bytes(
+                                *chunk,
+                            ))))
+                        })
+                        .collect(),
+                ))
+            }
             tag @ TAG_DATE..=TAG_DURATION => self.temporal(tag).map(PropertyValue::Temporal),
             tag => Err(DecodeError::UnknownTag(tag)),
         }
@@ -299,6 +340,14 @@ impl<'a> Reader<'a> {
                     self.skip_at_depth(depth + 1)?;
                 }
                 0
+            }
+            TAG_SINGLE_FLOATS => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                self.varint()?
+                    .checked_mul(4)
+                    .ok_or(DecodeError::LengthOverflow)?
             }
             tag => return Err(DecodeError::UnknownTag(tag)),
         };

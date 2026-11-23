@@ -418,6 +418,65 @@ fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
 }
 
 #[test]
+fn a_version_six_database_reads_its_float_lists_after_the_upgrade() {
+    let storage = RedbStorage::in_memory().unwrap();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &6u32.to_be_bytes(),
+        )
+        .unwrap();
+    let mut record = vec![0, 2, 0, 0, 0, 0, 5, 2, 2];
+    record.extend_from_slice(&0.5f64.to_bits().to_be_bytes());
+    record.push(2);
+    record.extend_from_slice(&(-1.0f64).to_bits().to_be_bytes());
+    record.extend_from_slice(&[0, 0, 0, 1, 1]);
+    record.extend_from_slice(&7i64.to_be_bytes());
+    write
+        .put(Table::Nodes, &keys::element_key(0), &record)
+        .unwrap();
+    write.commit().unwrap();
+
+    let graph = Graph::open(storage).unwrap();
+    let read = graph.read().unwrap();
+    let node = read.node(NodeId(0)).unwrap().unwrap();
+    assert_eq!(
+        node.properties.get(&Token::new(0)),
+        Some(&PropertyValue::List(vec![
+            PropertyValue::Float(0.5),
+            PropertyValue::Float(-1.0)
+        ]))
+    );
+    let after = read
+        .with_node(NodeId(0), |node| node.property(Token::new(1)))
+        .unwrap();
+    assert_eq!(after, Some(Some(PropertyValue::Integer(7))));
+}
+
+#[test]
+fn a_property_after_a_list_of_single_precision_floats_reads_back() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let embedding: Token<PropertyKey> = write.intern_token("embedding").unwrap();
+    let age: Token<PropertyKey> = write.intern_token("age").unwrap();
+    let mut record = node_with(&[]);
+    let floats = (0..64).map(|i| PropertyValue::Float(f64::from(i) / 64.0));
+    record
+        .properties
+        .insert(embedding, PropertyValue::List(floats.collect()));
+    record.properties.insert(age, PropertyValue::Integer(41));
+    let node = write.create_node(&record).unwrap();
+    write.commit().unwrap();
+
+    let read = graph.read().unwrap();
+    assert_eq!(read.node(node).unwrap(), Some(record));
+    let found = read.with_node(node, |node| node.property(age)).unwrap();
+    assert_eq!(found, Some(Some(PropertyValue::Integer(41))));
+}
+
+#[test]
 fn a_newer_format_version_is_rejected_on_open() {
     let storage = RedbStorage::in_memory().unwrap();
     let mut write = storage.begin_write().unwrap();

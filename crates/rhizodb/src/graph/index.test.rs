@@ -5,6 +5,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::graph::Direction;
+use crate::graph::FORMAT_VERSION;
 use crate::graph::Graph;
 use crate::graph::NodeId;
 use crate::graph::RelationshipId;
@@ -559,7 +560,7 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
         .unwrap()
         .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
         .unwrap();
-    assert_eq!(stored, Some(6u32.to_be_bytes().to_vec()));
+    assert_eq!(stored, Some(FORMAT_VERSION.to_be_bytes().to_vec()));
     let mut write = graph.write().unwrap();
     write
         .create_property_index("doc text", IndexTarget::Label("Doc"), "text")

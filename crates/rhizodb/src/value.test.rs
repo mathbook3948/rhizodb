@@ -122,6 +122,48 @@ fn unknown_tag_is_rejected() {
     );
 }
 
+proptest! {
+    #[test]
+    fn a_list_of_single_precision_floats_round_trips_bit_exactly(
+        bits in prop::collection::vec(any::<u32>(), 0..80),
+    ) {
+        let value = PropertyValue::List(
+            bits.iter()
+                .map(|bits| PropertyValue::Float(f64::from(f32::from_bits(*bits))))
+                .collect(),
+        );
+        let decoded = PropertyValue::decode(&value.encode()).unwrap();
+        prop_assert!(same_bits(&value, &decoded));
+    }
+}
+
+#[test]
+fn a_list_of_single_precision_floats_takes_four_bytes_a_float() {
+    let floats = |values: &[f64]| {
+        PropertyValue::List(values.iter().copied().map(PropertyValue::Float).collect())
+    };
+    let embedding: Vec<f64> = (0..64).map(|i| f64::from(i - 32) / 64.0).collect();
+    assert_eq!(floats(&embedding).encode().len(), 2 + 64 * 4);
+    let mut mixed = embedding.clone();
+    mixed.push(0.1);
+    assert_eq!(floats(&mixed).encode().len(), 2 + 65 * 9);
+}
+
+#[test]
+fn a_list_of_floats_stored_one_by_one_still_reads() {
+    let mut bytes = vec![TAG_LIST, 2, TAG_FLOAT];
+    bytes.extend_from_slice(&0.5f64.to_bits().to_be_bytes());
+    bytes.push(TAG_FLOAT);
+    bytes.extend_from_slice(&(-2.0f64).to_bits().to_be_bytes());
+    assert_eq!(
+        PropertyValue::decode(&bytes),
+        Ok(PropertyValue::List(vec![
+            PropertyValue::Float(0.5),
+            PropertyValue::Float(-2.0)
+        ]))
+    );
+}
+
 #[test]
 fn truncated_integer_is_rejected() {
     assert_eq!(

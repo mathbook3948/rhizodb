@@ -49,7 +49,7 @@ pub(crate) use value_key::compared;
 
 use index::Element;
 
-const FORMAT_VERSION: u32 = 6;
+const FORMAT_VERSION: u32 = 7;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;

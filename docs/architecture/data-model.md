@@ -32,6 +32,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Time-zone rules come from the IANA database that the jiff crate bundles into the build, so results do not depend on the host.
 - A temporal value is stored as its tag and fixed-width big-endian fields: a date as its day number from 1970-01-01, a time of day as nanoseconds since midnight, an offset as signed seconds, an instant as seconds from the Unix epoch and nanoseconds, a zone name as UTF-8 text.
 - Adding a stored value type changes the format version, so an older build refuses the database instead of failing on an unknown tag.
+- A non-empty list whose items are all floats that single precision holds bit for bit is stored as four bytes a float.
 - Stored lists have a fixed nesting limit, enforced on write as well as on read.
 - The database records one format version in a metadata table.
 
