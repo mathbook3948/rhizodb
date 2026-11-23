@@ -313,3 +313,125 @@ fn a_new_database_appears_whole_or_not_at_all() {
         }
     }
 }
+
+fn commit_number(engine: &Engine<SimFs>, number: u64) -> Result<(), crate::storage::StorageError> {
+    let mut write = engine.begin_write()?;
+    if number > 1 {
+        let earlier = number - 1 - (number * 7) % (number - 1).min(30);
+        assert!(
+            write
+                .get(Table::NodeColumns, &earlier.to_be_bytes())?
+                .is_some(),
+            "commit {number} does not see commit {earlier}"
+        );
+    }
+    write.put(
+        Table::NodeColumns,
+        &number.to_be_bytes(),
+        &vec![number as u8; (number % 9) as usize * 400],
+    )?;
+    if number >= 40 {
+        let old = number - 40;
+        write.delete_range(
+            Table::NodeColumns,
+            &(old - old % 8).to_be_bytes(),
+            &(old + 1).to_be_bytes(),
+        )?;
+    }
+    write.put(Table::Metadata, b"count", &number.to_be_bytes())?;
+    write.commit()
+}
+
+fn state_after(count: u64) -> State {
+    let mut state = State::new();
+    for number in 1..=count {
+        state.insert(
+            (Table::NodeColumns, number.to_be_bytes().to_vec()),
+            vec![number as u8; (number % 9) as usize * 400],
+        );
+        if number >= 40 {
+            let old = number - 40;
+            let (start, end) = (
+                (old - old % 8).to_be_bytes().to_vec(),
+                (old + 1).to_be_bytes().to_vec(),
+            );
+            state.retain(|(table, key), _| {
+                *table != Table::NodeColumns || *key < start || *key >= end
+            });
+        }
+        state.insert(
+            (Table::Metadata, b"count".to_vec()),
+            number.to_be_bytes().to_vec(),
+        );
+    }
+    state
+}
+
+#[test]
+fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_commit() {
+    let background = EngineOptions {
+        checkpoint: CheckpointMode::Background,
+        memtable_limit: 4_000,
+        ..options()
+    };
+    let commits = u64::from(test_scale::cases(400)).min(4000);
+    let fs = SimFs::new();
+    let engine = open(&fs, background).unwrap();
+    let acknowledged = std::sync::atomic::AtomicU64::new(0);
+    let mut snapshots = Vec::new();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for number in 1..=commits {
+                commit_number(&engine, number).unwrap();
+                acknowledged.store(number, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        let mut seed = 0;
+        while acknowledged.load(std::sync::atomic::Ordering::SeqCst) < commits {
+            let before = acknowledged.load(std::sync::atomic::Ordering::SeqCst);
+            let crash = match seed % 3 {
+                0 => Crash::Scramble { seed },
+                1 => Crash::Reorder { seed },
+                _ => Crash::DropUnsynced,
+            };
+            let crashed = fs.crash(crash);
+            let after = acknowledged.load(std::sync::atomic::Ordering::SeqCst);
+            snapshots.push((crashed, before, after, crash));
+            seed += 1;
+            let next = before + (commits / 60).max(1);
+            while acknowledged.load(std::sync::atomic::Ordering::SeqCst) < next.min(commits) {
+                std::thread::yield_now();
+            }
+        }
+    });
+    assert!(
+        engine.header().generation > 10,
+        "too few background checkpoints ran"
+    );
+    drop(engine);
+    let states: Vec<State> = (0..=commits + 1).map(state_after).collect();
+    let mut checked = 0;
+    for (crashed, before, after, crash) in snapshots {
+        let engine = open(&crashed, options())
+            .unwrap_or_else(|error| panic!("{crash:?} after {before}: {error}"));
+        engine
+            .check()
+            .unwrap_or_else(|error| panic!("{crash:?} after {before}: {error}"));
+        let found = dump(&engine);
+        let recovered = found
+            .get(&(Table::Metadata, b"count".to_vec()))
+            .map_or(0, |bytes| {
+                u64::from_be_bytes(bytes.as_slice().try_into().unwrap())
+            });
+        assert!(
+            (before..=after + 1).contains(&recovered),
+            "{crash:?}: recovered {recovered} commits, {before} to {after} were acknowledged"
+        );
+        assert!(
+            found == states[recovered as usize],
+            "{crash:?}: commit {recovered} recovered with other state"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 20, "only {checked} power losses were checked");
+}
