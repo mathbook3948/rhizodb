@@ -77,11 +77,36 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
 - A commit's timestamp is the wall clock in microseconds, or one past the previous commit's when the clock has not moved past it.
 - A replayed operation on a table id this build does not know refuses the log.
+- The database file is log-structured: checkpoints append to extents and never rewrite a block in place.
+- Each table is an append-only B+tree of one-block pages, and a checkpoint writes the leaves it changes and their paths as new pages.
+- A child pointer holds the child's block reference and LSN, and a child of another LSN, kind, level, or table is corruption.
+- A page shares the common prefix of its keys, capped at 512 bytes, and stores each key's rest.
+- A leaf whose keys and values all have one width uses a fixed format without per-cell offsets.
+- A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
+- A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
+- A key longer than 1 KiB lives in a run too, and its cell keeps its first 64 bytes after the page prefix, so most comparisons read no run.
+- An item larger than an extent is a chain of runs, each naming the next.
+- A run's header names its table, its role, and the first bytes, length, and hash of the key it belongs to.
+- Each page owns the runs of its long keys, which are rewritten with it, while a value's run stays until its entry changes.
+- A checkpoint packs cells greedily on the rightmost path of a table, so appends leave full pages, and spreads cells evenly elsewhere.
+- A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child.
+- Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
+- The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
+- The extent table records each extent's slot, written and live blocks, state, and purpose, and keeps room for a replication scheme and the term that opened it.
+- A checkpoint appends tree pages, runs of keys and values, and the catalog to open extents of their own.
+- The engine tracks each extent's live blocks as pages and runs are written and replaced.
+- A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
+- Commits go on into a new memtable while a background checkpoint runs, and a commit waits for it once the new memtable reaches twice the limit.
+- A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
+- Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
+- A failed checkpoint poisons the engine and leaves the frozen memtable serving reads.
+- The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
+- `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 
 ## Open
 
-- The layout of leaf and branch pages.
-- Whether the database file reuses free pages in place or appends extents in a log-structured way, and how free space is reclaimed.
-- The size of an extent and where extents are placed across files, disks, and servers.
+- How free space in sealed extents is reclaimed and the file shrinks.
+- How the extent table is written when rewriting it whole at every checkpoint costs too much.
+- Whether a database file is locked against a second process.
+- Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
-- How a checkpoint changes the database file without losing data that an older snapshot or a crash still needs.

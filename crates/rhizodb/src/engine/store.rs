@@ -5,17 +5,26 @@ use std::hash::Hasher;
 use std::io;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
 use std::time::SystemTime;
 
+use super::blob::RunRef;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
+use super::check;
+use super::check::CheckReport;
+use super::checkpoint::Checkpointer;
+use super::checkpoint::load_catalog;
 use super::error::EngineError;
+use super::extent::ExtentTable;
 use super::header;
 use super::header::FORMAT_MINOR;
 use super::header::Header;
@@ -25,21 +34,21 @@ use super::layout::ExtentId;
 use super::layout::TableId;
 use super::memtable::Bytes;
 use super::memtable::Memtable;
-use super::memtable::Slot;
-use super::memtable::bounds_are_ordered;
+use super::page::page_seed;
+use super::pages::PageSource;
+use super::pages::Pages;
+use super::staged::Staged;
+use super::staged::StagedOp;
 use super::tree::Tree;
 use super::view::Layers;
 use super::view::View;
 use super::view::Visit;
-use super::view::merge_over;
 use super::view::prefix_end;
 use super::wal::LogIdentity;
 use super::wal::Wal;
 use super::wal::segment_files;
 use super::wal::segment_name;
 use super::wal_format::Body;
-use super::wal_format::Op;
-use super::wal_format::OpRef;
 use super::wal_format::batch_record;
 use crate::storage::Entry;
 use crate::storage::ReadTransaction;
@@ -48,17 +57,37 @@ use crate::storage::StorageError;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
 
+/// Where checkpoints run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CheckpointMode {
+    /// On a thread of the engine's own, while commits go on.
+    Background,
+    /// On the committing thread, so a test sees the same operations every run.
+    Inline,
+}
+
 /// How the engine is tuned. The defaults suit a database on disk.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EngineOptions {
     /// The size a log segment grows to before the next record starts a new one.
     pub(crate) segment_target: u64,
+    /// The memtable size that starts a checkpoint.
+    pub(crate) memtable_limit: u64,
+    /// The log size that starts a checkpoint.
+    pub(crate) wal_limit: u64,
+    pub(crate) checkpoint: CheckpointMode,
+    /// The pages the block cache holds.
+    pub(crate) cache_pages: usize,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             segment_target: 16 << 20,
+            memtable_limit: 64 << 20,
+            wal_limit: 256 << 20,
+            checkpoint: CheckpointMode::Background,
+            cache_pages: (64 << 20) / BLOCK,
         }
     }
 }
@@ -97,28 +126,46 @@ struct Published {
 
 #[derive(Debug)]
 struct Writer<F: FileSystem> {
-    wal: Wal<F>,
+    wal: Option<Wal<F>>,
     last_lsn: u64,
     last_hlc: u64,
 }
 
 #[derive(Debug)]
+struct Durable {
+    header: Header,
+    extents: ExtentTable,
+    catalog: Vec<RunRef>,
+    tree: Arc<Tree>,
+}
+
+#[derive(Debug)]
+struct Job {
+    frozen: Arc<Memtable>,
+    lsn: u64,
+    hlc: u64,
+    first_segment: u64,
+}
+
+#[derive(Debug)]
 struct Shared<F: FileSystem> {
+    options: EngineOptions,
+    pages: Arc<Pages<F::File>>,
     published: Mutex<Published>,
     writer: Mutex<Writer<F>>,
+    durable: Mutex<Durable>,
+    droppable: Mutex<Option<u64>>,
+    running: Mutex<bool>,
+    finished: Condvar,
     poisoned: AtomicBool,
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
 #[derive(Debug)]
-pub(crate) struct Engine<F: FileSystem> {
-    shared: Shared<F>,
-}
-
-fn write_header(file: &impl BlockFile, header: &Header) -> Result<(), EngineError> {
-    file.write(header.slot(), &header.encode())?;
-    file.sync()?;
-    Ok(())
+pub(crate) struct Engine<F: FileSystem + 'static> {
+    shared: Arc<Shared<F>>,
+    jobs: Option<mpsc::Sender<Job>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 fn read_header(file: &impl BlockFile) -> Result<Header, EngineError> {
@@ -160,7 +207,30 @@ fn create_file_whole_or_not_at_all<F: FileSystem>(
     Ok(file)
 }
 
-impl<F: FileSystem> Engine<F> {
+fn replay_into(
+    layers: &Arc<Layers>,
+    last_lsn: &mut u64,
+    last_hlc: &mut u64,
+    record: super::wal_format::Record,
+) -> Result<(), EngineError> {
+    if let Body::Batch(ops) = record.body {
+        let mut staged = Staged::new(View {
+            snapshot: *last_lsn,
+            layers: Arc::clone(layers),
+        });
+        for op in ops {
+            staged.replay(op)?;
+        }
+        layers
+            .active
+            .apply(record.lsn, staged.into_changes(), record.lsn);
+    }
+    *last_lsn = record.lsn;
+    *last_hlc = (*last_hlc).max(record.hlc);
+    Ok(())
+}
+
+impl<F: FileSystem + 'static> Engine<F> {
     /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
     /// log of an unclean shutdown before it returns.
     pub(crate) fn open(
@@ -181,15 +251,61 @@ impl<F: FileSystem> Engine<F> {
             Err(error) => return Err(error.into()),
         };
         let header = read_header(&file)?;
-        let active = Arc::new(Memtable::default());
+        let pages = Arc::new(Pages::new(
+            file,
+            page_seed(header.database_id),
+            options.cache_pages,
+        ));
+        let source: Arc<dyn PageSource> = Arc::clone(&pages) as Arc<dyn PageSource>;
+        let (tree, extents, catalog) = if header.catalog.is_null() {
+            if header.open.iter().any(|open| !open.id.is_none()) || header.checkpoint_lsn != 0 {
+                return Err(EngineError::corrupt(
+                    "a header without a catalog records extents",
+                ));
+            }
+            let extents = ExtentTable {
+                next_extent: header.next_extent,
+                ..ExtentTable::default()
+            };
+            let tree = Tree {
+                roots: BTreeMap::new(),
+                source: Arc::clone(&source),
+            };
+            (tree, extents, Vec::new())
+        } else {
+            for open in header.open.iter().filter(|open| !open.id.is_none()) {
+                pages.place_extent(open.id, open.slot);
+            }
+            let first = RunRef {
+                at: header.catalog,
+                blocks: 1,
+                lsn: header.catalog_lsn,
+            };
+            let (catalog, runs) = load_catalog(&source, first)?;
+            if catalog.extents.next_extent != header.next_extent {
+                return Err(EngineError::corrupt(
+                    "the header and catalog disagree on extents",
+                ));
+            }
+            catalog.extents.check_open(&header.open)?;
+            for (id, entry) in &catalog.extents.entries {
+                pages.place_extent(*id, entry.slot);
+            }
+            let tree = Tree {
+                roots: catalog.roots,
+                source: Arc::clone(&source),
+            };
+            (tree, catalog.extents, runs)
+        };
+        let tree = Arc::new(tree);
         let layers = Arc::new(Layers {
-            active: Arc::clone(&active),
+            active: Arc::new(Memtable::default()),
             frozen: None,
-            tree: Arc::new(Tree),
+            tree: Arc::clone(&tree),
         });
         let mut last_lsn = header.checkpoint_lsn;
         let mut last_hlc = header.checkpoint_hlc;
-        let wal = if header.clean {
+        let (wal, header) = if header.clean {
             for sequence in segment_files(&*fs, name)? {
                 fs.remove(&segment_name(name, sequence))?;
             }
@@ -219,47 +335,63 @@ impl<F: FileSystem> Engine<F> {
                 clean: false,
                 ..header
             };
-            write_header(&file, &header)?;
-            wal
+            pages.write_header(&header)?;
+            (wal, header)
         } else {
-            Wal::recover(
+            let wal = Wal::recover(
                 Arc::clone(&fs),
                 name,
                 &header,
                 options.segment_target,
-                |record| {
-                    if let Body::Batch(ops) = record.body {
-                        let mut staged = Staged::new(View {
-                            snapshot: last_lsn,
-                            layers: Arc::clone(&layers),
-                        });
-                        for op in ops {
-                            staged.replay(op)?;
-                        }
-                        active.apply(record.lsn, staged.into_changes(), record.lsn);
-                    }
-                    last_lsn = record.lsn;
-                    last_hlc = last_hlc.max(record.hlc);
-                    Ok(())
+                |record| replay_into(&layers, &mut last_lsn, &mut last_hlc, record),
+            )?;
+            (wal, header)
+        };
+        let shared = Arc::new(Shared {
+            options,
+            pages,
+            published: Mutex::new(Published {
+                view: View {
+                    snapshot: last_lsn,
+                    layers,
                 },
-            )?
+                readers: BTreeMap::new(),
+            }),
+            writer: Mutex::new(Writer {
+                wal: Some(wal),
+                last_lsn,
+                last_hlc,
+            }),
+            durable: Mutex::new(Durable {
+                header,
+                extents,
+                catalog,
+                tree,
+            }),
+            droppable: Mutex::new(None),
+            running: Mutex::new(false),
+            finished: Condvar::new(),
+            poisoned: AtomicBool::new(false),
+        });
+        let (jobs, worker) = match options.checkpoint {
+            CheckpointMode::Inline => (None, None),
+            CheckpointMode::Background => {
+                let (sender, receiver) = mpsc::channel::<Job>();
+                let worker_shared = Arc::clone(&shared);
+                let worker = thread::Builder::new()
+                    .name("rhizodb-checkpoint".to_owned())
+                    .spawn(move || {
+                        for job in receiver {
+                            worker_shared.run_checkpoint(job, false);
+                        }
+                    })?;
+                (Some(sender), Some(worker))
+            }
         };
         Ok(Self {
-            shared: Shared {
-                published: Mutex::new(Published {
-                    view: View {
-                        snapshot: last_lsn,
-                        layers,
-                    },
-                    readers: BTreeMap::new(),
-                }),
-                writer: Mutex::new(Writer {
-                    wal,
-                    last_lsn,
-                    last_hlc,
-                }),
-                poisoned: AtomicBool::new(false),
-            },
+            shared,
+            jobs,
+            worker,
         })
     }
 
@@ -280,17 +412,15 @@ impl<F: FileSystem> Engine<F> {
         }
     }
 
-    fn poison(&self) {
-        self.shared.poisoned.store(true, Ordering::Release);
-    }
-
     fn commit(&self, writer: &mut Writer<F>, staged: Staged) -> Result<(), EngineError> {
-        if self.shared.poisoned.load(Ordering::Acquire) {
+        let shared = &*self.shared;
+        if shared.is_poisoned() {
             return Err(EngineError::Poisoned);
         }
         if staged.ops.is_empty() {
             return Ok(());
         }
+        shared.drop_segments(writer);
         let lsn = writer.last_lsn + 1;
         let hlc = hybrid_clock_after(writer.last_hlc);
         let record = batch_record(
@@ -299,186 +429,279 @@ impl<F: FileSystem> Engine<F> {
             u128::from(lsn),
             staged.ops.iter().map(StagedOp::borrowed),
         )?;
-        if let Err(error) = writer.wal.append(record, hlc) {
-            self.poison();
+        let wal = writer.wal.as_mut().ok_or(EngineError::Poisoned)?;
+        if let Err(error) = wal.append(record, hlc) {
+            shared.poison();
             return Err(error);
         }
         writer.last_lsn = lsn;
         writer.last_hlc = hlc;
         let (layers, horizon) = {
-            let published = lock(&self.shared.published);
+            let published = lock(&shared.published);
             let snapshot = published.view.snapshot;
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
         layers.active.apply(lsn, staged.into_changes(), horizon);
-        lock(&self.shared.published).view = View {
+        lock(&shared.published).view = View {
             snapshot: lsn,
-            layers,
+            layers: Arc::clone(&layers),
         };
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-enum StagedOp {
-    Put {
-        table: TableId,
-        key: Bytes,
-        value: Bytes,
-    },
-    Delete {
-        table: TableId,
-        key: Bytes,
-    },
-    DeleteRange {
-        table: TableId,
-        start: Bytes,
-        end: Bytes,
-    },
-}
-
-impl StagedOp {
-    fn borrowed(&self) -> OpRef<'_> {
-        match self {
-            StagedOp::Put { table, key, value } => OpRef::Put {
-                table: *table,
-                key,
-                value,
-            },
-            StagedOp::Delete { table, key } => OpRef::Delete { table: *table, key },
-            StagedOp::DeleteRange { table, start, end } => OpRef::DeleteRange {
-                table: *table,
-                start,
-                end,
-            },
-        }
-    }
-}
-
-#[derive(Debug)]
-struct Staged {
-    view: View,
-    overlay: BTreeMap<TableId, BTreeMap<Bytes, Slot>>,
-    ops: Vec<StagedOp>,
-}
-
-impl Staged {
-    fn new(view: View) -> Self {
-        Self {
-            view,
-            overlay: BTreeMap::new(),
-            ops: Vec::new(),
-        }
-    }
-
-    fn put(&mut self, table: TableId, key: &[u8], value: &[u8]) {
-        let key: Bytes = Arc::from(key);
-        let value: Bytes = Arc::from(value);
-        self.overlay
-            .entry(table)
-            .or_default()
-            .insert(Arc::clone(&key), Some(Arc::clone(&value)));
-        self.ops.push(StagedOp::Put { table, key, value });
-    }
-
-    fn delete(&mut self, table: TableId, key: &[u8]) {
-        let key: Bytes = Arc::from(key);
-        self.overlay
-            .entry(table)
-            .or_default()
-            .insert(Arc::clone(&key), None);
-        self.ops.push(StagedOp::Delete { table, key });
-    }
-
-    fn delete_range(
-        &mut self,
-        table: TableId,
-        start: &[u8],
-        end: &[u8],
-    ) -> Result<(), EngineError> {
-        if start >= end {
-            return Ok(());
-        }
-        let mut doomed = Vec::new();
-        let bounds = (Bound::Included(start), Bound::Excluded(end));
-        self.scan(table, bounds.0, bounds.1, &mut |key, _| {
-            doomed.push(Arc::<[u8]>::from(key));
-            Ok::<_, StorageError>(())
-        })?;
-        let overlay = self.overlay.entry(table).or_default();
-        for key in doomed {
-            overlay.insert(key, None);
-        }
-        self.ops.push(StagedOp::DeleteRange {
-            table,
-            start: Arc::from(start),
-            end: Arc::from(end),
-        });
-        Ok(())
-    }
-
-    fn replay(&mut self, op: Op) -> Result<(), EngineError> {
-        match op {
-            Op::Put { table, key, value } => {
-                table.table()?;
-                self.put(table, &key, &value);
-            }
-            Op::Delete { table, key } => {
-                table.table()?;
-                self.delete(table, &key);
-            }
-            Op::DeleteRange { table, start, end } => {
-                table.table()?;
-                self.delete_range(table, &start, &end)?;
+        let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
+        let full = layers.active.bytes() > shared.options.memtable_limit
+            || wal_size > shared.options.wal_limit;
+        if full {
+            self.start_checkpoint(writer);
+            if layers.frozen.is_some() && layers.active.bytes() > 2 * shared.options.memtable_limit
+            {
+                shared.wait_for_checkpoint();
             }
         }
         Ok(())
     }
 
-    fn get(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
-        match self.overlay.get(&table).and_then(|keys| keys.get(key)) {
-            Some(slot) => Ok(slot.clone()),
-            None => self.view.get(table, key),
-        }
-    }
-
-    fn scan<E: From<StorageError>>(
-        &self,
-        table: TableId,
-        start: Bound<&[u8]>,
-        end: Bound<&[u8]>,
-        visit: Visit<'_, E>,
-    ) -> Result<(), E> {
-        let upper: Vec<(Bytes, Slot)> = match self.overlay.get(&table) {
-            Some(keys) if bounds_are_ordered(start, end) => keys
-                .range::<[u8], _>((start, end))
-                .map(|(key, slot)| (Arc::clone(key), slot.clone()))
-                .collect(),
-            _ => Vec::new(),
+    fn start_checkpoint(&self, writer: &mut Writer<F>) {
+        let Some(job) = self.shared.freeze(writer) else {
+            return;
         };
-        merge_over(
-            &upper,
-            |lower| self.view.scan(table, start, end, lower),
-            visit,
+        match &self.jobs {
+            Some(jobs) => {
+                if let Err(mpsc::SendError(job)) = jobs.send(job) {
+                    self.shared.run_checkpoint(job, false);
+                }
+            }
+            None => {
+                self.shared.run_checkpoint(job, false);
+                self.shared.drop_segments(writer);
+            }
+        }
+    }
+
+    /// Writes every commit so far into the database file and drops the log segments it no
+    /// longer needs.
+    pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
+        let mut writer = lock(&self.shared.writer);
+        self.shared.wait_for_checkpoint();
+        if self.shared.is_poisoned() {
+            return Err(EngineError::Poisoned);
+        }
+        if let Some(job) = self.shared.freeze(&mut writer) {
+            self.shared.run_checkpoint(job, false);
+        }
+        self.shared.drop_segments(&mut writer);
+        if self.shared.is_poisoned() {
+            return Err(EngineError::Poisoned);
+        }
+        Ok(())
+    }
+
+    /// Checks every invariant of the database file as the last durable checkpoint left it.
+    pub(crate) fn check(&self) -> Result<CheckReport, EngineError> {
+        let durable = lock(&self.shared.durable);
+        check::check(
+            &durable.header,
+            &durable.extents,
+            &durable.catalog,
+            &durable.tree,
         )
     }
 
-    fn into_changes(self) -> impl Iterator<Item = (TableId, Bytes, Slot)> {
-        self.overlay
-            .into_iter()
-            .flat_map(|(table, keys)| keys.into_iter().map(move |(key, slot)| (table, key, slot)))
+    #[cfg(test)]
+    pub(crate) fn extents(&self) -> ExtentTable {
+        lock(&self.shared.durable).extents.clone()
+    }
+
+    /// The header of the last durable checkpoint.
+    pub(crate) fn header(&self) -> Header {
+        lock(&self.shared.durable).header
     }
 }
 
-/// A snapshot read of an [`Engine`].
+impl<F: FileSystem + 'static> Shared<F> {
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
+    fn wait_for_checkpoint(&self) {
+        let mut running = lock(&self.running);
+        while *running {
+            running = self
+                .finished
+                .wait(running)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    fn drop_segments(&self, writer: &mut Writer<F>) {
+        let Some(sequence) = lock(&self.droppable).take() else {
+            return;
+        };
+        if let Some(wal) = writer.wal.as_mut()
+            && wal.drop_before(sequence).is_err()
+        {
+            self.poison();
+        }
+    }
+
+    fn freeze(&self, writer: &mut Writer<F>) -> Option<Job> {
+        let mut running = lock(&self.running);
+        if *running || self.is_poisoned() {
+            return None;
+        }
+        let wal = writer.wal.as_ref()?;
+        let mut published = lock(&self.published);
+        let layers = &published.view.layers;
+        let frozen = Arc::clone(&layers.active);
+        let tree = Arc::clone(&layers.tree);
+        published.view.layers = Arc::new(Layers {
+            active: Arc::new(Memtable::default()),
+            frozen: Some(Arc::clone(&frozen)),
+            tree,
+        });
+        *running = true;
+        Some(Job {
+            frozen,
+            lsn: writer.last_lsn,
+            hlc: writer.last_hlc,
+            first_segment: wal.first_needed(writer.last_lsn),
+        })
+    }
+
+    fn run_checkpoint(&self, job: Job, clean: bool) {
+        let mut finish = EndCheckpointOnDrop {
+            shared: self,
+            completed: false,
+        };
+        let result = self.write_checkpoint(&job, clean);
+        match result {
+            Ok(tree) => {
+                let mut published = lock(&self.published);
+                let active = Arc::clone(&published.view.layers.active);
+                published.view.layers = Arc::new(Layers {
+                    active,
+                    frozen: None,
+                    tree,
+                });
+                drop(published);
+                *lock(&self.droppable) = Some(job.first_segment);
+            }
+            Err(_) => self.poison(),
+        }
+        finish.completed = true;
+    }
+
+    fn write_checkpoint(&self, job: &Job, clean: bool) -> Result<Arc<Tree>, EngineError> {
+        let mut durable = lock(&self.durable);
+        let generation = durable.header.generation + 1;
+        let changes = job.frozen.newest();
+        let (roots, extents, catalog) = if changes.is_empty() && !durable.header.catalog.is_null() {
+            (
+                durable.tree.roots.clone(),
+                durable.extents.clone(),
+                durable.catalog.clone(),
+            )
+        } else {
+            let mut checkpointer =
+                Checkpointer::new(&self.pages, durable.extents.clone(), job.lsn, generation);
+            let mut roots = durable.tree.roots.clone();
+            for (table, changes) in &changes {
+                match checkpointer.merge_table(*table, roots.get(table).copied(), changes)? {
+                    Some(root) => roots.insert(*table, root),
+                    None => roots.remove(table),
+                };
+            }
+            let (catalog, extents) = checkpointer.finish(roots.clone(), &durable.catalog)?;
+            self.pages.sync()?;
+            (roots, extents, catalog)
+        };
+        let first = catalog
+            .first()
+            .ok_or_else(|| EngineError::corrupt("a checkpoint wrote no catalog"))?;
+        let header = Header {
+            generation,
+            checkpoint_lsn: job.lsn,
+            checkpoint_hlc: job.hlc,
+            catalog: first.at,
+            catalog_lsn: first.lsn,
+            next_extent: extents.next_extent,
+            open: extents.open_extents()?,
+            wal: WalIdentity {
+                first_segment: job.first_segment,
+                ..durable.header.wal
+            },
+            clean,
+            ..durable.header
+        };
+        self.pages.write_header(&header)?;
+        let tree = Arc::new(Tree {
+            roots,
+            source: Arc::clone(&durable.tree.source),
+        });
+        *durable = Durable {
+            header,
+            extents,
+            catalog,
+            tree: Arc::clone(&tree),
+        };
+        Ok(tree)
+    }
+
+    fn close(&self) {
+        let mut writer = lock(&self.writer);
+        self.wait_for_checkpoint();
+        if self.is_poisoned() {
+            return;
+        }
+        let Some(job) = self.freeze(&mut writer) else {
+            return;
+        };
+        self.run_checkpoint(job, true);
+        if self.is_poisoned() {
+            return;
+        }
+        if let Some(wal) = writer.wal.take() {
+            let _ = wal.remove_all();
+        }
+        lock(&self.droppable).take();
+    }
+}
+
+struct EndCheckpointOnDrop<'a, F: FileSystem + 'static> {
+    shared: &'a Shared<F>,
+    completed: bool,
+}
+
+impl<F: FileSystem + 'static> Drop for EndCheckpointOnDrop<'_, F> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.shared.poison();
+        }
+        *lock(&self.shared.running) = false;
+        self.shared.finished.notify_all();
+    }
+}
+
+impl<F: FileSystem + 'static> Drop for Engine<F> {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.shared.close();
+    }
+}
+
 #[derive(Debug)]
-pub(crate) struct EngineRead<'a, F: FileSystem> {
+pub(crate) struct EngineRead<'a, F: FileSystem + 'static> {
     engine: &'a Engine<F>,
     view: View,
 }
 
-impl<F: FileSystem> Drop for EngineRead<'_, F> {
+impl<F: FileSystem + 'static> Drop for EngineRead<'_, F> {
     fn drop(&mut self) {
         self.engine.deregister(self.view.snapshot);
     }
@@ -486,13 +709,13 @@ impl<F: FileSystem> Drop for EngineRead<'_, F> {
 
 /// The one write transaction of an [`Engine`], which holds the writer lock while it lives.
 #[derive(Debug)]
-pub(crate) struct EngineWrite<'a, F: FileSystem> {
+pub(crate) struct EngineWrite<'a, F: FileSystem + 'static> {
     engine: &'a Engine<F>,
     writer: MutexGuard<'a, Writer<F>>,
     staged: Staged,
 }
 
-impl<F: FileSystem> Storage for Engine<F> {
+impl<F: FileSystem + 'static> Storage for Engine<F> {
     type Read<'a>
         = EngineRead<'a, F>
     where
@@ -511,7 +734,7 @@ impl<F: FileSystem> Storage for Engine<F> {
 
     fn begin_write(&self) -> Result<EngineWrite<'_, F>, StorageError> {
         let writer = lock(&self.shared.writer);
-        if self.shared.poisoned.load(Ordering::Acquire) {
+        if self.shared.is_poisoned() {
             return Err(EngineError::Poisoned.into());
         }
         let view = lock(&self.shared.published).view.clone();
@@ -557,7 +780,7 @@ trait Reads {
     ) -> Result<(), E>;
 }
 
-impl<F: FileSystem> Reads for EngineRead<'_, F> {
+impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
     fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
         self.view.get(table, key)
     }
@@ -573,7 +796,7 @@ impl<F: FileSystem> Reads for EngineRead<'_, F> {
     }
 }
 
-impl<F: FileSystem> Reads for EngineWrite<'_, F> {
+impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
     fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
         self.staged.get(table, key)
     }
@@ -650,7 +873,7 @@ fn visit_prefix<R: Reads, E: From<StorageError>>(
 
 macro_rules! read_transaction {
     ($type:ident) => {
-        impl<F: FileSystem> ReadTransaction for $type<'_, F> {
+        impl<F: FileSystem + 'static> ReadTransaction for $type<'_, F> {
             fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
                 get(self, table, key)
             }
@@ -692,7 +915,7 @@ macro_rules! read_transaction {
 read_transaction!(EngineRead);
 read_transaction!(EngineWrite);
 
-impl<F: FileSystem> WriteTransaction for EngineWrite<'_, F> {
+impl<F: FileSystem + 'static> WriteTransaction for EngineWrite<'_, F> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         self.staged.put(TableId::of(table), key, value);
         Ok(())

@@ -5,6 +5,7 @@ use crate::engine::block_file::FileSystem;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
+use crate::engine::store::CheckpointMode;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
 use crate::storage::ReadTransaction;
@@ -129,6 +130,10 @@ fn open(
 fn options() -> EngineOptions {
     EngineOptions {
         segment_target: 8192,
+        memtable_limit: 6_000,
+        wal_limit: 20_000,
+        checkpoint: CheckpointMode::Inline,
+        cache_pages: 64,
     }
 }
 
@@ -167,27 +172,48 @@ fn run_until_failure(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -> Run
 
 #[test]
 fn every_failure_then_power_loss_keeps_each_acknowledged_commit() {
+    fail_each_operation_then_lose_power(options(), 8);
+}
+
+#[test]
+fn every_failure_then_power_loss_keeps_each_commit_checkpointed_at_once() {
+    let every_commit = EngineOptions {
+        memtable_limit: 0,
+        ..options()
+    };
+    fail_each_operation_then_lose_power(every_commit, 20);
+}
+
+fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generation: u64) {
     let transactions = transactions(7, 24);
     let states = states(&transactions);
     let total = {
         let fs = SimFs::new();
-        let engine = open(&fs, options()).unwrap();
+        let engine = open(&fs, options).unwrap();
         let before = fs.operations();
         run_until_failure(&engine, &transactions);
+        assert!(
+            engine.header().generation >= minimum_generation,
+            "the workload checkpointed too rarely"
+        );
+        drop(engine);
         fs.operations() - before
     };
     let seeds = u64::from(test_scale::cases(3));
     let mut outcomes = [0usize; 2];
     for fail_at in 0..=total {
         let fs = SimFs::new();
-        let engine = open(&fs, options()).unwrap();
+        let engine = open(&fs, options).unwrap();
         fs.fail_after(fail_at, Failure::FromThenOn);
         let run = run_until_failure(&engine, &transactions);
         drop(engine);
         for crash in crashes(seeds) {
             let crashed = fs.crash(crash);
-            let engine = open(&crashed, options())
+            let engine = open(&crashed, options)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            engine.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
             let found = dump(&engine);
             let kept_in_flight = run.in_flight && found == states[run.acknowledged + 1];
             assert!(
@@ -205,7 +231,7 @@ fn every_failure_then_power_loss_keeps_each_acknowledged_commit() {
             commit(&engine, extra).unwrap();
             let expected = applied(&states[recovered], extra);
             drop(engine);
-            let reopened = open(&crashed.crash(Crash::DropUnsynced), options()).unwrap();
+            let reopened = open(&crashed.crash(Crash::DropUnsynced), options).unwrap();
             assert_eq!(dump(&reopened), expected, "fail at {fail_at}, {crash:?}");
         }
     }
@@ -238,6 +264,9 @@ fn every_failure_while_opening_leaves_the_database_whole() {
         for crash in crashes(2) {
             let engine = open(&copy.crash(crash), options())
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            engine.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
             assert_eq!(
                 dump(&engine),
                 states[transactions.len()],
@@ -262,6 +291,9 @@ fn a_new_database_appears_whole_or_not_at_all() {
             let crashed = fs.crash(crash);
             let engine = open(&crashed, options())
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            engine.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
             assert!(dump(&engine).is_empty());
             commit(
                 &engine,
