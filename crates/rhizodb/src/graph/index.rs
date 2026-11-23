@@ -101,9 +101,9 @@ impl VectorMetric {
         (smallest..=LARGEST_SQUARED_LENGTH).contains(&dot(vector, vector))
     }
 
-    fn score(self, query: &[f64], stored: &[[u8; 8]]) -> f64 {
+    fn score(self, query: &[f64], query_norm: f64, stored: &[[u8; 8]]) -> f64 {
         match self {
-            Self::Cosine => dot_stored(query, stored) / (norm(query) * norm_stored(stored)),
+            Self::Cosine => dot_stored(query, stored) / (query_norm * norm_stored(stored)),
             Self::Euclidean => {
                 0.0 - query
                     .iter()
@@ -836,6 +836,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     .to_owned(),
             ));
         }
+        let query_norm = norm(query);
         let mut scored = Vec::new();
         self.transaction.visit_prefix(
             Table::Vectors,
@@ -844,7 +845,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                 let stored = stored_vector(value, query.len())?;
                 scored.push((
                     keys::parse_index_entry_key(key)?,
-                    metric.score(query, stored),
+                    metric.score(query, query_norm, stored),
                 ));
                 Ok(())
             },
