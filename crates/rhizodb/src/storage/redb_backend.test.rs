@@ -1,6 +1,8 @@
 use super::*;
 use crate::storage::conformance;
 use crate::storage::conformance::Harness;
+use crate::storage::model;
+use crate::test_scale;
 use proptest::prelude::*;
 
 struct RedbFile {
@@ -26,6 +28,15 @@ impl Harness for RedbFile {
 #[test]
 fn the_redb_backend_passes_the_storage_conformance_suite() {
     conformance::run(RedbFile::new);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(test_scale::cases(128)))]
+
+    #[test]
+    fn the_redb_backend_matches_the_versioned_model(ops in model::ops()) {
+        model::check(&mut RedbFile::new(), &ops)?;
+    }
 }
 
 fn put_all(storage: &RedbStorage, table: Table, entries: &[(&[u8], &[u8])]) {

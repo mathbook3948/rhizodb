@@ -69,6 +69,8 @@ mod query;
 mod result;
 mod storage;
 mod temporal;
+#[cfg(test)]
+mod test_scale;
 mod transaction;
 mod value;
 
