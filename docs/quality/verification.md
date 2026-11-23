@@ -57,6 +57,8 @@ A database that returns wrong results or loses data after a crash is worse than 
 - The damaged file fuzz target replaces libFuzzer's abort on every panic, so a panic that the redb guard catches is not a crash.
 - A panic is injected at each backend operation of a redb commit in turn, and the reopened file must hold the state before or after the commit.
 - The writer slot and the index catalog are explored across thread interleavings with shuttle models that copy each protocol, in a crate of their own, since the library uses `std` primitives.
+- Every call a host can make wrongly, such as opening a file twice, forgetting or moving a transaction, a procedure that panics or calls back into its database, and invalid parameters or index definitions, must fail with an error kind, never panic out of RhizoDB, hang, or corrupt the file.
+- Inputs at and past each resource limit run on a 2 MiB stack, the default of a spawned thread, in a child process, so a stack overflow fails one test instead of the run.
 - Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
 - Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
 - Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.

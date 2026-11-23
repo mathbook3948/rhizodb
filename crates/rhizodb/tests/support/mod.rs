@@ -134,3 +134,70 @@ impl Rng {
         &items[self.below(items.len() as u64) as usize]
     }
 }
+
+const ISOLATED_ENV: &str = "RHIZODB_ISOLATED_TEST";
+
+/// Runs the test named `test` again in a child process, so a stack overflow, an abort, or a hang
+/// in it fails this test instead of ending or stalling the whole run. Returns true in the child,
+/// where the test then does its work, and false in the parent once the child passed.
+pub fn isolated(test: &str, limit: std::time::Duration) -> bool {
+    if std::env::var(ISOLATED_ENV).is_ok_and(|name| name == test) {
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            test,
+            "--exact",
+            "--include-ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ISOLATED_ENV, test)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("{test} did not finish within {limit:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = reader.join().unwrap();
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(15)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(status.success(), "{test} ended with {status}:\n{tail}");
+    false
+}
+
+/// Runs `work` on a thread with the 2 MiB stack Rust gives a spawned thread by default, the
+/// smallest stack a host is likely to call RhizoDB on.
+pub fn on_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn_scoped(scope, work)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
+}
