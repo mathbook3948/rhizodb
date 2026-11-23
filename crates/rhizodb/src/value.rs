@@ -187,6 +187,17 @@ fn encode_temporal(value: &Temporal, out: &mut Vec<u8>) {
     }
 }
 
+fn fixed_width(tag: u8) -> Option<usize> {
+    match tag {
+        TAG_BOOLEAN => Some(1),
+        TAG_INTEGER | TAG_FLOAT | TAG_DATE | TAG_LOCAL_TIME => Some(8),
+        TAG_TIME => Some(12),
+        TAG_LOCAL_DATETIME | TAG_OFFSET_DATETIME => Some(16),
+        TAG_DURATION => Some(28),
+        _ => None,
+    }
+}
+
 pub(crate) fn put_varint(out: &mut Vec<u8>, value: usize) {
     let mut rest = value as u64;
     while rest >= 0x80 {
@@ -321,35 +332,39 @@ impl<'a> Reader<'a> {
     }
 
     fn skip_at_depth(&mut self, depth: usize) -> Result<(), DecodeError> {
-        let width = match self.u8()? {
-            TAG_BOOLEAN => 1,
-            TAG_INTEGER | TAG_FLOAT | TAG_DATE | TAG_LOCAL_TIME => 8,
-            TAG_TIME => 12,
-            TAG_LOCAL_DATETIME | TAG_OFFSET_DATETIME => 16,
-            TAG_DURATION => 28,
-            TAG_STRING | TAG_BYTES => self.varint()?,
-            TAG_ZONED_DATETIME => {
-                self.take(12)?;
-                self.varint()?
-            }
-            TAG_LIST => {
-                if depth >= MAX_DEPTH {
-                    return Err(DecodeError::NestingTooDeep);
+        let tag = self.u8()?;
+        let width = match fixed_width(tag) {
+            Some(width) => width,
+            None => match tag {
+                TAG_STRING | TAG_BYTES => self.varint()?,
+                TAG_ZONED_DATETIME => {
+                    self.take(12)?;
+                    self.varint()?
                 }
-                for _ in 0..self.varint()? {
-                    self.skip_at_depth(depth + 1)?;
+                TAG_LIST => {
+                    if depth >= MAX_DEPTH {
+                        return Err(DecodeError::NestingTooDeep);
+                    }
+                    for _ in 0..self.varint()? {
+                        match self.bytes.first().copied().and_then(fixed_width) {
+                            Some(width) => {
+                                self.take(1 + width)?;
+                            }
+                            None => self.skip_at_depth(depth + 1)?,
+                        }
+                    }
+                    0
                 }
-                0
-            }
-            TAG_SINGLE_FLOATS => {
-                if depth >= MAX_DEPTH {
-                    return Err(DecodeError::NestingTooDeep);
+                TAG_SINGLE_FLOATS => {
+                    if depth >= MAX_DEPTH {
+                        return Err(DecodeError::NestingTooDeep);
+                    }
+                    self.varint()?
+                        .checked_mul(4)
+                        .ok_or(DecodeError::LengthOverflow)?
                 }
-                self.varint()?
-                    .checked_mul(4)
-                    .ok_or(DecodeError::LengthOverflow)?
-            }
-            tag => return Err(DecodeError::UnknownTag(tag)),
+                tag => return Err(DecodeError::UnknownTag(tag)),
+            },
         };
         self.take(width)?;
         Ok(())
