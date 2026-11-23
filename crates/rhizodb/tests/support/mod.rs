@@ -79,3 +79,58 @@ pub fn ints(rows: &[Vec<Value>]) -> Vec<i64> {
         })
         .collect()
 }
+
+/// `fast` cases, the count CI runs, times the scale that `RHIZODB_TEST_SCALE` sets for nightly
+/// runs.
+pub fn cases(fast: u64) -> u64 {
+    let scale = std::env::var("RHIZODB_TEST_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse::<u64>().ok())
+        .unwrap_or(1);
+    fast.saturating_mul(scale.max(1))
+}
+
+/// The seed a randomized test runs with: `RHIZODB_TEST_SEED` when set, so a failure replays,
+/// and otherwise one drawn from the clock.
+pub fn seed() -> u64 {
+    std::env::var("RHIZODB_TEST_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+        })
+}
+
+/// SplitMix64, a small seeded generator, so randomized tests need no extra crate.
+#[derive(Clone, Debug)]
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `0..bound`.
+    pub fn below(&mut self, bound: u64) -> u64 {
+        self.next_u64() % bound
+    }
+
+    /// True with probability `numerator / denominator`.
+    pub fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+        self.below(denominator) < numerator
+    }
+
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len() as u64) as usize]
+    }
+}
