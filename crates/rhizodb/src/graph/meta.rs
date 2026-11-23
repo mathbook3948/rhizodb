@@ -155,7 +155,7 @@ impl MetaEdit {
     }
 
     pub(crate) fn live(&self) -> impl Iterator<Item = (usize, LabelSetId)> + '_ {
-        (0..SLOTS).filter_map(|slot| Some((slot, self.label_set(slot)?)))
+        ones(self.alive).map(|slot| (slot, self.sets[slot]))
     }
 
     /// The stored chunk, or `None` when no slot is live and the group has no chunk. `labels`
@@ -164,14 +164,27 @@ impl MetaEdit {
         &self,
         mut labels: impl FnMut(LabelSetId) -> Result<Arc<[Token<Label>]>, GraphError>,
     ) -> Result<Option<Vec<u8>>, GraphError> {
-        let mut uses: BTreeMap<LabelSetId, u16> = BTreeMap::new();
+        let mut uses: Vec<(LabelSetId, u16)> = Vec::new();
+        let mut last = 0;
         for (_, set) in self.live() {
-            *uses.entry(set).or_default() += 1;
+            if uses.get(last).is_none_or(|(held, _)| *held != set) {
+                last = match uses.iter().position(|(held, _)| *held == set) {
+                    Some(found) => found,
+                    None => {
+                        uses.push((set, 0));
+                        uses.len() - 1
+                    }
+                };
+            }
+            if let Some((_, used)) = uses.get_mut(last) {
+                *used += 1;
+            }
         }
         if uses.is_empty() {
             return Ok(None);
         }
-        let dictionary: Vec<LabelSetId> = uses.keys().copied().collect();
+        uses.sort_unstable();
+        let dictionary: Vec<LabelSetId> = uses.iter().map(|(set, _)| *set).collect();
         let width = code_width(dictionary.len());
         let mut out = Vec::with_capacity(HEADER + 4 * dictionary.len() + width * SLOTS);
         out.push(LAYOUT_VERSION);
@@ -183,12 +196,12 @@ impl MetaEdit {
             out.extend_from_slice(&set.0.to_be_bytes());
         }
         if width > 0 {
-            for slot in 0..SLOTS {
-                let code = match self.label_set(slot) {
-                    Some(set) => dictionary.binary_search(&set).unwrap_or_default(),
-                    None => 0,
-                };
-                out.extend_from_slice(&(code as u16).to_be_bytes()[2 - width..]);
+            let start = out.len();
+            out.resize(start + width * SLOTS, 0);
+            for (slot, set) in self.live() {
+                let code = dictionary.binary_search(&set).unwrap_or_default() as u16;
+                let at = start + width * slot;
+                out[at..at + width].copy_from_slice(&code.to_be_bytes()[2 - width..]);
             }
         }
         let mut counts: BTreeMap<Token<Label>, u16> = BTreeMap::new();
@@ -204,6 +217,20 @@ impl MetaEdit {
         }
         Ok(Some(out))
     }
+}
+
+fn ones(words: [u64; WORDS]) -> impl Iterator<Item = usize> {
+    words.into_iter().enumerate().flat_map(|(index, word)| {
+        let mut rest = word;
+        std::iter::from_fn(move || {
+            if rest == 0 {
+                return None;
+            }
+            let bit = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            Some(index * 64 + bit)
+        })
+    })
 }
 
 fn code_width(dictionary: usize) -> usize {
@@ -256,6 +283,21 @@ impl<'a> MetaBytes<'a> {
 
     fn alive(&self, slot: usize) -> bool {
         self.bytes[1 + slot / 8] & (1 << (slot % 8)) != 0
+    }
+
+    fn alive_words(&self) -> [u64; WORDS] {
+        let mut words = [0u64; WORDS];
+        for (index, word) in words.iter_mut().enumerate() {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&self.bytes[1 + 8 * index..9 + 8 * index]);
+            *word = u64::from_le_bytes(bytes);
+        }
+        words
+    }
+
+    /// Each live slot with the position of its label set in the dictionary, in slot order.
+    pub(crate) fn live_codes(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        ones(self.alive_words()).map(|slot| (slot, self.code(slot).unwrap_or_default()))
     }
 
     /// The position in the dictionary of the label set of the node in `slot`, if it is live.
@@ -319,13 +361,11 @@ impl<'a> MetaBytes<'a> {
     pub(crate) fn to_edit(self) -> Result<MetaEdit, GraphError> {
         let dictionary: Vec<LabelSetId> = self.dictionary().collect();
         let mut edit = MetaEdit::default();
-        for slot in 0..SLOTS {
-            if let Some(code) = self.code(slot) {
-                let set = dictionary.get(code).ok_or(GraphError::Corrupt(
-                    "a node meta code is outside its dictionary",
-                ))?;
-                edit.put(slot, *set);
-            }
+        for (slot, code) in self.live_codes() {
+            let set = dictionary.get(code).ok_or(GraphError::Corrupt(
+                "a node meta code is outside its dictionary",
+            ))?;
+            edit.put(slot, *set);
         }
         Ok(edit)
     }

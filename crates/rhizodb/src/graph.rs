@@ -594,9 +594,14 @@ impl<T: ReadTransaction> GraphTx<T> {
     pub(crate) fn node_ids(&self) -> Result<Vec<NodeId>, GraphError> {
         let mut ids = Vec::new();
         self.visit_meta(|group, meta| {
-            for slot in 0..meta::SLOTS {
-                if meta.label_set(slot).is_some() {
-                    ids.push(meta::node_at(group, slot));
+            match meta {
+                Meta::Stored(stored) => ids.extend(
+                    stored
+                        .live_codes()
+                        .map(|(slot, _)| meta::node_at(group, slot)),
+                ),
+                Meta::Edited(edit) => {
+                    ids.extend(edit.live().map(|(slot, _)| meta::node_at(group, slot)));
                 }
             }
             Ok(())
@@ -620,11 +625,8 @@ impl<T: ReadTransaction> GraphTx<T> {
                         .dictionary()
                         .map(|set| Ok(self.label_set(set)?.binary_search(&label).is_ok()))
                         .collect::<Result<Vec<bool>, GraphError>>()?;
-                    for slot in 0..meta::SLOTS {
-                        if stored
-                            .code(slot)
-                            .is_some_and(|code| carries.get(code) == Some(&true))
-                        {
+                    for (slot, code) in stored.live_codes() {
+                        if carries.get(code) == Some(&true) {
                             ids.push(meta::node_at(group, slot));
                         }
                     }
