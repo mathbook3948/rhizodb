@@ -59,6 +59,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A delta entry whose value is the segment's value again is dropped, with values compared bit for bit, so `-0.0` and `0.0` differ, and a delta left with no entry is deleted.
 - A group keeps at most 64 deltas, and a commit whose changed nodes and the group's stored deltas together number more than 64 folds them into the segments they touch, without first comparing each change with the segments, and deletes the deltas with one range delete.
 - A write transaction takes the number of deltas a group stores from the count the last commit that changed the group left in memory, and scans the group's delta keys only for a group no commit changed since the database opened.
+- A commit holds the counts while the storage commits, so the next writer cannot read the counts from before it.
 - A commit that fails forgets every count, since the storage may hold either side of it.
 - A read of one value reads the node's delta and then the part that holds the value, and a query that reads a second node of a group loads all of the group's deltas once.
 - A query that reads many values of one column of a group loads and checks its segments once, with one prefix scan, and a query that reads only a few, as a traversal does, reads each in place.

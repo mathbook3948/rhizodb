@@ -862,9 +862,9 @@ impl<T: WriteTransaction> GraphTx<T> {
         let mut current = definitions
             .as_ref()
             .map(|(shared, definitions)| (lock(shared), definitions));
+        let mut counts = self.column_deltas.as_ref().map(|shared| lock(shared));
         let committed = self.transaction.commit();
-        if let Some(shared) = &self.column_deltas {
-            let mut counts = lock(shared);
+        if let Some(counts) = &mut counts {
             if committed.is_ok() {
                 counts.extend(std::mem::take(&mut self.own_column_deltas));
             } else {
