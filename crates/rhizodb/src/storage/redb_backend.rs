@@ -231,11 +231,12 @@ const MAX_STEPS: usize = 8;
 
 type Guard<'a> = AccessGuard<'a, &'static [u8]>;
 
-/// A read cursor that keeps its place and the value it read last.
+/// A read cursor that keeps its place and the two values it read last.
 pub(crate) struct ReadCursor<'a> {
     table: &'a OpenTable,
     place: Option<Place<'a>>,
-    last: Option<(Vec<u8>, Option<Guard<'a>>)>,
+    recent: [Option<(Vec<u8>, Option<Guard<'a>>)>; 2],
+    older: usize,
 }
 
 struct Place<'a> {
@@ -309,15 +310,23 @@ impl Cursor for ReadCursor<'_> {
         reach: Reach,
         read: impl FnOnce(&[u8]) -> Result<R, E>,
     ) -> Result<Option<R>, E> {
-        let cached = matches!(&self.last, Some((last, _)) if last == key);
-        if !cached {
+        let holds = |entry: &Option<(Vec<u8>, Option<Guard<'_>>)>| matches!(entry, Some((held, _)) if held == key);
+        let newer = 1 - self.older;
+        let slot = if holds(&self.recent[newer]) {
+            newer
+        } else if holds(&self.recent[self.older]) {
+            self.older
+        } else {
+            let slot = self.older;
             let found = self.find(key, reach)?;
-            let (last, value) = self.last.get_or_insert_with(|| (Vec::new(), None));
-            last.clear();
-            last.extend_from_slice(key);
+            let (held, value) = self.recent[slot].get_or_insert_with(|| (Vec::new(), None));
+            held.clear();
+            held.extend_from_slice(key);
             *value = found;
-        }
-        match &self.last {
+            slot
+        };
+        self.older = 1 - slot;
+        match &self.recent[slot] {
             Some((_, Some(value))) => read(value.value()).map(Some),
             _ => Ok(None),
         }
@@ -348,7 +357,8 @@ impl ReadTransaction for RedbRead {
         Ok(ReadCursor {
             table: self.table(table)?,
             place: None,
-            last: None,
+            recent: [None, None],
+            older: 0,
         })
     }
 

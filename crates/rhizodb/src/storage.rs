@@ -154,8 +154,8 @@ pub(crate) enum Reach {
     Lookup,
 }
 
-/// Reads the entries of one table by key. The value read last stays at hand, so reading its key
-/// again costs nothing.
+/// Reads the entries of one table by key. A cursor may keep the values it read last at hand, so
+/// reading one of their keys again costs nothing.
 pub(crate) trait Cursor {
     /// Calls `read` with the value stored under `key`, without copying it.
     fn get_with<R, E: From<StorageError>>(
