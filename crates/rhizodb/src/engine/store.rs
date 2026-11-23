@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::hash::Hasher;
@@ -9,6 +10,7 @@ use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -19,9 +21,11 @@ use super::blob::RunRef;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
+use super::catalog::Root;
 use super::check;
 use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
+use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
 use super::error::EngineError;
 use super::extent::ExtentTable;
@@ -158,6 +162,8 @@ struct Shared<F: FileSystem> {
     running: Mutex<bool>,
     finished: Condvar,
     failure: Mutex<Option<(bool, String)>>,
+    trees: Mutex<Vec<Weak<Tree>>>,
+    quarantine: Mutex<BTreeMap<u64, u64>>,
     poisoned: AtomicBool,
 }
 
@@ -269,6 +275,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 ..ExtentTable::default()
             };
             let tree = Tree {
+                generation: header.generation,
                 roots: BTreeMap::new(),
                 source: Arc::clone(&source),
             };
@@ -294,6 +301,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 pages.place_extent(*id, entry.slot);
             }
             let tree = Tree {
+                generation: header.generation,
                 roots: catalog.roots,
                 source: Arc::clone(&source),
             };
@@ -364,6 +372,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 last_lsn,
                 last_hlc,
             }),
+            trees: Mutex::new(vec![Arc::downgrade(&tree)]),
             durable: Mutex::new(Durable {
                 header,
                 extents,
@@ -374,6 +383,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             running: Mutex::new(false),
             finished: Condvar::new(),
             failure: Mutex::new(None),
+            quarantine: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
         });
         let (jobs, worker) = match options.checkpoint {
@@ -506,6 +516,28 @@ impl<F: FileSystem + 'static> Engine<F> {
         )
     }
 
+    /// Writes every commit into the database file, copies every table into as few extents as
+    /// they need, and cuts the file after them.
+    pub(crate) fn compact(&self) -> Result<(), EngineError> {
+        let mut writer = lock(&self.shared.writer);
+        self.shared.wait_for_checkpoint();
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        if let Some(job) = self.shared.freeze(&mut writer) {
+            self.shared.run_checkpoint(job, false);
+        }
+        self.shared.drop_segments(&mut writer);
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        if let Err(error) = self.shared.compact() {
+            self.shared.poison_with(&error);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn extents(&self) -> ExtentTable {
         lock(&self.shared.durable).extents.clone()
@@ -610,29 +642,54 @@ impl<F: FileSystem + 'static> Shared<F> {
 
     fn write_checkpoint(&self, job: &Job, clean: bool) -> Result<Arc<Tree>, EngineError> {
         let mut durable = lock(&self.durable);
-        let generation = durable.header.generation + 1;
+        self.trim(&mut durable)?;
         let changes = job.frozen.newest();
-        let (roots, extents, catalog) = if changes.is_empty() && !durable.header.catalog.is_null() {
-            (
-                durable.tree.roots.clone(),
-                durable.extents.clone(),
-                durable.catalog.clone(),
-            )
-        } else {
-            let mut checkpointer =
-                Checkpointer::new(&self.pages, durable.extents.clone(), job.lsn, generation);
-            let mut roots = durable.tree.roots.clone();
-            for (table, changes) in &changes {
-                match checkpointer.merge_table(*table, roots.get(table).copied(), changes)? {
-                    Some(root) => roots.insert(*table, root),
-                    None => roots.remove(table),
-                };
-            }
-            let (catalog, extents) = checkpointer.finish(roots.clone(), &durable.catalog)?;
-            self.pages.sync()?;
-            (roots, extents, catalog)
-        };
-        let first = catalog
+        if changes.is_empty() && !durable.header.catalog.is_null() {
+            let header = Header {
+                generation: durable.header.generation + 1,
+                checkpoint_lsn: job.lsn,
+                checkpoint_hlc: job.hlc,
+                wal: WalIdentity {
+                    first_segment: job.first_segment,
+                    ..durable.header.wal
+                },
+                clean,
+                ..durable.header
+            };
+            self.pages.write_header(&header)?;
+            durable.header = header;
+            return Ok(Arc::clone(&durable.tree));
+        }
+        let generation = durable.header.generation + 1;
+        let mut checkpointer = Checkpointer::new(
+            &self.pages,
+            self.extents_to_place(&durable.extents),
+            job.lsn,
+            generation,
+        );
+        let mut roots = durable.tree.roots.clone();
+        for (table, changes) in &changes {
+            match checkpointer.merge_table(*table, roots.get(table).copied(), changes)? {
+                Some(root) => roots.insert(*table, root),
+                None => roots.remove(table),
+            };
+        }
+        let finished = checkpointer.finish(roots.clone(), &durable.catalog)?;
+        self.install(&mut durable, roots, finished, job, clean)
+    }
+
+    fn install(
+        &self,
+        durable: &mut Durable,
+        roots: BTreeMap<TableId, Root>,
+        finished: Finished,
+        job: &Job,
+        clean: bool,
+    ) -> Result<Arc<Tree>, EngineError> {
+        self.pages.sync()?;
+        let generation = durable.header.generation + 1;
+        let first = finished
+            .catalog
             .first()
             .ok_or_else(|| EngineError::corrupt("a checkpoint wrote no catalog"))?;
         let header = Header {
@@ -641,8 +698,8 @@ impl<F: FileSystem + 'static> Shared<F> {
             checkpoint_hlc: job.hlc,
             catalog: first.at,
             catalog_lsn: first.lsn,
-            next_extent: extents.next_extent,
-            open: extents.open_extents()?,
+            next_extent: finished.extents.next_extent,
+            open: finished.extents.open_extents()?,
             wal: WalIdentity {
                 first_segment: job.first_segment,
                 ..durable.header.wal
@@ -652,16 +709,102 @@ impl<F: FileSystem + 'static> Shared<F> {
         };
         self.pages.write_header(&header)?;
         let tree = Arc::new(Tree {
+            generation,
             roots,
             source: Arc::clone(&durable.tree.source),
         });
+        lock(&self.trees).push(Arc::downgrade(&tree));
+        let mut quarantine = lock(&self.quarantine);
+        for slot in finished.dropped {
+            quarantine.insert(slot, generation);
+        }
+        drop(quarantine);
         *durable = Durable {
             header,
-            extents,
-            catalog,
+            extents: finished.extents,
+            catalog: finished.catalog,
             tree: Arc::clone(&tree),
         };
         Ok(tree)
+    }
+
+    fn oldest_tree(&self) -> u64 {
+        let mut trees = lock(&self.trees);
+        trees.retain(|tree| tree.strong_count() > 0);
+        trees
+            .iter()
+            .filter_map(|tree| tree.upgrade().map(|tree| tree.generation))
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    fn reusable_slots(&self, extents: &ExtentTable) -> BTreeSet<u64> {
+        let oldest = self.oldest_tree();
+        let mut quarantine = lock(&self.quarantine);
+        quarantine.retain(|_, dropped| *dropped > oldest);
+        extents
+            .free_slots()
+            .into_iter()
+            .filter(|slot| !quarantine.contains_key(slot))
+            .collect()
+    }
+
+    fn extents_to_place(&self, extents: &ExtentTable) -> ExtentTable {
+        let mut extents = extents.clone();
+        extents.reusable = self.reusable_slots(&extents);
+        extents
+    }
+
+    fn trim(&self, durable: &mut Durable) -> Result<(), EngineError> {
+        let removable = self.reusable_slots(&durable.extents);
+        if let Some((slot, written)) = durable.extents.trim(&removable) {
+            self.pages.truncate_after(slot, written)?;
+            let top = durable.extents.next_slot;
+            lock(&self.quarantine).retain(|slot, _| *slot < top);
+        }
+        Ok(())
+    }
+
+    fn compact(&self) -> Result<(), EngineError> {
+        for _ in 0..2 {
+            let mut durable = lock(&self.durable);
+            self.trim(&mut durable)?;
+            let generation = durable.header.generation + 1;
+            let lsn = durable.header.checkpoint_lsn;
+            let mut checkpointer = Checkpointer::new(
+                &self.pages,
+                self.extents_to_place(&durable.extents),
+                lsn,
+                generation,
+            );
+            checkpointer.evacuate();
+            let old = Arc::clone(&durable.tree);
+            let mut roots = BTreeMap::new();
+            for table in old.roots.keys() {
+                if let Some(root) = checkpointer.rebuild(*table, &old)? {
+                    roots.insert(*table, root);
+                }
+            }
+            let finished = checkpointer.finish(roots.clone(), &[])?;
+            let job = Job {
+                frozen: Arc::new(Memtable::default()),
+                lsn,
+                hlc: durable.header.checkpoint_hlc,
+                first_segment: durable.header.wal.first_segment,
+            };
+            let tree = self.install(&mut durable, roots, finished, &job, false)?;
+            drop(durable);
+            drop(old);
+            let mut published = lock(&self.published);
+            let layers = &published.view.layers;
+            published.view.layers = Arc::new(Layers {
+                active: Arc::clone(&layers.active),
+                frozen: layers.frozen.clone(),
+                tree,
+            });
+        }
+        let mut durable = lock(&self.durable);
+        self.trim(&mut durable)
     }
 
     fn close(&self) {

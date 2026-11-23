@@ -97,6 +97,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The extent table records each extent's slot, written and live blocks, state, and purpose, and keeps room for a replication scheme and the term that opened it.
 - A checkpoint appends tree pages, runs of keys and values, and the catalog to open extents of their own.
 - The engine tracks each extent's live blocks as pages and runs are written and replaced.
+- A checkpoint drops every sealed extent left with no live block from the extent table, and its slot becomes free.
+- A free slot takes a new extent only in a later checkpoint and only once no reader holds a tree older than the one that dropped it, so neither a durable header nor a snapshot loses a page.
+- An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
+- A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread.
+- `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
 - Commits go on into a new memtable while a background checkpoint runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
@@ -110,7 +115,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 
 ## Open
 
-- How free space in sealed extents is reclaimed and the file shrinks.
+- How a sealed extent that is still partly live is cleaned without a compaction, and which extents a cleaner picks.
+- How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.
 - How point reads reach redb's speed, which they trail by a per-read overhead beyond the block cache.

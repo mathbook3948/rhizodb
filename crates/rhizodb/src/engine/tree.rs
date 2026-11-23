@@ -26,6 +26,8 @@ pub(crate) const MAX_LEVEL: u8 = 40;
 /// The tables as the database file holds them at one checkpoint.
 #[derive(Debug)]
 pub(crate) struct Tree {
+    /// The header generation that published this tree.
+    pub(crate) generation: u64,
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) source: Arc<dyn PageSource>,
 }

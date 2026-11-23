@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::layout::ExtentId;
 use crate::engine::layout::physical_block;
 use crate::engine::mem_fs::MemFs;
 use crate::engine::sim_fs::Crash;
@@ -186,47 +187,72 @@ fn an_explicit_checkpoint_drops_the_log_and_keeps_every_commit() {
     engine.check().unwrap();
 }
 
-fn written_blocks(fs: &SimFs, extents: &ExtentTable) -> Vec<(u64, Vec<u8>)> {
+type Blocks = std::collections::BTreeMap<(ExtentId, u32), Vec<u8>>;
+
+fn written_blocks(fs: &SimFs, extents: &ExtentTable) -> Blocks {
     let file = fs.open(NAME, block_size().unwrap()).unwrap();
-    let mut blocks = Vec::new();
-    for entry in extents.entries.values() {
+    let mut blocks = Blocks::new();
+    for (id, entry) in &extents.entries {
         for block in 0..entry.written {
             let at = physical_block(entry.slot, block).unwrap();
             let mut bytes = vec![0; BLOCK];
             file.read(at, &mut bytes).unwrap();
-            blocks.push((at, bytes));
+            blocks.insert((*id, block), bytes);
         }
     }
     blocks
 }
 
-#[test]
-fn no_block_a_durable_header_reached_is_ever_written_again() {
-    let fs = SimFs::new();
-    let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
-    let mut snapshots = Vec::new();
-    for _ in 0..12 {
-        fill(&engine, 3);
-        let mut write = engine.begin_write().unwrap();
-        write
-            .delete_range(Table::Nodes, &[0, 0, 0, 10], &[0, 0, 0, 40])
-            .unwrap();
-        write.commit().unwrap();
-        engine.check().unwrap();
-        snapshots.push(written_blocks(&fs, &engine.extents()));
+fn manual(checkpoint: CheckpointMode) -> EngineOptions {
+    EngineOptions {
+        memtable_limit: u64::MAX,
+        wal_limit: u64::MAX,
+        ..tiny(checkpoint)
     }
-    drop(engine);
-    let file = fs.open(NAME, block_size().unwrap()).unwrap();
+}
+
+#[test]
+fn written_blocks_never_change_while_their_extent_is_listed_and_freed_slots_are_reused() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    let mut previous: Option<Blocks> = None;
+    let mut extents_seen = std::collections::BTreeSet::new();
     let mut checked = 0;
-    for snapshot in snapshots {
-        for (at, bytes) in snapshot {
-            let mut now = vec![0; BLOCK];
-            file.read(at, &mut now).unwrap();
-            assert!(now == bytes, "block {at} changed after a header reached it");
-            checked += 1;
+    for round in 0..40u32 {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..200u32 {
+            let key = (item * 7 + round) % 600;
+            let length = 30 + (item % 3) as usize * 600;
+            write
+                .put(Table::Nodes, &key.to_be_bytes(), &vec![round as u8; length])
+                .unwrap();
         }
+        write.commit().unwrap();
+        engine.checkpoint().unwrap();
+        engine.check().unwrap();
+        let extents = engine.extents();
+        let now = written_blocks(&fs, &extents);
+        if let Some(before) = previous.take() {
+            for (place, bytes) in &before {
+                if extents.entries.contains_key(&place.0) {
+                    assert!(
+                        now.get(place) == Some(bytes),
+                        "block {place:?} of a listed extent changed"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        extents_seen.extend(extents.entries.keys().copied());
+        previous = Some(now);
     }
     assert!(checked > 1000);
+    let slots = engine.extents().next_slot;
+    assert!(
+        (slots as usize) < extents_seen.len(),
+        "{} extents were opened in {slots} slots, so no slot was reused",
+        extents_seen.len()
+    );
 }
 
 #[test]
@@ -456,4 +482,96 @@ fn a_checkpoint_that_meets_a_damaged_page_reports_corruption_from_then_on() {
     assert!(error.is_corrupt(), "{error}");
     let refused = engine.begin_write().map(drop).unwrap_err();
     assert!(refused.is_corrupt(), "{refused}");
+}
+
+fn file_bytes(fs: &SimFs) -> u64 {
+    fs.open(NAME, block_size().unwrap())
+        .unwrap()
+        .block_count()
+        .unwrap()
+        * BLOCK as u64
+}
+
+fn churn(engine: &impl Storage, rounds: u32) {
+    for round in 0..rounds {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..300u32 {
+            let key = (item * 13 + round * 7) % 2000;
+            let length = [20, 300, 2000][(item % 3) as usize];
+            write
+                .put(Table::Nodes, &key.to_be_bytes(), &vec![round as u8; length])
+                .unwrap();
+        }
+        write
+            .delete_range(
+                Table::Nodes,
+                &(round % 2000).to_be_bytes(),
+                &(round % 2000 + 20).to_be_bytes(),
+            )
+            .unwrap();
+        write.commit().unwrap();
+    }
+}
+
+#[test]
+fn compacting_shrinks_the_file_to_its_live_data_and_keeps_every_entry() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
+    churn(&engine, 60);
+    let expected = everything(&engine).unwrap();
+    let before = file_bytes(&fs);
+    engine.compact().unwrap();
+    let report = engine.check().unwrap();
+    let after = file_bytes(&fs);
+    assert_eq!(everything(&engine).unwrap(), expected);
+    let live = report.live_blocks * BLOCK as u64;
+    let extents = engine.extents();
+    assert_eq!(
+        extents.entries.len() as u64,
+        extents.next_slot,
+        "compacting left free slots"
+    );
+    let extent_bytes = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
+    assert!(extents.entries.len() as u64 <= 3 + live / extent_bytes);
+    assert!(after < before, "compacting left {after} of {before} bytes");
+    churn(&engine, 5);
+    let expected = everything(&engine).unwrap();
+    let crashed = fs.crash(Crash::DropUnsynced);
+    drop(engine);
+    let engine = Engine::open(Arc::new(crashed), NAME, EngineOptions::default()).unwrap();
+    assert_eq!(everything(&engine).unwrap(), expected);
+    engine.check().unwrap();
+}
+
+#[test]
+fn a_reader_holding_an_old_snapshot_through_a_compaction_reads_it_whole() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
+    churn(&engine, 30);
+    let pinned = engine.begin_read().unwrap();
+    let before = pinned.scan_prefix(Table::Nodes, &[]).unwrap();
+    engine.compact().unwrap();
+    churn(&engine, 30);
+    engine.compact().unwrap();
+    assert_eq!(pinned.scan_prefix(Table::Nodes, &[]).unwrap(), before);
+    drop(pinned);
+    let grown = file_bytes(&fs);
+    engine.compact().unwrap();
+    assert!(file_bytes(&fs) < grown);
+    engine.check().unwrap();
+}
+
+#[test]
+fn overwriting_the_same_keys_keeps_the_file_bounded() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
+    churn(&engine, 40);
+    let early = file_bytes(&fs);
+    churn(&engine, 160);
+    let late = file_bytes(&fs);
+    assert!(
+        late < early * 3,
+        "the file grew from {early} to {late} bytes rewriting the same keys"
+    );
+    engine.check().unwrap();
 }

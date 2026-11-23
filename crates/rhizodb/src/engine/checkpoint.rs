@@ -39,7 +39,10 @@ use super::pages::PageSource;
 use super::pages::Pages;
 use super::pages::load_blob;
 use super::tree::MAX_LEVEL;
+use super::tree::Tree;
 use super::tree::fetch;
+use crate::storage::StorageError;
+use std::ops::Bound;
 
 const UNDERFULL: usize = BLOCK / 4;
 
@@ -685,15 +688,17 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         Ok((page, level))
     }
 
-    /// Writes the catalog for `roots` and this checkpoint's extent table, and frees `previous`.
+    /// Writes the catalog for `roots` and this checkpoint's extent table, after freeing
+    /// `previous` and dropping every sealed extent left with no live block.
     pub(crate) fn finish(
         mut self,
         roots: BTreeMap<TableId, Root>,
         previous: &[RunRef],
-    ) -> Result<(Vec<RunRef>, ExtentTable), EngineError> {
+    ) -> Result<Finished, EngineError> {
         for run in previous {
             self.extents.free(run.at, run.blocks)?;
         }
+        let dropped = self.extents.drop_empty();
         let mut length = Catalog {
             roots: roots.clone(),
             extents: self.extents.clone(),
@@ -711,10 +716,217 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             if payload.len() == length {
                 self.extents = planned;
                 self.write_runs(&runs, Role::Catalog, TableId(0), &[], &payload)?;
-                return Ok((runs, self.extents));
+                self.extents.reusable.clear();
+                return Ok(Finished {
+                    catalog: runs,
+                    extents: self.extents,
+                    dropped,
+                });
             }
             length = payload.len();
         }
+    }
+
+    /// Counts every block of the file dead and seals every extent, before [`Self::rebuild`]
+    /// copies each table into new extents.
+    pub(crate) fn evacuate(&mut self) {
+        self.extents.evacuate();
+    }
+
+    /// Writes every entry of `table` as `tree` holds it into new, full pages, copying each long
+    /// value into a run of its own.
+    pub(crate) fn rebuild(
+        &mut self,
+        table: TableId,
+        tree: &Tree,
+    ) -> Result<Option<Root>, EngineError> {
+        if !tree.roots.contains_key(&table) {
+            return Ok(None);
+        }
+        let mut builder = Builder::default();
+        tree.scan::<StorageError>(
+            table,
+            Bound::Unbounded,
+            Bound::Unbounded,
+            &mut |key, value| {
+                let key = Bytes::from(key);
+                let value = self.stored(table, &key, &Bytes::from(value))?;
+                builder.push_leaf(self, table, LeafEntry { key, value })?;
+                Ok(())
+            },
+        )?;
+        builder.finish(self, table)
+    }
+}
+
+/// What a checkpoint wrote: the catalog's runs, the extent table it records, and the slots of
+/// the extents it dropped.
+#[derive(Debug)]
+pub(crate) struct Finished {
+    pub(crate) catalog: Vec<RunRef>,
+    pub(crate) extents: ExtentTable,
+    pub(crate) dropped: Vec<u64>,
+}
+
+#[derive(Debug, Default)]
+struct Level {
+    leaves: Vec<LeafEntry>,
+    branches: Vec<BranchEntry>,
+    size: PageSize,
+    low: Bytes,
+}
+
+#[derive(Debug, Default)]
+struct Builder {
+    levels: Vec<Level>,
+    entries: u64,
+}
+
+impl Builder {
+    fn level(&mut self, level: usize) -> &mut Level {
+        while self.levels.len() <= level {
+            self.levels.push(Level::default());
+        }
+        &mut self.levels[level]
+    }
+
+    fn push_leaf<B: BlockFile>(
+        &mut self,
+        checkpointer: &mut Checkpointer<'_, B>,
+        table: TableId,
+        entry: LeafEntry,
+    ) -> Result<(), EngineError> {
+        self.entries += 1;
+        let leaf = self.level(0);
+        let (next, bytes) = leaf.size.with(Some(&entry.key), value_bytes(&entry.value));
+        if leaf.leaves.is_empty() || bytes <= BLOCK {
+            leaf.size = next;
+            leaf.leaves.push(entry);
+            return Ok(());
+        }
+        let low = leaf.leaves.last().map_or_else(
+            || entry.key.clone(),
+            |last| separator(&last.key, &entry.key),
+        );
+        self.flush(checkpointer, table, 0, low)?;
+        let leaf = self.level(0);
+        leaf.size = PageSize::default()
+            .with(Some(&entry.key), value_bytes(&entry.value))
+            .0;
+        leaf.leaves.push(entry);
+        Ok(())
+    }
+
+    fn push_branch<B: BlockFile>(
+        &mut self,
+        checkpointer: &mut Checkpointer<'_, B>,
+        table: TableId,
+        level: usize,
+        entry: BranchEntry,
+    ) -> Result<(), EngineError> {
+        let branch = self.level(level);
+        if branch.branches.is_empty() {
+            branch.low = entry.low.clone();
+            branch.size = PageSize::default().with(None, CHILD_BYTES).0;
+            branch.branches.push(entry);
+            return Ok(());
+        }
+        let (next, bytes) = branch.size.with(Some(&entry.low), CHILD_BYTES);
+        if bytes <= BLOCK {
+            branch.size = next;
+            branch.branches.push(entry);
+            return Ok(());
+        }
+        self.flush(checkpointer, table, level, entry.low.clone())?;
+        self.push_branch(checkpointer, table, level, entry)
+    }
+
+    fn flush<B: BlockFile>(
+        &mut self,
+        checkpointer: &mut Checkpointer<'_, B>,
+        table: TableId,
+        level: usize,
+        low: Bytes,
+    ) -> Result<(), EngineError> {
+        let current = self.level(level);
+        let page_low = std::mem::replace(&mut current.low, low);
+        let content = if level == 0 {
+            Content::Leaf(std::mem::take(&mut current.leaves))
+        } else {
+            let mut entries = std::mem::take(&mut current.branches);
+            if let Some(first) = entries.first_mut() {
+                first.low = page_low.clone();
+            }
+            Content::Branch(entries)
+        };
+        current.size = PageSize::default();
+        let level_byte = u8::try_from(level).map_err(|_| EngineError::TooLarge)?;
+        if level_byte >= MAX_LEVEL {
+            return Err(EngineError::TooLarge);
+        }
+        let child = checkpointer.write_node(table, level_byte, &content)?;
+        self.push_branch(
+            checkpointer,
+            table,
+            level + 1,
+            BranchEntry {
+                low: page_low,
+                child,
+            },
+        )
+    }
+
+    fn finish<B: BlockFile>(
+        mut self,
+        checkpointer: &mut Checkpointer<'_, B>,
+        table: TableId,
+    ) -> Result<Option<Root>, EngineError> {
+        let mut level = 0;
+        while level < self.levels.len() {
+            let top = level + 1 == self.levels.len();
+            let current = &self.levels[level];
+            if top {
+                if level == 0 {
+                    if current.leaves.is_empty() {
+                        return Ok(None);
+                    }
+                } else if current.branches.len() == 1 {
+                    let child = current.branches[0].child;
+                    return Ok(Some(Root {
+                        page: child,
+                        level: u8::try_from(level - 1).map_err(|_| EngineError::TooLarge)?,
+                        entries: self.entries,
+                    }));
+                }
+                let content = if level == 0 {
+                    Content::Leaf(std::mem::take(&mut self.levels[0].leaves))
+                } else {
+                    let mut entries = std::mem::take(&mut self.levels[level].branches);
+                    if let Some(first) = entries.first_mut() {
+                        first.low = Bytes::from(&[][..]);
+                    }
+                    Content::Branch(entries)
+                };
+                let level_byte = u8::try_from(level).map_err(|_| EngineError::TooLarge)?;
+                let page = checkpointer.write_node(table, level_byte, &content)?;
+                return Ok(Some(Root {
+                    page,
+                    level: level_byte,
+                    entries: self.entries,
+                }));
+            }
+            let empty = if level == 0 {
+                current.leaves.is_empty()
+            } else {
+                current.branches.is_empty()
+            };
+            if !empty {
+                let low = current.low.clone();
+                self.flush(checkpointer, table, level, low)?;
+            }
+            level += 1;
+        }
+        Ok(None)
     }
 }
 

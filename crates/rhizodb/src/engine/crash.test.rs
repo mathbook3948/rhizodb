@@ -435,3 +435,46 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
     }
     assert!(checked >= 20, "only {checked} power losses were checked");
 }
+
+#[test]
+fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
+    let transactions = transactions(13, 30);
+    let states = states(&transactions);
+    let fs = SimFs::new();
+    let engine = open(&fs, options()).unwrap();
+    for writes in &transactions {
+        commit(&engine, writes).unwrap();
+    }
+    let crashed = fs.crash(Crash::DropUnsynced);
+    drop(engine);
+    let base = crashed;
+    let total = {
+        let copy = base.crash(Crash::DropUnsynced);
+        let engine = open(&copy, options()).unwrap();
+        let before = copy.operations();
+        engine.compact().unwrap();
+        let used = copy.operations() - before;
+        assert_eq!(dump(&engine), states[transactions.len()]);
+        used
+    };
+    assert!(total > 20, "compacting ran only {total} operations");
+    for fail_at in 0..=total {
+        let copy = base.crash(Crash::DropUnsynced);
+        let engine = open(&copy, options()).unwrap();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        let _ = engine.compact();
+        drop(engine);
+        for crash in crashes(2) {
+            let reopened = open(&copy.crash(crash), options())
+                .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            reopened.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
+            assert_eq!(
+                dump(&reopened),
+                states[transactions.len()],
+                "fail at {fail_at}, {crash:?}"
+            );
+        }
+    }
+}

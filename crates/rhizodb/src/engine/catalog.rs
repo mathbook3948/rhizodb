@@ -148,6 +148,7 @@ impl Catalog {
                 next_extent,
                 next_slot,
                 open,
+                reusable: std::collections::BTreeSet::new(),
             },
         })
     }

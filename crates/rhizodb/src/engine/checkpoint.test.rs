@@ -69,11 +69,11 @@ impl Store {
             Some(root) => self.roots.insert(TABLE, root),
             None => self.roots.remove(&TABLE),
         };
-        let (catalog, extents) = checkpointer
+        let finished = checkpointer
             .finish(self.roots.clone(), &self.catalog)
             .unwrap();
-        self.catalog = catalog;
-        self.extents = extents;
+        self.catalog = finished.catalog;
+        self.extents = finished.extents;
         self.header.checkpoint_lsn = lsn;
         self.header.generation = generation;
     }
@@ -84,6 +84,7 @@ impl Store {
 
     fn tree(&self) -> Tree {
         Tree {
+            generation: self.header.generation,
             roots: self.roots.clone(),
             source: Arc::clone(&self.pages) as Arc<dyn PageSource>,
         }
@@ -382,8 +383,8 @@ fn a_catalog_longer_than_an_extent_reads_back_from_the_header_alone() {
             ExtentId(1_000_000 + index),
             crate::engine::extent::ExtentEntry {
                 slot: 50_000_000 + index,
-                written: 0,
-                live: 0,
+                written: 1,
+                live: 1,
                 state: crate::engine::extent::ExtentState::Sealed,
                 purpose: crate::engine::extent::Purpose::Tree,
                 scheme: 0,

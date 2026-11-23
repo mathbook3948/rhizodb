@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::error::EngineError;
 use super::header::OPEN_EXTENTS;
@@ -66,6 +67,9 @@ pub(crate) struct ExtentTable {
     pub(crate) next_extent: ExtentId,
     pub(crate) next_slot: u64,
     pub(crate) open: [Option<ExtentId>; OPEN_EXTENTS],
+    /// Free slots a checkpoint may place new extents in, lowest first. The engine fills it at the
+    /// start of each checkpoint, and it is never stored.
+    pub(crate) reusable: BTreeSet<u64>,
 }
 
 impl Default for ExtentTable {
@@ -75,6 +79,7 @@ impl Default for ExtentTable {
             next_extent: ExtentId(1),
             next_slot: 0,
             open: [None; OPEN_EXTENTS],
+            reusable: BTreeSet::new(),
         }
     }
 }
@@ -105,8 +110,13 @@ impl ExtentTable {
         }
         let id = self.next_extent;
         self.next_extent = ExtentId(id.0 + 1);
-        let slot = self.next_slot;
-        self.next_slot += 1;
+        let slot = match self.reusable.pop_first() {
+            Some(slot) => slot,
+            None => {
+                self.next_slot += 1;
+                self.next_slot - 1
+            }
+        };
         self.entries.insert(
             id,
             ExtentEntry {
@@ -122,6 +132,52 @@ impl ExtentTable {
         self.open[index] = Some(id);
         opened(id, slot);
         BlockRef::new(id, 0)
+    }
+
+    /// The slots below the high-water mark that no extent uses.
+    pub(crate) fn free_slots(&self) -> BTreeSet<u64> {
+        let used: BTreeSet<u64> = self.entries.values().map(|entry| entry.slot).collect();
+        (0..self.next_slot)
+            .filter(|slot| !used.contains(slot))
+            .collect()
+    }
+
+    /// Removes every sealed extent with no live block and returns their slots.
+    pub(crate) fn drop_empty(&mut self) -> Vec<u64> {
+        let empty: Vec<ExtentId> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.state == ExtentState::Sealed && entry.live == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        empty
+            .into_iter()
+            .filter_map(|id| self.entries.remove(&id).map(|entry| entry.slot))
+            .collect()
+    }
+
+    /// Seals every extent and counts none of its blocks live, before a rewrite of every table
+    /// moves all live data into new extents.
+    pub(crate) fn evacuate(&mut self) {
+        for entry in self.entries.values_mut() {
+            entry.state = ExtentState::Sealed;
+            entry.live = 0;
+        }
+        self.open = [None; OPEN_EXTENTS];
+    }
+
+    /// Lowers the high-water mark past free slots at the end of the file, and returns the slot
+    /// and written blocks of the last extent in use, after which the file can end.
+    pub(crate) fn trim(&mut self, removable: &BTreeSet<u64>) -> Option<(u64, u32)> {
+        let last = self.entries.values().max_by_key(|entry| entry.slot);
+        let top = last.map_or(0, |entry| entry.slot + 1);
+        if (top..self.next_slot).any(|slot| !removable.contains(&slot)) {
+            return None;
+        }
+        let end = last.map_or((0, 0), |entry| (entry.slot, entry.written));
+        self.next_slot = top;
+        self.reusable.retain(|slot| *slot < top);
+        Some(end)
     }
 
     /// Records that `blocks` blocks from `at` are no longer reachable.

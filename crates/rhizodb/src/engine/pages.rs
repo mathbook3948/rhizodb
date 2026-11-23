@@ -24,10 +24,8 @@ use super::page::PageHeader;
 
 /// Reads checked pages and runs of the database file.
 pub(crate) trait PageSource: Send + Sync + fmt::Debug {
-    /// The one-block page at `at`, checked against its checksum and its block.
     fn page(&self, at: BlockRef) -> Result<CachedPage, EngineError>;
 
-    /// The blocks of the run `run`, unchecked.
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError>;
 
     fn seed(&self) -> u64;
@@ -133,6 +131,16 @@ impl<B: BlockFile> Pages<B> {
         self.write(at, &bytes)?;
         let header = PageHeader::open(self.seed, &bytes, at)?;
         self.cache.insert(at, (header, Arc::from(bytes)));
+        Ok(())
+    }
+
+    /// Cuts the file after block `blocks` of the extent in slot `slot`, unless it already ends
+    /// there or before.
+    pub(crate) fn truncate_after(&self, slot: u64, blocks: u32) -> Result<(), EngineError> {
+        let end = physical_block(slot, blocks)?;
+        if self.file.block_count()? > end {
+            self.file.set_block_count(end)?;
+        }
         Ok(())
     }
 
