@@ -5,6 +5,9 @@
 //! `format-8.answers`. `typed` holds property values of every type across several row
 //! groups and is compacted. `db-file` is the undamaged file of the `db_file` fuzz target at that
 //! commit, byte for byte, so the damages the fuzzer found on it replay on the same bytes.
+//! Run as `format-8 answer-db-file <path>` on a copy of that file, it writes nothing and prints
+//! each query the upgrade test checks with its answer, which `answer-format-8-db-file.sh` keeps
+//! in `format-8-db-file.answers`.
 
 use rhizodb::Database;
 use rhizodb::IndexTarget;
@@ -35,6 +38,21 @@ const DB_FILE_SETUP: &[&str] = &[
     "MATCH (a:Item), (b:Item) WHERE b.i = a.i + 1 INSERT (a)-[:NEXT {w: a.i}]->(b)",
     "MATCH (n:Item) WHERE n.i % 7 = 0 DETACH DELETE n",
     "MATCH (n:Item) WHERE n.i % 5 = 0 SET n:Five REMOVE n.blob",
+];
+
+const DB_FILE_QUERIES: &[&str] = &[
+    "MATCH (n) RETURN count(n)",
+    "MATCH (n) RETURN n ORDER BY id(n)",
+    "MATCH (a)-[r]->(b) RETURN id(r), type(r), id(a), id(b), r ORDER BY id(r)",
+    "MATCH (n:Item {i: 42}) RETURN id(n), n.text",
+    "MATCH (n:Item) WHERE n.i >= 100 AND n.i < 110 RETURN id(n), n.i ORDER BY id(n)",
+    "MATCH (n:Item) WHERE n.i > 100 RETURN count(n), sum(n.i)",
+    "MATCH (n:Five) RETURN labels(n), keys(n) ORDER BY id(n) LIMIT 3",
+    "MATCH (:Person {name: 'Ada'})-[k:KNOWS {since: 1833}]->(b) RETURN b, k",
+    "MATCH ()-[k:KNOWS]->() WHERE k.since >= 1800 RETURN k.since",
+    "MATCH p = (:Item)-[:NEXT*1..3]->(:Item) RETURN count(p)",
+    "CALL db.index.keyword.queryNodes('text', 'word', 10) YIELD node, score RETURN id(node), score",
+    "CALL db.index.vector.queryNodes('vec', [3.0, 1.0], 10) YIELD node, score RETURN id(node), score",
 ];
 
 fn run(db: &Database, query: &str) {
@@ -139,6 +157,11 @@ fn main() {
         match kind.as_str() {
             "typed" => typed(&db),
             "db-file" => db_file(&db),
+            "answer-db-file" => {
+                for query in DB_FILE_QUERIES {
+                    run(&db, query);
+                }
+            }
             other => panic!("unknown fixture {other}"),
         }
     }

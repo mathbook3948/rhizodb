@@ -199,8 +199,16 @@ const FORMAT_EIGHT: &str = "tests/fixtures/format-8.redb";
 
 /// Each query the format 8 generator ran, with the answer it printed at format 8.
 fn answers_at_format_eight() -> Vec<(String, String)> {
+    answers_in("format-8.answers")
+}
+
+/// Each query of an answer file in `tests/fixtures`, with the answer the fixture's own commit
+/// printed.
+fn answers_in(file: &str) -> Vec<(String, String)> {
     let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-8.answers"),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(file),
     )
     .unwrap();
     let lines: Vec<&str> = text.lines().collect();
@@ -281,5 +289,68 @@ fn a_database_of_format_eight_takes_writes_of_every_type_after_the_upgrade() {
     assert_eq!(
         run(&db, "MATCH (n:Late) RETURN count(*), sum(n.i), min(id(n))"),
         [vec![int(5000), int(12_502_500), int(8309)]]
+    );
+}
+
+const FORMAT_EIGHT_DB_FILE: &str = "tests/fixtures/format-8-db-file.redb";
+
+fn assert_format_eight_db_file_answers(db: &Database) {
+    let answers = answers_in("format-8-db-file.answers");
+    assert_eq!(answers.len(), 12);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn the_damaged_file_fixture_of_format_eight_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_EIGHT_DB_FILE, directory.path());
+    assert_format_eight_db_file_answers(&Database::open(&path).unwrap());
+    assert_format_eight_db_file_answers(&Database::open(&path).unwrap());
+}
+
+#[test]
+fn the_damaged_file_fixture_of_format_eight_keeps_its_indexes_current_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_EIGHT_DB_FILE, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH (n:Item) WHERE n.i <= 10 SET n.i = n.i + 1000, n.text = 'moved'",
+        );
+        run(
+            &db,
+            "INSERT (:Item {i: 42, text: 'word again', vec: [-1.0, 5.0]})",
+        );
+        run(&db, "MATCH ()-[k:KNOWS]->() SET k.since = 1900");
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        run(&db, "MATCH (n:Item {i: 42}) RETURN n.text"),
+        [vec![string("word again")]]
+    );
+    assert_eq!(
+        single(&db, "MATCH (n:Item) WHERE n.i > 1000 RETURN count(*)"),
+        int(9)
+    );
+    assert_eq!(
+        single(&db, "MATCH ()-[k:KNOWS {since: 1900}]->() RETURN count(*)"),
+        int(1)
+    );
+    assert_eq!(
+        single(
+            &db,
+            "CALL db.index.keyword.queryNodes('text', 'moved', 100) YIELD node RETURN count(node)"
+        ),
+        int(9)
+    );
+    assert_eq!(
+        run(
+            &db,
+            "CALL db.index.vector.queryNodes('vec', [-1.0, 5.0], 1) YIELD node RETURN node.i"
+        ),
+        [vec![int(42)]]
     );
 }
