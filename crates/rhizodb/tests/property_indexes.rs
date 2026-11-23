@@ -344,8 +344,11 @@ fn apply(db: &Database, write: &Write) {
     rows(db, query, &parameters);
 }
 
-const LOOKUPS: [&str; 12] = [
+const LOOKUPS: [&str; 15] = [
     "MATCH (n:P {k: $v}) RETURN id(n) AS id",
+    "MATCH (n:P {k: $v}) WHERE n.k = $w RETURN id(n) AS id",
+    "MATCH (n:P {k: $v, k: $w}) RETURN id(n) AS id",
+    "MATCH (n:P {k: $v})-[r:T]->(m:P {k: $w}) RETURN id(r) AS id",
     "MATCH (n:P) WHERE n.k = $v RETURN id(n) AS id",
     "MATCH (n:P) WHERE n.k IN [$v, $w] RETURN id(n) AS id",
     "MATCH (n:P) WHERE n.k < $v RETURN id(n) AS id",

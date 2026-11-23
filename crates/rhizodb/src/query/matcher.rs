@@ -35,6 +35,19 @@ pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
 
 type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
 
+#[derive(Clone, Copy, Debug)]
+struct Known {
+    labels: bool,
+    served: Option<Token<PropertyKey>>,
+}
+
+impl Known {
+    const NOTHING: Self = Self {
+        labels: false,
+        served: None,
+    };
+}
+
 struct Search<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     patterns: &'s [PatternPart],
@@ -118,13 +131,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         &self,
         id: NodeId,
         pattern: &NodePattern,
-        labels_known: bool,
+        known: Known,
         row: &Row,
     ) -> Result<bool, Error> {
-        if labels_known && pattern.properties.is_none() {
+        if known.labels && pattern.properties.is_none() {
             return Ok(true);
         }
-        if !labels_known {
+        if !known.labels {
             let labelled = match &pattern.labels {
                 Some(labels) => self.node_labelled(id, labels)?,
                 None => self.with_labels(id, |_| true)?,
@@ -136,7 +149,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(expected) = &pattern.properties else {
             return Ok(true);
         };
-        let expected = self.expected_properties(expected, row)?;
+        let mut expected = self.expected_properties(expected, row)?;
+        if let Some(served) = known.served {
+            expected.retain(|(key, _)| *key != Some(served));
+        }
         holds(&expected, |key| {
             Ok(self.node_property(id, Some(key))?.flatten())
         })
@@ -165,7 +181,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         &self,
         part: &PatternPart,
         row: &Row,
-    ) -> Result<(Vec<NodeId>, bool), Error> {
+    ) -> Result<(Vec<NodeId>, Known), Error> {
         let pattern = &part.start;
         if pattern.bound {
             return Ok((
@@ -173,12 +189,16 @@ impl<T: ReadTransaction> Env<'_, T> {
                     Some(Datum::Node(id)) => vec![*id],
                     _ => Vec::new(),
                 },
-                false,
+                Known::NOTHING,
             ));
         }
         let labels_known = label_scan_decides(pattern);
         if let Some(sought) = self.seek_start(part, row)? {
-            return Ok((sought.nodes, labels_known && sought.labelled));
+            let known = Known {
+                labels: labels_known && sought.labelled,
+                served: sought.served,
+            };
+            return Ok((sought.nodes, known));
         }
         let nodes = match pattern.labels.as_ref().and_then(LabelExpr::required) {
             Some(label) => match self.label_token(&label.0)? {
@@ -187,7 +207,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
             None => self.tx.node_ids()?,
         };
-        Ok((nodes, labels_known))
+        let known = Known {
+            labels: labels_known,
+            served: None,
+        };
+        Ok((nodes, known))
     }
 
     fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
@@ -277,9 +301,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = patterns.get(index) else {
             return emit(row);
         };
-        let (candidates, labels_known) = self.env.start_candidates(part, row)?;
+        let (candidates, known) = self.env.start_candidates(part, row)?;
         for id in candidates {
-            if !self.env.node_matches(id, &part.start, labels_known, row)? {
+            if !self.env.node_matches(id, &part.start, known, row)? {
                 continue;
             }
             set(row, part.start.slot, Datum::Node(id));
@@ -457,7 +481,10 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         } else {
             set(row, step.node.slot, Datum::Node(node));
         }
-        if !self.env.node_matches(node, &step.node, false, row)? {
+        if !self
+            .env
+            .node_matches(node, &step.node, Known::NOTHING, row)?
+        {
             return Ok(true);
         }
         self.step(index, step_index + 1, node, row, trail, emit)

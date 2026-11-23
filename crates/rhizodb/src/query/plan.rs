@@ -150,6 +150,8 @@ pub(crate) struct Seek {
     /// Each holds for every match, and none reads a variable that the pattern part or a later
     /// one binds.
     pub(crate) tests: Vec<SeekTest>,
+    /// Whether the first test is the equality of the pattern's property map entry for the key.
+    pub(crate) map_entry: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

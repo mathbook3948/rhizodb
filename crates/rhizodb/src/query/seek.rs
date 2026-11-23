@@ -12,6 +12,7 @@ use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipType;
 use crate::graph::Target;
+use crate::graph::Token;
 use crate::graph::compared;
 use crate::storage::ReadTransaction;
 use crate::value::PropertyValue;
@@ -46,12 +47,14 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
     let mut found = Vec::new();
     let mut from_map = |element: SeekElement, properties: Option<&Expr>| {
         if let Some(Expr::Map(entries)) = properties {
-            for (key, value) in entries {
-                if independent(value, bound_later) {
+            for (at, (key, value)) in entries.iter().enumerate() {
+                let last = !entries[at + 1..].iter().any(|(other, _)| other == key);
+                if last && independent(value, bound_later) {
                     found.push((
                         element,
                         SeekKey::Property(key.clone()),
                         SeekTest::Equal(value.clone()),
+                        true,
                     ));
                 }
             }
@@ -98,12 +101,12 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
                         && independent(right, bound_later)
                         && let Some(test) = test(*op, right)
                     {
-                        found.push((element, key, test));
+                        found.push((element, key, test, false));
                     } else if let Some((element, key)) = value_of(right)
                         && independent(left, bound_later)
                         && let Some(test) = test(mirror(*op), left)
                     {
-                        found.push((element, key, test));
+                        found.push((element, key, test, false));
                     }
                     left = right;
                 }
@@ -112,14 +115,14 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
                 if let Some((element, key)) = value_of(needle)
                     && independent(list, bound_later)
                 {
-                    found.push((element, key, SeekTest::In(list.as_ref().clone())));
+                    found.push((element, key, SeekTest::In(list.as_ref().clone()), false));
                 }
             }
             _ => {}
         }
     }
     let mut seeks: Vec<Seek> = Vec::new();
-    for (element, key, test) in found {
+    for (element, key, test, map_entry) in found {
         match seeks
             .iter_mut()
             .find(|seek| seek.element == element && seek.key == key)
@@ -129,6 +132,7 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
                 element,
                 key,
                 tests: vec![test],
+                map_entry,
             }),
         }
     }
@@ -191,6 +195,8 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
     }
 }
 
+type Found = (Vec<u64>, Option<Token<PropertyKey>>);
+
 /// The start nodes a seek found, ascending and each once.
 #[derive(Debug)]
 pub(crate) struct Sought {
@@ -198,6 +204,9 @@ pub(crate) struct Sought {
     /// Whether every node carries the label the start node pattern names, as when it came
     /// from a property index over that label.
     pub(crate) labelled: bool,
+    /// The property whose entry in the start node pattern's map holds for every node, as when
+    /// an index lookup by that entry's equality found them.
+    pub(crate) served: Option<Token<PropertyKey>>,
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
@@ -211,9 +220,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         row: &Row,
     ) -> Result<Option<Sought>, Error> {
         for seek in &part.seeks {
-            let elements = match &seek.key {
-                SeekKey::Id => self.id_seek(seek, row),
-                SeekKey::Property(key) => self.property_seek(part, seek, key, row)?,
+            let (elements, served) = match &seek.key {
+                SeekKey::Id => (self.id_seek(seek, row), None),
+                SeekKey::Property(key) => match self.property_seek(part, seek, key, row)? {
+                    Some((elements, served)) => (Some(elements), served),
+                    None => (None, None),
+                },
             };
             let Some(elements) = elements else {
                 continue;
@@ -222,10 +234,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 SeekElement::Start => Sought {
                     nodes: elements.into_iter().map(NodeId).collect(),
                     labelled: matches!(seek.key, SeekKey::Property(_)),
+                    served,
                 },
                 SeekElement::FirstRelationship => Sought {
                     nodes: self.endpoints(part, elements)?,
                     labelled: false,
+                    served: None,
                 },
             }));
         }
@@ -258,7 +272,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         seek: &Seek,
         key: &str,
         row: &Row,
-    ) -> Result<Option<Vec<u64>>, Error> {
+    ) -> Result<Option<Found>, Error> {
         let target = match seek.element {
             SeekElement::Start => {
                 let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
@@ -266,7 +280,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 match self.tx.lookup_token::<Label>(&label.0)? {
                     Some(token) => Target::Label(token),
-                    None => return Ok(Some(Vec::new())),
+                    None => return Ok(Some((Vec::new(), None))),
                 }
             }
             SeekElement::FirstRelationship => {
@@ -279,7 +293,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
                     Some(token) => Target::RelationshipType(token),
-                    None => return Ok(Some(Vec::new())),
+                    None => return Ok(Some((Vec::new(), None))),
                 }
             }
         };
@@ -291,11 +305,15 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let mut points: Option<Vec<KeyRange>> = None;
         let mut range: Option<KeyRange> = None;
-        for test in &seek.tests {
+        let mut served = None;
+        for (index, test) in seek.tests.iter().enumerate() {
             match test {
                 SeekTest::Equal(expr) if points.is_none() => {
                     if let Ok(value) = self.eval(expr, row) {
                         points = Some(equal_to(&value).into_iter().collect());
+                        served =
+                            (index == 0 && seek.map_entry && seek.element == SeekElement::Start)
+                                .then_some(property);
                     }
                 }
                 SeekTest::In(expr) if points.is_none() => match self.eval(expr, row) {
@@ -313,20 +331,21 @@ impl<T: ReadTransaction> Env<'_, T> {
                         Compared::Range(found) => {
                             match range.map_or(Some(found.clone()), |held| held.intersect(&found)) {
                                 Some(narrowed) => range = Some(narrowed),
-                                None => return Ok(Some(Vec::new())),
+                                None => return Ok(Some((Vec::new(), None))),
                             }
                         }
-                        Compared::Never => return Ok(Some(Vec::new())),
+                        Compared::Never => return Ok(Some((Vec::new(), None))),
                         Compared::Unserved => {}
                     }
                 }
                 SeekTest::Equal(_) | SeekTest::In(_) => {}
             }
         }
+        let served = served.filter(|_| points.is_some());
         let Some(ranges) = points.or_else(|| range.map(|range| vec![range])) else {
             return Ok(None);
         };
-        Ok(Some(self.tx.property_seek(index, &ranges)?))
+        Ok(Some((self.tx.property_seek(index, &ranges)?, served)))
     }
 
     fn endpoints(&self, part: &PatternPart, relationships: Vec<u64>) -> Result<Vec<NodeId>, Error> {
