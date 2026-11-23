@@ -1071,6 +1071,34 @@ proptest! {
     }
 
     #[test]
+    fn vector_search_scores_match_the_brute_force_bit_for_bit(
+        (vectors, query) in (1usize..=8).prop_flat_map(|dimension| (
+            prop::collection::vec(prop::collection::vec(-6i8..=6, dimension), 0..40),
+            prop::collection::vec(-6i8..=6, dimension),
+        )),
+        metric in metric(),
+        limit in 0usize..50,
+    ) {
+        let thirds = |vector: &[i8]| vector.iter().map(|item| f64::from(*item) / 3.0).collect::<Vec<_>>();
+        let vectors: Vec<Vec<f64>> = vectors.iter().map(|vector| thirds(vector)).collect();
+        let query = thirds(&query);
+        prop_assume!(metric != VectorMetric::Cosine || query.iter().any(|item| *item != 0.0));
+        let db = db();
+        db.create_vector_index("v", IndexTarget::Label("V"), "at", query.len(), metric).unwrap();
+        for (position, vector) in vectors.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            parameters.insert("at".to_owned(), list(vector.iter().map(|item| float(*item))));
+            db.execute("INSERT (:V {name: $name, at: $at})", &parameters).unwrap();
+        }
+        let bits = |hits: Vec<(String, f64)>| {
+            hits.into_iter().map(|(name, score)| (name, score.to_bits())).collect::<Vec<_>>()
+        };
+        let found = vector(&db, "v", &query, limit as i64);
+        prop_assert_eq!(bits(found), bits(brute_force(&vectors, &query, metric, limit)));
+    }
+
+    #[test]
     fn a_phrase_finds_exactly_the_nodes_with_a_string_that_holds_its_words_in_a_row(
         documents in prop::collection::vec(
             prop::collection::vec(prop::collection::vec(0usize..3, 0..6), 0..4),

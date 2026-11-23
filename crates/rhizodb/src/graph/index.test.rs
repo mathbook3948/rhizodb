@@ -935,6 +935,36 @@ fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
 }
 
 #[test]
+fn a_stored_vector_reads_only_at_its_index_dimension() {
+    let bytes: Vec<u8> = [1.5f64, -2.0]
+        .iter()
+        .flat_map(|item| item.to_be_bytes())
+        .collect();
+    let numbers: Vec<f64> = stored_vector(&bytes, 2)
+        .unwrap()
+        .iter()
+        .map(|item| f64::from_be_bytes(*item))
+        .collect();
+    assert_eq!(numbers, [1.5, -2.0]);
+    assert!(matches!(
+        stored_vector(&bytes, 3),
+        Err(DecodeError::UnexpectedEnd)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes[..15], 2),
+        Err(DecodeError::UnexpectedEnd)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes, 1),
+        Err(DecodeError::TrailingBytes)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes[..12], 1),
+        Err(DecodeError::TrailingBytes)
+    ));
+}
+
+#[test]
 fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone() {
     let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
     let mut write = graph.write().unwrap();

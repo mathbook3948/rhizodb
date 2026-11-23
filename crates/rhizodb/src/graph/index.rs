@@ -101,20 +101,39 @@ impl VectorMetric {
         (smallest..=LARGEST_SQUARED_LENGTH).contains(&dot(vector, vector))
     }
 
-    fn score(self, query: &[f64], stored: &[f64]) -> f64 {
+    fn score(self, query: &[f64], stored: &[[u8; 8]]) -> f64 {
         match self {
-            Self::Cosine => dot(query, stored) / (norm(query) * norm(stored)),
+            Self::Cosine => dot_stored(query, stored) / (norm(query) * norm_stored(stored)),
             Self::Euclidean => {
                 0.0 - query
                     .iter()
-                    .zip(stored)
+                    .zip(numbers(stored))
                     .map(|(left, right)| (left - right) * (left - right))
                     .sum::<f64>()
                     .sqrt()
             }
-            Self::DotProduct => dot(query, stored),
+            Self::DotProduct => dot_stored(query, stored),
         }
     }
+}
+
+fn numbers(stored: &[[u8; 8]]) -> impl Iterator<Item = f64> {
+    stored.iter().map(|bytes| f64::from_be_bytes(*bytes))
+}
+
+fn dot_stored(query: &[f64], stored: &[[u8; 8]]) -> f64 {
+    query
+        .iter()
+        .zip(numbers(stored))
+        .map(|(left, right)| left * right)
+        .sum()
+}
+
+fn norm_stored(stored: &[[u8; 8]]) -> f64 {
+    numbers(stored)
+        .map(|number| number * number)
+        .sum::<f64>()
+        .sqrt()
 }
 
 fn dot(left: &[f64], right: &[f64]) -> f64 {
@@ -578,14 +597,13 @@ fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
     Ok(Posting { positions, length })
 }
 
-fn decode_vector(bytes: &[u8], dimension: u32) -> Result<Vec<f64>, GraphError> {
-    let mut reader = Reader::new(bytes);
-    let mut vector = Vec::new();
-    for _ in 0..dimension {
-        vector.push(f64::from_bits(reader.u64()?));
+fn stored_vector(bytes: &[u8], dimension: usize) -> Result<&[[u8; 8]], DecodeError> {
+    let (numbers, rest) = bytes.as_chunks::<8>();
+    match numbers.len().cmp(&dimension) {
+        Ordering::Less => Err(DecodeError::UnexpectedEnd),
+        Ordering::Equal if rest.is_empty() => Ok(numbers),
+        Ordering::Equal | Ordering::Greater => Err(DecodeError::TrailingBytes),
     }
-    reader.finish()?;
-    Ok(vector)
 }
 
 fn bm25(idf: f64, frequency: u32, length: u32, average_length: f64) -> f64 {
@@ -819,16 +837,18 @@ impl<T: ReadTransaction> GraphTx<T> {
             ));
         }
         let mut scored = Vec::new();
-        for (key, value) in self
-            .transaction
-            .scan_prefix(Table::Vectors, &keys::index_prefix(id))?
-        {
-            let stored = decode_vector(&value, dimension)?;
-            scored.push((
-                keys::parse_index_entry_key(&key)?,
-                metric.score(query, &stored),
-            ));
-        }
+        self.transaction.visit_prefix(
+            Table::Vectors,
+            &keys::index_prefix(id),
+            |key, value| -> Result<(), GraphError> {
+                let stored = stored_vector(value, query.len())?;
+                scored.push((
+                    keys::parse_index_entry_key(key)?,
+                    metric.score(query, stored),
+                ));
+                Ok(())
+            },
+        )?;
         Ok(best(scored, limit))
     }
 
