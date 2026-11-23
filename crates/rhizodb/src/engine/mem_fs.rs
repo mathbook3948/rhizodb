@@ -5,21 +5,23 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
-use super::page_file::FileSystem;
-use super::page_file::PAGE_SIZE;
-use super::page_file::Page;
-use super::page_file::PageFile;
+use super::block_file::BlockFile;
+use super::block_file::BlockSize;
+use super::block_file::FileSystem;
+
+type Bytes = Arc<Mutex<Vec<u8>>>;
 
 /// Files held in memory, for databases that are never written to disk.
 #[derive(Debug, Default)]
 pub(crate) struct MemFs {
-    files: Mutex<BTreeMap<String, MemFile>>,
+    files: Mutex<BTreeMap<String, Bytes>>,
 }
 
-/// A file of [`MemFs`]. Its clones share the same pages, which outlive the file's name.
-#[derive(Clone, Debug, Default)]
+/// A file of [`MemFs`]. Every handle of one file shares its bytes, which outlive its name.
+#[derive(Debug)]
 pub(crate) struct MemFile {
-    pages: Arc<Mutex<Vec<Page>>>,
+    size: BlockSize,
+    bytes: Bytes,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -30,17 +32,21 @@ fn not_found(name: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("no file named {name}"))
 }
 
-pub(crate) fn page_index(page: u64) -> io::Result<usize> {
-    usize::try_from(page)
-        .ok()
-        .filter(|index| index.checked_mul(PAGE_SIZE).is_some())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "page number out of range"))
+pub(crate) fn byte_index(offset: u64) -> io::Result<usize> {
+    usize::try_from(offset)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset out of range"))
 }
 
-pub(crate) fn read_pages(stored: &[Page], first: u64, pages: &mut [Page]) -> io::Result<()> {
-    let start = page_index(first)?;
+pub(crate) fn read_blocks(
+    stored: &[u8],
+    size: BlockSize,
+    first: u64,
+    buffer: &mut [u8],
+) -> io::Result<()> {
+    size.require_whole_blocks(buffer.len())?;
+    let start = byte_index(size.offset(first)?)?;
     let source = start
-        .checked_add(pages.len())
+        .checked_add(buffer.len())
         .and_then(|end| stored.get(start..end))
         .ok_or_else(|| {
             io::Error::new(
@@ -48,24 +54,37 @@ pub(crate) fn read_pages(stored: &[Page], first: u64, pages: &mut [Page]) -> io:
                 "read past the end of the file",
             )
         })?;
-    pages.copy_from_slice(source);
+    buffer.copy_from_slice(source);
     Ok(())
 }
 
-pub(crate) fn write_pages(stored: &mut Vec<Page>, first: u64, pages: &[Page]) -> io::Result<()> {
-    let start = page_index(first)?;
-    let end = page_index(first.saturating_add(pages.len() as u64))?;
+pub(crate) fn write_blocks(
+    stored: &mut Vec<u8>,
+    size: BlockSize,
+    first: u64,
+    buffer: &[u8],
+) -> io::Result<()> {
+    size.require_whole_blocks(buffer.len())?;
+    let start = byte_index(size.offset(first)?)?;
+    let end = start
+        .checked_add(buffer.len())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset out of range"))?;
     if stored.len() < end {
-        stored.resize(end, [0; PAGE_SIZE]);
+        stored.resize(end, 0);
     }
-    stored[start..end].copy_from_slice(pages);
+    stored[start..end].copy_from_slice(buffer);
+    Ok(())
+}
+
+pub(crate) fn resize_blocks(stored: &mut Vec<u8>, size: BlockSize, count: u64) -> io::Result<()> {
+    stored.resize(byte_index(size.offset(count)?)?, 0);
     Ok(())
 }
 
 impl FileSystem for MemFs {
     type File = MemFile;
 
-    fn create(&self, name: &str) -> io::Result<MemFile> {
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<MemFile> {
         let mut files = lock(&self.files);
         if files.contains_key(name) {
             return Err(io::Error::new(
@@ -73,16 +92,17 @@ impl FileSystem for MemFs {
                 format!("a file named {name} exists"),
             ));
         }
-        let file = MemFile::default();
-        files.insert(name.to_owned(), file.clone());
-        Ok(file)
+        let bytes = Bytes::default();
+        files.insert(name.to_owned(), Arc::clone(&bytes));
+        Ok(MemFile { size, bytes })
     }
 
-    fn open(&self, name: &str) -> io::Result<MemFile> {
-        lock(&self.files)
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<MemFile> {
+        let bytes = lock(&self.files)
             .get(name)
             .cloned()
-            .ok_or_else(|| not_found(name))
+            .ok_or_else(|| not_found(name))?;
+        Ok(MemFile { size, bytes })
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -108,22 +128,25 @@ impl FileSystem for MemFs {
     }
 }
 
-impl PageFile for MemFile {
-    fn read(&self, first: u64, pages: &mut [Page]) -> io::Result<()> {
-        read_pages(&lock(&self.pages), first, pages)
+impl BlockFile for MemFile {
+    fn block_size(&self) -> BlockSize {
+        self.size
     }
 
-    fn write(&self, first: u64, pages: &[Page]) -> io::Result<()> {
-        write_pages(&mut lock(&self.pages), first, pages)
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        read_blocks(&lock(&self.bytes), self.size, first, buffer)
     }
 
-    fn page_count(&self) -> io::Result<u64> {
-        Ok(lock(&self.pages).len() as u64)
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
+        write_blocks(&mut lock(&self.bytes), self.size, first, buffer)
     }
 
-    fn set_page_count(&self, count: u64) -> io::Result<()> {
-        lock(&self.pages).resize(page_index(count)?, [0; PAGE_SIZE]);
-        Ok(())
+    fn block_count(&self) -> io::Result<u64> {
+        Ok((lock(&self.bytes).len() / self.size.bytes()) as u64)
+    }
+
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
+        resize_blocks(&mut lock(&self.bytes), self.size, count)
     }
 
     fn sync(&self) -> io::Result<()> {

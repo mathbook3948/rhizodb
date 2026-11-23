@@ -6,19 +6,18 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
-use super::mem_fs::page_index;
-use super::mem_fs::read_pages;
-use super::mem_fs::write_pages;
-use super::page_file::FileSystem;
-use super::page_file::PAGE_SIZE;
-use super::page_file::Page;
-use super::page_file::PageFile;
-
-/// The size of the unit a torn write keeps or loses as a whole.
-pub(crate) const SECTOR_SIZE: usize = 512;
+use super::block_file::BlockFile;
+use super::block_file::BlockSize;
+use super::block_file::FileSystem;
+use super::block_file::SECTOR_SIZE;
+use super::mem_fs::byte_index;
+use super::mem_fs::read_blocks;
+use super::mem_fs::resize_blocks;
+use super::mem_fs::write_blocks;
 
 /// A deterministic simulated file system that tells what was synced from what was only
 /// written, so a test can build the files a power loss could leave and inject I/O errors.
+/// It holds any number of files, so a layout spread over several of them can be tested.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SimFs {
     state: Arc<Mutex<State>>,
@@ -29,18 +28,20 @@ pub(crate) struct SimFs {
 pub(crate) struct SimFile {
     state: Arc<Mutex<State>>,
     inode: usize,
+    size: BlockSize,
 }
 
 /// Which of the writes since the last sync a simulated power loss keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Crash {
-    /// Only synced pages, page counts, and names survive.
+    /// Only synced blocks, lengths, and names survive.
     DropUnsynced,
     /// Every write reached the disk.
     KeepUnsynced,
-    /// The seed picks, for each unsynced write, whether it is lost, kept, or torn at sectors
-    /// into new, old, and garbage bytes, applies the kept ones in a shuffled order, may lose
-    /// an unsynced change of page count, and keeps a prefix of the unsynced name changes.
+    /// The seed picks, for each block of each unsynced write, whether it is lost, kept, or
+    /// torn at sectors into new, old, and garbage bytes, applies the kept ones in a shuffled
+    /// order, may lose an unsynced change of length, and keeps a prefix of the unsynced name
+    /// changes.
     Scramble { seed: u64 },
 }
 
@@ -66,16 +67,16 @@ struct State {
 
 #[derive(Clone, Debug, Default)]
 struct Inode {
-    live: Vec<Page>,
-    durable: Vec<Page>,
+    live: Vec<u8>,
+    durable: Vec<u8>,
     pending: Vec<DataChange>,
     sync_failed: bool,
 }
 
 #[derive(Clone, Debug)]
 enum DataChange {
-    Write { page: u64, data: Box<Page> },
-    SetPageCount(u64),
+    Write { start: usize, data: Vec<u8> },
+    SetLength(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -221,15 +222,15 @@ impl SimFs {
         let mut inodes = Vec::new();
         for inode in names.values().copied().collect::<BTreeSet<_>>() {
             let stored = &state.inodes[inode];
-            let pages = match crash {
+            let bytes = match crash {
                 Crash::DropUnsynced => stored.durable.clone(),
                 Crash::KeepUnsynced => stored.live.clone(),
                 Crash::Scramble { .. } => scramble(stored, &mut random),
             };
             renumbered.insert(inode, inodes.len());
             inodes.push(Inode {
-                live: pages.clone(),
-                durable: pages,
+                live: bytes.clone(),
+                durable: bytes,
                 pending: Vec::new(),
                 sync_failed: false,
             });
@@ -248,36 +249,37 @@ impl SimFs {
         }
     }
 
-    fn file(&self, inode: usize) -> SimFile {
+    fn file(&self, inode: usize, size: BlockSize) -> SimFile {
         SimFile {
             state: Arc::clone(&self.state),
             inode,
+            size,
         }
     }
 }
 
-fn scramble(inode: &Inode, random: &mut SplitMix) -> Vec<Page> {
-    let mut pages = inode.durable.clone();
+fn scramble(inode: &Inode, random: &mut SplitMix) -> Vec<u8> {
+    let mut bytes = inode.durable.clone();
     let mut order: Vec<&DataChange> = inode.pending.iter().collect();
     random.shuffle(&mut order);
     for change in order {
         match change {
-            DataChange::SetPageCount(count) => {
+            DataChange::SetLength(length) => {
                 if random.chance(2) {
-                    pages.resize(*count as usize, [0; PAGE_SIZE]);
+                    bytes.resize(*length, 0);
                 }
             }
-            DataChange::Write { page, data } => {
-                let index = *page as usize;
+            DataChange::Write { start, data } => {
+                let end = start + data.len();
                 match random.below(3) {
                     0 => {}
                     1 => {
-                        grow(&mut pages, index);
-                        pages[index] = **data;
+                        grow(&mut bytes, end);
+                        bytes[*start..end].copy_from_slice(data);
                     }
                     _ => {
-                        grow(&mut pages, index);
-                        tear(&mut pages[index], data, random);
+                        grow(&mut bytes, end);
+                        tear(&mut bytes[*start..end], data, random);
                     }
                 }
             }
@@ -285,20 +287,20 @@ fn scramble(inode: &Inode, random: &mut SplitMix) -> Vec<Page> {
     }
     if random.chance(4) {
         let durable = &inode.durable;
-        pages.truncate(durable.len());
-        pages.extend_from_slice(&durable[pages.len()..]);
+        bytes.truncate(durable.len());
+        bytes.extend_from_slice(&durable[bytes.len()..]);
     }
-    pages
+    bytes
 }
 
-fn grow(pages: &mut Vec<Page>, index: usize) {
-    if pages.len() <= index {
-        pages.resize(index + 1, [0; PAGE_SIZE]);
+fn grow(bytes: &mut Vec<u8>, end: usize) {
+    if bytes.len() < end {
+        bytes.resize(end, 0);
     }
 }
 
-fn tear(page: &mut Page, new: &Page, random: &mut SplitMix) {
-    let (sectors, _) = page.as_chunks_mut::<SECTOR_SIZE>();
+fn tear(block: &mut [u8], new: &[u8], random: &mut SplitMix) {
+    let (sectors, _) = block.as_chunks_mut::<SECTOR_SIZE>();
     let (new_sectors, _) = new.as_chunks::<SECTOR_SIZE>();
     for (sector, new) in sectors.iter_mut().zip(new_sectors) {
         match random.below(3) {
@@ -339,7 +341,7 @@ impl SplitMix {
 impl FileSystem for SimFs {
     type File = SimFile;
 
-    fn create(&self, name: &str) -> io::Result<SimFile> {
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
         state.operate(None)?;
         if state.live_names.contains_key(name) {
@@ -354,14 +356,14 @@ impl FileSystem for SimFs {
             name: name.to_owned(),
             inode,
         });
-        Ok(self.file(inode))
+        Ok(self.file(inode, size))
     }
 
-    fn open(&self, name: &str) -> io::Result<SimFile> {
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
         state.operate(None)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
-        Ok(self.file(inode))
+        Ok(self.file(inode, size))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -410,42 +412,46 @@ impl FileSystem for SimFs {
     }
 }
 
-impl PageFile for SimFile {
-    fn read(&self, first: u64, pages: &mut [Page]) -> io::Result<()> {
-        let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
-        read_pages(&state.inode(self.inode).live, first, pages)
+impl BlockFile for SimFile {
+    fn block_size(&self) -> BlockSize {
+        self.size
     }
 
-    fn write(&self, first: u64, pages: &[Page]) -> io::Result<()> {
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        state.operate(Some(self.inode))?;
+        read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
+    }
+
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;
         let inode = state.inode(self.inode);
-        write_pages(&mut inode.live, first, pages)?;
-        inode.pending.extend(
-            pages
-                .iter()
-                .zip(first..)
-                .map(|(data, page)| DataChange::Write {
-                    page,
-                    data: Box::new(*data),
-                }),
-        );
+        write_blocks(&mut inode.live, self.size, first, buffer)?;
+        let start = byte_index(self.size.offset(first)?)?;
+        let blocks = buffer.chunks(self.size.bytes()).enumerate();
+        inode
+            .pending
+            .extend(blocks.map(|(index, data)| DataChange::Write {
+                start: start + index * data.len(),
+                data: data.to_vec(),
+            }));
         Ok(())
     }
 
-    fn page_count(&self) -> io::Result<u64> {
+    fn block_count(&self) -> io::Result<u64> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;
-        Ok(state.inode(self.inode).live.len() as u64)
+        Ok((state.inode(self.inode).live.len() / self.size.bytes()) as u64)
     }
 
-    fn set_page_count(&self, count: u64) -> io::Result<()> {
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;
         let inode = state.inode(self.inode);
-        inode.live.resize(page_index(count)?, [0; PAGE_SIZE]);
-        inode.pending.push(DataChange::SetPageCount(count));
+        resize_blocks(&mut inode.live, self.size, count)?;
+        let length = inode.live.len();
+        inode.pending.push(DataChange::SetLength(length));
         Ok(())
     }
 

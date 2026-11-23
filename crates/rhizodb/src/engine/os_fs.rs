@@ -3,11 +3,9 @@ use std::fs::File;
 use std::io;
 use std::path::PathBuf;
 
-use super::page_file::FileSystem;
-use super::page_file::PAGE_SIZE;
-use super::page_file::Page;
-use super::page_file::PageFile;
-use super::page_file::byte_offset;
+use super::block_file::BlockFile;
+use super::block_file::BlockSize;
+use super::block_file::FileSystem;
 
 /// The files of one directory of the operating system's file system.
 #[derive(Debug)]
@@ -26,26 +24,27 @@ impl OsFs {
 #[derive(Debug)]
 pub(crate) struct OsFile {
     file: File,
+    size: BlockSize,
 }
 
 impl FileSystem for OsFs {
     type File = OsFile;
 
-    fn create(&self, name: &str) -> io::Result<OsFile> {
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(self.directory.join(name))?;
-        Ok(OsFile { file })
+        Ok(OsFile { file, size })
     }
 
-    fn open(&self, name: &str) -> io::Result<OsFile> {
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(self.directory.join(name))?;
-        Ok(OsFile { file })
+        Ok(OsFile { file, size })
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -81,21 +80,31 @@ impl FileSystem for OsFs {
     }
 }
 
-impl PageFile for OsFile {
-    fn read(&self, first: u64, pages: &mut [Page]) -> io::Result<()> {
-        read_exact_at(&self.file, pages.as_flattened_mut(), byte_offset(first)?)
+impl BlockFile for OsFile {
+    fn block_size(&self) -> BlockSize {
+        self.size
     }
 
-    fn write(&self, first: u64, pages: &[Page]) -> io::Result<()> {
-        write_all_at(&self.file, pages.as_flattened(), byte_offset(first)?)
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.size.require_whole_blocks(buffer.len())?;
+        read_exact_at(&self.file, buffer, self.size.offset(first)?)
     }
 
-    fn page_count(&self) -> io::Result<u64> {
-        Ok(self.file.metadata()?.len() / PAGE_SIZE as u64)
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
+        self.size.require_whole_blocks(buffer.len())?;
+        let offset = self.size.offset(first)?;
+        offset
+            .checked_add(buffer.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset out of range"))?;
+        write_all_at(&self.file, buffer, offset)
     }
 
-    fn set_page_count(&self, count: u64) -> io::Result<()> {
-        self.file.set_len(byte_offset(count)?)
+    fn block_count(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len() / self.size.bytes() as u64)
+    }
+
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
+        self.file.set_len(self.size.offset(count)?)
     }
 
     fn sync(&self) -> io::Result<()> {

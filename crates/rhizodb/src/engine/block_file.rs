@@ -1,39 +1,78 @@
 use std::fmt;
 use std::io;
 
-/// The size of every page the engine reads and writes.
-pub(crate) const PAGE_SIZE: usize = 4096;
+/// The unit a storage device writes whole, and the most a torn write keeps or loses together.
+pub(crate) const SECTOR_SIZE: usize = 512;
 
-pub(crate) type Page = [u8; PAGE_SIZE];
+const LARGEST_BLOCK: usize = 1 << 30;
 
-/// A file read and written in whole pages addressed by number.
-pub(crate) trait PageFile: Send + Sync + fmt::Debug {
-    /// Fills `pages` with the pages from `first` on, and fails when one of them lies past the end.
-    fn read(&self, first: u64, pages: &mut [Page]) -> io::Result<()>;
+/// The fixed size of every block of one file, a power of two from one sector up to 1 GiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BlockSize(usize);
 
-    /// Writes `pages` from page `first` on. A write past the end extends the file, and the pages
-    /// it skips read as zeros.
-    fn write(&self, first: u64, pages: &[Page]) -> io::Result<()>;
+impl BlockSize {
+    pub(crate) fn new(bytes: usize) -> Option<Self> {
+        (bytes.is_power_of_two() && (SECTOR_SIZE..=LARGEST_BLOCK).contains(&bytes))
+            .then_some(Self(bytes))
+    }
 
-    /// The number of whole pages in the file.
-    fn page_count(&self) -> io::Result<u64>;
+    pub(crate) fn bytes(self) -> usize {
+        self.0
+    }
 
-    /// Truncates the file to `count` pages, or extends it with zeroed pages.
-    fn set_page_count(&self, count: u64) -> io::Result<()>;
+    /// The byte offset where block `block` starts.
+    pub(crate) fn offset(self, block: u64) -> io::Result<u64> {
+        block
+            .checked_mul(self.0 as u64)
+            .ok_or_else(|| invalid("block number out of range"))
+    }
 
-    /// Returns once the file's pages and page count survive a power loss.
+    /// Fails unless a buffer of `length` bytes holds whole blocks.
+    pub(crate) fn require_whole_blocks(self, length: usize) -> io::Result<()> {
+        if length.is_multiple_of(self.0) {
+            Ok(())
+        } else {
+            Err(invalid("a buffer must hold whole blocks"))
+        }
+    }
+}
+
+fn invalid(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// A file read and written in whole blocks of one fixed size, addressed by block number.
+pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
+    fn block_size(&self) -> BlockSize;
+
+    /// Fills `buffer`, which holds whole blocks, with the blocks from `first` on, and fails
+    /// when one of them lies past the end.
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()>;
+
+    /// Writes `buffer`, which holds whole blocks, from block `first` on. A write past the end
+    /// extends the file, and the blocks it skips read as zeros.
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()>;
+
+    /// The number of whole blocks in the file.
+    fn block_count(&self) -> io::Result<u64>;
+
+    /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
+    fn set_block_count(&self, count: u64) -> io::Result<()>;
+
+    /// Returns once the file's blocks and block count survive a power loss.
     fn sync(&self) -> io::Result<()>;
 }
 
-/// A flat set of named page files, such as the database file and its WAL segments.
+/// A flat set of named block files, such as database files and WAL segments.
 pub(crate) trait FileSystem: Send + Sync {
-    type File: PageFile;
+    type File: BlockFile;
 
-    /// Creates an empty file, and fails when `name` exists.
-    fn create(&self, name: &str) -> io::Result<Self::File>;
+    /// Creates an empty file of blocks of `size`, and fails when `name` exists.
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<Self::File>;
 
-    /// Opens an existing file, and fails with [`io::ErrorKind::NotFound`] when there is none.
-    fn open(&self, name: &str) -> io::Result<Self::File>;
+    /// Opens an existing file as blocks of `size`, and fails with [`io::ErrorKind::NotFound`]
+    /// when there is none.
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<Self::File>;
 
     /// Renames `from` to `to`, replacing a file named `to`.
     fn rename(&self, from: &str, to: &str) -> io::Result<()>;
@@ -47,11 +86,6 @@ pub(crate) trait FileSystem: Send + Sync {
     fn sync_names(&self) -> io::Result<()>;
 }
 
-pub(crate) fn byte_offset(page: u64) -> io::Result<u64> {
-    page.checked_mul(PAGE_SIZE as u64)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "page number out of range"))
-}
-
 #[cfg(test)]
-#[path = "page_file.test.rs"]
+#[path = "block_file.test.rs"]
 mod tests;
