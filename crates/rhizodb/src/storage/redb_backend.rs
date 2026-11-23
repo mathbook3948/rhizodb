@@ -443,12 +443,13 @@ fn read_value<T: ReadableTable<&'static [u8], &'static [u8]>, R, E: From<Storage
 
 fn visit_entries<T: ReadableTable<&'static [u8], &'static [u8]>, E: From<StorageError>>(
     table: &Guarded<T>,
-    prefix: &[u8],
+    start: &[u8],
+    within: impl Fn(&[u8]) -> bool,
     mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     let poison = table.poison();
     let range = table
-        .call(|table| table.range(prefix..))?
+        .call(|table| table.range(start..))?
         .map_err(redb_error)?;
     let held: Option<(Guard<'_>, Guard<'_>)> = None;
     poison.with_released((range, held), |(range, held)| {
@@ -459,7 +460,7 @@ fn visit_entries<T: ReadableTable<&'static [u8], &'static [u8]>, E: From<Storage
                     Ok(held
                         .as_ref()
                         .map(|(key, value)| (key.value(), value.value()))
-                        .filter(|(key, _)| key.starts_with(prefix)))
+                        .filter(|(key, _)| within(key)))
                 })?
                 .map_err(redb_error)?;
             match entry {
@@ -503,7 +504,25 @@ impl ReadTransaction for RedbRead {
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        visit_entries(self.table(table)?, prefix, visit)
+        visit_entries(
+            self.table(table)?,
+            prefix,
+            |key| key.starts_with(prefix),
+            visit,
+        )
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if start >= end {
+            return Ok(());
+        }
+        visit_entries(self.table(table)?, start, |key| key < end, visit)
     }
 }
 
@@ -540,7 +559,24 @@ impl ReadTransaction for RedbWrite {
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        self.with_table(table, |table| visit_entries(table, prefix, visit))
+        self.with_table(table, |table| {
+            visit_entries(table, prefix, |key| key.starts_with(prefix), visit)
+        })
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if start >= end {
+            return Ok(());
+        }
+        self.with_table(table, |table| {
+            visit_entries(table, start, |key| key < end, visit)
+        })
     }
 }
 

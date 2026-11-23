@@ -53,8 +53,7 @@ pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
-use columns::ColumnEdit;
-use columns::ColumnId;
+use columns::ColumnsEdit;
 use index::Element;
 use meta::Delta;
 use meta::Flush;
@@ -169,7 +168,10 @@ pub(crate) struct Graph<S> {
     committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
+    committed_column_deltas: Arc<ColumnDeltas>,
 }
+
+type ColumnDeltas = Mutex<BTreeMap<u64, usize>>;
 
 /// The tokens of every name space by name, as committed. A committed token never changes, and
 /// no element of a snapshot taken before a token was committed refers to it.
@@ -247,6 +249,7 @@ impl<S: Storage> Graph<S> {
             committed_index_definitions: Arc::new(Mutex::new(definitions)),
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
+            committed_column_deltas: Arc::default(),
         })
     }
 
@@ -266,6 +269,8 @@ impl<S: Storage> Graph<S> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            column_deltas: None,
+            own_column_deltas: BTreeMap::new(),
             counters: Vec::new(),
         })
     }
@@ -296,6 +301,8 @@ impl<S: Storage> Graph<S> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
+            own_column_deltas: BTreeMap::new(),
             counters: Vec::new(),
         })
     }
@@ -314,8 +321,10 @@ pub(crate) struct GraphTx<T> {
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
     meta: BTreeMap<u64, GroupEdit>,
-    columns: BTreeMap<ColumnId, ColumnEdit>,
+    columns: BTreeMap<u64, ColumnsEdit>,
     reader: ColumnReader,
+    column_deltas: Option<Arc<ColumnDeltas>>,
+    own_column_deltas: BTreeMap<u64, usize>,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -334,6 +343,8 @@ impl<T> GraphTx<T> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            column_deltas: None,
+            own_column_deltas: BTreeMap::new(),
             counters: Vec::new(),
         }
     }
@@ -841,17 +852,29 @@ impl<T: ReadTransaction> GraphTx<T> {
 impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn commit(mut self) -> Result<(), GraphError> {
         self.flush()?;
-        let Some(Catalog {
-            shared,
-            changed: true,
-        }) = &self.catalog
-        else {
-            return Ok(self.transaction.commit()?);
+        let definitions = match &self.catalog {
+            Some(Catalog {
+                shared,
+                changed: true,
+            }) => Some((shared, self.index_definitions()?)),
+            _ => None,
         };
-        let definitions = self.index_definitions()?;
-        let mut current = lock(shared);
-        self.transaction.commit()?;
-        *current = definitions;
+        let mut current = definitions
+            .as_ref()
+            .map(|(shared, definitions)| (lock(shared), definitions));
+        let committed = self.transaction.commit();
+        if let Some(shared) = &self.column_deltas {
+            let mut counts = lock(shared);
+            if committed.is_ok() {
+                counts.extend(std::mem::take(&mut self.own_column_deltas));
+            } else {
+                counts.clear();
+            }
+        }
+        committed?;
+        if let Some((current, definitions)) = &mut current {
+            **current = Arc::clone(definitions);
+        }
         Ok(())
     }
 
@@ -1012,16 +1035,21 @@ impl<T: WriteTransaction> GraphTx<T> {
             return Ok(());
         };
         for (token, values) in values {
-            let cells: Vec<(usize, columns::Cell<'_>)> = values
-                .iter()
-                .map(|(slot, value)| (*slot, columns::Cell::of(value)))
-                .collect();
-            if let Some(chunk) = columns::encode_chunk(group, token, &cells)? {
-                self.transaction.put(
-                    Table::NodeColumns,
-                    &columns::chunk_key(group, token),
-                    &chunk,
-                )?;
+            let mut start = 0;
+            while start < values.len() {
+                let segment = values[start].0 / columns::SEGMENT_SLOTS;
+                let end = values[start..]
+                    .iter()
+                    .position(|(slot, _)| slot / columns::SEGMENT_SLOTS != segment)
+                    .map_or(values.len(), |offset| start + offset);
+                let cells: Vec<(usize, columns::Cell<'_>)> = values[start..end]
+                    .iter()
+                    .map(|(slot, value)| (slot % columns::SEGMENT_SLOTS, columns::Cell::of(value)))
+                    .collect();
+                for (key, bytes) in columns::encode_segment(group, token, segment, &cells)? {
+                    self.transaction.put(Table::NodeColumns, &key, &bytes)?;
+                }
+                start = end;
             }
         }
         Ok(())
@@ -1051,15 +1079,13 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(token)
     }
 
-    pub(crate) fn create_node(&mut self, record: &NodeRecord) -> Result<NodeId, GraphError> {
+    pub(crate) fn create_node(&mut self, record: NodeRecord) -> Result<NodeId, GraphError> {
         let id = NodeId(self.next_counter(keys::NEXT_NODE_ID_KEY)?);
         let set = self.intern_label_set(&record.labels)?;
         let (group, slot) = meta::locate(id);
         self.meta_edit(group)?.set(slot, Some(set))?;
-        for (key, value) in &record.properties {
-            self.set_column_value((group, *key), slot, Some(value.clone()))?;
-        }
-        self.reindex(id.0, None, Some(Element::Node(record)))?;
+        self.reindex(id.0, None, Some(Element::Node(&record)))?;
+        self.create_column_node(group, slot, record.properties)?;
         Ok(id)
     }
 

@@ -190,7 +190,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 .labels
                 .insert(self.tx.intern_token::<Label>(&label.0)?);
         }
-        let id = self.tx.create_node(&record)?;
+        let id = self.tx.create_node(record)?;
         set(row, pattern.slot, Datum::Node(id));
         Ok(id)
     }

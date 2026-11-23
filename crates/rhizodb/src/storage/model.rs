@@ -344,10 +344,18 @@ fn check_query(
             prop_assert_eq!(visited, expected);
         }
         Query::Range { table, start, end } => {
+            let expected = expected_range(snapshot, *table, start, end);
             prop_assert_eq!(
-                read.scan_range(TABLES[*table], start, end).unwrap(),
-                expected_range(snapshot, *table, start, end)
+                &read.scan_range(TABLES[*table], start, end).unwrap(),
+                &expected
             );
+            let mut visited = Vec::new();
+            read.visit_range(TABLES[*table], start, end, |key, value| {
+                visited.push((key.to_vec(), value.to_vec()));
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+            prop_assert_eq!(visited, expected);
         }
         Query::GetWith { table, keys } => {
             for key in keys {

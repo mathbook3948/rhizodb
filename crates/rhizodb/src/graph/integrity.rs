@@ -102,10 +102,8 @@ pub(crate) enum IntegrityViolation {
         group: u64,
         key: u32,
     },
-    StrayColumnDelta {
-        node: NodeId,
-        key: u32,
-    },
+    NonCanonicalColumnDelta(NodeId),
+    TooManyColumnDeltas(u64),
     NonCanonicalNodeMeta(u64),
     StrayNodeMetaDelta(NodeId),
     DuplicateIndexId(u32),
@@ -449,7 +447,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .into_iter()
             .collect();
         for (id, edit) in &self.columns {
-            for write in self.column_writes(*id, edit.clone())? {
+            for write in self.column_writes(*id, edit.clone())?.0 {
                 match write {
                     ColumnWrite::Put(key, value) => {
                         entries.insert(key.to_vec(), value);
@@ -457,8 +455,8 @@ impl<T: ReadTransaction> GraphTx<T> {
                     ColumnWrite::Delete(key) => {
                         entries.remove(key.as_slice());
                     }
-                    ColumnWrite::DeleteDeltas((group, token)) => {
-                        let (start, end) = columns::delta_range(group, token);
+                    ColumnWrite::DeleteDeltas(group) => {
+                        let (start, end) = columns::deltas_range(group);
                         let doomed: Vec<Vec<u8>> = entries
                             .range(start.to_vec()..end.to_vec())
                             .map(|(key, _)| key.clone())
@@ -470,18 +468,39 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }
             }
         }
-        let mut stored: BTreeMap<columns::ColumnId, StoredGroup> = BTreeMap::new();
+        let mut base: BTreeMap<columns::ColumnId, BTreeMap<usize, PropertyValue>> = BTreeMap::new();
+        let mut segments: BTreeMap<(u64, Token<PropertyKey>, usize), StoredSegment> =
+            BTreeMap::new();
+        let mut deltas: BTreeMap<u64, Vec<StoredDelta>> = BTreeMap::new();
         for (key, value) in entries {
             match columns::parse_key(&key) {
-                Ok((group, token, columns::Part::Chunk)) => {
-                    stored.entry((group, token)).or_default().chunk = Some(value);
+                Ok(columns::ColumnKey::Segment {
+                    group,
+                    token,
+                    segment,
+                    ..
+                }) => {
+                    let stored = segments.entry((group, token, segment)).or_default();
+                    match check_part(&key, &value) {
+                        Ok(cells) => {
+                            let column = base.entry((group, token)).or_default();
+                            for (at, value) in &cells {
+                                column.insert(segment * columns::SEGMENT_SLOTS + at, value.clone());
+                            }
+                            stored.cells.extend(cells);
+                        }
+                        Err(_) => {
+                            stored.unreadable = true;
+                            violations.push(IntegrityViolation::Undecodable {
+                                table: Table::NodeColumns,
+                                key: key.clone(),
+                            });
+                        }
+                    }
+                    stored.parts.push((key, value));
                 }
-                Ok((group, token, columns::Part::Delta(_))) => {
-                    stored
-                        .entry((group, token))
-                        .or_default()
-                        .deltas
-                        .push((key, value));
+                Ok(columns::ColumnKey::Delta { group, slot }) => {
+                    deltas.entry(group).or_default().push((slot, key, value));
                 }
                 Err(_) => violations.push(IntegrityViolation::Undecodable {
                     table: Table::NodeColumns,
@@ -489,9 +508,72 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }),
             }
         }
+        for ((group, token, segment), stored) in segments {
+            if stored.unreadable {
+                continue;
+            }
+            let cells: Vec<(usize, columns::Cell<'_>)> = stored
+                .cells
+                .iter()
+                .map(|(at, value)| (*at, columns::Cell::of(value)))
+                .collect();
+            let canonical = columns::encode_segment(group, token, segment, &cells)?
+                .into_iter()
+                .map(|(key, bytes)| (key.to_vec(), bytes))
+                .eq(stored.parts);
+            if !canonical {
+                violations.push(IntegrityViolation::NonCanonicalColumn {
+                    group,
+                    key: token.id(),
+                });
+            }
+        }
+        let mut changes: Vec<(columns::ColumnId, usize, Option<PropertyValue>)> = Vec::new();
+        for (group, stored) in deltas {
+            if stored.len() > columns::MAX_DELTAS {
+                violations.push(IntegrityViolation::TooManyColumnDeltas(group));
+            }
+            for (slot, key, bytes) in stored {
+                let Ok(entries) = decode_delta(&key, &bytes) else {
+                    violations.push(IntegrityViolation::Undecodable {
+                        table: Table::NodeColumns,
+                        key,
+                    });
+                    continue;
+                };
+                let encoded = columns::encode_delta(
+                    &columns::delta_key(group, slot),
+                    entries
+                        .iter()
+                        .map(|(token, value)| (*token, value.as_ref().map(columns::Cell::of))),
+                );
+                let mut canonical = encoded == bytes;
+                for (token, after) in entries {
+                    let before = base
+                        .get(&(group, token))
+                        .and_then(|column| column.get(&slot))
+                        .map(columns::Cell::of);
+                    canonical &=
+                        !columns::same_state(before, after.as_ref().map(columns::Cell::of));
+                    changes.push(((group, token), slot, after));
+                }
+                if !canonical {
+                    violations.push(IntegrityViolation::NonCanonicalColumnDelta(meta::node_at(
+                        group, slot,
+                    )));
+                }
+            }
+        }
+        for (id, slot, after) in changes {
+            let column = base.entry(id).or_default();
+            match after {
+                Some(value) => column.insert(slot, value),
+                None => column.remove(&slot),
+            };
+        }
         let mut properties: BTreeMap<NodeId, Properties> = BTreeMap::new();
-        for ((group, token), column) in stored {
-            for (slot, value) in check_column(group, token, column, violations)? {
+        for ((group, token), column) in base {
+            for (slot, value) in column {
                 let node = meta::node_at(group, slot);
                 if live.contains_key(&node) {
                     properties.entry(node).or_default().insert(token, value);
@@ -762,69 +844,35 @@ fn check_group(
     Ok(Some(edit))
 }
 
-fn check_column(
-    group: u64,
-    token: Token<PropertyKey>,
-    stored: StoredGroup,
-    violations: &mut Vec<IntegrityViolation>,
-) -> Result<BTreeMap<usize, PropertyValue>, GraphError> {
-    let key = token.id();
-    let undecodable = |key: Vec<u8>| IntegrityViolation::Undecodable {
-        table: Table::NodeColumns,
-        key,
-    };
-    let Some(chunk) = stored.chunk else {
-        for (delta_key, value) in stored.deltas {
-            match columns::parse_delta(&delta_key, &value) {
-                Ok((slot, _)) => violations.push(IntegrityViolation::StrayColumnDelta {
-                    node: meta::node_at(group, slot),
-                    key,
-                }),
-                Err(_) => violations.push(undecodable(delta_key)),
-            }
-        }
-        return Ok(BTreeMap::new());
-    };
-    let decoded = columns::ChunkRef::parse(group, token, &chunk).and_then(|view| {
-        view.verify()?;
-        view.cells()
-            .map(|cell| {
-                let (slot, cell) = cell?;
-                Ok((slot, cell.to_value()?))
-            })
-            .collect::<Result<BTreeMap<usize, PropertyValue>, GraphError>>()
-    });
-    let Ok(mut values) = decoded else {
-        violations.push(undecodable(columns::chunk_key(group, token).to_vec()));
-        return Ok(BTreeMap::new());
-    };
-    let cells: Vec<(usize, columns::Cell<'_>)> = values
-        .iter()
-        .map(|(slot, value)| (*slot, columns::Cell::of(value)))
-        .collect();
-    let mut canonical = columns::encode_chunk(group, token, &cells)?.as_deref() == Some(&chunk[..]);
-    canonical &= stored.deltas.len() <= columns::MAX_DELTAS;
-    let mut changes = BTreeMap::new();
-    for (delta_key, bytes) in stored.deltas {
-        let Ok((slot, after)) = columns::parse_delta(&delta_key, &bytes) else {
-            violations.push(undecodable(delta_key));
-            continue;
-        };
-        let before = values.get(&slot).map(columns::Cell::of);
-        canonical &= !columns::same_state(before, after.as_ref().map(columns::Cell::of));
-        changes.insert(slot, after);
-    }
-    for (slot, after) in changes {
-        match after {
-            Some(value) => values.insert(slot, value),
-            None => values.remove(&slot),
-        };
-    }
-    canonical &= !values.is_empty();
-    if !canonical {
-        violations.push(IntegrityViolation::NonCanonicalColumn { group, key });
-    }
-    Ok(values)
+type StoredDelta = (usize, Vec<u8>, Vec<u8>);
+
+type DeltaEntry = (Token<PropertyKey>, Option<PropertyValue>);
+
+#[derive(Default)]
+struct StoredSegment {
+    parts: Vec<(Vec<u8>, Vec<u8>)>,
+    cells: Vec<(usize, PropertyValue)>,
+    unreadable: bool,
+}
+
+fn check_part(key: &[u8], bytes: &[u8]) -> Result<Vec<(usize, PropertyValue)>, GraphError> {
+    columns::SegmentRef::parse(key, bytes)?
+        .cells()
+        .map(|cell| {
+            let (at, cell) = cell?;
+            Ok((at, cell.to_value()?))
+        })
+        .collect()
+}
+
+fn decode_delta(key: &[u8], bytes: &[u8]) -> Result<Vec<DeltaEntry>, GraphError> {
+    columns::DeltaRef::parse(key, bytes)?
+        .entries()
+        .map(|entry| {
+            let (token, cell) = entry?;
+            Ok((token, cell.map(columns::Cell::to_value).transpose()?))
+        })
+        .collect()
 }
 
 fn encode(

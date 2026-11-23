@@ -6,11 +6,12 @@ use super::*;
 use crate::Database;
 use crate::IndexTarget as PublicTarget;
 use crate::Parameters;
+use crate::Value;
 use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::graph::NodeRecord;
 use crate::graph::Properties;
-use crate::graph::Token;
+
 use crate::query::compare::Comparison;
 use crate::query::compare::compare;
 use crate::query::compare::equals;
@@ -220,7 +221,7 @@ proptest! {
                 labels: [label].into_iter().collect(),
                 properties,
             };
-            nodes.push((write.create_node(&record).unwrap().0, Datum::from(item.clone())));
+            nodes.push((write.create_node(record.clone()).unwrap().0, Datum::from(item.clone())));
         }
         if fill_on_create {
             write.create_property_index("i", IndexTarget::Label("P"), "k").unwrap();
@@ -277,4 +278,64 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
     let db = Database::open(&path).unwrap();
     assert_eq!(queries.map(|query| count(&db, query)), [0, 0, 1]);
     assert_eq!(count(&db, "MATCH (n:P) RETURN n"), 3);
+}
+
+#[test]
+fn a_lookup_by_a_pattern_map_entry_tests_only_the_other_conditions_on_what_it_finds() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.redb");
+    {
+        let db = Database::open(&path).unwrap();
+        db.execute(
+            "INSERT (:P {k: 1, j: 1}), (:P {k: 2, j: 1})",
+            &Parameters::new(),
+        )
+        .unwrap();
+        db.create_property_index("p", PublicTarget::Label("P"), "k")
+            .unwrap();
+    }
+    {
+        let storage = RedbStorage::open(&path).unwrap();
+        let mut write = storage.begin_write().unwrap();
+        let entries = write.scan_prefix(Table::PropertyEntries, &[]).unwrap();
+        let (first, value) = entries.first().unwrap().clone();
+        let mut planted = first.clone();
+        let at = planted.len() - 8;
+        planted[at..].copy_from_slice(&1u64.to_be_bytes());
+        assert_ne!(planted, first);
+        write.put(Table::PropertyEntries, &planted, &value).unwrap();
+        write.commit().unwrap();
+    }
+    let db = Database::open(&path).unwrap();
+    let ids = |query: &str| -> Vec<Value> {
+        db.execute(query, &Parameters::new())
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+    let both = vec![Value::Integer(0), Value::Integer(1)];
+    assert_eq!(ids("MATCH (n:P {k: 1}) RETURN id(n) ORDER BY id(n)"), both);
+    assert_eq!(
+        ids("MATCH (n:P {k: 1, j: 1}) RETURN id(n) ORDER BY id(n)"),
+        both
+    );
+    assert_eq!(
+        ids("MATCH (n:P {k: 1, j: 2}) RETURN id(n)"),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        ids("MATCH (n:P {k: 1}) WHERE n.k = 1 RETURN id(n)"),
+        vec![Value::Integer(0)]
+    );
+    assert_eq!(
+        ids("MATCH (n:P) WHERE n.k = 1 RETURN id(n)"),
+        vec![Value::Integer(0)]
+    );
+    assert_eq!(
+        ids("MATCH (n:P {k: 2, k: 1}) RETURN id(n) ORDER BY id(n)"),
+        both,
+        "a repeated key looks up the entry the map holds, its last"
+    );
 }

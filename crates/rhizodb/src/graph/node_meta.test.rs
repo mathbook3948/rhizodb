@@ -90,7 +90,7 @@ pub(super) fn create(
     value: Option<i64>,
 ) {
     let node = record(write, &labels, value);
-    let id = write.create_node(&node).unwrap();
+    let id = write.create_node(node.clone()).unwrap();
     assert_eq!(
         id.0,
         model.create(labels, value),
@@ -560,7 +560,7 @@ fn a_group_with_more_than_256_label_sets_reads_back() {
             labels: labels.clone(),
             properties: Properties::new(),
         };
-        assert_eq!(write.create_node(&node).unwrap(), NodeId(slot));
+        assert_eq!(write.create_node(node.clone()).unwrap(), NodeId(slot));
         expected.push(labels);
     }
     write.commit().unwrap();

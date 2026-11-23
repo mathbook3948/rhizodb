@@ -300,7 +300,7 @@ fn apply(tx: &mut GraphTx<impl WriteTransaction>, names: &Names, model: &mut Mod
                     .collect(),
                 properties: property_map(names, properties),
             };
-            tx.create_node(&record).unwrap();
+            tx.create_node(record.clone()).unwrap();
         }
         Op::CreateRelationship {
             from,

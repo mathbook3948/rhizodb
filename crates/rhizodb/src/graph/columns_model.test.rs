@@ -38,9 +38,10 @@ impl Model {
 }
 
 /// A value of a small domain, so writes often repeat a value, change only its type, or set a
-/// float to the other zero.
+/// float to the other zero. Two values are large enough that a segment holding several of them
+/// splits into parts.
 pub(super) fn value_at(pick: u8) -> PropertyValue {
-    match pick % 16 {
+    match pick % 18 {
         0 => PropertyValue::Integer(0),
         1 => PropertyValue::Integer(-3),
         2 => PropertyValue::Integer(i64::MAX),
@@ -59,7 +60,13 @@ pub(super) fn value_at(pick: u8) -> PropertyValue {
             PropertyValue::Integer(1),
             PropertyValue::String("a".to_owned()),
         ]),
-        _ => PropertyValue::Bytes(vec![0, 255]),
+        15 => PropertyValue::Bytes(vec![0, 255]),
+        16 => PropertyValue::String("w".repeat(700)),
+        _ => PropertyValue::List(
+            (0..40)
+                .map(|at| PropertyValue::Float(f64::from(at)))
+                .collect(),
+        ),
     }
 }
 
@@ -126,7 +133,7 @@ pub(super) fn create(
     for (name, value) in &values {
         record.properties.insert(key(write, name), value.clone());
     }
-    let id = write.create_node(&record).unwrap();
+    let id = write.create_node(record.clone()).unwrap();
     assert_eq!(id.0, model.next, "IDs are handed out in order");
     model.next += 1;
     model.nodes.insert(id.0, (indexed, values));
@@ -439,21 +446,48 @@ proptest! {
     }
 }
 
-fn stored_parts(read: &GraphTx<impl ReadTransaction>) -> BTreeMap<(u64, u32), (usize, usize)> {
-    let mut parts: BTreeMap<(u64, u32), (usize, usize)> = BTreeMap::new();
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Stored {
+    segments: BTreeMap<(u64, u32), usize>,
+    deltas: BTreeMap<u64, usize>,
+}
+
+fn stored(read: &GraphTx<impl ReadTransaction>) -> Stored {
+    let mut stored = Stored::default();
     for (key, _) in read
         .transaction
         .scan_prefix(Table::NodeColumns, &[])
         .unwrap()
     {
-        let (group, token, part) = columns::parse_key(&key).unwrap();
-        let entry = parts.entry((group, token.id())).or_default();
-        match part {
-            columns::Part::Chunk => entry.0 += 1,
-            columns::Part::Delta(_) => entry.1 += 1,
+        match columns::parse_key(&key).unwrap() {
+            columns::ColumnKey::Segment { group, token, .. } => {
+                *stored.segments.entry((group, token.id())).or_default() += 1;
+            }
+            columns::ColumnKey::Delta { group, .. } => {
+                *stored.deltas.entry(group).or_default() += 1;
+            }
         }
     }
-    parts
+    stored
+}
+
+fn segment_values(
+    read: &GraphTx<impl ReadTransaction>,
+    group: u64,
+    token: Token<PropertyKey>,
+) -> usize {
+    let mut held = 0;
+    for (key, value) in read
+        .transaction
+        .scan_prefix(Table::NodeColumns, &columns::column_prefix(group, token))
+        .unwrap()
+    {
+        held += columns::SegmentRef::parse(&key, &value)
+            .unwrap()
+            .cells()
+            .count();
+    }
+    held
 }
 
 fn graph_of(count: u64, values: impl Fn(u64) -> Values) -> (SimFs, Graph<RedbStorage>, Model) {
@@ -473,7 +507,37 @@ fn only_b(value: PropertyValue) -> impl Fn(u64) -> Values {
 }
 
 #[test]
-fn one_node_commits_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
+fn a_commit_that_creates_more_nodes_than_a_group_keeps_deltas_for_writes_segments() {
+    for (count, deltas) in [
+        (1, 1),
+        (columns::MAX_DELTAS, columns::MAX_DELTAS),
+        (columns::MAX_DELTAS + 1, 0),
+    ] {
+        let (_fs, graph, model) = graph_of(count as u64, only_b(PropertyValue::Integer(1)));
+        let read = graph.read().unwrap();
+        let b = read.lookup_token::<PropertyKey>("b").unwrap().unwrap();
+        let layout = stored(&read);
+        assert_eq!(
+            layout.deltas.get(&0).copied().unwrap_or(0),
+            deltas,
+            "{count} nodes"
+        );
+        let segments = if deltas == 0 {
+            count.div_ceil(columns::SEGMENT_SLOTS)
+        } else {
+            0
+        };
+        assert_eq!(
+            layout.segments.get(&(0, b.id())).copied().unwrap_or(0),
+            segments
+        );
+        assert_eq!(read.check_integrity().unwrap(), vec![]);
+        check(&read, &model).unwrap();
+    }
+}
+
+#[test]
+fn one_node_commits_keep_deltas_up_to_the_limit_then_fold_them_into_the_segments() {
     let (fs, graph, mut model) = graph_of(300, only_b(PropertyValue::Integer(1)));
     let b = graph
         .read()
@@ -482,7 +546,8 @@ fn one_node_commits_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
         .unwrap()
         .unwrap();
     let column = (0, b.id());
-    assert_eq!(stored_parts(&graph.read().unwrap())[&column], (1, 0));
+    let segments = 300usize.div_ceil(columns::SEGMENT_SLOTS);
+    assert_eq!(stored(&graph.read().unwrap()).segments[&column], segments);
     for round in 0..3 * columns::MAX_DELTAS {
         let mut write = graph.write().unwrap();
         set(
@@ -496,14 +561,16 @@ fn one_node_commits_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
         let read = graph.read().unwrap();
         let expected = (round + 1) % (columns::MAX_DELTAS + 1);
         assert_eq!(read.check_integrity().unwrap(), vec![]);
+        let layout = stored(&read);
+        assert_eq!(layout.segments[&column], segments, "after commit {round}");
         assert_eq!(
-            stored_parts(&read)[&column],
-            (1, expected),
+            layout.deltas.get(&0).copied().unwrap_or(0),
+            expected,
             "after commit {round}"
         );
     }
     check(&graph.read().unwrap(), &model).unwrap();
-    let held = stored_parts(&graph.read().unwrap())[&column].1;
+    let held = stored(&graph.read().unwrap()).deltas[&0];
     let mut write = graph.write().unwrap();
     let id = 3 * columns::MAX_DELTAS as u64 - 1;
     set(
@@ -515,9 +582,9 @@ fn one_node_commits_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
     );
     write.commit().unwrap();
     assert_eq!(
-        stored_parts(&graph.read().unwrap())[&column],
-        (1, held - 1),
-        "a value set back to the chunk's drops its delta"
+        stored(&graph.read().unwrap()).deltas[&0],
+        held - 1,
+        "a value set back to the segment's drops its delta"
     );
     let mut write = graph.write().unwrap();
     set(
@@ -529,10 +596,73 @@ fn one_node_commits_keep_deltas_up_to_the_limit_then_rewrite_the_chunk() {
     );
     write.commit().unwrap();
     assert_eq!(
-        stored_parts(&graph.read().unwrap())[&column],
-        (1, held - 1),
+        stored(&graph.read().unwrap()).deltas[&0],
+        held - 1,
         "a value set to the one it holds writes nothing"
     );
+    drop(graph);
+    check(&open(&fs).read().unwrap(), &model).unwrap();
+}
+
+#[test]
+fn a_node_keeps_one_delta_for_every_property_it_changed() {
+    let (fs, graph, mut model) = graph_of(100, |id| {
+        Values::from([
+            ("a", PropertyValue::Integer(id as i64)),
+            ("b", PropertyValue::Boolean(true)),
+        ])
+    });
+    let before = stored(&graph.read().unwrap());
+    assert_eq!(before.deltas.get(&0), None);
+    let mut write = graph.write().unwrap();
+    set(&mut write, &mut model, 7, "a", None);
+    set(
+        &mut write,
+        &mut model,
+        7,
+        "b",
+        Some(PropertyValue::Integer(0)),
+    );
+    set(
+        &mut write,
+        &mut model,
+        7,
+        "c",
+        Some(PropertyValue::String("new".to_owned())),
+    );
+    write.commit().unwrap();
+    let after = stored(&graph.read().unwrap());
+    assert_eq!(after.deltas[&0], 1);
+    assert_eq!(
+        after.segments, before.segments,
+        "a delta leaves the segments as they are"
+    );
+    let mut write = graph.write().unwrap();
+    set(
+        &mut write,
+        &mut model,
+        7,
+        "b",
+        Some(PropertyValue::Boolean(true)),
+    );
+    write.commit().unwrap();
+    assert_eq!(
+        stored(&graph.read().unwrap()).deltas[&0],
+        1,
+        "the delta keeps a and c"
+    );
+    let mut write = graph.write().unwrap();
+    set(
+        &mut write,
+        &mut model,
+        7,
+        "a",
+        Some(PropertyValue::Integer(7)),
+    );
+    set(&mut write, &mut model, 7, "c", None);
+    write.commit().unwrap();
+    assert_eq!(stored(&graph.read().unwrap()).deltas.get(&0), None);
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
     drop(graph);
     check(&open(&fs).read().unwrap(), &model).unwrap();
 }
@@ -560,33 +690,37 @@ fn a_value_that_changes_only_its_type_or_the_sign_of_a_zero_is_stored_again() {
 }
 
 #[test]
-fn removing_every_value_of_a_column_deletes_its_chunk_and_deltas() {
+fn removing_every_value_of_a_column_deletes_its_segments() {
     let (fs, graph, mut model) = graph_of(200, |id| {
         Values::from([
             ("a", PropertyValue::Integer(id as i64)),
             ("b", PropertyValue::Boolean(true)),
         ])
     });
-    let mut write = graph.write().unwrap();
-    for id in 0..5 {
-        set(&mut write, &mut model, id, "a", None);
-    }
-    write.commit().unwrap();
     let a = graph
         .read()
         .unwrap()
         .lookup_token::<PropertyKey>("a")
         .unwrap()
         .unwrap();
-    assert_eq!(stored_parts(&graph.read().unwrap())[&(0, a.id())], (1, 5));
+    let segments = 200usize.div_ceil(columns::SEGMENT_SLOTS);
+    let mut write = graph.write().unwrap();
+    for id in 0..5 {
+        set(&mut write, &mut model, id, "a", None);
+    }
+    write.commit().unwrap();
+    let layout = stored(&graph.read().unwrap());
+    assert_eq!(layout.segments[&(0, a.id())], segments);
+    assert_eq!(layout.deltas[&0], 5);
     let mut write = graph.write().unwrap();
     for id in 5..200 {
         set(&mut write, &mut model, id, "a", None);
     }
     check(&write, &model).unwrap();
     write.commit().unwrap();
-    let parts = stored_parts(&graph.read().unwrap());
-    assert!(!parts.contains_key(&(0, a.id())), "{parts:?}");
+    let layout = stored(&graph.read().unwrap());
+    assert!(!layout.segments.contains_key(&(0, a.id())), "{layout:?}");
+    assert_eq!(layout.deltas.get(&0), None);
     check(&graph.read().unwrap(), &model).unwrap();
     let mut write = graph.write().unwrap();
     set(
@@ -597,7 +731,119 @@ fn removing_every_value_of_a_column_deletes_its_chunk_and_deltas() {
         Some(PropertyValue::Integer(7)),
     );
     write.commit().unwrap();
-    assert_eq!(stored_parts(&graph.read().unwrap())[&(0, a.id())], (1, 0));
+    let layout = stored(&graph.read().unwrap());
+    assert!(!layout.segments.contains_key(&(0, a.id())));
+    assert_eq!(
+        layout.deltas[&0], 1,
+        "a value no segment holds lives in a delta"
+    );
+    drop(graph);
+    check(&open(&fs).read().unwrap(), &model).unwrap();
+}
+
+fn long_text(id: u64, length: usize) -> PropertyValue {
+    PropertyValue::String(format!("{id:0>length$}"))
+}
+
+#[test]
+fn a_column_of_large_values_splits_its_segments_and_joins_them_again_as_they_shrink() {
+    let (fs, graph, mut model) = graph_of(200, |id| Values::from([("b", long_text(id, 300))]));
+    let b = graph
+        .read()
+        .unwrap()
+        .lookup_token::<PropertyKey>("b")
+        .unwrap()
+        .unwrap();
+    let segments = 200usize.div_ceil(columns::SEGMENT_SLOTS);
+    let layout = stored(&graph.read().unwrap());
+    assert!(layout.segments[&(0, b.id())] > segments, "{layout:?}");
+    assert_eq!(segment_values(&graph.read().unwrap(), 0, b), 200);
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    for id in 0..200 {
+        set(
+            &mut write,
+            &mut model,
+            id,
+            "b",
+            Some(PropertyValue::Integer(id as i64)),
+        );
+    }
+    check(&write, &model).unwrap();
+    write.commit().unwrap();
+    assert_eq!(
+        stored(&graph.read().unwrap()).segments[&(0, b.id())],
+        segments
+    );
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    for id in [3, 70, 199] {
+        set(&mut write, &mut model, id, "b", Some(long_text(id, 2000)));
+    }
+    write.commit().unwrap();
+    assert_eq!(stored(&graph.read().unwrap()).deltas[&0], 3);
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    for id in 100..180 {
+        set(&mut write, &mut model, id, "b", Some(long_text(id, 600)));
+    }
+    write.commit().unwrap();
+    let layout = stored(&graph.read().unwrap());
+    assert_eq!(
+        layout.deltas.get(&0),
+        None,
+        "the deltas fold into the segments"
+    );
+    assert!(layout.segments[&(0, b.id())] > segments + 80, "{layout:?}");
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    for id in 64..200 {
+        set(&mut write, &mut model, id, "b", None);
+    }
+    write.commit().unwrap();
+    let layout = stored(&graph.read().unwrap());
+    assert_eq!(layout.deltas.get(&0), None);
+    assert_eq!(
+        layout.segments[&(0, b.id())],
+        columns::SEGMENT_SLOTS,
+        "one value too large for a part leaves each value a part of its own"
+    );
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    set(
+        &mut write,
+        &mut model,
+        3,
+        "b",
+        Some(PropertyValue::Integer(3)),
+    );
+    for id in 0..64 {
+        set(
+            &mut write,
+            &mut model,
+            id,
+            "b",
+            Some(PropertyValue::Integer(-1)),
+        );
+    }
+    write.commit().unwrap();
+    assert_eq!(
+        stored(&graph.read().unwrap()).deltas[&0],
+        columns::MAX_DELTAS
+    );
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    set(
+        &mut write,
+        &mut model,
+        64,
+        "b",
+        Some(PropertyValue::Integer(5)),
+    );
+    write.commit().unwrap();
+    let layout = stored(&graph.read().unwrap());
+    assert_eq!(layout.deltas.get(&0), None);
+    assert_eq!(layout.segments[&(0, b.id())], 2, "the parts join again");
     drop(graph);
     check(&open(&fs).read().unwrap(), &model).unwrap();
 }
@@ -620,25 +866,20 @@ fn nodes_on_both_sides_of_each_group_edge_keep_their_values_in_their_own_group()
         .lookup_token::<PropertyKey>("a")
         .unwrap()
         .unwrap();
-    let parts = stored_parts(&graph.read().unwrap());
+    let read = graph.read().unwrap();
+    let layout = stored(&read);
     assert_eq!(
-        parts.keys().copied().collect::<Vec<_>>(),
-        vec![(0, a.id()), (1, a.id()), (2, a.id())]
+        layout.segments,
+        BTreeMap::from([
+            ((0, a.id()), columns::SEGMENTS),
+            ((1, a.id()), columns::SEGMENTS)
+        ])
     );
-    for (group, count) in [(0u64, 4096usize), (1, 4096), (2, 2)] {
-        let chunk = graph
-            .read()
-            .unwrap()
-            .transaction
-            .get(Table::NodeColumns, &columns::chunk_key(group, a))
-            .unwrap()
-            .unwrap();
-        let column = columns::Column::load(group, a, &chunk).unwrap();
-        let held = (0..meta::SLOTS)
-            .filter(|slot| column.cell_at(*slot).unwrap().is_some())
-            .count();
-        assert_eq!(held, count, "group {group}");
+    assert_eq!(layout.deltas, BTreeMap::from([(2, 2)]));
+    for (group, count) in [(0u64, meta::SLOTS), (1, meta::SLOTS), (2, 0)] {
+        assert_eq!(segment_values(&read, group, a), count, "group {group}");
     }
+    drop(read);
     let mut write = graph.write().unwrap();
     for id in [GROUP - 1, GROUP, GROUP + 1, 2 * GROUP - 1, 2 * GROUP] {
         set(

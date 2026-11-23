@@ -217,7 +217,7 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             if *labelled {
                 record.labels.insert(names.label);
             }
-            write.create_node(&record).unwrap();
+            write.create_node(record.clone()).unwrap();
         }
         Op::Link {
             from,
@@ -355,7 +355,7 @@ fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
         PropertyValue::List(vec![PropertyValue::Float(first), PropertyValue::Float(1.0)])
     };
     let node = write
-        .create_node(&NodeRecord {
+        .create_node(NodeRecord {
             labels: [label].into(),
             properties: Properties::from([(at, vector(0.0))]),
         })
@@ -389,7 +389,7 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("current terms".to_owned())),
@@ -473,7 +473,7 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("graph store".to_owned())),
@@ -538,7 +538,7 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([(text, PropertyValue::String("five".to_owned()))]),
             })
@@ -590,19 +590,19 @@ fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_
         labels: [label].into(),
         properties: Properties::from([(text, PropertyValue::String("a".to_owned()))]),
     };
-    write.create_node(&doc()).unwrap();
+    write.create_node(doc()).unwrap();
     let target = Target::Label(label);
     assert_eq!(write.property_index(target, text).unwrap(), None);
     write
         .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
         .unwrap();
     let index = write.property_index(target, text).unwrap().unwrap();
-    write.create_node(&doc()).unwrap();
+    write.create_node(doc()).unwrap();
     let a = KeyRange::equal_to(&PropertyValue::String("a".to_owned())).unwrap();
     assert_eq!(write.property_seek(index, &[a]).unwrap().len(), 2);
     assert!(write.drop_index("doc text").unwrap());
     assert_eq!(write.property_index(target, text).unwrap(), None);
-    write.create_node(&doc()).unwrap();
+    write.create_node(doc()).unwrap();
     write.commit().unwrap();
     assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
 }
@@ -721,6 +721,16 @@ impl ReadTransaction for CountingWrite {
     ) -> Result<(), E> {
         self.inner.visit_prefix(table, prefix, visit)
     }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, visit)
+    }
 }
 
 impl WriteTransaction for CountingWrite {
@@ -760,7 +770,7 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("graph store graph".to_owned())),
@@ -823,7 +833,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([(
                     text,
@@ -982,7 +992,7 @@ fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone()
     let text = write.intern_token("text").unwrap();
     let mut node = || {
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: Default::default(),
                 properties: Properties::new(),
             })
@@ -1044,7 +1054,7 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
         labels: [label].into(),
         properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
     };
-    let first = write.create_node(&doc).unwrap();
+    let first = write.create_node(doc.clone()).unwrap();
     let relationship = |source| RelationshipRecord {
         rel_type: link,
         source,
@@ -1056,7 +1066,7 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
     write
         .create_keyword_index("words", IndexTarget::RelationshipType("LINK"), &["text"])
         .unwrap();
-    let second = write.create_node(&doc).unwrap();
+    let second = write.create_node(doc.clone()).unwrap();
     let linked = write.create_relationship(&relationship(second)).unwrap();
     assert_eq!(words(&write, ElementKind::Relationship), 2);
     write.drop_index("words").unwrap();
@@ -1069,11 +1079,11 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
         .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
         .unwrap();
     write.create_relationship(&relationship(second)).unwrap();
-    write.create_node(&doc).unwrap();
+    write.create_node(doc.clone()).unwrap();
     write.remove_node_property(first, text).unwrap();
     assert_eq!(words(&write, ElementKind::Node), 2);
     write.drop_index("words").unwrap();
-    write.create_node(&doc).unwrap();
+    write.create_node(doc.clone()).unwrap();
 
     write
         .create_vector_index(

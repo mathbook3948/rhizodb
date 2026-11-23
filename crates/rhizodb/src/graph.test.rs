@@ -40,7 +40,7 @@ fn a_created_node_reads_back_with_its_labels_and_properties() {
     record
         .properties
         .insert(name, PropertyValue::String("Ada".to_owned()));
-    let id = write.create_node(&record).unwrap();
+    let id = write.create_node(record.clone()).unwrap();
     write.commit().unwrap();
 
     let read = graph.read().unwrap();
@@ -53,8 +53,8 @@ fn a_created_relationship_reads_back_and_requires_existing_endpoints() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let record = relationship(knows, a, b);
     let id = write.create_relationship(&record).unwrap();
 
@@ -75,9 +75,9 @@ fn adjacency_is_visible_from_both_ends_and_filters_by_type() {
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
     let likes: Token<RelationshipType> = write.intern_token("LIKES").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
-    let c = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let c = write.create_node(node_with(&[])).unwrap();
     let a_knows_b = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -121,7 +121,7 @@ fn a_self_loop_is_reported_once_when_scanning_both_directions() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
     write
         .create_relationship(&relationship(knows, a, a))
         .unwrap();
@@ -143,9 +143,9 @@ fn the_label_index_follows_label_changes() {
     let mut write = graph.write().unwrap();
     let person: Token<Label> = write.intern_token("Person").unwrap();
     let admin: Token<Label> = write.intern_token("Admin").unwrap();
-    let a = write.create_node(&node_with(&[person])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
-    let c = write.create_node(&node_with(&[person, admin])).unwrap();
+    let a = write.create_node(node_with(&[person])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let c = write.create_node(node_with(&[person, admin])).unwrap();
     write.add_label(b, person).unwrap();
     write.add_label(b, person).unwrap();
     write.remove_label(c, person).unwrap();
@@ -168,8 +168,8 @@ fn a_node_with_relationships_is_not_detached_until_they_are_gone() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -202,8 +202,8 @@ fn properties_can_be_set_replaced_and_removed_on_nodes_and_relationships() {
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
     let since: Token<PropertyKey> = write.intern_token("since").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -286,12 +286,12 @@ fn a_dropped_write_transaction_leaves_no_trace() {
     let graph = memory_graph();
     {
         let mut write = graph.write().unwrap();
-        write.create_node(&node_with(&[])).unwrap();
+        write.create_node(node_with(&[])).unwrap();
     }
 
     let mut write = graph.write().unwrap();
     assert_eq!(write.node_ids().unwrap(), Vec::new());
-    assert_eq!(write.create_node(&node_with(&[])).unwrap(), NodeId(0));
+    assert_eq!(write.create_node(node_with(&[])).unwrap(), NodeId(0));
 }
 
 #[test]
@@ -303,8 +303,8 @@ fn a_file_database_keeps_its_graph_across_reopen() {
         let mut write = graph.write().unwrap();
         let person: Token<Label> = write.intern_token("Person").unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-        let a = write.create_node(&node_with(&[person])).unwrap();
-        let b = write.create_node(&node_with(&[person])).unwrap();
+        let a = write.create_node(node_with(&[person])).unwrap();
+        let b = write.create_node(node_with(&[person])).unwrap();
         let edge = write
             .create_relationship(&relationship(knows, a, b))
             .unwrap();
@@ -331,8 +331,8 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
         let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
         let mut write = graph.write().unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-        let a = write.create_node(&node_with(&[])).unwrap();
-        let b = write.create_node(&node_with(&[])).unwrap();
+        let a = write.create_node(node_with(&[])).unwrap();
+        let b = write.create_node(node_with(&[])).unwrap();
         let edge = write
             .create_relationship(&relationship(knows, a, b))
             .unwrap();
@@ -345,7 +345,7 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
     let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let fresh = write.create_node(&node_with(&[])).unwrap();
+    let fresh = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, fresh, fresh))
         .unwrap();
@@ -461,7 +461,7 @@ fn a_property_after_a_list_of_single_precision_floats_reads_back() {
         .properties
         .insert(embedding, PropertyValue::List(floats.collect()));
     record.properties.insert(age, PropertyValue::Integer(41));
-    let node = write.create_node(&record).unwrap();
+    let node = write.create_node(record.clone()).unwrap();
     write.commit().unwrap();
 
     let read = graph.read().unwrap();
@@ -538,13 +538,13 @@ fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() 
     let person: Token<Label> = write.intern_token("Person").unwrap();
     let mut ids = Vec::new();
     for _ in 0..5000 {
-        ids.push(write.create_node(&node_with(&[person])).unwrap());
+        ids.push(write.create_node(node_with(&[person])).unwrap());
     }
     write.commit().unwrap();
     let mut write = graph.write().unwrap();
     write.delete_node(ids[10]).unwrap();
     write.remove_label(ids[4500], person).unwrap();
-    let late = write.create_node(&node_with(&[person])).unwrap();
+    let late = write.create_node(node_with(&[person])).unwrap();
     let mut expected: Vec<NodeId> = ids
         .iter()
         .copied()
@@ -563,49 +563,44 @@ fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() 
 
 /// Deletes every property column and returns the properties they held, by node.
 pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId, Properties> {
-    let mut nodes: BTreeMap<NodeId, Properties> = BTreeMap::new();
-    let mut chunk = None;
-    let mut deltas: BTreeMap<usize, Option<PropertyValue>> = BTreeMap::new();
-    let mut flush = |id: Option<columns::ColumnId>,
-                     chunk: &mut Option<columns::Column>,
-                     deltas: &mut BTreeMap<usize, Option<PropertyValue>>| {
-        let Some((group, token)) = id else {
-            return;
-        };
-        for slot in 0..meta::SLOTS {
-            let stored = chunk
-                .as_ref()
-                .and_then(|chunk: &columns::Column| chunk.cell_at(slot).unwrap())
-                .map(|cell| cell.to_value().unwrap());
-            let value = deltas.remove(&slot).unwrap_or(stored);
-            if let Some(value) = value {
-                nodes
-                    .entry(meta::node_at(group, slot))
-                    .or_default()
-                    .insert(token, value);
-            }
-        }
-        *chunk = None;
-    };
-    let mut current = None;
+    let mut values: BTreeMap<(NodeId, Token<PropertyKey>), PropertyValue> = BTreeMap::new();
+    let mut changes = Vec::new();
     for (key, value) in write.scan_prefix(Table::NodeColumns, &[]).unwrap() {
-        let (group, token, part) = columns::parse_key(&key).unwrap();
-        if current != Some((group, token)) {
-            flush(current, &mut chunk, &mut deltas);
-            current = Some((group, token));
-        }
-        match part {
-            columns::Part::Chunk => {
-                chunk = Some(columns::Column::load(group, token, &value).unwrap());
+        match columns::parse_key(&key).unwrap() {
+            columns::ColumnKey::Segment {
+                group,
+                token,
+                segment,
+                ..
+            } => {
+                let view = columns::SegmentRef::parse(&key, &value).unwrap();
+                for cell in view.cells() {
+                    let (at, cell) = cell.unwrap();
+                    let node = meta::node_at(group, segment * columns::SEGMENT_SLOTS + at);
+                    values.insert((node, token), cell.to_value().unwrap());
+                }
             }
-            columns::Part::Delta(_) => {
-                let (slot, value) = columns::parse_delta(&key, &value).unwrap();
-                deltas.insert(slot, value);
+            columns::ColumnKey::Delta { group, slot } => {
+                let delta = columns::DeltaRef::parse(&key, &value).unwrap();
+                for entry in delta.entries() {
+                    let (token, cell) = entry.unwrap();
+                    let value = cell.map(|cell| cell.to_value().unwrap());
+                    changes.push(((meta::node_at(group, slot), token), value));
+                }
             }
         }
         write.delete(Table::NodeColumns, &key).unwrap();
     }
-    flush(current, &mut chunk, &mut deltas);
+    for (at, value) in changes {
+        match value {
+            Some(value) => values.insert(at, value),
+            None => values.remove(&at),
+        };
+    }
+    let mut nodes: BTreeMap<NodeId, Properties> = BTreeMap::new();
+    for ((node, token), value) in values {
+        nodes.entry(node).or_default().insert(token, value);
+    }
     nodes
 }
 

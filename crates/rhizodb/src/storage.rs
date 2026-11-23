@@ -174,6 +174,16 @@ pub(crate) trait ReadTransaction {
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
+
+    /// Calls `visit` with every entry whose key is at least `start` and below `end`, in
+    /// ascending key order, without copying them. An empty or reversed range visits nothing.
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

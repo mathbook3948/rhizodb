@@ -236,6 +236,11 @@ impl<'a> Reader<'a> {
         Self { bytes }
     }
 
+    /// The bytes not read yet.
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len()
+    }
+
     pub(crate) fn finish(&self) -> Result<(), DecodeError> {
         if self.bytes.is_empty() {
             Ok(())

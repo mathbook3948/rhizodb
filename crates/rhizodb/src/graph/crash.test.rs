@@ -150,11 +150,11 @@ fn write_iteration(graph: &Graph<RedbStorage>, iteration: u64) {
             .unwrap();
     }
     assert_eq!(
-        write.create_node(&head_record(&tokens, iteration)).unwrap(),
+        write.create_node(head_record(&tokens, iteration)).unwrap(),
         head_id(iteration)
     );
     assert_eq!(
-        write.create_node(&tail_record(&tokens, iteration)).unwrap(),
+        write.create_node(tail_record(&tokens, iteration)).unwrap(),
         tail_id(iteration)
     );
     assert_eq!(

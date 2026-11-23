@@ -31,11 +31,11 @@ fn healthy_graph() -> Graph<RedbStorage> {
     alice
         .properties
         .insert(name, PropertyValue::String("Alice".to_owned()));
-    assert_eq!(write.create_node(&alice).unwrap(), ALICE);
+    assert_eq!(write.create_node(alice.clone()).unwrap(), ALICE);
     let mut bob = NodeRecord::default();
     bob.labels.insert(person);
-    assert_eq!(write.create_node(&bob).unwrap(), BOB);
-    assert_eq!(write.create_node(&NodeRecord::default()).unwrap(), CAROL);
+    assert_eq!(write.create_node(bob.clone()).unwrap(), BOB);
+    assert_eq!(write.create_node(NodeRecord::default()).unwrap(), CAROL);
     let friendship = RelationshipRecord {
         rel_type: knows,
         source: ALICE,
@@ -97,7 +97,7 @@ fn a_graph_after_edits_and_deletes_passes() {
     let graph = healthy_graph();
     let mut write = graph.write().unwrap();
     let person = Token::<Label>::new(PERSON);
-    let scratch = write.create_node(&NodeRecord::default()).unwrap();
+    let scratch = write.create_node(NodeRecord::default()).unwrap();
     write.add_label(scratch, person).unwrap();
     write.delete_relationship(LOOP).unwrap();
     write.remove_label(BOB, person).unwrap();
@@ -354,15 +354,25 @@ fn kill(write: &mut Write<'_>, node: NodeId) {
 }
 
 fn put_column_delta(write: &mut Write<'_>, group: u64, slot: usize, value: Option<PropertyValue>) {
-    let token = Token::new(NAME);
-    let bytes = columns::encode_delta(group, token, slot, value.as_ref().map(columns::Cell::of));
-    write
-        .put(
-            Table::NodeColumns,
-            &columns::delta_key(group, token, slot),
-            &bytes,
-        )
-        .unwrap();
+    let key = columns::delta_key(group, slot);
+    let bytes = columns::encode_delta(
+        &key,
+        [(Token::new(NAME), value.as_ref().map(columns::Cell::of))],
+    );
+    write.put(Table::NodeColumns, &key, &bytes).unwrap();
+}
+
+fn put_segment(write: &mut Write<'_>, group: u64, slot: usize, value: &PropertyValue) {
+    let parts = columns::encode_segment(
+        group,
+        Token::new(NAME),
+        slot / columns::SEGMENT_SLOTS,
+        &[(slot % columns::SEGMENT_SLOTS, columns::Cell::of(value))],
+    )
+    .unwrap();
+    for (key, bytes) in parts {
+        write.put(Table::NodeColumns, &key, &bytes).unwrap();
+    }
 }
 
 #[test]
@@ -467,24 +477,10 @@ fn a_property_of_a_deleted_node_is_caught() {
 }
 
 #[test]
-fn a_column_delta_without_a_chunk_is_caught() {
+fn a_column_delta_entry_that_matches_its_segment_is_caught() {
     assert_caught(
-        |write| put_column_delta(write, 7, 3, Some(PropertyValue::Integer(1))),
-        IntegrityViolation::StrayColumnDelta {
-            node: meta::node_at(7, 3),
-            key: NAME,
-        },
-    );
-}
-
-#[test]
-fn a_column_delta_that_changes_nothing_is_caught() {
-    assert_caught(
-        |write| put_column_delta(write, 0, 0, Some(PropertyValue::String("Alice".to_owned()))),
-        IntegrityViolation::NonCanonicalColumn {
-            group: 0,
-            key: NAME,
-        },
+        |write| put_segment(write, 0, 0, &PropertyValue::String("Alice".to_owned())),
+        IntegrityViolation::NonCanonicalColumnDelta(ALICE),
     );
 }
 
@@ -492,30 +488,46 @@ fn a_column_delta_that_changes_nothing_is_caught() {
 fn a_column_delta_that_removes_an_absent_value_is_caught() {
     assert_caught(
         |write| put_column_delta(write, 0, 1, None),
-        IntegrityViolation::NonCanonicalColumn {
-            group: 0,
-            key: NAME,
-        },
+        IntegrityViolation::NonCanonicalColumnDelta(BOB),
     );
 }
 
 #[test]
-fn a_column_whose_deltas_leave_it_empty_is_caught() {
-    assert_caught(
-        |write| put_column_delta(write, 0, 0, None),
-        IntegrityViolation::NonCanonicalColumn {
-            group: 0,
-            key: NAME,
-        },
-    );
+fn a_segment_value_that_a_delta_overrides_is_not_a_violation() {
+    let graph = healthy_graph();
+    corrupt(&graph, |write| {
+        put_segment(write, 0, 0, &PropertyValue::String("Alicia".to_owned()))
+    });
+    assert_eq!(violations_of(&graph), vec![]);
 }
 
 #[test]
-fn more_column_deltas_than_a_column_keeps_are_caught() {
+fn more_column_deltas_than_a_group_keeps_are_caught() {
     assert_caught(
         |write| {
             for slot in 100..101 + columns::MAX_DELTAS {
                 put_column_delta(write, 0, slot, Some(PropertyValue::Integer(1)));
+            }
+        },
+        IntegrityViolation::TooManyColumnDeltas(0),
+    );
+}
+
+#[test]
+fn a_column_segment_in_another_encoding_than_its_values_take_is_caught() {
+    assert_caught(
+        |write| {
+            let mut tagged = Vec::new();
+            PropertyValue::String("Bob".to_owned()).encode_into(&mut tagged);
+            let parts = columns::encode_segment(
+                0,
+                Token::new(NAME),
+                0,
+                &[(1, columns::Cell::Encoded(&tagged))],
+            )
+            .unwrap();
+            for (key, bytes) in parts {
+                write.put(Table::NodeColumns, &key, &bytes).unwrap();
             }
         },
         IntegrityViolation::NonCanonicalColumn {
@@ -526,33 +538,8 @@ fn more_column_deltas_than_a_column_keeps_are_caught() {
 }
 
 #[test]
-fn a_column_chunk_in_another_encoding_than_its_values_take_is_caught() {
-    assert_caught(
-        |write| {
-            let mut tagged = Vec::new();
-            PropertyValue::String("Alice".to_owned()).encode_into(&mut tagged);
-            let chunk =
-                columns::encode_chunk(0, Token::new(NAME), &[(0, columns::Cell::Encoded(&tagged))])
-                    .unwrap()
-                    .unwrap();
-            write
-                .put(
-                    Table::NodeColumns,
-                    &columns::chunk_key(0, Token::new(NAME)),
-                    &chunk,
-                )
-                .unwrap();
-        },
-        IntegrityViolation::NonCanonicalColumn {
-            group: 0,
-            key: NAME,
-        },
-    );
-}
-
-#[test]
-fn an_unreadable_column_chunk_is_caught() {
-    let key = columns::chunk_key(0, Token::new(NAME));
+fn an_unreadable_column_segment_is_caught() {
+    let key = columns::segment_key(0, Token::new(NAME), 0, 0);
     assert_caught(
         |write| write.put(Table::NodeColumns, &key, &[0xff]).unwrap(),
         IntegrityViolation::Undecodable {
@@ -563,8 +550,25 @@ fn an_unreadable_column_chunk_is_caught() {
 }
 
 #[test]
+fn a_column_segment_stored_under_another_key_is_caught() {
+    let key = columns::segment_key(0, Token::new(NAME), 1, 0);
+    assert_caught(
+        |write| {
+            let parts =
+                columns::encode_segment(0, Token::new(NAME), 0, &[(5, columns::Cell::Int(7))])
+                    .unwrap();
+            write.put(Table::NodeColumns, &key, &parts[0].1).unwrap();
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
 fn an_unreadable_column_delta_is_caught() {
-    let key = columns::delta_key(0, Token::new(NAME), 1);
+    let key = columns::delta_key(0, 1);
     assert_caught(
         |write| {
             write
@@ -585,6 +589,83 @@ fn a_column_key_of_the_wrong_length_is_caught() {
         IntegrityViolation::Undecodable {
             table: Table::NodeColumns,
             key: vec![0; 15],
+        },
+    );
+}
+
+#[test]
+fn a_column_segment_beyond_its_group_or_a_part_beyond_its_segment_is_caught() {
+    let mut segment = columns::segment_key(0, Token::new(NAME), 0, 0).to_vec();
+    let at = segment.len() - 2;
+    segment[at] = u8::try_from(columns::SEGMENTS).unwrap();
+    let mut part = columns::segment_key(0, Token::new(NAME), 0, 0).to_vec();
+    let at = part.len() - 1;
+    part[at] = u8::try_from(columns::SEGMENT_SLOTS).unwrap();
+    for key in [segment, part] {
+        assert_caught(
+            |write| write.put(Table::NodeColumns, &key, &[]).unwrap(),
+            IntegrityViolation::Undecodable {
+                table: Table::NodeColumns,
+                key: key.to_vec(),
+            },
+        );
+    }
+}
+
+fn long_names(count: usize) -> Vec<PropertyValue> {
+    (0..count)
+        .map(|at| PropertyValue::String(format!("{at:0>600}")))
+        .collect()
+}
+
+fn put_long_names(write: &mut Write<'_>, names: &[PropertyValue]) -> Vec<columns::Part> {
+    let cells: Vec<(usize, columns::Cell<'_>)> = names
+        .iter()
+        .enumerate()
+        .map(|(at, name)| (at, columns::Cell::of(name)))
+        .collect();
+    let parts = columns::encode_segment(0, Token::new(NAME), 0, &cells).unwrap();
+    for (key, bytes) in &parts {
+        write.put(Table::NodeColumns, key, bytes).unwrap();
+    }
+    parts
+}
+
+#[test]
+fn a_split_column_segment_missing_a_part_is_caught() {
+    assert_caught(
+        |write| {
+            let parts = put_long_names(write, &long_names(2));
+            assert_eq!(parts.len(), 2);
+            write.delete(Table::NodeColumns, &parts[0].0).unwrap();
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_segment_kept_whole_beyond_the_part_limit_is_caught() {
+    assert_caught(
+        |write| {
+            let names = long_names(2);
+            for (key, _) in put_long_names(write, &names) {
+                write.delete(Table::NodeColumns, &key).unwrap();
+            }
+            let cells: Vec<(usize, columns::Cell<'_>)> = names
+                .iter()
+                .enumerate()
+                .map(|(at, name)| (at, columns::Cell::of(name)))
+                .collect();
+            let key = columns::segment_key(0, Token::new(NAME), 0, 0);
+            let whole = columns::encode_part(&key, columns::SEGMENT_SLOTS, &cells).unwrap();
+            write.put(Table::NodeColumns, &key, &whole).unwrap();
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
         },
     );
 }

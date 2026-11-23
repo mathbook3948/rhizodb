@@ -87,7 +87,7 @@ fn the_wide_format_seven_fixture_takes_writes_in_every_group_after_the_upgrade()
         model.nodes.remove(&id);
     }
     let created = write
-        .create_node(&NodeRecord {
+        .create_node(NodeRecord {
             labels: [wide].into(),
             properties: [(key, PropertyValue::Integer(12290))].into(),
         })
@@ -183,7 +183,7 @@ fn a_graph_stored_as_format_eight_reads_back_every_node_after_the_upgrade() {
                     record.properties.insert(*key, value);
                 }
             }
-            write.create_node(&record).unwrap();
+            write.create_node(record.clone()).unwrap();
         }
         for i in (4096..8192).filter(|i| i % 13 != 0).chain(12_000..12_300) {
             write.delete_node(NodeId(i)).unwrap().unwrap();

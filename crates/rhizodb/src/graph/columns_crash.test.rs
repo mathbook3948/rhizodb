@@ -217,7 +217,55 @@ fn a_crash_inside_a_commit_that_empties_a_column_leaves_the_graph_before_or_afte
 }
 
 #[test]
-fn a_crash_inside_a_commit_that_folds_deltas_into_their_chunk_leaves_the_graph_before_or_after_it()
-{
+fn a_crash_inside_a_commit_that_folds_deltas_into_segments_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(40, fold_deltas);
+}
+
+#[test]
+fn no_writer_after_a_commit_that_failed_breaks_the_delta_limit_of_a_group() {
+    let prepared = SimFs::new();
+    let before = prepare(&prepared, 40);
+    let operations = {
+        let fs = prepared.crash(Crash::KeepUnsynced);
+        let graph = open(&fs);
+        let mut write = graph.write().unwrap();
+        fold_deltas(&mut write, &mut before.clone());
+        let start = fs.operations();
+        write.commit().unwrap();
+        fs.operations() - start
+    };
+    for at in 0..=operations {
+        let fs = prepared.crash(Crash::KeepUnsynced);
+        let graph = open(&fs);
+        let mut write = graph.write().unwrap();
+        fold_deltas(&mut write, &mut before.clone());
+        fs.fail_after(at, Failure::Once);
+        if write.commit().is_ok() {
+            continue;
+        }
+        for round in 0..columns::MAX_DELTAS as u64 + 2 {
+            let Ok(mut write) = graph.write() else {
+                break;
+            };
+            let id = round * 2 + 1;
+            let value = PropertyValue::Integer(-(round as i64));
+            let wrote = write.set_node_property(NodeId(id), b_token(&write), value);
+            if wrote.is_err() || write.commit().is_err() {
+                break;
+            }
+        }
+        if let Ok(read) = graph.read()
+            && let Ok(violations) = read.check_integrity()
+        {
+            assert_eq!(
+                violations,
+                vec![],
+                "after a failure at {at} of {operations}"
+            );
+        }
+    }
+}
+
+fn b_token(write: &GraphTx<<RedbStorage as Storage>::Write<'_>>) -> Token<PropertyKey> {
+    write.lookup_token::<PropertyKey>("b").unwrap().unwrap()
 }

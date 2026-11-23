@@ -15,7 +15,7 @@ const GROUP: u64 = meta::SLOTS as u64;
 
 type Entries = Vec<(Vec<u8>, Vec<u8>)>;
 
-fn graph_with_chunks_and_deltas<S: Storage>(graph: &Graph<S>) -> Model {
+fn graph_with_segments_and_deltas<S: Storage>(graph: &Graph<S>) -> Model {
     let mut model = Model::default();
     let mut write = graph.write().unwrap();
     for id in 0..150u64 {
@@ -28,7 +28,7 @@ fn graph_with_chunks_and_deltas<S: Storage>(graph: &Graph<S>) -> Model {
     }
     write.skip_node_ids_to(GROUP);
     model.next = GROUP;
-    for id in 0..20u64 {
+    for id in 0..70u64 {
         let mut values = values_of(id);
         values.insert("a", PropertyValue::Integer(id as i64));
         values.insert("b", PropertyValue::Boolean(id % 3 == 0));
@@ -146,7 +146,16 @@ fn corrupt_and_check<S: Storage>(
         "the integrity check reports {key:?}"
     );
     drop(read);
-    let (group, token, _) = columns::parse_key(key).unwrap();
+    let (group, token) = match columns::parse_key(key).unwrap() {
+        columns::ColumnKey::Segment { group, token, .. } => (group, token),
+        columns::ColumnKey::Delta { group, .. } => {
+            let read = graph.read().unwrap();
+            (
+                group,
+                read.lookup_token::<PropertyKey>("a").unwrap().unwrap(),
+            )
+        }
+    };
     let node = model.nodes.keys().find(|id| **id / GROUP == group).copied();
     if let Some(node) = node {
         let mut write = graph.write().unwrap();
@@ -166,7 +175,7 @@ fn corrupt_and_check<S: Storage>(
 fn healthy() -> (SimFs, Graph<RedbStorage>, Model) {
     let fs = SimFs::new();
     let graph = open(&fs);
-    let model = graph_with_chunks_and_deltas(&graph);
+    let model = graph_with_segments_and_deltas(&graph);
     check(&graph.read().unwrap(), &model).unwrap();
     (fs, graph, model)
 }
@@ -181,20 +190,20 @@ fn positions(length: usize, head: u32) -> Vec<usize> {
 }
 
 #[test]
-fn the_healthy_graph_keeps_chunks_and_deltas_in_both_groups() {
+fn the_healthy_graph_keeps_segments_and_deltas_in_both_groups() {
     let (_fs, graph, _) = healthy();
     let read = graph.read().unwrap();
-    let mut chunks = BTreeSet::new();
+    let mut segments = BTreeSet::new();
     let mut deltas = Vec::new();
     for (key, _) in column_entries(&read) {
         match columns::parse_key(&key).unwrap() {
-            (group, _, columns::Part::Chunk) => {
-                chunks.insert(group);
+            columns::ColumnKey::Segment { group, segment, .. } => {
+                segments.insert((group, segment));
             }
-            (group, _, columns::Part::Delta(slot)) => deltas.push((group, slot)),
+            columns::ColumnKey::Delta { group, slot } => deltas.push((group, slot)),
         }
     }
-    assert_eq!(chunks, [0, 1].into());
+    assert_eq!(segments, [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)].into());
     deltas.sort_unstable();
     assert_eq!(deltas, vec![(0, 3), (0, 5), (1, 2), (1, 4), (1, 6)]);
 }
@@ -249,26 +258,6 @@ fn a_column_entry_stored_under_another_key_fails_reads_that_need_it() {
 }
 
 #[test]
-fn deltas_left_without_their_chunk_fail_reads_that_need_them() {
-    let (_fs, graph, model) = healthy();
-    let entries = column_entries(&graph.read().unwrap());
-    let mut with_deltas = BTreeSet::new();
-    for (key, _) in &entries {
-        if let (group, token, columns::Part::Delta(_)) = columns::parse_key(key).unwrap() {
-            with_deltas.insert((group, token));
-        }
-    }
-    assert!(!with_deltas.is_empty());
-    for (group, token) in with_deltas {
-        let failed = corrupt_and_check(&graph, &model, &columns::chunk_key(group, token), None);
-        assert!(
-            failed > 0,
-            "deltas of {group} {token:?} without their chunk fail some read"
-        );
-    }
-}
-
-#[test]
 fn a_changed_byte_of_a_column_in_the_database_file_fails_reads_or_answers_as_before() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.redb");
@@ -279,7 +268,7 @@ fn a_changed_byte_of_a_column_in_the_database_file_fails_reads_or_answers_as_bef
             write.intern_token::<PropertyKey>(key).unwrap();
         }
         write.commit().unwrap();
-        let model = graph_with_chunks_and_deltas(&graph);
+        let model = graph_with_segments_and_deltas(&graph);
         let entries = column_entries(&graph.read().unwrap());
         (model, entries)
     };

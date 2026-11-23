@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::value::DecodeError;
 use crate::value::PropertyValue;
 use crate::value::Reader;
@@ -14,93 +12,254 @@ use super::ids::PropertyKey;
 use super::ids::Token;
 use super::meta::SLOTS;
 
-const KEY: usize = 16;
 const LAYOUT_VERSION: u8 = 1;
-const HEAD_CHECKSUM: usize = 1;
+const DELTA_KIND: u8 = 0;
+const SEGMENT_KIND: u8 = 1;
+/// The slots of a row group that one segment of a column covers.
+pub(crate) const SEGMENT_SLOTS: usize = 64;
+/// The segments of one column of a row group.
+pub(crate) const SEGMENTS: usize = SLOTS / SEGMENT_SLOTS;
+/// The most bytes a segment key takes.
+pub(crate) const SEGMENT_KEY: usize = 17;
+/// The most bytes a part of a segment takes, unless it holds a single value. A segment that
+/// would take more is split into parts that cover equal runs of its slots, so that the storage
+/// engine packs four or more parts with their keys into each 4 KiB page instead of giving each
+/// one pages of its own.
+pub(crate) const PART_BYTES: usize = 992;
+/// The length of a delta key.
+pub(crate) const DELTA_KEY: usize = 11;
+const CHECKSUM_AT: usize = 1;
+const CREATED_BYTES: usize = 512;
 const KIND_AT: usize = 5;
-const GROUP_AT: usize = 6;
-const TOKEN_AT: usize = 14;
-const COUNT_AT: usize = 18;
-const HEAP_AT: usize = 20;
-const BITMAP_AT: usize = 24;
-const WORDS: usize = SLOTS / 64;
-const BLOCKS_AT: usize = BITMAP_AT + 8 * WORDS;
-const BLOCK: usize = 64;
+const SPAN_AT: usize = 6;
+const BITMAP_AT: usize = 7;
+const KIND_BITS: u8 = 0x07;
+const WIDE_OFFSETS: u8 = 0x08;
 const PRESENT: u8 = 1;
 const ABSENT: u8 = 0;
-/// The most deltas a column keeps beside its chunk. A commit that would leave more rewrites
-/// the chunk and drops them.
+/// The most deltas a row group keeps beside its segments. A commit that would leave more folds
+/// them into the segments.
 pub(crate) const MAX_DELTAS: usize = 64;
 
 const CHECKSUM_MISMATCH: GraphError =
     GraphError::Corrupt("a property column entry does not match its checksum");
-const DELTA_WITHOUT_CHUNK: GraphError = GraphError::Corrupt("a property column delta has no chunk");
+const UNKNOWN_LAYOUT: GraphError =
+    GraphError::Corrupt("a property column segment has an unknown layout");
 const VALUE_OUTSIDE: GraphError =
-    GraphError::Corrupt("a property column value lies outside its chunk");
+    GraphError::Corrupt("a property column value lies outside its segment");
 
 /// A property column: the row group and the property key.
 pub(crate) type ColumnId = (u64, Token<PropertyKey>);
 
-fn key(group: u64, token: Token<PropertyKey>, part: u32) -> [u8; KEY] {
-    let mut key = [0u8; KEY];
-    key[..8].copy_from_slice(&group.to_be_bytes());
-    key[8..12].copy_from_slice(&token.id().to_be_bytes());
-    key[12..].copy_from_slice(&part.to_be_bytes());
+/// The key of a part of a segment: the kind, the group and the property key, each as its
+/// length and then its big-endian bytes without leading zeros so that keys sort by number, and
+/// then the segment and the part.
+#[derive(Clone, Copy)]
+pub(crate) struct SegmentKey {
+    bytes: [u8; SEGMENT_KEY],
+    len: u8,
+}
+
+impl SegmentKey {
+    fn push(&mut self, byte: u8) {
+        if let Some(slot) = self.bytes.get_mut(usize::from(self.len)) {
+            *slot = byte;
+            self.len += 1;
+        }
+    }
+
+    fn push_number(&mut self, number: u64) {
+        let bytes = number.to_be_bytes();
+        let skip = (number.leading_zeros() / 8) as usize;
+        self.push((bytes.len() - skip) as u8);
+        for byte in &bytes[skip..] {
+            self.push(*byte);
+        }
+    }
+
+    fn cut(mut self, len: usize) -> Self {
+        self.len = self.len.min(len as u8);
+        self
+    }
+}
+
+impl std::ops::Deref for SegmentKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+impl std::fmt::Debug for SegmentKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl PartialEq for SegmentKey {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for SegmentKey {}
+
+impl PartialOrd for SegmentKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SegmentKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (**self).cmp(&**other)
+    }
+}
+
+fn column_key(group: u64, token: Token<PropertyKey>) -> SegmentKey {
+    let mut key = SegmentKey {
+        bytes: [0; SEGMENT_KEY],
+        len: 0,
+    };
+    key.push(SEGMENT_KIND);
+    key.push_number(group);
+    key.push_number(u64::from(token.id()));
     key
 }
 
-/// The key of a column's chunk: the group, the property key, and part 0.
-pub(crate) fn chunk_key(group: u64, token: Token<PropertyKey>) -> [u8; KEY] {
-    key(group, token, 0)
+/// The key of part `part` of the segment of the column of `group` and `token` that covers the
+/// slots from `segment * SEGMENT_SLOTS`.
+pub(crate) fn segment_key(
+    group: u64,
+    token: Token<PropertyKey>,
+    segment: usize,
+    part: usize,
+) -> SegmentKey {
+    let mut key = column_key(group, token);
+    key.push(segment as u8);
+    key.push(part as u8);
+    key
 }
 
-/// The key of the delta that amends a column's chunk at `slot`: part `1 + slot`, so a column's
-/// deltas follow its chunk in slot order.
-pub(crate) fn delta_key(group: u64, token: Token<PropertyKey>, slot: usize) -> [u8; KEY] {
-    key(group, token, 1 + slot as u32)
+/// The part a segment key names.
+pub(crate) fn part_of_key(key: &[u8]) -> usize {
+    key.last().map_or(0, |part| usize::from(*part))
 }
 
-/// The prefix of every entry of one column.
-/// The start, inclusive, and the end, exclusive, of the keys of every delta of a column.
-pub(crate) fn delta_range(group: u64, token: Token<PropertyKey>) -> ([u8; KEY], [u8; KEY]) {
-    (key(group, token, 1), key(group, token, SLOTS as u32 + 1))
+/// The prefix of every part of one segment.
+pub(crate) fn parts_prefix(group: u64, token: Token<PropertyKey>, segment: usize) -> SegmentKey {
+    let key = segment_key(group, token, segment, 0);
+    key.cut(key.len() - 1)
 }
 
-pub(crate) fn column_prefix(group: u64, token: Token<PropertyKey>) -> [u8; 12] {
-    let mut prefix = [0u8; 12];
-    prefix.copy_from_slice(&chunk_key(group, token)[..12]);
+/// The prefix of every segment of one column.
+pub(crate) fn column_prefix(group: u64, token: Token<PropertyKey>) -> SegmentKey {
+    column_key(group, token)
+}
+
+/// The end, exclusive, of the segment keys of `group`.
+pub(crate) fn segments_end(group: u64) -> SegmentKey {
+    let mut key = column_key(group, Token::new(0));
+    key = key.cut(key.len() - 1);
+    key.push(u8::MAX);
+    key
+}
+
+/// The key of the delta of the node in `slot` of `group`.
+pub(crate) fn delta_key(group: u64, slot: usize) -> [u8; DELTA_KEY] {
+    let mut key = [0u8; DELTA_KEY];
+    key[0] = DELTA_KIND;
+    key[1..9].copy_from_slice(&group.to_be_bytes());
+    key[9..].copy_from_slice(&(slot as u16).to_be_bytes());
+    key
+}
+
+/// The prefix of every delta of one group.
+pub(crate) fn deltas_prefix(group: u64) -> [u8; 9] {
+    let mut prefix = [0u8; 9];
+    prefix.copy_from_slice(&delta_key(group, 0)[..9]);
     prefix
 }
 
-/// The prefix of every column entry of one group.
-pub(crate) fn group_prefix(group: u64) -> [u8; 8] {
-    group.to_be_bytes()
+/// The start, inclusive, and the end, exclusive, of the delta keys of one group.
+pub(crate) fn deltas_range(group: u64) -> ([u8; DELTA_KEY], [u8; DELTA_KEY]) {
+    (delta_key(group, 0), delta_key(group, SLOTS))
 }
 
 /// What a column key names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Part {
-    Chunk,
-    Delta(usize),
+pub(crate) enum ColumnKey {
+    /// A part of a segment of the column of `group` and `token`.
+    Segment {
+        group: u64,
+        token: Token<PropertyKey>,
+        segment: usize,
+        part: usize,
+    },
+    /// The delta of the node in `slot` of `group`.
+    Delta { group: u64, slot: usize },
 }
 
-/// The group, property key, and part a column key names.
-pub(crate) fn parse_key(key: &[u8]) -> Result<(u64, Token<PropertyKey>, Part), GraphError> {
-    let key = <[u8; KEY]>::try_from(key).map_err(|_| DecodeError::UnexpectedEnd)?;
-    let mut group = [0u8; 8];
-    group.copy_from_slice(&key[..8]);
-    let token = Token::new(u32::from_be_bytes([key[8], key[9], key[10], key[11]]));
-    let part = u32::from_be_bytes([key[12], key[13], key[14], key[15]]) as usize;
-    let part = match part {
-        0 => Part::Chunk,
-        1..=SLOTS => Part::Delta(part - 1),
-        _ => return Err(GraphError::Corrupt("a property column key names no part")),
+fn take_number(key: &[u8], at: &mut usize, most: usize) -> Option<u64> {
+    let len = usize::from(*key.get(*at)?);
+    let bytes = key.get(*at + 1..*at + 1 + len)?;
+    if len > most || bytes.first() == Some(&0) {
+        return None;
+    }
+    *at += 1 + len;
+    Some(
+        bytes
+            .iter()
+            .fold(0u64, |number, byte| number << 8 | u64::from(*byte)),
+    )
+}
+
+fn parse_segment_key(key: &[u8]) -> Option<ColumnKey> {
+    let mut at = 1;
+    let group = take_number(key, &mut at, 8)?;
+    let token = u32::try_from(take_number(key, &mut at, 4)?).ok()?;
+    match key.get(at..)? {
+        &[segment, part]
+            if usize::from(segment) < SEGMENTS && usize::from(part) < SEGMENT_SLOTS =>
+        {
+            Some(ColumnKey::Segment {
+                group,
+                token: Token::new(token),
+                segment: usize::from(segment),
+                part: usize::from(part),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The entry a column key names.
+pub(crate) fn parse_key(key: &[u8]) -> Result<ColumnKey, GraphError> {
+    let unknown = GraphError::Corrupt("a property column key names no entry");
+    let group = |key: &[u8]| {
+        let mut group = [0u8; 8];
+        group.copy_from_slice(&key[1..9]);
+        u64::from_be_bytes(group)
     };
-    Ok((u64::from_be_bytes(group), token, part))
+    match (key.first(), key.len()) {
+        (Some(&SEGMENT_KIND), _) => parse_segment_key(key).ok_or(unknown),
+        (Some(&DELTA_KIND), DELTA_KEY) => {
+            let slot = usize::from(u16::from_be_bytes([key[9], key[10]]));
+            if slot >= SLOTS {
+                return Err(unknown);
+            }
+            Ok(ColumnKey::Delta {
+                group: group(key),
+                slot,
+            })
+        }
+        _ => Err(unknown),
+    }
 }
 
-/// How a chunk stores its values: one type for every value, or each value encoded with its tag
-/// when the values differ in type or are of another type.
+/// How a segment stores its values: one type for every value, or each value encoded with its
+/// tag when the values differ in type or are of another type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Bool,
@@ -131,21 +290,9 @@ impl Kind {
             _ => return None,
         })
     }
-
-    fn varying(self) -> bool {
-        matches!(self, Kind::Str | Kind::Variant)
-    }
-
-    fn body(self, count: usize, heap: usize) -> Option<usize> {
-        match self {
-            Kind::Bool => Some(count.div_ceil(8)),
-            Kind::Int | Kind::Float => count.checked_mul(8),
-            Kind::Str | Kind::Variant => count.checked_mul(4)?.checked_add(heap),
-        }
-    }
 }
 
-/// One stored value, read in place where its chunk allows.
+/// One stored value, read in place where its segment allows.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cell<'a> {
     Bool(bool),
@@ -293,307 +440,410 @@ fn u32_le(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }
 
-fn ones(words: impl Iterator<Item = u64>) -> impl Iterator<Item = usize> {
-    words.enumerate().flat_map(|(index, word)| {
-        let mut rest = word;
-        std::iter::from_fn(move || {
-            if rest == 0 {
-                return None;
-            }
-            let bit = rest.trailing_zeros() as usize;
-            rest &= rest - 1;
-            Some(index * 64 + bit)
-        })
+fn part_mask(part: usize, span: usize) -> u64 {
+    let run = match span {
+        SEGMENT_SLOTS.. => u64::MAX,
+        span => (1u64 << span) - 1,
+    };
+    run.checked_shl(u32::try_from(part * span).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
+fn ones(bitmap: u64) -> impl Iterator<Item = usize> {
+    let mut rest = bitmap;
+    std::iter::from_fn(move || {
+        if rest == 0 {
+            return None;
+        }
+        let bit = rest.trailing_zeros() as usize;
+        rest &= rest - 1;
+        Some(bit)
     })
 }
 
-/// The values of one column, as the chunk that stores them: the slots that hold a value,
-/// ascending, each with its value. `None` when no slot holds one, since such a column has no
-/// chunk.
-pub(crate) fn encode_chunk(
+/// A part of a segment: its key and its bytes.
+pub(crate) type Part = (SegmentKey, Vec<u8>);
+
+/// The parts that store the values of one segment, each under its key: the positions in the
+/// segment that hold a value, ascending, each with its value. Every part covers the same number
+/// of positions, its span, except that the last part ends with the segment. The span is the
+/// largest under which every part fits `PART_BYTES`, or 1 when none does, and part 0 is stored
+/// even when it holds no value, since it tells a reader the span. No part is stored when no
+/// position holds a value.
+pub(crate) fn encode_segment(
     group: u64,
     token: Token<PropertyKey>,
+    segment: usize,
     cells: &[(usize, Cell<'_>)],
-) -> Result<Option<Vec<u8>>, GraphError> {
-    let Some(kind) = cells
+) -> Result<Vec<Part>, GraphError> {
+    let mut last = None;
+    for (at, _) in cells {
+        if *at >= SEGMENT_SLOTS {
+            return Err(VALUE_OUTSIDE);
+        }
+        if last.is_some_and(|last| last >= *at) {
+            return Err(GraphError::Corrupt(
+                "a property column segment takes its values out of order",
+            ));
+        }
+        last = Some(*at);
+    }
+    if cells.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut scratch = Vec::new();
+    let mut spans = Vec::new();
+    for (_, cell) in cells {
+        if let Cell::Value(value) = cell {
+            let start = scratch.len();
+            value.encode_into(&mut scratch);
+            spans.push(start..scratch.len());
+        }
+    }
+    let mut spans = spans.into_iter();
+    let cells: Vec<(usize, Cell<'_>)> = cells
+        .iter()
+        .map(|(at, cell)| match cell {
+            Cell::Value(_) => spans
+                .next()
+                .and_then(|span| scratch.get(span))
+                .map(|bytes| (*at, Cell::Encoded(bytes)))
+                .ok_or(VALUE_OUTSIDE),
+            other => Ok((*at, *other)),
+        })
+        .collect::<Result<_, GraphError>>()?;
+    let span = span_of(&cells);
+    let mut out = Vec::new();
+    if cells.first().is_some_and(|(at, _)| at / span > 0) {
+        let key = segment_key(group, token, segment, 0);
+        out.push((key, encode_part(&key, span, &[])?));
+    }
+    for (part, held) in parts_of(&cells, span) {
+        let key = segment_key(group, token, segment, part);
+        out.push((key, encode_part(&key, span, held)?));
+    }
+    Ok(out)
+}
+
+fn span_of(cells: &[(usize, Cell<'_>)]) -> usize {
+    let least: usize = cells.iter().map(|(_, cell)| least_bytes(cell)).sum();
+    (1..=SEGMENT_SLOTS)
+        .rev()
+        .find(|span| {
+            values_at(*span) + least.div_ceil(SEGMENT_SLOTS.div_ceil(*span)) <= PART_BYTES
+                && parts_of(cells, *span).all(|(_, part)| part_bytes(*span, part) <= PART_BYTES)
+        })
+        .unwrap_or(1)
+}
+
+fn least_bytes(cell: &Cell<'_>) -> usize {
+    match cell {
+        Cell::Bool(_) => 0,
+        Cell::Int(_) | Cell::Float(_) => 8,
+        Cell::Str(text) => 2 + text.len(),
+        Cell::Encoded(bytes) => 2 + bytes.len(),
+        Cell::Value(_) => 2 + tagged_bytes(cell),
+    }
+}
+
+fn parts_of<'c, 'a>(
+    cells: &'c [(usize, Cell<'a>)],
+    span: usize,
+) -> impl Iterator<Item = (usize, &'c [(usize, Cell<'a>)])> {
+    let mut rest = cells;
+    std::iter::from_fn(move || {
+        let part = rest.first()?.0 / span;
+        let split = rest
+            .iter()
+            .position(|(at, _)| at / span != part)
+            .unwrap_or(rest.len());
+        let (held, after) = rest.split_at(split);
+        rest = after;
+        Some((part, held))
+    })
+}
+
+fn part_kind(cells: &[(usize, Cell<'_>)]) -> Kind {
+    cells
         .iter()
         .map(|(_, cell)| cell.kind())
         .reduce(|left, right| if left == right { left } else { Kind::Variant })
-    else {
-        return Ok(None);
-    };
-    let count = cells.len();
-    let blocks = count.div_ceil(BLOCK);
-    let mut words = [0u64; WORDS];
-    for (slot, _) in cells {
-        words[slot / 64] |= 1 << (slot % 64);
+        .unwrap_or(Kind::Variant)
+}
+
+fn tagged_bytes(cell: &Cell<'_>) -> usize {
+    match cell {
+        Cell::Bool(_) => 2,
+        Cell::Int(_) | Cell::Float(_) => 9,
+        Cell::Str(text) => {
+            let mut rest = text.len() >> 7;
+            let mut varint = 1;
+            while rest > 0 {
+                varint += 1;
+                rest >>= 7;
+            }
+            1 + varint + text.len()
+        }
+        Cell::Encoded(bytes) => bytes.len(),
+        Cell::Value(value) => {
+            let mut bytes = Vec::new();
+            value.encode_into(&mut bytes);
+            bytes.len()
+        }
     }
-    let mut ends: Vec<u8> = Vec::new();
-    let mut body: Vec<u8> = Vec::new();
+}
+
+fn bitmap_bytes(span: usize) -> usize {
+    span.div_ceil(8).max(1)
+}
+
+fn values_at(span: usize) -> usize {
+    BITMAP_AT + bitmap_bytes(span)
+}
+
+fn offset_bytes(heap: usize) -> usize {
+    if heap > usize::from(u16::MAX) { 4 } else { 2 }
+}
+
+fn heap_bytes(kind: Kind, cells: &[(usize, Cell<'_>)]) -> usize {
+    match kind {
+        Kind::Str => cells
+            .iter()
+            .map(|(_, cell)| match cell {
+                Cell::Str(text) => text.len(),
+                _ => 0,
+            })
+            .sum(),
+        _ => cells.iter().map(|(_, cell)| tagged_bytes(cell)).sum(),
+    }
+}
+
+fn part_bytes(span: usize, cells: &[(usize, Cell<'_>)]) -> usize {
+    let count = cells.len();
+    let kind = part_kind(cells);
+    values_at(span)
+        + match kind {
+            Kind::Bool => count.div_ceil(8),
+            Kind::Int | Kind::Float => 8 * count,
+            Kind::Str | Kind::Variant => {
+                let heap = heap_bytes(kind, cells);
+                offset_bytes(heap) * count + heap
+            }
+        }
+}
+
+/// One part of a segment under `key`, in a segment split into parts of `span` positions,
+/// holding `cells`.
+pub(crate) fn encode_part(
+    key: &[u8],
+    span: usize,
+    cells: &[(usize, Cell<'_>)],
+) -> Result<Vec<u8>, GraphError> {
+    let kind = part_kind(cells);
+    let first = part_of_key(key) * span;
+    let bitmap = cells.iter().fold(0u64, |bitmap, (at, _)| {
+        bitmap | 1u64 << ((at % SEGMENT_SLOTS).wrapping_sub(first) % SEGMENT_SLOTS)
+    });
+    let count = cells.len();
+    let mut out = Vec::with_capacity(part_bytes(span, cells));
+    out.push(LAYOUT_VERSION);
+    out.extend_from_slice(&[0; 4]);
+    out.push(kind.tag());
+    out.push(u8::try_from(span).map_err(|_| UNKNOWN_LAYOUT)?);
+    out.extend_from_slice(&bitmap.to_le_bytes()[..bitmap_bytes(span)]);
     match kind {
         Kind::Bool => {
-            body.resize(count.div_ceil(8), 0);
+            let start = out.len();
+            out.resize(start + count.div_ceil(8), 0);
             for (index, (_, cell)) in cells.iter().enumerate() {
                 if matches!(cell, Cell::Bool(true)) {
-                    body[index / 8] |= 1 << (index % 8);
+                    out[start + index / 8] |= 1 << (index % 8);
                 }
             }
         }
         Kind::Int | Kind::Float => {
-            body.reserve(8 * count);
             for (_, cell) in cells {
                 match cell {
-                    Cell::Int(value) => body.extend_from_slice(&value.to_le_bytes()),
-                    Cell::Float(value) => body.extend_from_slice(&value.to_bits().to_le_bytes()),
+                    Cell::Int(value) => out.extend_from_slice(&value.to_le_bytes()),
+                    Cell::Float(value) => out.extend_from_slice(&value.to_bits().to_le_bytes()),
                     _ => {}
                 }
             }
         }
         Kind::Str | Kind::Variant => {
-            ends.reserve(4 * count);
+            let mut heap = Vec::with_capacity(heap_bytes(kind, cells));
+            let mut ends = Vec::with_capacity(count);
             for (_, cell) in cells {
                 match (kind, cell) {
-                    (Kind::Str, Cell::Str(text)) => body.extend_from_slice(text.as_bytes()),
-                    _ => cell.encode_tagged(&mut body),
+                    (Kind::Str, Cell::Str(text)) => heap.extend_from_slice(text.as_bytes()),
+                    _ => cell.encode_tagged(&mut heap),
                 }
-                let end = u32::try_from(body.len()).map_err(|_| DecodeError::LengthOverflow)?;
-                ends.extend_from_slice(&end.to_le_bytes());
+                ends.push(heap.len());
             }
+            let wide = offset_bytes(heap.len()) == 4;
+            if wide {
+                out[KIND_AT] |= WIDE_OFFSETS;
+            }
+            for end in ends {
+                match wide {
+                    true => out.extend_from_slice(
+                        &u32::try_from(end)
+                            .map_err(|_| DecodeError::LengthOverflow)?
+                            .to_le_bytes(),
+                    ),
+                    false => out.extend_from_slice(
+                        &u16::try_from(end)
+                            .map_err(|_| DecodeError::LengthOverflow)?
+                            .to_le_bytes(),
+                    ),
+                }
+            }
+            out.extend_from_slice(&heap);
         }
     }
-    let heap = if kind.varying() { body.len() } else { 0 };
-    let heap = u32::try_from(heap).map_err(|_| DecodeError::LengthOverflow)?;
-    let head_end = BLOCKS_AT + 4 * blocks;
-    let mut out = Vec::with_capacity(head_end + ends.len() + body.len());
-    out.push(LAYOUT_VERSION);
-    out.extend_from_slice(&[0; 4]);
-    out.push(kind.tag());
-    out.extend_from_slice(&group.to_be_bytes());
-    out.extend_from_slice(&token.id().to_be_bytes());
-    out.extend_from_slice(&(count as u16).to_be_bytes());
-    out.extend_from_slice(&heap.to_be_bytes());
-    for word in words {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    out.resize(head_end, 0);
-    out.extend_from_slice(&ends);
-    out.extend_from_slice(&body);
-    let layout = Layout::of(&out)?;
-    for block in 0..blocks {
-        let sum = layout.block_checksum(&out, block)?;
-        let at = BLOCKS_AT + 4 * block;
-        out[at..at + 4].copy_from_slice(&sum.to_le_bytes());
-    }
-    let head = crc(&[&out[KIND_AT..head_end]]);
-    out[HEAD_CHECKSUM..KIND_AT].copy_from_slice(&head.to_le_bytes());
-    Ok(Some(out))
+    let sum = crc(&[key, &out[KIND_AT..]]);
+    out[CHECKSUM_AT..KIND_AT].copy_from_slice(&sum.to_le_bytes());
+    Ok(out)
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     kind: Kind,
-    count: usize,
-    head_end: usize,
+    span: usize,
+    bitmap: u64,
     values: usize,
+    offset: usize,
     heap: usize,
 }
 
 impl Layout {
-    fn of(bytes: &[u8]) -> Result<Self, GraphError> {
-        if bytes.len() < BLOCKS_AT || bytes[0] != LAYOUT_VERSION {
-            return Err(GraphError::Corrupt(
-                "a property column chunk has an unknown layout",
-            ));
+    fn of(part: usize, bytes: &[u8]) -> Result<Self, GraphError> {
+        if bytes.len() < BITMAP_AT || bytes[0] != LAYOUT_VERSION {
+            return Err(UNKNOWN_LAYOUT);
         }
-        let kind = Kind::from_tag(bytes[KIND_AT]).ok_or(GraphError::Corrupt(
-            "a property column chunk has an unknown type",
-        ))?;
-        let count = usize::from(u16::from_be_bytes([bytes[COUNT_AT], bytes[COUNT_AT + 1]]));
-        let heap = u32::from_be_bytes([
-            bytes[HEAP_AT],
-            bytes[HEAP_AT + 1],
-            bytes[HEAP_AT + 2],
-            bytes[HEAP_AT + 3],
-        ]) as usize;
-        if count == 0 || count > SLOTS || (heap != 0 && !kind.varying()) {
-            return Err(GraphError::Corrupt(
-                "a property column chunk has an unknown layout",
-            ));
+        let flags = bytes[KIND_AT];
+        let wide = flags & WIDE_OFFSETS != 0;
+        let kind = Kind::from_tag(flags & KIND_BITS).ok_or(UNKNOWN_LAYOUT)?;
+        let span = usize::from(bytes[SPAN_AT]);
+        if flags & !(KIND_BITS | WIDE_OFFSETS) != 0
+            || !(1..=SEGMENT_SLOTS).contains(&span)
+            || part * span >= SEGMENT_SLOTS
+        {
+            return Err(UNKNOWN_LAYOUT);
         }
-        let head_end = BLOCKS_AT + 4 * count.div_ceil(BLOCK);
-        let end = kind
-            .body(count, heap)
-            .and_then(|body| body.checked_add(head_end))
-            .ok_or(DecodeError::LengthOverflow)?;
+        let values = values_at(span);
+        let mut word = [0u8; 8];
+        word[..values - BITMAP_AT].copy_from_slice(
+            bytes
+                .get(BITMAP_AT..values)
+                .ok_or(DecodeError::UnexpectedEnd)?,
+        );
+        let relative = u64::from_le_bytes(word);
+        let bitmap = relative << (part * span);
+        if relative & !part_mask(0, span) != 0 || bitmap >> (part * span) != relative {
+            return Err(VALUE_OUTSIDE);
+        }
+        let count = bitmap.count_ones() as usize;
+        if count == 0 && (part > 0 || span == SEGMENT_SLOTS) {
+            return Err(UNKNOWN_LAYOUT);
+        }
+        let offset = if wide { 4 } else { 2 };
+        let (heap, end) = match kind {
+            Kind::Bool | Kind::Int | Kind::Float if wide => return Err(UNKNOWN_LAYOUT),
+            Kind::Bool => (values, values + count.div_ceil(8)),
+            Kind::Int | Kind::Float => (values, values + 8 * count),
+            Kind::Str | Kind::Variant => {
+                let heap = values + offset * count;
+                if bytes.len() < heap {
+                    return Err(DecodeError::UnexpectedEnd.into());
+                }
+                let last = match count {
+                    0 => 0,
+                    count => read_offset(bytes, values + offset * (count - 1), offset),
+                };
+                (heap, heap + last)
+            }
+        };
         match end.cmp(&bytes.len()) {
             std::cmp::Ordering::Less => Err(DecodeError::TrailingBytes.into()),
             std::cmp::Ordering::Greater => Err(DecodeError::UnexpectedEnd.into()),
             std::cmp::Ordering::Equal => Ok(Self {
                 kind,
-                count,
-                head_end,
-                values: head_end,
-                heap: head_end + if kind.varying() { 4 * count } else { 0 },
+                span,
+                bitmap,
+                values,
+                offset,
+                heap,
             }),
         }
     }
+}
 
-    fn block_values(&self, block: usize) -> std::ops::Range<usize> {
-        let start = block * BLOCK;
-        start..(start + BLOCK).min(self.count)
-    }
-
-    fn end_of(&self, bytes: &[u8], index: usize) -> usize {
-        u32_le(bytes, self.values + 4 * index) as usize
-    }
-
-    fn block_checksum(&self, bytes: &[u8], block: usize) -> Result<u32, GraphError> {
-        let values = self.block_values(block);
-        Ok(match self.kind {
-            Kind::Bool => {
-                crc(
-                    &[
-                        &bytes
-                            [self.values + values.start / 8..self.values + values.end.div_ceil(8)],
-                    ],
-                )
-            }
-            Kind::Int | Kind::Float => {
-                crc(&[&bytes[self.values + 8 * values.start..self.values + 8 * values.end]])
-            }
-            Kind::Str | Kind::Variant => {
-                let first = values.start.saturating_sub(1);
-                let ends = &bytes[self.values + 4 * first..self.values + 4 * values.end];
-                let start = match values.start {
-                    0 => 0,
-                    start => self.end_of(bytes, start - 1),
-                };
-                let end = self.end_of(bytes, values.end - 1);
-                let heap = bytes
-                    .get(self.heap + start..)
-                    .and_then(|rest| rest.get(..end.checked_sub(start)?))
-                    .ok_or(VALUE_OUTSIDE)?;
-                crc(&[ends, heap])
-            }
-        })
+fn read_offset(bytes: &[u8], at: usize, size: usize) -> usize {
+    match size {
+        4 => u32_le(bytes, at) as usize,
+        _ => usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]])),
     }
 }
 
-/// A stored chunk read in place. Its head was checked; each block of values is checked when a
-/// value in it is read, or all at once by [`ChunkRef::verify`].
+/// A stored segment read in place, checked whole against its checksum.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ChunkRef<'a> {
+pub(crate) struct SegmentRef<'a> {
     bytes: &'a [u8],
     layout: Layout,
 }
 
-impl<'a> ChunkRef<'a> {
-    /// The chunk stored under the key of `group` and `token`, with its head checked.
-    pub(crate) fn parse(
-        group: u64,
-        token: Token<PropertyKey>,
-        bytes: &'a [u8],
-    ) -> Result<Self, GraphError> {
-        let layout = Layout::of(bytes)?;
-        if crc(&[&bytes[KIND_AT..layout.head_end]]) != u32_le(bytes, HEAD_CHECKSUM) {
+impl<'a> SegmentRef<'a> {
+    /// The part of a segment stored under `key`, checked.
+    pub(crate) fn parse(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
+        if bytes.len() < BITMAP_AT || key.first() != Some(&SEGMENT_KIND) {
+            return Err(UNKNOWN_LAYOUT);
+        }
+        if crc(&[key, &bytes[KIND_AT..]]) != u32_le(bytes, CHECKSUM_AT) {
             return Err(CHECKSUM_MISMATCH);
         }
-        let mut stored = [0u8; 8];
-        stored.copy_from_slice(&bytes[GROUP_AT..TOKEN_AT]);
-        let stored_token = u32::from_be_bytes([
-            bytes[TOKEN_AT],
-            bytes[TOKEN_AT + 1],
-            bytes[TOKEN_AT + 2],
-            bytes[TOKEN_AT + 3],
-        ]);
-        if u64::from_be_bytes(stored) != group || stored_token != token.id() {
-            return Err(GraphError::Corrupt(
-                "a property column chunk is stored under the key of another column",
-            ));
-        }
-        let chunk = Self { bytes, layout };
-        let present: usize = chunk.words().map(|word| word.count_ones() as usize).sum();
-        if present != layout.count {
-            return Err(GraphError::Corrupt(
-                "a property column chunk counts other values than it holds",
-            ));
-        }
-        Ok(chunk)
+        Ok(Self {
+            bytes,
+            layout: Layout::of(part_of_key(key), bytes)?,
+        })
     }
 
-    fn word(&self, index: usize) -> u64 {
-        let at = BITMAP_AT + 8 * index;
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&self.bytes[at..at + 8]);
-        u64::from_le_bytes(word)
+    /// The part of its segment that holds position `at`, by the span this part records.
+    pub(crate) fn part_of(&self, at: usize) -> usize {
+        (at % SEGMENT_SLOTS) / self.layout.span
     }
 
-    pub(crate) fn words(&self) -> impl Iterator<Item = u64> + '_ {
-        (0..WORDS).map(|index| self.word(index))
-    }
-
-    fn index_of(&self, slot: usize) -> Option<usize> {
-        let word = self.word(slot / 64);
-        let bit = 1u64 << (slot % 64);
-        if word & bit == 0 {
-            return None;
-        }
-        let before: u32 = (0..slot / 64)
-            .map(|index| self.word(index).count_ones())
-            .sum();
-        Some(before as usize + (word & (bit - 1)).count_ones() as usize)
-    }
-
-    fn verify_block(&self, block: usize) -> Result<(), GraphError> {
-        if self.layout.block_checksum(self.bytes, block)?
-            != u32_le(self.bytes, BLOCKS_AT + 4 * block)
-        {
-            return Err(CHECKSUM_MISMATCH);
-        }
-        if self.layout.kind.varying() {
-            let mut start = match block * BLOCK {
-                0 => 0,
-                first => self.layout.end_of(self.bytes, first - 1),
-            };
-            for index in self.layout.block_values(block) {
-                let end = self.layout.end_of(self.bytes, index);
-                if end < start {
-                    return Err(VALUE_OUTSIDE);
-                }
-                start = end;
-            }
-        }
-        Ok(())
-    }
-
-    /// Checks every block of values.
-    pub(crate) fn verify(&self) -> Result<(), GraphError> {
-        (0..self.layout.count.div_ceil(BLOCK)).try_for_each(|block| self.verify_block(block))
+    fn end_of(&self, index: usize) -> usize {
+        let layout = self.layout;
+        read_offset(
+            self.bytes,
+            layout.values + layout.offset * index,
+            layout.offset,
+        )
     }
 
     fn cell(&self, index: usize) -> Result<Cell<'a>, GraphError> {
-        let layout = self.layout;
         let bytes = self.bytes;
         let fixed = |at: usize| {
             let mut value = [0u8; 8];
             value.copy_from_slice(&bytes[at..at + 8]);
             value
         };
+        let layout = self.layout;
+        let values = layout.values;
         Ok(match layout.kind {
-            Kind::Bool => Cell::Bool(bytes[layout.values + index / 8] & (1 << (index % 8)) != 0),
-            Kind::Int => Cell::Int(i64::from_le_bytes(fixed(layout.values + 8 * index))),
+            Kind::Bool => Cell::Bool(bytes[values + index / 8] & (1 << (index % 8)) != 0),
+            Kind::Int => Cell::Int(i64::from_le_bytes(fixed(values + 8 * index))),
             Kind::Float => Cell::Float(f64::from_bits(u64::from_le_bytes(fixed(
-                layout.values + 8 * index,
+                values + 8 * index,
             )))),
             Kind::Str | Kind::Variant => {
                 let start = match index {
                     0 => 0,
-                    index => layout.end_of(bytes, index - 1),
+                    index => self.end_of(index - 1),
                 };
-                let end = layout.end_of(bytes, index);
                 let value = bytes
-                    .get(layout.heap + start..layout.heap + end)
-                    .filter(|_| start <= end)
+                    .get(layout.heap + start..layout.heap + self.end_of(index))
                     .ok_or(VALUE_OUTSIDE)?;
                 if layout.kind == Kind::Str {
                     Cell::Str(std::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)?)
@@ -604,395 +854,513 @@ impl<'a> ChunkRef<'a> {
         })
     }
 
-    /// The value in `slot`, checking only the block that holds it.
-    pub(crate) fn cell_at(&self, slot: usize) -> Result<Option<Cell<'a>>, GraphError> {
-        let Some(index) = self.index_of(slot) else {
+    /// The value at position `at` of the segment, which this part must cover.
+    pub(crate) fn cell_at(&self, at: usize) -> Result<Option<Cell<'a>>, GraphError> {
+        let bit = 1u64 << (at % SEGMENT_SLOTS);
+        if self.layout.bitmap & bit == 0 {
             return Ok(None);
-        };
-        self.verify_block(index / BLOCK)?;
+        }
+        let index = (self.layout.bitmap & (bit - 1)).count_ones() as usize;
         self.cell(index).map(Some)
     }
 
-    /// Every slot that holds a value, ascending, with its value. The chunk must have been
-    /// checked with [`ChunkRef::verify`].
+    /// Every position that holds a value, ascending, with its value.
     pub(crate) fn cells(&self) -> impl Iterator<Item = Result<(usize, Cell<'a>), GraphError>> + '_ {
-        ones(self.words())
+        ones(self.layout.bitmap)
             .enumerate()
-            .map(|(index, slot)| Ok((slot, self.cell(index)?)))
-    }
-
-    /// The presence bitmap and value count, which is all a write keeps of a stored chunk.
-    pub(crate) fn head(&self) -> StoredHead {
-        let mut words = [0u64; WORDS];
-        for (index, word) in words.iter_mut().enumerate() {
-            *word = self.word(index);
-        }
-        StoredHead {
-            words,
-            count: self.layout.count,
-        }
+            .map(|(index, at)| Ok((at, self.cell(index)?)))
     }
 }
 
-/// A stored chunk copied out of storage and checked whole, for a reader that reads many of its
-/// values.
+/// A stored segment copied out of storage and checked, for a reader that reads many values of
+/// its column.
 #[derive(Debug)]
-pub(crate) struct Column {
+pub(crate) struct Segment {
+    part: usize,
     bytes: Box<[u8]>,
     layout: Layout,
-    ranks: [u16; WORDS],
 }
 
-impl Column {
-    pub(crate) fn load(
-        group: u64,
-        token: Token<PropertyKey>,
-        bytes: &[u8],
-    ) -> Result<Self, GraphError> {
-        let chunk = ChunkRef::parse(group, token, bytes)?;
-        chunk.verify()?;
-        let mut ranks = [0u16; WORDS];
-        let mut rank = 0u16;
-        for (index, word) in chunk.words().enumerate() {
-            ranks[index] = rank;
-            rank += word.count_ones() as u16;
-        }
+impl Segment {
+    pub(crate) fn load(key: &[u8], bytes: &[u8]) -> Result<Self, GraphError> {
+        let layout = SegmentRef::parse(key, bytes)?.layout;
         Ok(Self {
-            layout: chunk.layout,
+            part: part_of_key(key),
             bytes: bytes.into(),
-            ranks,
+            layout,
         })
     }
 
-    fn view(&self) -> ChunkRef<'_> {
-        ChunkRef {
+    fn view(&self) -> SegmentRef<'_> {
+        SegmentRef {
             bytes: &self.bytes,
             layout: self.layout,
         }
     }
+}
 
+/// The stored segments of one column of a group, loaded for a reader: the parts of each
+/// segment, ascending.
+#[derive(Debug)]
+pub(crate) struct Column {
+    segments: Vec<Vec<Segment>>,
+}
+
+impl Column {
+    /// A column with no stored segment.
+    pub(crate) fn new() -> Self {
+        Self {
+            segments: (0..SEGMENTS).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    /// Keeps a part of the segment `segment`, loaded in ascending key order.
+    pub(crate) fn insert(&mut self, segment: usize, loaded: Segment) {
+        if let Some(held) = self.segments.get_mut(segment) {
+            held.push(loaded);
+        }
+    }
+
+    /// The value in `slot` of the group.
     pub(crate) fn cell_at(&self, slot: usize) -> Result<Option<Cell<'_>>, GraphError> {
-        let view = self.view();
-        let word = view.word(slot / 64);
-        let bit = 1u64 << (slot % 64);
-        if word & bit == 0 {
+        let Some(parts) = self.segments.get(slot / SEGMENT_SLOTS) else {
             return Ok(None);
+        };
+        let Some(first) = parts.first() else {
+            return Ok(None);
+        };
+        let part = first.view().part_of(slot);
+        match parts.binary_search_by_key(&part, |held| held.part) {
+            Ok(index) => match parts.get(index) {
+                Some(held) => held.view().cell_at(slot % SEGMENT_SLOTS),
+                None => Ok(None),
+            },
+            Err(_) => Ok(None),
         }
-        let index = usize::from(self.ranks[slot / 64]) + (word & (bit - 1)).count_ones() as usize;
-        view.cell(index).map(Some)
     }
 }
 
-/// The presence bitmap and value count of a stored chunk.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StoredHead {
-    words: [u64; WORDS],
-    count: usize,
-}
-
-impl StoredHead {
-    fn has(&self, slot: usize) -> bool {
-        self.words[slot / 64] & (1 << (slot % 64)) != 0
-    }
-}
-
-/// The delta stored for one slot: the slot's value now, or none when the slot holds none.
-pub(crate) fn encode_delta(
-    group: u64,
-    token: Token<PropertyKey>,
-    slot: usize,
-    value: Option<Cell<'_>>,
+/// The delta stored for one node under `key`: its properties that differ from the segments of
+/// its group, each with its value now or none when it holds none. The properties ascend by key.
+pub(crate) fn encode_delta<'a>(
+    key: &[u8; DELTA_KEY],
+    entries: impl IntoIterator<Item = (Token<PropertyKey>, Option<Cell<'a>>)>,
 ) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    match value {
-        Some(value) => {
-            bytes.push(PRESENT);
-            value.encode_tagged(&mut bytes);
+    let mut bytes = vec![LAYOUT_VERSION];
+    for (token, value) in entries {
+        bytes.extend_from_slice(&token.id().to_be_bytes());
+        match value {
+            Some(value) => {
+                bytes.push(PRESENT);
+                value.encode_tagged(&mut bytes);
+            }
+            None => bytes.push(ABSENT),
         }
-        None => bytes.push(ABSENT),
     }
-    let sum = crc(&[&delta_key(group, token, slot), &bytes]);
+    let sum = crc(&[key, &bytes]);
     bytes.extend_from_slice(&sum.to_le_bytes());
     bytes
 }
 
-fn checked_delta<'a>(key: &[u8], bytes: &'a [u8]) -> Result<(usize, Option<&'a [u8]>), GraphError> {
-    let (_, _, Part::Delta(slot)) = parse_key(key)? else {
-        return Err(GraphError::Corrupt("a property column key names no delta"));
-    };
-    let body = bytes
-        .len()
-        .checked_sub(4)
-        .filter(|body| *body > 0)
-        .ok_or(DecodeError::UnexpectedEnd)?;
-    if crc(&[key, &bytes[..body]]) != u32_le(bytes, body) {
-        return Err(CHECKSUM_MISMATCH);
-    }
-    match bytes[0] {
-        ABSENT if body == 1 => Ok((slot, None)),
-        PRESENT if body > 1 => Ok((slot, Some(&bytes[1..body]))),
-        PRESENT => Err(DecodeError::UnexpectedEnd.into()),
+/// The delta stored for one node under `key` that holds the properties of `created`, a node as
+/// a transaction created it.
+pub(crate) fn encode_created_delta(key: &[u8; DELTA_KEY], created: DeltaRef<'_>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(created.body.len() + 5);
+    bytes.push(LAYOUT_VERSION);
+    bytes.extend_from_slice(created.body);
+    let sum = crc(&[key, &bytes]);
+    bytes.extend_from_slice(&sum.to_le_bytes());
+    bytes
+}
+
+fn next_entry<'a>(
+    reader: &mut Reader<'a>,
+    body: &'a [u8],
+) -> Result<(Token<PropertyKey>, Option<&'a [u8]>), GraphError> {
+    let token = Token::new(reader.u32()?);
+    match reader.u8()? {
+        ABSENT => Ok((token, None)),
+        PRESENT => {
+            let start = body.len() - reader.remaining();
+            reader.skip_value()?;
+            let end = body.len() - reader.remaining();
+            Ok((token, Some(&body[start..end])))
+        }
         _ => Err(GraphError::Corrupt(
             "a property column delta holds no slot state",
         )),
     }
 }
 
-/// The slot and value of the delta stored under `key`, which must name a delta, checked against
-/// its checksum.
-pub(crate) fn parse_delta(
-    key: &[u8],
-    bytes: &[u8],
-) -> Result<(usize, Option<PropertyValue>), GraphError> {
-    let (slot, value) = checked_delta(key, bytes)?;
-    let value = value
-        .map(|value| {
-            let mut reader = Reader::new(value);
-            let value = reader.value()?;
-            reader.finish()?;
-            Ok::<PropertyValue, GraphError>(value)
-        })
-        .transpose()?;
-    Ok((slot, value))
+/// A stored delta read in place, checked against its checksum.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeltaRef<'a> {
+    body: &'a [u8],
 }
 
-/// The slot of the delta stored under `key`, and whether the slot holds a value, checked against
-/// the delta's checksum without decoding the value.
-pub(crate) fn delta_state(key: &[u8], bytes: &[u8]) -> Result<(usize, bool), GraphError> {
-    checked_delta(key, bytes).map(|(slot, value)| (slot, value.is_some()))
-}
-
-/// One column in a write transaction: the head of its stored chunk, the slots of its stored
-/// deltas with whether each holds a value, the slots this transaction changed with their values
-/// now, and what commit needs to store the column as a rewritten chunk or as deltas beside the
-/// stored one. A slot the transaction did not change reads as stored.
-#[derive(Clone, Debug)]
-pub(crate) struct ColumnEdit {
-    stored: Option<StoredHead>,
-    present: usize,
-    stored_deltas: Vec<(usize, bool)>,
-    current: BTreeMap<usize, Option<PropertyValue>>,
-    fresh: usize,
-    rewrite: bool,
-}
-
-/// What commit writes for one edited column.
-#[derive(Debug)]
-pub(crate) enum ColumnFlush {
-    /// Store the column as a chunk of its stored values, with its stored deltas and then
-    /// `values` applied, or delete its chunk when no value is left, and delete the deltas at
-    /// `stale`.
-    Rewrite {
-        values: BTreeMap<usize, Option<PropertyValue>>,
-        stale: Vec<usize>,
-    },
-    /// Keep the chunk. Each touched slot, with whether the chunk holds a value there, gets a
-    /// delta, or loses its stored one when its value is the chunk's again.
-    Deltas {
-        touched: Vec<(usize, bool, Option<PropertyValue>)>,
-        stored: Vec<usize>,
-    },
-}
-
-impl ColumnEdit {
-    /// The column as stored: the head of its chunk, if any, and the slots of its deltas with
-    /// whether each holds a value. Deltas need a chunk.
-    pub(crate) fn load(
-        stored: Option<StoredHead>,
-        mut deltas: Vec<(usize, bool)>,
-    ) -> Result<Self, GraphError> {
-        let Some(head) = stored else {
-            if !deltas.is_empty() {
-                return Err(DELTA_WITHOUT_CHUNK);
-            }
-            return Ok(Self {
-                stored: None,
-                present: 0,
-                stored_deltas: Vec::new(),
-                current: BTreeMap::new(),
-                fresh: 0,
-                rewrite: true,
-            });
-        };
-        deltas.sort_unstable_by_key(|(slot, _)| *slot);
-        if deltas.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+impl<'a> DeltaRef<'a> {
+    /// The delta stored under `key`, checked.
+    pub(crate) fn parse(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
+        let end = bytes
+            .len()
+            .checked_sub(4)
+            .filter(|end| *end > 1)
+            .ok_or(DecodeError::UnexpectedEnd)?;
+        if crc(&[key, &bytes[..end]]) != u32_le(bytes, end) {
+            return Err(CHECKSUM_MISMATCH);
+        }
+        if bytes[0] != LAYOUT_VERSION {
             return Err(GraphError::Corrupt(
-                "a property column holds two deltas for one slot",
+                "a property column delta has an unknown layout",
             ));
         }
-        let mut present = head.count;
-        for (slot, holds) in &deltas {
-            present = (present + usize::from(*holds))
-                .checked_sub(usize::from(head.has(*slot)))
-                .ok_or(GraphError::Corrupt("a property column counts below zero"))?;
+        let delta = Self {
+            body: &bytes[1..end],
+        };
+        let mut last: Option<Token<PropertyKey>> = None;
+        for entry in delta.raw() {
+            let (token, _) = entry?;
+            if last.is_some_and(|last| last >= token) {
+                return Err(GraphError::Corrupt(
+                    "a property column delta lists its properties out of order",
+                ));
+            }
+            last = Some(token);
         }
-        Ok(Self {
-            stored: Some(head),
-            present,
-            stored_deltas: deltas,
-            current: BTreeMap::new(),
-            fresh: 0,
-            rewrite: false,
+        Ok(delta)
+    }
+
+    fn raw(
+        &self,
+    ) -> impl Iterator<Item = Result<(Token<PropertyKey>, Option<&'a [u8]>), GraphError>> {
+        let body = self.body;
+        let mut reader = Reader::new(body);
+        let mut failed = false;
+        std::iter::from_fn(move || {
+            if failed || reader.remaining() == 0 {
+                return None;
+            }
+            let entry = next_entry(&mut reader, body);
+            failed = entry.is_err();
+            Some(entry)
         })
     }
 
-    fn stored_delta(&self, slot: usize) -> Option<bool> {
-        self.stored_deltas
-            .binary_search_by_key(&slot, |(held, _)| *held)
-            .ok()
-            .map(|index| self.stored_deltas[index].1)
+    /// Every property the delta holds, ascending by key, with its value now.
+    pub(crate) fn entries(
+        &self,
+    ) -> impl Iterator<Item = Result<(Token<PropertyKey>, Option<Cell<'a>>), GraphError>> {
+        self.raw().map(|entry| {
+            let (token, value) = entry?;
+            Ok((token, value.map(classify).transpose()?))
+        })
     }
 
-    /// The slot's value as the transaction sees it, when the transaction changed it or the
-    /// column stores none there: `Some(None)` for no value, `None` to read the stored column.
-    pub(crate) fn current(&self, slot: usize) -> Option<Option<&PropertyValue>> {
-        match self.current.get(&slot) {
-            Some(value) => Some(value.as_ref()),
-            None if self.stored_delta(slot).is_none() && !self.chunk_has(slot) => Some(None),
-            None => None,
-        }
-    }
-
-    fn chunk_has(&self, slot: usize) -> bool {
-        self.stored.as_ref().is_some_and(|head| head.has(slot))
-    }
-
-    fn has(&self, slot: usize) -> bool {
-        match self.current.get(&slot) {
-            Some(value) => value.is_some(),
-            None => self
-                .stored_delta(slot)
-                .unwrap_or_else(|| self.chunk_has(slot)),
-        }
-    }
-
-    /// Sets the slot's value, and rewrites the chunk at commit once the column would keep more
-    /// than `MAX_DELTAS` deltas.
-    pub(crate) fn set(&mut self, slot: usize, value: Option<PropertyValue>) {
-        let had = self.has(slot);
-        self.present =
-            (self.present + usize::from(value.is_some())).saturating_sub(usize::from(had));
-        if !self.rewrite && !self.current.contains_key(&slot) {
-            if self.stored_delta(slot).is_none() {
-                self.fresh += 1;
+    /// The value of the property `token` now: `None` when the delta leaves it to the segments,
+    /// `Some(None)` when the node holds none.
+    pub(crate) fn get(
+        &self,
+        token: Token<PropertyKey>,
+    ) -> Result<Option<Option<Cell<'a>>>, GraphError> {
+        for entry in self.raw() {
+            let (held, value) = entry?;
+            if held == token {
+                return Ok(Some(value.map(classify).transpose()?));
             }
-            self.rewrite = self.stored_deltas.len() + self.fresh > MAX_DELTAS;
+            if held > token {
+                break;
+            }
         }
-        self.current.insert(slot, value);
+        Ok(None)
     }
 
-    pub(crate) fn flush(self) -> ColumnFlush {
-        let stored = self.stored_deltas.iter().map(|(slot, _)| *slot).collect();
-        if self.rewrite || self.stored.is_none() || self.present == 0 {
-            return ColumnFlush::Rewrite {
-                values: self.current,
-                stale: stored,
-            };
-        }
-        let head = self.stored;
-        let touched = self
-            .current
-            .into_iter()
-            .map(|(slot, value)| {
-                let had = head.as_ref().is_some_and(|head| head.has(slot));
-                (slot, had, value)
-            })
-            .collect();
-        ColumnFlush::Deltas { touched, stored }
+    /// Whether the delta holds no property.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.body.is_empty()
+    }
+
+    /// The property keys the delta holds, ascending.
+    pub(crate) fn tokens(&self) -> impl Iterator<Item = Result<Token<PropertyKey>, GraphError>> {
+        self.raw().map(|entry| entry.map(|(token, _)| token))
     }
 }
 
-/// The stored values of a column merged with changes, ascending by slot, as a chunk takes them.
-pub(crate) fn merged<'a>(
-    stored: impl Iterator<Item = Result<(usize, Cell<'a>), GraphError>>,
-    changes: &'a BTreeMap<usize, Option<PropertyValue>>,
-) -> Result<Vec<(usize, Cell<'a>)>, GraphError> {
-    let mut cells = Vec::new();
-    let mut changes = changes.iter().peekable();
-    for entry in stored {
-        let (slot, cell) = entry?;
-        while let Some((changed, value)) = changes.next_if(|(changed, _)| **changed < slot) {
-            if let Some(value) = value {
-                cells.push((*changed, Cell::of(value)));
+/// A stored delta copied out of storage and checked.
+#[derive(Debug)]
+pub(crate) struct Delta {
+    bytes: Box<[u8]>,
+}
+
+impl Delta {
+    pub(crate) fn load(key: &[u8], bytes: &[u8]) -> Result<Self, GraphError> {
+        DeltaRef::parse(key, bytes)?;
+        Ok(Self {
+            bytes: bytes.into(),
+        })
+    }
+
+    pub(crate) fn view(&self) -> DeltaRef<'_> {
+        DeltaRef {
+            body: &self.bytes[1..self.bytes.len() - 4],
+        }
+    }
+}
+
+/// Property values by key, ascending by key, each with its value or none for no value.
+pub(crate) type Changes = Vec<(Token<PropertyKey>, Option<PropertyValue>)>;
+
+/// Sets `token` to `value` in `changes`.
+pub(crate) fn put_change(
+    changes: &mut Changes,
+    token: Token<PropertyKey>,
+    value: Option<PropertyValue>,
+) {
+    match changes.binary_search_by_key(&token, |(held, _)| *held) {
+        Ok(index) => {
+            if let Some(held) = changes.get_mut(index) {
+                held.1 = value;
             }
         }
-        match changes.next_if(|(changed, _)| **changed == slot) {
-            Some((_, Some(value))) => cells.push((slot, Cell::of(value))),
+        Err(index) => changes.insert(index, (token, value)),
+    }
+}
+
+/// The values a write transaction set on the node in one slot.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SlotEdit {
+    /// Whether the transaction created the node, so the slot stores no value.
+    pub(crate) fresh: bool,
+    created: Option<(usize, usize)>,
+    /// The properties the transaction changed, with their values now, over those it created the
+    /// node with.
+    pub(crate) values: Changes,
+}
+
+impl SlotEdit {
+    /// The properties the node holds as the transaction left it, ascending by key, where they
+    /// differ from the stored segments.
+    pub(crate) fn into_changes(self, heap: &[u8]) -> Result<Changes, GraphError> {
+        let created = self.created(heap);
+        let mut changes = self.values;
+        if let Some(created) = created {
+            for entry in created.entries() {
+                let (token, cell) = entry?;
+                if let Err(at) = changes.binary_search_by_key(&token, |(held, _)| *held) {
+                    changes.insert(at, (token, cell.map(|cell| cell.to_value()).transpose()?));
+                }
+            }
+        }
+        Ok(changes)
+    }
+
+    /// The properties the transaction created the node with, ascending by key, in the heap of
+    /// its group.
+    pub(crate) fn created<'h>(&self, heap: &'h [u8]) -> Option<DeltaRef<'h>> {
+        let (start, end) = self.created?;
+        Some(DeltaRef {
+            body: heap.get(start..end)?,
+        })
+    }
+}
+
+/// The property columns of one row group in a write transaction: how many deltas the group
+/// stores and the slots this transaction changed, ascending. A slot the transaction did not
+/// change reads as stored. The properties of the nodes the transaction created are kept encoded
+/// in one heap, so that a large transaction holds few allocations.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ColumnsEdit {
+    deltas: usize,
+    slots: Vec<(usize, SlotEdit)>,
+    heap: Vec<u8>,
+}
+
+impl ColumnsEdit {
+    /// The group as stored, with `deltas` deltas.
+    pub(crate) fn load(deltas: usize) -> Self {
+        Self {
+            deltas,
+            slots: Vec::new(),
+            heap: Vec::new(),
+        }
+    }
+
+    fn find(&self, slot: usize) -> Option<&SlotEdit> {
+        let index = self
+            .slots
+            .binary_search_by_key(&slot, |(held, _)| *held)
+            .ok()?;
+        self.slots.get(index).map(|(_, edit)| edit)
+    }
+
+    fn index(&mut self, slot: usize) -> usize {
+        match self.slots.last() {
+            Some((last, _)) if *last == slot => self.slots.len() - 1,
+            Some((last, _)) if *last > slot => {
+                match self.slots.binary_search_by_key(&slot, |(held, _)| *held) {
+                    Ok(index) => index,
+                    Err(index) => {
+                        self.slots.insert(index, (slot, SlotEdit::default()));
+                        index
+                    }
+                }
+            }
+            _ => {
+                self.slots.push((slot, SlotEdit::default()));
+                self.slots.len() - 1
+            }
+        }
+    }
+
+    /// The value of the property `token` of the node in `slot` as the transaction sees it, when
+    /// the transaction changed it or the slot stores no value: `Some(None)` for no value, `None`
+    /// to read the stored columns.
+    pub(crate) fn current(
+        &self,
+        slot: usize,
+        token: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        let Some(edit) = self.find(slot) else {
+            return Ok(None);
+        };
+        if let Ok(index) = edit.values.binary_search_by_key(&token, |(held, _)| *held) {
+            return Ok(edit.values.get(index).map(|(_, value)| value.clone()));
+        }
+        if let Some(created) = edit.created(&self.heap)
+            && let Some(cell) = created.get(token)?
+        {
+            return Ok(Some(cell.map(|cell| cell.to_value()).transpose()?));
+        }
+        Ok(edit.fresh.then_some(None))
+    }
+
+    /// Marks the node in `slot` as created by the transaction, holding `values`, ascending by
+    /// key, and nothing else.
+    pub(crate) fn create(
+        &mut self,
+        slot: usize,
+        values: impl IntoIterator<Item = (Token<PropertyKey>, PropertyValue)>,
+    ) -> Result<(), GraphError> {
+        let index = self.index(slot);
+        let heap = &mut self.heap;
+        let Some((_, edit)) = self.slots.get_mut(index) else {
+            return Err(GraphError::Corrupt("a property column edit lost a slot"));
+        };
+        if edit.values.is_empty() && edit.created.is_none() {
+            if heap.capacity() == 0 {
+                heap.reserve(CREATED_BYTES);
+            }
+            let start = heap.len();
+            for (token, value) in values {
+                heap.extend_from_slice(&token.id().to_be_bytes());
+                heap.push(PRESENT);
+                Cell::of(&value).encode_tagged(heap);
+            }
+            edit.fresh = true;
+            edit.created = Some((start, heap.len()));
+            return Ok(());
+        }
+        let mut changes = std::mem::take(edit).into_changes(heap)?;
+        for (token, value) in values {
+            put_change(&mut changes, token, Some(value));
+        }
+        edit.fresh = true;
+        edit.values = changes;
+        Ok(())
+    }
+
+    /// Sets the value of the property `token` of the node in `slot`, or removes it with `None`.
+    pub(crate) fn set(
+        &mut self,
+        slot: usize,
+        token: Token<PropertyKey>,
+        value: Option<PropertyValue>,
+    ) {
+        let index = self.index(slot);
+        if let Some((_, edit)) = self.slots.get_mut(index) {
+            put_change(&mut edit.values, token, value);
+        }
+    }
+
+    /// The property keys the transaction changed or created the node in `slot` with.
+    pub(crate) fn tokens(&self, slot: usize) -> Result<Vec<Token<PropertyKey>>, GraphError> {
+        let Some(edit) = self.find(slot) else {
+            return Ok(Vec::new());
+        };
+        let mut tokens: Vec<Token<PropertyKey>> =
+            edit.values.iter().map(|(token, _)| *token).collect();
+        if let Some(created) = edit.created(&self.heap) {
+            for token in created.tokens() {
+                tokens.push(token?);
+            }
+            tokens.sort_unstable();
+            tokens.dedup();
+        }
+        Ok(tokens)
+    }
+
+    /// How many deltas the group stores, the slots the transaction changed, ascending, with
+    /// their changes, and the heap that holds the properties of the nodes it created.
+    pub(crate) fn into_slots(self) -> (usize, Vec<(usize, SlotEdit)>, Vec<u8>) {
+        (self.deltas, self.slots, self.heap)
+    }
+}
+
+/// The stored values of a segment merged with changes, ascending by position, as a segment takes
+/// them.
+pub(crate) fn merged<'a>(
+    stored: impl Iterator<Item = Result<(usize, Cell<'a>), GraphError>>,
+    changes: &[(usize, Option<Cell<'a>>)],
+) -> Result<Vec<(usize, Cell<'a>)>, GraphError> {
+    let mut cells = Vec::with_capacity(SEGMENT_SLOTS);
+    let mut changes = changes.iter().peekable();
+    for entry in stored {
+        let (at, cell) = entry?;
+        while let Some((changed, value)) = changes.next_if(|change| change.0 < at) {
+            if let Some(value) = value {
+                cells.push((*changed, *value));
+            }
+        }
+        match changes.next_if(|change| change.0 == at) {
+            Some((_, Some(value))) => cells.push((at, *value)),
             Some((_, None)) => {}
-            None => cells.push((slot, cell)),
+            None => cells.push((at, cell)),
         }
     }
     for (changed, value) in changes {
         if let Some(value) = value {
-            cells.push((*changed, Cell::of(value)));
+            cells.push((*changed, *value));
         }
     }
     Ok(cells)
 }
 
-/// A stored column a reader loaded: its chunk and its deltas in slot order.
+/// A stored column or set of deltas a reader read once in place, or loaded whole.
 #[derive(Debug)]
-pub(crate) struct Loaded {
-    chunk: Column,
-    deltas: Vec<(usize, Option<PropertyValue>)>,
+pub(crate) enum Cached<P, L> {
+    /// Read once in place. The next read of another part loads the whole.
+    Probed(P),
+    /// Loaded whole.
+    Loaded(L),
 }
 
-#[derive(Debug)]
-pub(crate) enum Cached {
-    /// Read once in place. The next read loads the column.
-    Probed,
-    /// Loaded, or `None` when the column has no stored entry.
-    Loaded(Option<Box<Loaded>>),
-}
+/// The deltas of one group a reader loaded, ascending by slot.
+pub(crate) type Deltas = Vec<(usize, Delta)>;
 
-/// The stored columns one query read so far. A column read once is read in place, so a
-/// point lookup copies nothing; a column read again is loaded and checked whole, so a scan
-/// reads each value with no storage access.
+/// The delta of one slot a reader read in place, or none, or every delta of the group, loaded.
+pub(crate) type CachedDeltas = Cached<(usize, Option<Delta>), Deltas>;
+
+/// The stored columns and deltas one query read so far. A column or a group's deltas read once
+/// are read in place, so a point lookup copies nothing; read again, they are loaded and checked
+/// whole, so a scan reads each value with one storage access per segment.
 #[derive(Debug, Default)]
 pub(crate) struct ColumnReader {
-    columns: Vec<(ColumnId, Cached)>,
-    last: usize,
-    keys: Vec<(u64, Vec<Token<PropertyKey>>)>,
-}
-
-/// A read of one stored column value.
-pub(crate) enum ColumnRead<'r> {
-    /// The value, as loaded.
-    Value(Option<PropertyValue>),
-    /// The column was read once in place before, and now needs loading.
-    Load(&'r mut Cached),
-    /// The column was never read, and is now marked as read once.
-    Probe,
+    pub(crate) columns: Vec<(ColumnId, Cached<(), Column>)>,
+    pub(crate) deltas: Vec<(u64, CachedDeltas)>,
+    pub(crate) keys: Vec<(u64, Vec<Token<PropertyKey>>)>,
 }
 
 impl ColumnReader {
-    fn position(&self, id: ColumnId) -> Result<usize, usize> {
-        match self.columns.get(self.last) {
-            Some((held, _)) if *held == id => Ok(self.last),
-            _ => self.columns.binary_search_by_key(&id, |(held, _)| *held),
-        }
-    }
-
-    pub(crate) fn read(&mut self, id: ColumnId, slot: usize) -> Result<ColumnRead<'_>, GraphError> {
-        match self.position(id) {
-            Ok(index) => {
-                self.last = index;
-                let cached = &mut self.columns[index].1;
-                match cached {
-                    Cached::Loaded(None) => Ok(ColumnRead::Value(None)),
-                    Cached::Loaded(Some(loaded)) => Ok(ColumnRead::Value(loaded.value(slot)?)),
-                    Cached::Probed => Ok(ColumnRead::Load(cached)),
-                }
-            }
-            Err(index) => {
-                self.columns.insert(index, (id, Cached::Probed));
-                self.last = index;
-                Ok(ColumnRead::Probe)
-            }
-        }
-    }
-
-    /// The property keys with a stored column in `group`, if read before.
+    /// The property keys with a stored segment in `group`, if read before.
     pub(crate) fn keys(&self, group: u64) -> Option<&[Token<PropertyKey>]> {
         self.keys
             .binary_search_by_key(&group, |(held, _)| *held)
@@ -1007,38 +1375,12 @@ impl ColumnReader {
     }
 }
 
-impl Cached {
-    /// Stores the loaded column and returns the value of `slot`.
-    pub(crate) fn fill(
-        &mut self,
-        chunk: Option<Column>,
-        deltas: Vec<(usize, Option<PropertyValue>)>,
-        slot: usize,
-    ) -> Result<Option<PropertyValue>, GraphError> {
-        let loaded = match chunk {
-            Some(chunk) => Some(Box::new(Loaded { chunk, deltas })),
-            None if deltas.is_empty() => None,
-            None => return Err(DELTA_WITHOUT_CHUNK),
-        };
-        let value = loaded
-            .as_ref()
-            .map(|loaded| loaded.value(slot))
-            .transpose()?
-            .flatten();
-        *self = Cached::Loaded(loaded);
-        Ok(value)
-    }
-}
-
-impl Loaded {
-    fn value(&self, slot: usize) -> Result<Option<PropertyValue>, GraphError> {
-        if !self.deltas.is_empty()
-            && let Ok(found) = self.deltas.binary_search_by_key(&slot, |(held, _)| *held)
-        {
-            return Ok(self.deltas[found].1.clone());
-        }
-        self.chunk.cell_at(slot)?.map(Cell::to_value).transpose()
-    }
+/// The delta of `slot` among a group's loaded deltas.
+pub(crate) fn find_delta(deltas: &Deltas, slot: usize) -> Option<&Delta> {
+    deltas
+        .binary_search_by_key(&slot, |(held, _)| *held)
+        .ok()
+        .map(|index| &deltas[index].1)
 }
 
 #[cfg(test)]

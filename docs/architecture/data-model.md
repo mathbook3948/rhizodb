@@ -39,23 +39,32 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Node meta checksums are CRC-32, which needs no dependency outside the allowed licenses.
 - A write transaction reads each ID and token counter once and writes it once, at commit.
 - Opening a database written before node meta moves each node's labels into node meta and empties the old label index, in the opening write transaction.
-- Each row group keeps one property column per property key that a live node of the group holds, keyed by the group, the key, and a part number.
-- A property column chunk holds a presence bitmap of its group's slots and the values of the present slots in slot order.
-- A property column chunk whose values all have one type stores them in that type's encoding: booleans as bits, integers and floats as eight bytes each, strings as end offsets and one byte heap.
-- A property column chunk whose values differ in type, or are of another type, stores each value in its tagged value encoding.
-- A value of one of the four column types in a mixed chunk reads back as that type, so a chunk re-encoded from its values is the same bytes.
+- Each row group keeps one property column per property key that a live node of the group holds, stored as segments of 64 slots.
+- A segment is stored as one or more parts, keyed by the group, the key, the segment, and the part, with each number in its fewest big-endian bytes.
+- A part stays small enough that the storage engine packs four or more parts with their keys into one page, so no stored value spans a page and reading one value copies little.
+- A segment that does not fit one part is split into parts that each cover the same run of slots, the longest run under which every part fits, with the last part ending at the end of the segment.
+- A part records the run of slots each part of its segment covers, and the first part of a split segment is stored even without values, so a reader finds the part that holds a slot with at most two reads.
+- A part holds a presence bitmap of its slots and the values of the present slots in slot order.
+- A part whose values all have one type stores them in that type's encoding: booleans as bits, integers and floats as eight bytes each, strings as end offsets and one byte heap.
+- A part whose values differ in type, or are of another type, stores each value in its tagged value encoding.
+- A value of one of the four column types in a mixed segment reads back as that type, so a segment re-encoded from its values is the same bytes.
 - Only a live node's slot holds a property value, so deleting a node removes its value from every column of its group.
-- A column with no value has no chunk.
-- A read of one value checks the chunk's head and the one block of 64 values that holds it, and a read of many values of one column in a query loads and checks the chunk once.
+- A segment with no value is not stored.
+- Each node with properties that differ from its group's segments keeps one delta, keyed by the group and the slot, that holds each such property's value now or that it holds none.
+- Deltas sort before every segment, so a load that fills groups in order writes each segment past the end of the column table, where the storage engine packs entries into full pages, and a scan of one column's segments reads no delta.
+- A commit writes the column entries of all its groups in key order.
+- A commit that creates or changes a few nodes of a group writes or replaces one delta per node and leaves the segments as they are.
+- A node created in a transaction holds no stored value, so its delta is written without reading the segments.
+- A transaction keeps the properties of the nodes it creates encoded in one buffer per group until it commits, so a large load holds few allocations.
+- A delta entry whose value is the segment's value again is dropped, with values compared bit for bit, so `-0.0` and `0.0` differ, and a delta left with no entry is deleted.
+- A group keeps at most 64 deltas, and a commit that would leave more folds them into the segments they touch and deletes them with one range delete.
+- A write transaction takes the number of deltas a group stores from the count the last commit that changed the group left in memory, and scans the group's delta keys only for a group no commit changed since the database opened.
+- A commit that fails forgets every count, since the storage may hold either side of it.
+- A read of one value reads the node's delta and then the part that holds the value, and a query that reads a second node of a group loads all of the group's deltas once.
+- A query that reads one column a second time loads and checks its segments once, with one prefix scan.
 - A query reads only the columns of the properties it reads.
-- A commit that changes a few slots of a column writes one small delta per changed slot beside the chunk, holding the slot's value now.
-- A column keeps at most 64 deltas, and a commit that would leave more rewrites the chunk and deletes them.
-- A write that changes a column reads only the state of each stored delta, and decodes the stored deltas' values only to rewrite the chunk.
-- A rewrite deletes all of a column's deltas with one range delete.
-- A delta whose value is the chunk's value again is deleted, with values compared bit for bit, so `-0.0` and `0.0` differ.
-- A property column chunk keeps one checksum over its head and bitmap and one over each block of 64 values, and a varying block's checksum covers the end of the value before it.
-- A property column chunk holds its group and key inside its head checksum, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
-- A write keeps only the bitmap of each stored chunk it edits, and re-encodes the chunk from its stored values only when it rewrites it.
+- Listing a node's properties seeks to the first segment of each column of its group and reads the node's delta.
+- A part's checksum covers its key, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
 - Setting a property updates only the indexes on a label of the node that cover that property, and changing a label updates only the indexes on that label.
 - Opening a database written before property columns moves each node record's properties into property columns and deletes the records, in the opening write transaction.
 - Stored property values are null-free.

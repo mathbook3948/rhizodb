@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::storage::ReadTransaction;
@@ -13,17 +12,23 @@ use super::LabelReader;
 use super::NodeId;
 use super::Properties;
 use super::columns;
+use super::columns::Cached;
 use super::columns::Cell;
-use super::columns::ChunkRef;
+use super::columns::Changes;
 use super::columns::Column;
-use super::columns::ColumnEdit;
-use super::columns::ColumnFlush;
 use super::columns::ColumnId;
-use super::columns::ColumnRead;
+use super::columns::ColumnKey;
 use super::columns::ColumnReader;
-use super::columns::Part;
+use super::columns::ColumnsEdit;
+use super::columns::Delta;
+use super::columns::DeltaRef;
+use super::columns::Deltas;
+use super::columns::SEGMENT_SLOTS;
+use super::columns::Segment;
+use super::columns::SegmentRef;
 use super::ids::PropertyKey;
 use super::ids::Token;
+use super::lock;
 use super::meta;
 
 enum Visit {
@@ -43,86 +48,203 @@ impl From<GraphError> for Visit {
     }
 }
 
-type StoredColumn = (Option<Column>, Vec<(usize, Option<PropertyValue>)>);
+const DELTA_UNCOUNTED: GraphError =
+    GraphError::Corrupt("a property column delta is missing from the count of its group");
 
 /// A write to the column table.
+#[derive(Debug)]
 pub(crate) enum ColumnWrite {
     /// Stores the value under the key.
-    Put([u8; 16], Vec<u8>),
+    Put(Vec<u8>, Vec<u8>),
     /// Deletes the key.
-    Delete([u8; 16]),
-    /// Deletes every delta of the column.
-    DeleteDeltas(ColumnId),
+    Delete(Vec<u8>),
+    /// Deletes every delta of the group.
+    DeleteDeltas(u64),
+}
+
+impl ColumnWrite {
+    fn key(&self) -> Option<&[u8]> {
+        match self {
+            ColumnWrite::Put(key, _) | ColumnWrite::Delete(key) => Some(key),
+            ColumnWrite::DeleteDeltas(_) => None,
+        }
+    }
+}
+
+fn delta_changes(key: &[u8], bytes: &[u8]) -> Result<Changes, GraphError> {
+    DeltaRef::parse(key, bytes)?
+        .entries()
+        .map(|entry| {
+            let (token, cell) = entry?;
+            Ok((token, cell.map(Cell::to_value).transpose()?))
+        })
+        .collect()
+}
+
+fn state(
+    delta: &Delta,
+    token: Token<PropertyKey>,
+) -> Result<Option<Option<PropertyValue>>, GraphError> {
+    delta
+        .view()
+        .get(token)?
+        .map(|cell| cell.map(Cell::to_value).transpose())
+        .transpose()
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
-    fn load_column(&self, (group, token): ColumnId) -> Result<StoredColumn, GraphError> {
-        let mut chunk = None;
-        let mut deltas = Vec::new();
+    fn load_column(&self, (group, token): ColumnId) -> Result<Column, GraphError> {
+        let mut column = Column::new();
         self.transaction.visit_prefix(
             Table::NodeColumns,
             &columns::column_prefix(group, token),
             |key, value| {
-                match columns::parse_key(key)?.2 {
-                    Part::Chunk => chunk = Some(Column::load(group, token, value)?),
-                    Part::Delta(_) if chunk.is_none() => {
-                        return Err(GraphError::Corrupt("a property column delta has no chunk"));
+                match columns::parse_key(key)? {
+                    ColumnKey::Segment { segment, .. } => {
+                        column.insert(segment, Segment::load(key, value)?);
                     }
-                    Part::Delta(_) => deltas.push(columns::parse_delta(key, value)?),
+                    ColumnKey::Delta { .. } => {
+                        return Err(GraphError::Corrupt(
+                            "a property column delta lies among segments",
+                        ));
+                    }
                 }
                 Ok::<(), GraphError>(())
             },
         )?;
-        Ok((chunk, deltas))
+        Ok(column)
     }
 
-    fn probe_column(
+    fn load_deltas(&self, group: u64) -> Result<Deltas, GraphError> {
+        let mut deltas = Deltas::new();
+        self.transaction.visit_prefix(
+            Table::NodeColumns,
+            &columns::deltas_prefix(group),
+            |key, value| {
+                let ColumnKey::Delta { slot, .. } = columns::parse_key(key)? else {
+                    return Err(GraphError::Corrupt(
+                        "a property column segment lies among deltas",
+                    ));
+                };
+                deltas.push((slot, Delta::load(key, value)?));
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(deltas)
+    }
+
+    fn probe_delta(&self, group: u64, slot: usize) -> Result<Option<Delta>, GraphError> {
+        let key = columns::delta_key(group, slot);
+        self.transaction
+            .get_with(Table::NodeColumns, &key, |bytes| Delta::load(&key, bytes))
+    }
+
+    fn stored_delta<'r>(
+        &self,
+        reader: &'r mut ColumnReader,
+        group: u64,
+        slot: usize,
+    ) -> Result<Option<&'r Delta>, GraphError> {
+        let index = match reader
+            .deltas
+            .binary_search_by_key(&group, |(held, _)| *held)
+        {
+            Ok(index) => index,
+            Err(index) => {
+                let delta = self.probe_delta(group, slot)?;
+                reader
+                    .deltas
+                    .insert(index, (group, Cached::Probed((slot, delta))));
+                index
+            }
+        };
+        let cached = &mut reader.deltas[index].1;
+        if matches!(cached, Cached::Probed((probed, _)) if *probed != slot) {
+            *cached = Cached::Loaded(self.load_deltas(group)?);
+        }
+        Ok(match cached {
+            Cached::Probed((_, delta)) => delta.as_ref(),
+            Cached::Loaded(deltas) => columns::find_delta(deltas, slot),
+        })
+    }
+
+    fn segment_cell<R>(
         &self,
         (group, token): ColumnId,
         slot: usize,
+        read: impl Fn(Option<Cell<'_>>) -> Result<R, GraphError>,
+    ) -> Result<R, GraphError> {
+        let segment = slot / SEGMENT_SLOTS;
+        let at = slot % SEGMENT_SLOTS;
+        let key = columns::segment_key(group, token, segment, 0);
+        let first = self
+            .transaction
+            .get_with(Table::NodeColumns, &key, |bytes| {
+                let part = SegmentRef::parse(&key, bytes)?;
+                Ok::<_, GraphError>(match part.part_of(at) {
+                    0 => Ok(read(part.cell_at(at)?)?),
+                    other => Err(other),
+                })
+            })?;
+        let part = match first {
+            None => return read(None),
+            Some(Ok(done)) => return Ok(done),
+            Some(Err(part)) => part,
+        };
+        let key = columns::segment_key(group, token, segment, part);
+        match self
+            .transaction
+            .get_with(Table::NodeColumns, &key, |bytes| {
+                read(SegmentRef::parse(&key, bytes)?.cell_at(at)?)
+            })? {
+            Some(done) => Ok(done),
+            None => read(None),
+        }
+    }
+
+    fn probe_segment(
+        &self,
+        id: ColumnId,
+        slot: usize,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        let mut found: Option<Option<PropertyValue>> = None;
-        let visited = self.transaction.visit_prefix(
-            Table::NodeColumns,
-            &columns::column_prefix(group, token),
-            |key, value| match columns::parse_key(key)?.2 {
-                Part::Chunk => {
-                    let chunk = ChunkRef::parse(group, token, value)?;
-                    found = Some(chunk.cell_at(slot)?.map(Cell::to_value).transpose()?);
-                    Ok(())
-                }
-                Part::Delta(_) if found.is_none() => Err(Visit::Failed(GraphError::Corrupt(
-                    "a property column delta has no chunk",
-                ))),
-                Part::Delta(at) if at < slot => Ok(()),
-                Part::Delta(at) => {
-                    if at == slot {
-                        found = Some(columns::parse_delta(key, value)?.1);
-                    }
-                    Err(Visit::Stop)
-                }
-            },
-        );
-        match visited {
-            Ok(()) | Err(Visit::Stop) => Ok(found.flatten()),
-            Err(Visit::Failed(error)) => Err(error),
+        self.segment_cell(id, slot, |cell| cell.map(Cell::to_value).transpose())
+    }
+
+    fn segment_value(
+        &self,
+        reader: &mut ColumnReader,
+        id: ColumnId,
+        slot: usize,
+    ) -> Result<Option<PropertyValue>, GraphError> {
+        let index = match reader.columns.binary_search_by_key(&id, |(held, _)| *held) {
+            Ok(index) => index,
+            Err(index) => {
+                reader.columns.insert(index, (id, Cached::Probed(())));
+                return self.probe_segment(id, slot);
+            }
+        };
+        let cached = &mut reader.columns[index].1;
+        if matches!(cached, Cached::Probed(())) {
+            *cached = Cached::Loaded(self.load_column(id)?);
+        }
+        match cached {
+            Cached::Loaded(column) => column.cell_at(slot)?.map(Cell::to_value).transpose(),
+            Cached::Probed(()) => self.probe_segment(id, slot),
         }
     }
 
     fn stored_value(
         &self,
         reader: &mut ColumnReader,
-        id: ColumnId,
+        (group, token): ColumnId,
         slot: usize,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        match reader.read(id, slot)? {
-            ColumnRead::Value(value) => Ok(value),
-            ColumnRead::Load(cached) => {
-                let (chunk, deltas) = self.load_column(id)?;
-                cached.fill(chunk, deltas, slot)
-            }
-            ColumnRead::Probe => self.probe_column(id, slot),
+        if let Some(delta) = self.stored_delta(reader, group, slot)?
+            && let Some(value) = state(delta, token)?
+        {
+            return Ok(value);
         }
+        self.segment_value(reader, (group, token), slot)
     }
 
     /// The value of the property `token` of the node in `slot` of `group` as the transaction
@@ -134,34 +256,46 @@ impl<T: ReadTransaction> GraphTx<T> {
         slot: usize,
         token: Token<PropertyKey>,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        if let Some(edit) = self.columns.get(&(group, token))
-            && let Some(value) = edit.current(slot)
+        if let Some(edit) = self.columns.get(&group)
+            && let Some(value) = edit.current(slot, token)?
         {
-            return Ok(value.cloned());
+            return Ok(value);
         }
         self.stored_value(reader, (group, token), slot)
     }
 
     fn stored_keys(&self, group: u64) -> Result<Vec<Token<PropertyKey>>, GraphError> {
         let mut keys: Vec<Token<PropertyKey>> = Vec::new();
-        self.transaction.visit_prefix(
-            Table::NodeColumns,
-            &columns::group_prefix(group),
-            |key, _| {
-                let (_, token, _) = columns::parse_key(key)?;
-                if keys.last() != Some(&token) {
-                    keys.push(token);
-                }
-                Ok::<(), GraphError>(())
-            },
-        )?;
+        let end = columns::segments_end(group);
+        let mut next = Some(Token::<PropertyKey>::new(0));
+        while let Some(from) = next.take() {
+            let visited = self.transaction.visit_range(
+                Table::NodeColumns,
+                &columns::segment_key(group, from, 0, 0),
+                &end,
+                |key, _| match columns::parse_key(key)? {
+                    ColumnKey::Segment { token, .. } => {
+                        keys.push(token);
+                        next = token.id().checked_add(1).map(Token::new);
+                        Err(Visit::Stop)
+                    }
+                    ColumnKey::Delta { .. } => Err(Visit::Failed(GraphError::Corrupt(
+                        "a property column delta lies among segments",
+                    ))),
+                },
+            );
+            if let Err(Visit::Failed(error)) = visited {
+                return Err(error);
+            }
+        }
         Ok(keys)
     }
 
-    fn group_keys(
+    fn node_keys(
         &self,
         reader: &mut ColumnReader,
         group: u64,
+        slot: usize,
     ) -> Result<BTreeSet<Token<PropertyKey>>, GraphError> {
         if reader.keys(group).is_none() {
             let keys = self.stored_keys(group)?;
@@ -173,11 +307,14 @@ impl<T: ReadTransaction> GraphTx<T> {
             .iter()
             .copied()
             .collect();
-        keys.extend(
-            self.columns
-                .range((group, Token::new(0))..=(group, Token::new(u32::MAX)))
-                .map(|((_, token), _)| *token),
-        );
+        if let Some(delta) = self.stored_delta(reader, group, slot)? {
+            for token in delta.view().tokens() {
+                keys.insert(token?);
+            }
+        }
+        if let Some(edit) = self.columns.get(&group) {
+            keys.extend(edit.tokens(slot)?);
+        }
         Ok(keys)
     }
 
@@ -189,7 +326,7 @@ impl<T: ReadTransaction> GraphTx<T> {
     ) -> Result<Properties, GraphError> {
         let (group, slot) = meta::locate(id);
         let mut properties = Properties::new();
-        for token in self.group_keys(reader, group)? {
+        for token in self.node_keys(reader, group, slot)? {
             if let Some(value) = self.column_value(reader, group, slot, token)? {
                 properties.insert(token, value);
             }
@@ -228,116 +365,321 @@ impl<T: ReadTransaction> GraphTx<T> {
         self.live_node_properties(columns, id).map(Some)
     }
 
-    /// What commit writes for one edited column: a rewritten chunk, or the deltas that differ
-    /// from the stored chunk.
-    pub(crate) fn column_writes(
+    fn changes_over(
         &self,
-        (group, token): ColumnId,
-        edit: ColumnEdit,
-    ) -> Result<Vec<ColumnWrite>, GraphError> {
-        let key = columns::chunk_key(group, token);
-        let mut writes = Vec::new();
-        match edit.flush() {
-            ColumnFlush::Rewrite { values, stale } => {
-                let mut changes = BTreeMap::new();
-                if !stale.is_empty() {
-                    self.transaction.visit_prefix(
-                        Table::NodeColumns,
-                        &columns::column_prefix(group, token),
-                        |key, value| {
-                            if let Part::Delta(slot) = columns::parse_key(key)?.2
-                                && !values.contains_key(&slot)
-                            {
-                                let (slot, value) = columns::parse_delta(key, value)?;
-                                changes.insert(slot, value);
-                            }
-                            Ok::<(), GraphError>(())
-                        },
-                    )?;
+        group: u64,
+        slot: usize,
+        mut changes: Changes,
+        values: Changes,
+    ) -> Result<Changes, GraphError> {
+        for (token, value) in values {
+            if self.segment_holds(group, token, slot, value.as_ref())? {
+                if let Ok(index) = changes.binary_search_by_key(&token, |(held, _)| *held) {
+                    changes.remove(index);
                 }
-                changes.extend(values);
-                let rewritten = self
-                    .transaction
-                    .get_with(Table::NodeColumns, &key, |bytes| {
-                        let chunk = ChunkRef::parse(group, token, bytes)?;
-                        chunk.verify()?;
-                        columns::encode_chunk(
-                            group,
-                            token,
-                            &columns::merged(chunk.cells(), &changes)?,
-                        )
-                    })?;
-                let chunk = match rewritten {
-                    Some(chunk) => chunk,
-                    None if stale.is_empty() => columns::encode_chunk(
-                        group,
-                        token,
-                        &columns::merged(std::iter::empty(), &changes)?,
-                    )?,
-                    None => return Err(GraphError::Corrupt("a property column lost its chunk")),
-                };
-                writes.push(match chunk {
-                    Some(chunk) => ColumnWrite::Put(key, chunk),
-                    None => ColumnWrite::Delete(key),
-                });
-                if !stale.is_empty() {
-                    writes.push(ColumnWrite::DeleteDeltas((group, token)));
-                }
-            }
-            ColumnFlush::Deltas { touched, stored } => {
-                let mut compare = |chunk: Option<ChunkRef<'_>>| {
-                    for (slot, had, after) in &touched {
-                        let before = match chunk {
-                            Some(chunk) if *had => chunk.cell_at(*slot)?,
-                            _ => None,
-                        };
-                        let after = after.as_ref().map(Cell::of);
-                        if !columns::same_state(before, after) {
-                            writes.push(ColumnWrite::Put(
-                                columns::delta_key(group, token, *slot),
-                                columns::encode_delta(group, token, *slot, after),
-                            ));
-                        } else if stored.binary_search(slot).is_ok() {
-                            writes
-                                .push(ColumnWrite::Delete(columns::delta_key(group, token, *slot)));
-                        }
-                    }
-                    Ok::<(), GraphError>(())
-                };
-                if touched.iter().any(|(_, had, _)| *had) {
-                    self.transaction
-                        .get_with(Table::NodeColumns, &key, |bytes| {
-                            compare(Some(ChunkRef::parse(group, token, bytes)?))
-                        })?
-                        .ok_or(GraphError::Corrupt("a property column lost its chunk"))?;
-                } else {
-                    compare(None)?;
-                }
+            } else {
+                columns::put_change(&mut changes, token, value);
             }
         }
-        Ok(writes)
+        Ok(changes)
     }
-}
 
-impl<T: WriteTransaction> GraphTx<T> {
-    fn load_edit(&self, (group, token): ColumnId) -> Result<ColumnEdit, GraphError> {
-        let mut head = None;
-        let mut deltas = Vec::new();
+    fn segment_holds(
+        &self,
+        group: u64,
+        token: Token<PropertyKey>,
+        slot: usize,
+        value: Option<&PropertyValue>,
+    ) -> Result<bool, GraphError> {
+        self.segment_cell((group, token), slot, |cell| {
+            Ok(columns::same_state(cell, value.map(Cell::of)))
+        })
+    }
+
+    /// What commit writes for the property columns of one group: a delta for each changed node
+    /// that differs from the segments, or, once the group would keep more than
+    /// `MAX_DELTAS` deltas, the segments its deltas and changes touch, rewritten.
+    pub(crate) fn column_writes(
+        &self,
+        group: u64,
+        edit: ColumnsEdit,
+    ) -> Result<(Vec<ColumnWrite>, usize), GraphError> {
+        let (stored, slots, heap) = edit.into_slots();
+        let mut merged: Merged<'_> = Vec::with_capacity(slots.len());
+        let mut kept = stored;
+        for (slot, edit) in slots {
+            let key = columns::delta_key(group, slot);
+            let before = match edit.fresh {
+                true => None,
+                false => self.transaction.get(Table::NodeColumns, &key)?,
+            };
+            let changes = match &before {
+                Some(bytes) => {
+                    kept = kept.checked_sub(1).ok_or(DELTA_UNCOUNTED)?;
+                    let changes = delta_changes(&key, bytes)?;
+                    SlotChanges::Owned(self.changes_over(group, slot, changes, edit.values)?)
+                }
+                None if edit.fresh => match edit.created(&heap) {
+                    Some(created) if edit.values.is_empty() => SlotChanges::Packed(created),
+                    _ => {
+                        let mut values = edit.into_changes(&heap)?;
+                        values.retain(|(_, value)| value.is_some());
+                        SlotChanges::Owned(values)
+                    }
+                },
+                None => SlotChanges::Owned(self.changes_over(
+                    group,
+                    slot,
+                    Changes::new(),
+                    edit.values,
+                )?),
+            };
+            kept += usize::from(!changes.is_empty());
+            merged.push((slot, (changes, before)));
+        }
+        if kept > columns::MAX_DELTAS {
+            return Ok((self.fold(group, merged)?, 0));
+        }
+        let mut writes = Vec::new();
+        for (slot, (changes, before)) in merged {
+            let key = columns::delta_key(group, slot);
+            if changes.is_empty() {
+                if before.is_some() {
+                    writes.push(ColumnWrite::Delete(key.to_vec()));
+                }
+                continue;
+            }
+            let bytes = match &changes {
+                SlotChanges::Packed(created) => columns::encode_created_delta(&key, *created),
+                SlotChanges::Owned(changes) => columns::encode_delta(
+                    &key,
+                    changes
+                        .iter()
+                        .map(|(token, value)| (*token, value.as_ref().map(Cell::of))),
+                ),
+            };
+            if before.as_ref() != Some(&bytes) {
+                writes.push(ColumnWrite::Put(key.to_vec(), bytes));
+            }
+        }
+        Ok((writes, kept))
+    }
+
+    fn fold(&self, group: u64, merged: Merged<'_>) -> Result<Vec<ColumnWrite>, GraphError> {
+        let mut others: Vec<(usize, Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut stored = false;
         self.transaction.visit_prefix(
             Table::NodeColumns,
-            &columns::column_prefix(group, token),
-            |key, value| {
-                match columns::parse_key(key)?.2 {
-                    Part::Chunk => head = Some(ChunkRef::parse(group, token, value)?.head()),
-                    Part::Delta(_) if head.is_none() => {
-                        return Err(GraphError::Corrupt("a property column delta has no chunk"));
-                    }
-                    Part::Delta(_) => deltas.push(columns::delta_state(key, value)?),
+            &columns::deltas_prefix(group),
+            |key, bytes| {
+                let ColumnKey::Delta { slot, .. } = columns::parse_key(key)? else {
+                    return Err(GraphError::Corrupt(
+                        "a property column segment lies among deltas",
+                    ));
+                };
+                stored = true;
+                if merged
+                    .binary_search_by_key(&slot, |(held, _)| *held)
+                    .is_err()
+                {
+                    others.push((slot, key.to_vec(), bytes.to_vec()));
                 }
                 Ok::<(), GraphError>(())
             },
         )?;
-        ColumnEdit::load(head, deltas)
+        let mut columns: Vec<(Token<PropertyKey>, SlotCells<'_>)> = Vec::new();
+        let mut cells = Vec::new();
+        let mut others = others.iter().peekable();
+        let mut merged = merged.iter().peekable();
+        loop {
+            let slot = match (others.peek(), merged.peek()) {
+                (Some((other, ..)), Some((changed, _))) if other < changed => others
+                    .next()
+                    .map(|(slot, key, bytes)| (*slot, Ok((key, bytes)))),
+                (_, Some(_)) => merged
+                    .next()
+                    .map(|(slot, (changes, _))| (*slot, Err(changes))),
+                (Some(_), None) => others
+                    .next()
+                    .map(|(slot, key, bytes)| (*slot, Ok((key, bytes)))),
+                (None, None) => None,
+            };
+            let Some((slot, source)) = slot else {
+                break;
+            };
+            cells.clear();
+            match source {
+                Ok((key, bytes)) => {
+                    for entry in DeltaRef::parse(key, bytes)?.entries() {
+                        cells.push(entry?);
+                    }
+                }
+                Err(changes) => changes.push_cells(&mut cells)?,
+            }
+            for (token, cell) in cells.drain(..) {
+                let index = match columns.binary_search_by_key(&token, |(held, _)| *held) {
+                    Ok(index) => index,
+                    Err(index) => {
+                        columns.insert(index, (token, Vec::new()));
+                        index
+                    }
+                };
+                if let Some((_, column)) = columns.get_mut(index) {
+                    column.push((slot, cell));
+                }
+            }
+        }
+        let mut writes = Vec::new();
+        let mut changes: SegmentChanges<'_> = Vec::with_capacity(SEGMENT_SLOTS);
+        for (token, column) in &columns {
+            for run in column
+                .chunk_by(|(left, _), (right, _)| left / SEGMENT_SLOTS == right / SEGMENT_SLOTS)
+            {
+                let Some((first, _)) = run.first() else {
+                    continue;
+                };
+                changes.clear();
+                changes.extend(run.iter().map(|(slot, cell)| (slot % SEGMENT_SLOTS, *cell)));
+                self.rewrite_segment(group, *token, first / SEGMENT_SLOTS, &changes, &mut writes)?;
+            }
+        }
+        if stored {
+            writes.push(ColumnWrite::DeleteDeltas(group));
+        }
+        Ok(writes)
+    }
+
+    fn rewrite_segment(
+        &self,
+        group: u64,
+        token: Token<PropertyKey>,
+        segment: usize,
+        changes: &SegmentChanges<'_>,
+        writes: &mut Vec<ColumnWrite>,
+    ) -> Result<(), GraphError> {
+        let first_key = columns::segment_key(group, token, segment, 0);
+        let mut stored: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let split = self
+            .transaction
+            .get_with(Table::NodeColumns, &first_key, |bytes| {
+                let whole = SegmentRef::parse(&first_key, bytes)?.part_of(SEGMENT_SLOTS - 1) == 0;
+                stored.push((first_key.to_vec(), bytes.to_vec()));
+                Ok::<bool, GraphError>(!whole)
+            })?
+            .unwrap_or(false);
+        if split {
+            stored.clear();
+            self.transaction.visit_prefix(
+                Table::NodeColumns,
+                &columns::parts_prefix(group, token, segment),
+                |key, bytes| {
+                    stored.push((key.to_vec(), bytes.to_vec()));
+                    Ok::<(), GraphError>(())
+                },
+            )?;
+        }
+        let mut cells = Vec::new();
+        for (key, bytes) in &stored {
+            for cell in SegmentRef::parse(key, bytes)?.cells() {
+                cells.push(cell?);
+            }
+        }
+        let parts = columns::encode_segment(
+            group,
+            token,
+            segment,
+            &columns::merged(cells.into_iter().map(Ok), changes)?,
+        )?;
+        for (key, _) in &stored {
+            if !parts.iter().any(|(part, _)| **part == **key) {
+                writes.push(ColumnWrite::Delete(key.clone()));
+            }
+        }
+        for (key, bytes) in parts {
+            let same = stored
+                .iter()
+                .any(|(held, before)| **held == *key && *before == bytes);
+            if !same {
+                writes.push(ColumnWrite::Put(key.to_vec(), bytes));
+            }
+        }
+        Ok(())
+    }
+}
+
+type SegmentChanges<'a> = Vec<(usize, Option<Cell<'a>>)>;
+
+type SlotCells<'a> = Vec<(usize, Option<Cell<'a>>)>;
+
+type Merged<'h> = Vec<(usize, (SlotChanges<'h>, Option<Vec<u8>>))>;
+
+enum SlotChanges<'h> {
+    Owned(Changes),
+    Packed(DeltaRef<'h>),
+}
+
+impl SlotChanges<'_> {
+    fn is_empty(&self) -> bool {
+        match self {
+            SlotChanges::Owned(changes) => changes.is_empty(),
+            SlotChanges::Packed(created) => created.is_empty(),
+        }
+    }
+
+    fn push_cells<'s>(
+        &'s self,
+        out: &mut Vec<(Token<PropertyKey>, Option<Cell<'s>>)>,
+    ) -> Result<(), GraphError> {
+        match self {
+            SlotChanges::Owned(changes) => out.extend(
+                changes
+                    .iter()
+                    .map(|(token, value)| (*token, value.as_ref().map(Cell::of))),
+            ),
+            SlotChanges::Packed(created) => {
+                for entry in created.entries() {
+                    out.push(entry?);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: WriteTransaction> GraphTx<T> {
+    fn columns_edit(&mut self, group: u64) -> Result<&mut ColumnsEdit, GraphError> {
+        if !self.columns.contains_key(&group) {
+            let cached = self
+                .column_deltas
+                .as_ref()
+                .and_then(|counts| lock(counts).get(&group).copied());
+            let deltas = match cached {
+                Some(deltas) => deltas,
+                None => self.count_deltas(group)?,
+            };
+            self.columns.insert(group, ColumnsEdit::load(deltas));
+        }
+        self.columns
+            .get_mut(&group)
+            .ok_or(GraphError::Corrupt("a property column edit vanished"))
+    }
+
+    fn count_deltas(&self, group: u64) -> Result<usize, GraphError> {
+        let mut deltas = 0;
+        self.transaction.visit_prefix(
+            Table::NodeColumns,
+            &columns::deltas_prefix(group),
+            |key, _| {
+                let ColumnKey::Delta { .. } = columns::parse_key(key)? else {
+                    return Err(GraphError::Corrupt(
+                        "a property column segment lies among deltas",
+                    ));
+                };
+                deltas += 1;
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(deltas)
     }
 
     /// Sets the value of the property `token` of the node in `slot` of `group`, or removes it
@@ -348,15 +690,19 @@ impl<T: WriteTransaction> GraphTx<T> {
         slot: usize,
         value: Option<PropertyValue>,
     ) -> Result<(), GraphError> {
-        if !self.columns.contains_key(&(group, token)) {
-            let edit = self.load_edit((group, token))?;
-            self.columns.insert((group, token), edit);
-        }
-        self.columns
-            .get_mut(&(group, token))
-            .ok_or(GraphError::Corrupt("a property column edit vanished"))?
-            .set(slot, value);
+        self.columns_edit(group)?.set(slot, token, value);
         Ok(())
+    }
+
+    /// Records that the transaction created the node in `slot` of `group` with `values`,
+    /// ascending by key, so the slot holds no stored value.
+    pub(crate) fn create_column_node(
+        &mut self,
+        group: u64,
+        slot: usize,
+        values: impl IntoIterator<Item = (Token<PropertyKey>, PropertyValue)>,
+    ) -> Result<(), GraphError> {
+        self.columns_edit(group)?.create(slot, values)
     }
 
     /// Reads through the write transaction's own reader, which keeps the stored columns it
@@ -372,20 +718,23 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     pub(crate) fn flush_columns(&mut self) -> Result<(), GraphError> {
-        for (id, edit) in std::mem::take(&mut self.columns) {
-            for write in self.column_writes(id, edit)? {
-                match write {
-                    ColumnWrite::Put(key, value) => {
-                        self.transaction.put(Table::NodeColumns, &key, &value)?;
-                    }
-                    ColumnWrite::Delete(key) => {
-                        self.transaction.delete(Table::NodeColumns, &key)?
-                    }
-                    ColumnWrite::DeleteDeltas((group, token)) => {
-                        let (start, end) = columns::delta_range(group, token);
-                        self.transaction
-                            .delete_range(Table::NodeColumns, &start, &end)?;
-                    }
+        let mut all = Vec::new();
+        for (group, edit) in std::mem::take(&mut self.columns) {
+            let (writes, deltas) = self.column_writes(group, edit)?;
+            self.own_column_deltas.insert(group, deltas);
+            all.extend(writes);
+        }
+        all.sort_by(|left, right| left.key().cmp(&right.key()));
+        for write in all {
+            match write {
+                ColumnWrite::Put(key, value) => {
+                    self.transaction.put(Table::NodeColumns, &key, &value)?;
+                }
+                ColumnWrite::Delete(key) => self.transaction.delete(Table::NodeColumns, &key)?,
+                ColumnWrite::DeleteDeltas(group) => {
+                    let (start, end) = columns::deltas_range(group);
+                    self.transaction
+                        .delete_range(Table::NodeColumns, &start, &end)?;
                 }
             }
         }

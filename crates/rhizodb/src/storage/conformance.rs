@@ -146,6 +146,21 @@ fn visited(read: &impl ReadTransaction, table: Table, prefix: &[u8]) -> Vec<Entr
     found
 }
 
+fn visited_range(
+    read: &impl ReadTransaction,
+    table: Table,
+    start: &[u8],
+    end: &[u8],
+) -> Vec<Entry> {
+    let mut found = Vec::new();
+    read.visit_range(table, start, end, |key, value| {
+        found.push((key.to_vec(), value.to_vec()));
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    found
+}
+
 fn copied(read: &impl ReadTransaction, table: Table, key: &[u8]) -> Option<Vec<u8>> {
     read.get_with(table, key, |value| Ok::<_, StorageError>(value.to_vec()))
         .unwrap()
@@ -408,7 +423,13 @@ fn a_range_scan_yields_keys_from_start_to_end<H: Harness>(harness: &mut H) {
     );
     let read = store.begin_read().unwrap();
     let ranged = |start: &[u8], end: &[u8]| {
-        keys(read.scan_range(Table::PropertyEntries, start, end).unwrap())
+        let scanned = read.scan_range(Table::PropertyEntries, start, end).unwrap();
+        assert_eq!(
+            visited_range(&read, Table::PropertyEntries, start, end),
+            scanned,
+            "a visit of {start:?}..{end:?} yields what a scan does"
+        );
+        keys(scanned)
     };
     assert_eq!(ranged(b"b", b"c"), [b"b".to_vec(), b"ba".to_vec()]);
     assert_eq!(ranged(b"a", b"b"), [b"a".to_vec()]);
@@ -439,6 +460,13 @@ fn a_visitor_error_stops_the_visit<H: Harness>(harness: &mut H) {
             .to_string()
             .contains("the visitor stopped")
     );
+    assert_eq!(seen, 2);
+    let mut seen = 0;
+    let result = read.visit_range(Table::Nodes, b"a", b"z", |_, _| {
+        seen += 1;
+        if seen == 2 { Err(stopped()) } else { Ok(()) }
+    });
+    assert!(result.is_err());
     assert_eq!(seen, 2);
 }
 
@@ -495,6 +523,10 @@ fn a_write_transaction_reads_its_own_writes<H: Harness>(harness: &mut H) {
     assert_eq!(visited(&write, Table::LabelIndex, b"a"), expected);
     assert_eq!(
         write.scan_range(Table::LabelIndex, b"a", b"b").unwrap(),
+        expected
+    );
+    assert_eq!(
+        visited_range(&write, Table::LabelIndex, b"a", b"b"),
         expected
     );
     assert_eq!(
