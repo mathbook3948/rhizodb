@@ -1,0 +1,17 @@
+id: redb-only-in-its-backend
+language: rust
+severity: error
+message: Only the redb backend names redb, so every redb call runs under its panic guard.
+note: Reach redb through `RedbStorage`, whose `Guarded` values and `Poison::guard` catch a redb panic and poison the database.
+files:
+  - crates/*/src/**/*.rs
+ignores:
+  - crates/rhizodb/src/storage/redb_backend.rs
+  - crates/rhizodb/src/storage/redb_backend.test.rs
+  - crates/rhizodb/src/storage/sim_backend.rs
+rule:
+  any:
+    - kind: scoped_identifier
+    - kind: scoped_type_identifier
+    - kind: scoped_use_list
+  regex: '^redb::'

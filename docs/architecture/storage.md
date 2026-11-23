@@ -20,6 +20,14 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - Index definitions and index entries live in tables of their own, so a database from before indexes upgrades with no index.
 - Opening a database written before indexes could cover relationships rewrites each index definition as one over a label, in the same write transaction.
 - Adding a kind of index changes the format version, so an older build refuses the database instead of failing on an unknown definition.
+- Every call into redb runs under a panic guard until RhizoDB's own engine, which checks page checksums, replaces redb.
+- The guard covers opening, every read, iteration step, write, and commit, and the drop of every redb value, and returns a caught panic as corrupt data.
+- Only the redb backend names redb, which a guard rule checks, so no call can skip the guard.
+- redb's own corruption errors are reported as corrupt data too.
+- A caught panic poisons the database, and every later operation on it fails as corrupt data until the file is opened again.
+- A poisoned database drops its redb values while an unwind is in progress, so redb writes nothing more and the next open recovers the file from its last commit.
+- The guard relies on `panic = "unwind"`, and a host built with `panic = "abort"` still dies on a damaged file.
+- RhizoDB installs no panic hook, so the host's hook still reports each caught panic.
 
 ## Open
 

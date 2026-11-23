@@ -129,7 +129,11 @@ pub enum ErrorKind {
     Unsupported,
     /// The storage engine failed.
     Storage,
-    /// Stored data does not decode or breaks an invariant.
+    /// Stored data does not decode, breaks an invariant, or makes the storage engine fail. Once
+    /// the storage engine panics on a damaged file, every later operation on that [`Database`]
+    /// fails this way until the file is opened again.
+    ///
+    /// [`Database`]: crate::Database
     CorruptData,
     /// The database was written in a format version this build cannot read.
     UnsupportedFormatVersion,
@@ -235,7 +239,11 @@ impl From<SyntaxError> for Error {
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         Self {
-            kind: ErrorKind::Storage,
+            kind: if error.is_corrupt() {
+                ErrorKind::CorruptData
+            } else {
+                ErrorKind::Storage
+            },
             message: error.to_string(),
             source: Some(Box::new(error)),
             rejects_type: false,
@@ -246,6 +254,7 @@ impl From<StorageError> for Error {
 impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
         let kind = match &error {
+            GraphError::Storage(error) if error.is_corrupt() => ErrorKind::CorruptData,
             GraphError::Storage(_) => ErrorKind::Storage,
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,

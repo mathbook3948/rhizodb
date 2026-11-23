@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use rhizodb::ErrorKind;
 use support::*;
 
 const FAST_DAMAGES: u64 = 24;
@@ -29,9 +30,14 @@ fn regressions(target: &str) -> Vec<PathBuf> {
     inputs
 }
 
-/// Opens and probes every damaged file and returns the panics, each with the damage bytes that
-/// caused it.
-fn panics(inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Vec<String> {
+struct Outcomes {
+    panics: Vec<String>,
+    failures: Vec<(String, Vec<ErrorKind>)>,
+}
+
+/// Opens and probes every damaged file, and returns the panics, each with the damage bytes that
+/// caused it, and the kinds of the failures of each input that did not panic.
+fn probe(inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Outcomes {
     let directory = tempfile::tempdir().unwrap();
     let pristine = db_file::pristine(&directory.path().join("pristine.rhizodb"));
     let damaged = directory.path().join("damaged.rhizodb");
@@ -41,56 +47,73 @@ fn panics(inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Vec<String> {
             *LAST_PANIC.lock().unwrap() = location.to_string();
         }
     }));
-    let found = inputs
-        .into_iter()
-        .filter_map(|(name, bytes)| {
-            let file = db_file::damage(pristine.clone(), &bytes);
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                db_file::open_and_probe(&damaged, &file)
-            }))
-            .err()
-            .map(|payload| {
+    let mut outcomes = Outcomes {
+        panics: Vec::new(),
+        failures: Vec::new(),
+    };
+    for (name, bytes) in inputs {
+        let file = db_file::damage(pristine.clone(), &bytes);
+        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            db_file::open_and_probe(&damaged, &file)
+        })) {
+            Ok(kinds) => outcomes.failures.push((name, kinds)),
+            Err(payload) => {
                 let message = payload
                     .downcast_ref::<&str>()
                     .map(|message| (*message).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_default();
                 let location = LAST_PANIC.lock().unwrap().clone();
-                format!("{name} (damage {bytes:?}): {message} at {location}")
-            })
-        })
-        .collect();
+                outcomes.panics.push(format!(
+                    "{name} (damage {bytes:?}): {message} at {location}"
+                ));
+            }
+        }
+    }
     std::panic::set_hook(hook);
-    found
+    outcomes
+}
+
+fn random_damages(count: usize) -> Vec<(String, Vec<u8>)> {
+    let seed = seed();
+    let mut rng = Rng::new(seed);
+    (0..cases(FAST_DAMAGES))
+        .map(|index| {
+            let bytes = (0..count * db_file::DAMAGE_BYTES)
+                .map(|_| rng.next_u64() as u8)
+                .collect();
+            (format!("seed {seed} damage {index}"), bytes)
+        })
+        .collect()
 }
 
 #[test]
-#[ignore = "bug: redb panics with `entered unreachable code` in btree_cursor.rs while a query \
-            reads a damaged b-tree page, so a corrupted file panics the host instead of \
-            failing with ErrorKind::CorruptData"]
-fn fuzzer_inputs_that_damaged_a_file_fail_without_a_panic() {
-    let found = panics(
+fn every_fuzzer_input_that_damaged_a_file_fails_as_corrupt_data_without_a_panic() {
+    let outcomes = probe(
         regressions("db_file")
             .into_iter()
             .map(|path| (path.display().to_string(), std::fs::read(&path).unwrap())),
     );
-    assert!(found.is_empty(), "{}", found.join("\n"));
+    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
+    let unreported: Vec<String> = outcomes
+        .failures
+        .iter()
+        .filter(|(_, kinds)| !kinds.contains(&ErrorKind::CorruptData))
+        .map(|(name, kinds)| format!("{name}: {kinds:?}"))
+        .collect();
+    assert!(unreported.is_empty(), "{}", unreported.join("\n"));
 }
 
 #[test]
-#[ignore = "bug: redb panics on damaged pages instead of returning an error, see \
-            fuzzer_inputs_that_damaged_a_file_fail_without_a_panic"]
 fn random_single_damages_fail_without_a_panic() {
-    let seed = seed();
-    let mut rng = Rng::new(seed);
-    let inputs: Vec<(String, Vec<u8>)> = (0..cases(FAST_DAMAGES))
-        .map(|index| {
-            let bytes = rng.next_u64().to_le_bytes()[..db_file::DAMAGE_BYTES].to_vec();
-            (format!("seed {seed} damage {index}"), bytes)
-        })
-        .collect();
-    let found = panics(inputs);
-    assert!(found.is_empty(), "{}", found.join("\n"));
+    let outcomes = probe(random_damages(1));
+    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
+}
+
+#[test]
+fn random_multiple_damages_fail_without_a_panic() {
+    let outcomes = probe(random_damages(db_file::MAX_DAMAGES));
+    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }
 
 #[test]
@@ -101,6 +124,6 @@ fn a_truncated_file_fails_to_open_or_reads_without_a_panic() {
         bytes.extend_from_slice(&offset.to_le_bytes());
         (format!("truncated at {offset} modulo the length"), bytes)
     });
-    let found = panics(inputs);
-    assert!(found.is_empty(), "{}", found.join("\n"));
+    let outcomes = probe(inputs);
+    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }

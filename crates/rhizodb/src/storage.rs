@@ -88,13 +88,27 @@ pub(crate) type Entry = (Vec<u8>, Vec<u8>);
 #[derive(Debug)]
 pub(crate) struct StorageError {
     source: Box<dyn Error + Send + Sync>,
+    corrupt: bool,
 }
 
 impl StorageError {
     pub(crate) fn new(source: impl Error + Send + Sync + 'static) -> Self {
         Self {
             source: Box::new(source),
+            corrupt: false,
         }
+    }
+
+    /// A failure the engine raised on damaged stored data, which is reported as corrupt data.
+    pub(crate) fn corrupt(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            corrupt: true,
+            ..Self::new(source)
+        }
+    }
+
+    pub(crate) fn is_corrupt(&self) -> bool {
+        self.corrupt
     }
 }
 

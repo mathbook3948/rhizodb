@@ -47,7 +47,9 @@ A database that returns wrong results or loses data after a crash is worse than 
 - The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
-- The nightly fuzz run skips panics raised inside redb on damaged files and fails on any other.
+- The fuzz run fails on any panic that escapes RhizoDB, any hang, and any run out of memory.
+- The damaged file fuzz target replaces libFuzzer's abort on every panic, so a panic that the redb guard catches is not a crash.
+- A panic is injected at each backend operation of a redb commit in turn, and the reopened file must hold the state before or after the commit.
 - Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
 - Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
 - Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.

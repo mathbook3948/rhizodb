@@ -24,6 +24,14 @@ pub struct Database {
 
 impl Database {
     /// Opens the database file at `path`, creating it when it does not exist.
+    ///
+    /// A damaged file fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on
+    /// open or on the operation that reads the damage. The storage engine can panic on some
+    /// damage. RhizoDB catches that panic, and from then on every operation on this `Database`
+    /// fails with `CorruptData` until the file is opened again. Catching needs the host built
+    /// with `panic = "unwind"`, the default, and with `panic = "abort"` the process still ends.
+    /// RhizoDB installs no panic hook, so the host's hook still reports the caught panic, by
+    /// default on standard error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(RedbStorage::open(path)?)?,
