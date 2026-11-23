@@ -109,3 +109,10 @@ pub use value::read_value_for_fuzzing;
 pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::decode_formats(bytes)
 }
+
+/// Damages a database file of RhizoDB's own engine by `bytes`, opens it, and reads every entry,
+/// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[doc(hidden)]
+pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::open_damaged_file(bytes)
+}

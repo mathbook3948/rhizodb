@@ -61,7 +61,19 @@ fn valid_encodings_of_every_format_round_trip() {
     );
 }
 
+#[test]
+fn the_undamaged_file_reads_back() {
+    assert_eq!(open_damaged_file(&[]), Ok(()));
+}
+
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(256)))]
+
+    #[test]
+    fn a_damaged_file_never_panics_or_reads_differently(damage in vec(any::<u8>(), 4..64)) {
+        prop_assert_eq!(open_damaged_file(&damage), Ok(()));
+    }
+
     #[test]
     fn arbitrary_bytes_never_break_a_decoder(choice in 0u8..10, rest in vec(any::<u8>(), 0..5000)) {
         let input = [[choice].as_slice(), &rest].concat();

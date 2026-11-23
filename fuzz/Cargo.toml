@@ -48,3 +48,10 @@ path = "fuzz_targets/engine_formats.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "engine_file"
+path = "fuzz_targets/engine_file.rs"
+test = false
+doc = false
+bench = false
