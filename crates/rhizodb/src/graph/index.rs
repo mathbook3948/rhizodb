@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
@@ -10,6 +11,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 use crate::value::put_varint;
 
+use super::ColumnReader;
 use super::GraphError;
 use super::GraphTx;
 use super::NodeId;
@@ -23,6 +25,7 @@ use super::ids::PropertyKey;
 use super::ids::RelationshipType;
 use super::ids::Token;
 use super::keys;
+use super::meta;
 use super::tokenize;
 use super::tokenize::Clause;
 use super::tokenize::Purpose;
@@ -480,6 +483,16 @@ impl IndexDefinition {
 }
 
 impl IndexKind {
+    /// The properties the index reads.
+    pub(crate) fn properties(&self) -> &[Token<PropertyKey>] {
+        match self {
+            IndexKind::Keyword { properties } => properties,
+            IndexKind::Vector { property, .. } | IndexKind::Property { property } => {
+                std::slice::from_ref(property)
+            }
+        }
+    }
+
     fn entry(&self, values: &Properties) -> Option<Entry> {
         match self {
             IndexKind::Keyword { properties } => {
@@ -686,6 +699,26 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     /// The stored bytes of every index definition, read from storage at most once per transaction.
+    /// The properties of the node indexes for which `covers` holds, given each index's label
+    /// and properties.
+    pub(crate) fn node_index_keys(
+        &self,
+        mut covers: impl FnMut(Token<Label>, &[Token<PropertyKey>]) -> bool,
+    ) -> Result<BTreeSet<Token<PropertyKey>>, GraphError> {
+        let mut keys = BTreeSet::new();
+        for bytes in self.index_definitions()?.iter() {
+            let (id, target, reader) = Index::decode_target(bytes)?;
+            if let Target::Label(label) = target {
+                let index = Index::decode_kind(id, target, reader)?;
+                let properties = index.definition.kind.properties();
+                if covers(label, properties) {
+                    keys.extend(properties.iter().copied());
+                }
+            }
+        }
+        Ok(keys)
+    }
+
     pub(crate) fn index_definitions(&self) -> Result<Arc<[Vec<u8>]>, GraphError> {
         if let Some(definitions) = self.index_definitions.get() {
             return Ok(Arc::clone(definitions));
@@ -972,13 +1005,22 @@ impl<T: ReadTransaction> GraphTx<T> {
 
     fn covered_entry(
         &self,
+        reader: &mut ColumnReader,
         definition: &IndexDefinition,
         id: u64,
     ) -> Result<Option<Entry>, GraphError> {
         Ok(match definition.target {
-            Target::Label(_) => {
-                let node = NodeId(id);
-                let record = self.node(node)?.ok_or(GraphError::NodeNotFound(node))?;
+            Target::Label(label) => {
+                let (group, slot) = meta::locate(NodeId(id));
+                let mut record = NodeRecord {
+                    labels: BTreeSet::from([label]),
+                    properties: Properties::new(),
+                };
+                for key in definition.kind.properties() {
+                    if let Some(value) = self.column_value(reader, group, slot, *key)? {
+                        record.properties.insert(*key, value);
+                    }
+                }
                 definition.entry(Element::Node(&record))
             }
             Target::RelationshipType(_) => {
@@ -1120,7 +1162,9 @@ impl<T: WriteTransaction> GraphTx<T> {
             )?;
         }
         for element in self.covered_ids(index.definition.target)? {
-            if let Some(entry) = self.covered_entry(&index.definition, element)? {
+            let entry = self
+                .with_reader(|tx, reader| tx.covered_entry(reader, &index.definition, element))?;
+            if let Some(entry) = entry {
                 self.insert_entry(index, element, &entry)?;
             }
         }

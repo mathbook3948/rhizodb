@@ -11,8 +11,6 @@ use std::sync::RwLock;
 use std::thread;
 use std::thread::ThreadId;
 
-use crate::storage::Cursor;
-use crate::storage::Reach;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
@@ -22,16 +20,19 @@ use crate::value::DecodeError;
 use crate::value::PropertyValue;
 use crate::value::Reader;
 
+mod columns;
 mod ids;
 mod index;
 #[cfg(test)]
 pub(crate) mod integrity;
 mod keys;
 mod meta;
+mod properties;
 mod records;
 mod tokenize;
 mod value_key;
 
+pub(crate) use columns::ColumnReader;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
 pub(crate) use ids::PropertyKey;
@@ -44,7 +45,6 @@ pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use meta::LabelReader;
-pub(crate) use records::EncodedNode;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
@@ -53,6 +53,8 @@ pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
+use columns::ColumnEdit;
+use columns::ColumnId;
 use index::Element;
 use meta::Delta;
 use meta::Flush;
@@ -66,11 +68,12 @@ use meta::MetaHead;
 use meta::Part;
 use meta::Slot;
 
-const FORMAT_VERSION: u32 = 8;
+const FORMAT_VERSION: u32 = 9;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
 const NODE_META_FORMAT_VERSION: u32 = 8;
+const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -221,6 +224,9 @@ impl<S: Storage> Graph<S> {
             if found.is_some_and(|found| found < NODE_META_FORMAT_VERSION) {
                 tx.move_labels_to_node_meta()?;
             }
+            if found.is_some_and(|found| found < NODE_COLUMNS_FORMAT_VERSION) {
+                tx.move_properties_to_columns()?;
+            }
             if upgrade {
                 tx.transaction.put(
                     Table::Metadata,
@@ -258,6 +264,8 @@ impl<S: Storage> Graph<S> {
             label_sets: Arc::clone(&self.committed_label_sets),
             own_label_sets: LabelSetCache::default(),
             meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
             counters: Vec::new(),
         })
     }
@@ -286,6 +294,8 @@ impl<S: Storage> Graph<S> {
             label_sets: Arc::clone(&self.committed_label_sets),
             own_label_sets: LabelSetCache::default(),
             meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
             counters: Vec::new(),
         })
     }
@@ -304,6 +314,8 @@ pub(crate) struct GraphTx<T> {
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
     meta: BTreeMap<u64, GroupEdit>,
+    columns: BTreeMap<ColumnId, ColumnEdit>,
+    reader: ColumnReader,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -320,6 +332,8 @@ impl<T> GraphTx<T> {
             label_sets: Arc::default(),
             own_label_sets: LabelSetCache::default(),
             meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
             counters: Vec::new(),
         }
     }
@@ -360,84 +374,17 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
     Ok(value)
 }
 
-const NEAR: u64 = 8;
-
-/// Reads node records through one storage cursor. A node with an ID just after the one the
-/// cursor reached last is read by stepping the cursor forward. A node just after the one read
-/// last, wherever the cursor is, starts a new run there. Any other node is looked up without
-/// moving the cursor.
-pub(crate) struct NodeReader<'a, T: ReadTransaction + 'a> {
-    cursor: T::Cursor<'a>,
-    reached: Option<NodeId>,
-    last: Option<NodeId>,
-}
-
-fn near(from: Option<NodeId>, to: NodeId) -> bool {
-    from.is_some_and(|from| to.0.checked_sub(from.0).is_some_and(|ahead| ahead <= NEAR))
-}
-
-impl<T: ReadTransaction> NodeReader<'_, T> {
-    /// Calls `read` with the stored record of the node with ID `id`, if there is one.
-    pub(crate) fn with_node<R, E: From<GraphError>>(
-        &mut self,
-        id: NodeId,
-        read: impl FnOnce(EncodedNode<'_>) -> Result<R, E>,
-    ) -> Result<Option<R>, E> {
-        let reach = if self.reached.is_none() || near(self.reached, id) {
-            Reach::Step
-        } else if self.last != Some(id) && near(self.last, id) {
-            Reach::Seek
-        } else {
-            Reach::Lookup
-        };
-        if reach != Reach::Lookup {
-            self.reached = Some(id);
-        }
-        self.last = Some(id);
-        self.cursor
-            .get_with(&keys::element_key(id.0), reach, |bytes| {
-                Ok::<_, GraphError>(read(EncodedNode(bytes)))
-            })
-            .map_err(E::from)?
-            .transpose()
-    }
-}
-
 impl<T: ReadTransaction> GraphTx<T> {
-    pub(crate) fn node_reader(&self) -> Result<NodeReader<'_, T>, GraphError> {
-        Ok(NodeReader {
-            cursor: self.transaction.cursor(Table::Nodes)?,
-            reached: None,
-            last: None,
-        })
-    }
-
+    #[cfg(test)]
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
         let Some(labels) = self.node_labels(id)? else {
             return Ok(None);
         };
-        let properties = self
-            .with_node(id, |node| node.properties())?
-            .ok_or(GraphError::Corrupt("a live node has no record"))?;
+        let properties = self.live_node_properties(&mut ColumnReader::default(), id)?;
         Ok(Some(NodeRecord {
             labels: labels.iter().copied().collect(),
             properties,
         }))
-    }
-
-    /// Calls `read` with the stored properties of the node with ID `id`, if there is one, left
-    /// encoded so the caller decodes only the parts it reads.
-    pub(crate) fn with_node<R, E: From<GraphError>>(
-        &self,
-        id: NodeId,
-        read: impl FnOnce(EncodedNode<'_>) -> Result<R, E>,
-    ) -> Result<Option<R>, E> {
-        self.transaction
-            .get_with(Table::Nodes, &keys::element_key(id.0), |bytes| {
-                Ok::<_, GraphError>(read(EncodedNode(bytes)))
-            })
-            .map_err(E::from)?
-            .transpose()
     }
 
     /// One property of a relationship, decoding none of the others. The outer `None` means the
@@ -917,6 +864,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.transaction
                 .put(Table::Metadata, &key, &next.to_be_bytes())?;
         }
+        self.flush_columns()?;
         for (group, edit) in std::mem::take(&mut self.meta) {
             match edit.flush()? {
                 Flush::Rewrite { view, stale } => {
@@ -1038,6 +986,47 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
+    fn move_properties_to_columns(&mut self) -> Result<(), GraphError> {
+        let mut group: Option<u64> = None;
+        let mut values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>> = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
+            let (at, slot) = meta::locate(NodeId(decode_u64(&key)?));
+            if group.is_some_and(|group| group != at) {
+                self.put_columns(group, std::mem::take(&mut values))?;
+            }
+            group = Some(at);
+            for (token, value) in NodeRecord::decode_properties(&value)? {
+                values.entry(token).or_default().push((slot, value));
+            }
+            self.transaction.delete(Table::Nodes, &key)?;
+        }
+        self.put_columns(group, values)
+    }
+
+    fn put_columns(
+        &mut self,
+        group: Option<u64>,
+        values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>>,
+    ) -> Result<(), GraphError> {
+        let Some(group) = group else {
+            return Ok(());
+        };
+        for (token, values) in values {
+            let cells: Vec<(usize, columns::Cell<'_>)> = values
+                .iter()
+                .map(|(slot, value)| (*slot, columns::Cell::of(value)))
+                .collect();
+            if let Some(chunk) = columns::encode_chunk(group, token, &cells)? {
+                self.transaction.put(
+                    Table::NodeColumns,
+                    &columns::chunk_key(group, token),
+                    &chunk,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn intern_token<K: TokenKind>(
         &mut self,
         name: &str,
@@ -1065,10 +1054,11 @@ impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn create_node(&mut self, record: &NodeRecord) -> Result<NodeId, GraphError> {
         let id = NodeId(self.next_counter(keys::NEXT_NODE_ID_KEY)?);
         let set = self.intern_label_set(&record.labels)?;
-        self.transaction
-            .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
         let (group, slot) = meta::locate(id);
         self.meta_edit(group)?.set(slot, Some(set))?;
+        for (key, value) in &record.properties {
+            self.set_column_value((group, *key), slot, Some(value.clone()))?;
+        }
         self.reindex(id.0, None, Some(Element::Node(record)))?;
         Ok(id)
     }
@@ -1105,9 +1095,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         key: Token<PropertyKey>,
         value: PropertyValue,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.properties.insert(key, value);
-        })
+        self.write_node_property(node, key, Some(value))
     }
 
     pub(crate) fn remove_node_property(
@@ -1115,9 +1103,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         key: Token<PropertyKey>,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.properties.remove(&key);
-        })
+        self.write_node_property(node, key, None)
     }
 
     pub(crate) fn set_relationship_property(
@@ -1146,9 +1132,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.labels.insert(label);
-        })
+        self.relabel(node, label, true)
     }
 
     pub(crate) fn remove_label(
@@ -1156,9 +1140,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.labels.remove(&label);
-        })
+        self.relabel(node, label, false)
     }
 
     /// Removes the relationship and returns its record, or returns `None` when it does not exist.
@@ -1187,13 +1169,19 @@ impl<T: WriteTransaction> GraphTx<T> {
     /// returns `None` when it does not exist. Relationships that touch it are left alone, so the
     /// caller must delete them or reject the transaction, which `ensure_detached` checks.
     pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
-        let Some(record) = self.node(id)? else {
+        let Some(labels) = self.node_labels(id)? else {
             return Ok(None);
         };
+        let properties = self.with_reader(|tx, reader| tx.live_node_properties(reader, id))?;
+        let record = NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        };
         self.reindex(id.0, Some(Element::Node(&record)), None)?;
-        self.transaction
-            .delete(Table::Nodes, &keys::element_key(id.0))?;
         let (group, slot) = meta::locate(id);
+        for key in record.properties.keys() {
+            self.set_column_value((group, *key), slot, None)?;
+        }
         self.meta_edit(group)?.set(slot, None)?;
         Ok(Some(record))
     }
@@ -1204,28 +1192,83 @@ impl<T: WriteTransaction> GraphTx<T> {
             .ok_or(GraphError::NodeNotFound(id))
     }
 
-    fn edit_node<R>(
+    fn partial_record(
         &mut self,
         id: NodeId,
-        edit: impl FnOnce(&mut NodeRecord) -> R,
-    ) -> Result<R, GraphError> {
-        let before = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
-        let mut record = before.clone();
-        let result = edit(&mut record);
-        if record.labels == before.labels {
-            self.transaction
-                .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
-        } else {
-            let set = self.intern_label_set(&record.labels)?;
-            let (group, slot) = meta::locate(id);
-            self.meta_edit(group)?.set(slot, Some(set))?;
+        labels: &[Token<Label>],
+        keys: &BTreeSet<Token<PropertyKey>>,
+    ) -> Result<NodeRecord, GraphError> {
+        let (group, slot) = meta::locate(id);
+        let mut properties = Properties::new();
+        for key in keys {
+            if let Some(value) =
+                self.with_reader(|tx, reader| tx.column_value(reader, group, slot, *key))?
+            {
+                properties.insert(*key, value);
+            }
         }
-        self.reindex(
-            id.0,
-            Some(Element::Node(&before)),
-            Some(Element::Node(&record)),
-        )?;
-        Ok(result)
+        Ok(NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        })
+    }
+
+    fn write_node_property(
+        &mut self,
+        id: NodeId,
+        key: Token<PropertyKey>,
+        value: Option<PropertyValue>,
+    ) -> Result<(), GraphError> {
+        let labels = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let indexed =
+            self.node_index_keys(|label, keys| labels.contains(&label) && keys.contains(&key))?;
+        let (group, slot) = meta::locate(id);
+        if !indexed.is_empty() {
+            let before = self.partial_record(id, &labels, &indexed)?;
+            let mut after = before.clone();
+            match &value {
+                Some(value) => after.properties.insert(key, value.clone()),
+                None => after.properties.remove(&key),
+            };
+            self.reindex(
+                id.0,
+                Some(Element::Node(&before)),
+                Some(Element::Node(&after)),
+            )?;
+        } else if value.is_none()
+            && self
+                .with_reader(|tx, reader| tx.column_value(reader, group, slot, key))?
+                .is_none()
+        {
+            return Ok(());
+        }
+        self.set_column_value((group, key), slot, value)
+    }
+
+    fn relabel(&mut self, id: NodeId, label: Token<Label>, add: bool) -> Result<(), GraphError> {
+        let labels = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        if labels.binary_search(&label).is_ok() == add {
+            return Ok(());
+        }
+        let indexed = self.node_index_keys(|covered, _| covered == label)?;
+        let before = self.partial_record(id, &labels, &indexed)?;
+        let mut after = before.clone();
+        if add {
+            after.labels.insert(label);
+        } else {
+            after.labels.remove(&label);
+        }
+        let set = self.intern_label_set(&after.labels)?;
+        let (group, slot) = meta::locate(id);
+        self.meta_edit(group)?.set(slot, Some(set))?;
+        if !indexed.is_empty() {
+            self.reindex(
+                id.0,
+                Some(Element::Node(&before)),
+                Some(Element::Node(&after)),
+            )?;
+        }
+        Ok(())
     }
 
     fn edit_relationship<R>(
@@ -1297,6 +1340,18 @@ mod node_meta_corrupt_tests;
 #[cfg(test)]
 #[path = "graph/upgrade.test.rs"]
 mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_model.test.rs"]
+mod columns_model_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_crash.test.rs"]
+mod columns_crash_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_corrupt.test.rs"]
+mod columns_corrupt_tests;
 
 fn amend(ids: &mut Vec<NodeId>, node: NodeId, was: bool, is: bool) -> Result<(), GraphError> {
     match (ids.binary_search(&node), was, is) {

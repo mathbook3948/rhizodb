@@ -40,6 +40,10 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Node meta is checked against a model of node labels over random sequences of node and label edits, commits, rollbacks, reopens, and power losses.
 - A commit that writes node meta is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
 - Node meta is corrupted byte by byte, in its stored entries and in the database file, and every read must then fail as corrupt data or answer as before.
+- Property columns are checked against a model of typed and mixed property values over random sequences of value, label, and node edits, commits, rollbacks, reopens, and power losses, with every index entry checked against the properties.
+- A commit that writes property column chunks or deltas is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
+- Property column chunks and deltas are corrupted byte by byte, in their encoding, in their stored entries, and in the database file, and every read must then fail as corrupt data or answer as before.
+- Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
 - Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.

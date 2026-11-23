@@ -113,3 +113,106 @@ fn the_basic_format_seven_fixture_upgrades_to_a_consistent_graph() {
     let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
     assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
 }
+
+#[test]
+fn the_format_eight_fixtures_upgrade_to_consistent_graphs_with_no_node_record_left() {
+    for fixture in ["format-8.redb", "format-8-db-file.redb"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = copy_of(fixture, directory.path());
+        for _ in 0..2 {
+            let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+            let read = graph.read().unwrap();
+            assert_eq!(read.check_integrity().unwrap(), vec![], "{fixture}");
+            assert_ne!(
+                read.transaction
+                    .scan_prefix(Table::NodeColumns, &[])
+                    .unwrap(),
+                vec![],
+                "{fixture}"
+            );
+            if let Ok(entries) = read.transaction.scan_prefix(Table::Nodes, &[]) {
+                assert_eq!(entries, vec![], "{fixture}: the node records are emptied");
+            }
+        }
+    }
+}
+
+fn every_node(read: &GraphTx<impl ReadTransaction>) -> Vec<(NodeId, NodeRecord)> {
+    read.node_ids()
+        .unwrap()
+        .into_iter()
+        .map(|id| (id, read.node(id).unwrap().unwrap()))
+        .collect()
+}
+
+fn value_of(i: u64, key: u32) -> Option<PropertyValue> {
+    let i = i as i64;
+    match (key, i % 7) {
+        (0, _) => Some(PropertyValue::Integer(i)),
+        (1, 0) => None,
+        (1, _) => Some(PropertyValue::Float(-0.0 * i as f64)),
+        (2, 3) => Some(PropertyValue::Boolean(i % 2 == 0)),
+        (2, 4) => Some(PropertyValue::List(vec![PropertyValue::Integer(i)])),
+        (2, 5) => Some(PropertyValue::String(String::new())),
+        (2, _) if (4096..8192).contains(&i) => Some(PropertyValue::String(format!("s{i}"))),
+        (2, _) => Some(PropertyValue::Integer(-i)),
+        (3, _) if i % 4096 == 4095 => Some(PropertyValue::Boolean(true)),
+        _ => None,
+    }
+}
+
+#[test]
+fn a_graph_stored_as_format_eight_reads_back_every_node_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("eight.redb");
+    let before = {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        let label = write.intern_token::<Label>("N").unwrap();
+        let keys: Vec<Token<PropertyKey>> = ["i", "f", "m", "edge"]
+            .iter()
+            .map(|name| write.intern_token(name).unwrap())
+            .collect();
+        for i in 0..12_300u64 {
+            let mut record = NodeRecord::default();
+            if i % 3 == 0 {
+                record.labels.insert(label);
+            }
+            for (at, key) in keys.iter().enumerate() {
+                if let Some(value) = value_of(i, at as u32) {
+                    record.properties.insert(*key, value);
+                }
+            }
+            write.create_node(&record).unwrap();
+        }
+        for i in (4096..8192).filter(|i| i % 13 != 0).chain(12_000..12_300) {
+            write.delete_node(NodeId(i)).unwrap().unwrap();
+        }
+        write.commit().unwrap();
+        let before = every_node(&graph.read().unwrap());
+        let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_eight(&mut previous);
+        previous.commit().unwrap();
+        before
+    };
+    assert_eq!(before.len(), 12_300 - 4096 + 315 - 300);
+    for _ in 0..2 {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let read = graph.read().unwrap();
+        assert_eq!(read.check_integrity().unwrap(), vec![]);
+        let after = every_node(&read);
+        assert_eq!(after.len(), before.len());
+        for ((id, record), (stored_id, stored)) in after.iter().zip(&before) {
+            assert_eq!(id, stored_id);
+            assert_eq!(record.labels, stored.labels, "{id:?}");
+            assert_eq!(record.properties.len(), stored.properties.len(), "{id:?}");
+            for (key, value) in &record.properties {
+                let held = &stored.properties[key];
+                assert!(
+                    crate::value::tests::same_bits(value, held),
+                    "{id:?}: {value:?} {held:?}"
+                );
+            }
+        }
+    }
+}

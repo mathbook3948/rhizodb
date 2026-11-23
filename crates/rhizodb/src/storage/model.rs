@@ -5,9 +5,7 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
-use super::Cursor;
 use super::Entry;
-use super::Reach;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
@@ -15,7 +13,7 @@ use super::Table;
 use super::WriteTransaction;
 use super::conformance::Harness;
 
-const TABLES: [Table; 3] = [Table::Metadata, Table::Nodes, Table::PropertyEntries];
+const TABLES: [Table; 3] = [Table::Metadata, Table::NodeColumns, Table::PropertyEntries];
 
 /// One step a model run takes on the store under test and on the model alike.
 #[derive(Clone, Debug)]
@@ -67,9 +65,9 @@ pub(crate) enum Query {
         start: Vec<u8>,
         end: Vec<u8>,
     },
-    Cursor {
+    GetWith {
         table: usize,
-        probes: Vec<(Vec<u8>, Reach)>,
+        keys: Vec<Vec<u8>>,
     },
 }
 
@@ -93,10 +91,6 @@ fn length() -> impl Strategy<Value = usize> {
     ]
 }
 
-fn reach() -> impl Strategy<Value = Reach> {
-    prop_oneof![Just(Reach::Step), Just(Reach::Seek), Just(Reach::Lookup)]
-}
-
 fn table() -> impl Strategy<Value = usize> {
     0..TABLES.len()
 }
@@ -111,8 +105,8 @@ fn query() -> impl Strategy<Value = Query> {
             start,
             end,
         }),
-        2 => (table(), vec((key(), reach()), 0..12))
-            .prop_map(|(table, probes)| Query::Cursor { table, probes }),
+        2 => (table(), vec(key(), 0..12))
+            .prop_map(|(table, keys)| Query::GetWith { table, keys }),
     ]
 }
 
@@ -334,18 +328,18 @@ fn check_query(
                 expected_range(snapshot, *table, start, end)
             );
         }
-        Query::Cursor { table, probes } => {
-            let mut cursor = read.cursor(TABLES[*table]).unwrap();
-            for (key, reach) in probes {
-                let found = cursor
-                    .get_with(key, *reach, |value| Ok::<_, StorageError>(value.to_vec()))
+        Query::GetWith { table, keys } => {
+            for key in keys {
+                let found = read
+                    .get_with(TABLES[*table], key, |value| {
+                        Ok::<_, StorageError>(value.to_vec())
+                    })
                     .unwrap();
                 prop_assert_eq!(
                     found,
                     snapshot.get(&(*table, key.clone())).cloned(),
-                    "cursor read of {:?} by {:?}",
-                    key,
-                    reach
+                    "borrowed read of {:?}",
+                    key
                 );
             }
         }

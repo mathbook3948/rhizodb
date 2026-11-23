@@ -51,8 +51,46 @@ impl Choices for ByteChoices<'_> {
 }
 
 const LABELS: [&str; 3] = ["A", "B", "C"];
+const STRINGS_OF_FIVE: [&str; 5] = ["0", "1", "2", "3", "4"];
 const TYPES: [&str; 2] = ["T", "U"];
 const STRINGS: [&str; 4] = ["", "a", "b", "é"];
+
+/// The values of `m`, a property whose type changes from node to node and write to write. No
+/// two of them are equal numbers, so grouping and equality do not depend on how GQL compares
+/// an integer with a float.
+const MIXED: [Mixed; 9] = [
+    Mixed::Int(7),
+    Mixed::Int(-4),
+    Mixed::Float(-0.0),
+    Mixed::Float(2.5),
+    Mixed::Bool(true),
+    Mixed::Bool(false),
+    Mixed::Str("m"),
+    Mixed::Str(""),
+    Mixed::Pair,
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mixed {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(&'static str),
+    /// The list `[1, 'x']`.
+    Pair,
+}
+
+impl Mixed {
+    fn value(self) -> Value {
+        match self {
+            Mixed::Int(value) => Value::Integer(value),
+            Mixed::Float(value) => Value::Float(value),
+            Mixed::Bool(value) => Value::Boolean(value),
+            Mixed::Str(value) => Value::String(value.to_owned()),
+            Mixed::Pair => Value::List(vec![Value::Integer(1), Value::String("x".to_owned())]),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Number {
@@ -81,6 +119,7 @@ struct ModelNode {
     labels: BTreeSet<&'static str>,
     p: Option<Number>,
     q: Option<&'static str>,
+    m: Option<Mixed>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,11 +152,26 @@ enum Step {
     CreateNode(i64, ModelNode),
     SetP(i64, Option<Number>),
     SetQ(i64, Option<&'static str>),
+    SetM(i64, Option<Mixed>),
+    /// Creates nodes with the keys `first..first + count`, each labelled `A` and with `p` and
+    /// `m` chosen by its key, so a bulk insert fills several row groups.
+    CreateMany {
+        first: i64,
+        count: i64,
+    },
+    /// Sets `p` of every node whose key is a multiple of `stride`.
+    SetEveryP {
+        stride: i64,
+        p: Option<Number>,
+    },
     AddLabel(i64, &'static str),
     RemoveLabel(i64, &'static str),
     CreateRel(i64, ModelRel),
     DeleteRel(i64),
-    DeleteNode { key: i64, detach: bool },
+    DeleteNode {
+        key: i64,
+        detach: bool,
+    },
 }
 
 fn parameters(entries: &[(&str, Value)]) -> Parameters {
@@ -141,14 +195,39 @@ impl Step {
                     .map(|label| format!(":{label}"))
                     .collect();
                 (
-                    format!("INSERT (n{labels} {{key: $key}}) SET n.p = $p, n.q = $q"),
+                    format!("INSERT (n{labels} {{key: $key}}) SET n.p = $p, n.q = $q, n.m = $m"),
                     parameters(&[
                         ("key", Value::Integer(*key)),
                         ("p", optional(node.p.map(Number::value))),
                         ("q", optional(node.q.map(|q| Value::String(q.to_owned())))),
+                        ("m", optional(node.m.map(Mixed::value))),
                     ]),
                 )
             }
+            Step::CreateMany { first, count } => (
+                "UNWIND range($first, $first + $count - 1) AS i \
+                 INSERT (n:A {key: i, p: i % 7 - 3}) \
+                 SET n.m = CASE i % 3 WHEN 0 THEN toString(i % 5) WHEN 1 THEN i % 4 = 0 ELSE NULL END"
+                    .to_owned(),
+                parameters(&[
+                    ("first", Value::Integer(*first)),
+                    ("count", Value::Integer(*count)),
+                ]),
+            ),
+            Step::SetEveryP { stride, p } => (
+                "MATCH (n) WHERE n.key % $stride = 0 SET n.p = $p".to_owned(),
+                parameters(&[
+                    ("stride", Value::Integer(*stride)),
+                    ("p", optional(p.map(Number::value))),
+                ]),
+            ),
+            Step::SetM(key, m) => (
+                "MATCH (n {key: $key}) SET n.m = $m".to_owned(),
+                parameters(&[
+                    ("key", Value::Integer(*key)),
+                    ("m", optional(m.map(Mixed::value))),
+                ]),
+            ),
             Step::SetP(key, p) => (
                 "MATCH (n {key: $key}) SET n.p = $p".to_owned(),
                 parameters(&[
@@ -212,6 +291,36 @@ impl Step {
             Step::SetQ(key, q) => {
                 if let Some(node) = model.nodes.get_mut(key) {
                     node.q = *q;
+                }
+            }
+            Step::SetM(key, m) => {
+                if let Some(node) = model.nodes.get_mut(key) {
+                    node.m = *m;
+                }
+            }
+            Step::CreateMany { first, count } => {
+                for key in *first..*first + *count {
+                    let m = match key % 3 {
+                        0 => Some(Mixed::Str(
+                            STRINGS_OF_FIVE[usize::try_from(key % 5).unwrap_or(0)],
+                        )),
+                        1 => Some(Mixed::Bool(key % 4 == 0)),
+                        _ => None,
+                    };
+                    let node = ModelNode {
+                        labels: BTreeSet::from(["A"]),
+                        p: Some(Number::Int(key % 7 - 3)),
+                        q: None,
+                        m,
+                    };
+                    model.nodes.insert(key, node);
+                }
+            }
+            Step::SetEveryP { stride, p } => {
+                for (key, node) in &mut model.nodes {
+                    if key % stride == 0 {
+                        node.p = *p;
+                    }
                 }
             }
             Step::AddLabel(key, label) => {
@@ -309,8 +418,28 @@ impl Run {
         }
     }
 
+    fn mixed(choices: &mut dyn Choices) -> Option<Mixed> {
+        let index = usize::try_from(choices.below(MIXED.len() as u64 + 1)).unwrap_or(0);
+        MIXED.get(index).copied()
+    }
+
     fn step(next_key: &mut i64, model: &Model, choices: &mut dyn Choices) -> Step {
-        match choices.below(12) {
+        match choices.below(15) {
+            12 => Step::SetM(Self::pick_node(*next_key, choices), Self::mixed(choices)),
+            13 => {
+                let first = *next_key;
+                let count = if choices.below(16) == 0 {
+                    4000 + i64::try_from(choices.below(300)).unwrap_or(0)
+                } else {
+                    1 + i64::try_from(choices.below(64)).unwrap_or(0)
+                };
+                *next_key += count;
+                Step::CreateMany { first, count }
+            }
+            14 => Step::SetEveryP {
+                stride: 1 + i64::try_from(choices.below(4)).unwrap_or(0),
+                p: Self::number(choices),
+            },
             0..=2 => {
                 let key = *next_key;
                 *next_key += 1;
@@ -323,12 +452,14 @@ impl Run {
                     0 => None,
                     index => Some(STRINGS[usize::try_from(index - 1).unwrap_or(0)]),
                 };
+                let p = Self::number(choices);
                 Step::CreateNode(
                     key,
                     ModelNode {
                         labels,
-                        p: Self::number(choices),
+                        p,
                         q,
+                        m: Self::mixed(choices),
                     },
                 )
             }
@@ -465,7 +596,7 @@ type Rows = (Vec<Vec<Value>>, Vec<Vec<Value>>);
 
 type Execute<'a> = dyn Fn(&str, &Parameters) -> Result<Vec<Vec<Value>>, String> + 'a;
 
-const NODE_DUMP: &str = "MATCH (n) RETURN n.key, labels(n), n.p, n.q ORDER BY n.key";
+const NODE_DUMP: &str = "MATCH (n) RETURN n.key, labels(n), n.p, n.q, n.m ORDER BY n.key";
 const REL_DUMP: &str = "MATCH (a)-[r]->(b) RETURN r.rk, a.key, type(r), r.w, b.key ORDER BY r.rk";
 
 fn dump(execute: &Execute<'_>) -> Result<Rows, String> {
@@ -509,6 +640,7 @@ fn rows_of(model: &Model) -> Rows {
                 ),
                 optional(node.p.map(Number::value)),
                 optional(node.q.map(|q| Value::String(q.to_owned()))),
+                optional(node.m.map(Mixed::value)),
             ]
         })
         .collect();
@@ -595,7 +727,87 @@ fn check_query(
             .values()
             .filter(move |node| node.labels.contains(label))
     };
-    match choices.below(5) {
+    match choices.below(9) {
+        5 => {
+            let query = format!(
+                "MATCH (n:{label}) RETURN count(n), count(n.p), sum(n.p), min(n.p), max(n.p)"
+            );
+            let numbers: Vec<Number> = labelled().filter_map(|node| node.p).collect();
+            let all_int = numbers
+                .iter()
+                .all(|number| matches!(number, Number::Int(_)));
+            let sum = if all_int {
+                Value::Integer(numbers.iter().map(|number| number.as_f64() as i64).sum())
+            } else {
+                Value::Float(numbers.iter().map(|number| number.as_f64()).sum())
+            };
+            let by_value = |a: &&Number, b: &&Number| a.as_f64().total_cmp(&b.as_f64());
+            let want = vec![vec![
+                Value::Integer(labelled().count() as i64),
+                Value::Integer(numbers.len() as i64),
+                sum,
+                optional(numbers.iter().min_by(by_value).map(|number| number.value())),
+                optional(numbers.iter().max_by(by_value).map(|number| number.value())),
+            ]];
+            expect_rows(execute(&query, &Parameters::new())?, want, &query)
+        }
+        6 => {
+            let query = format!("MATCH (n:{label}) RETURN n.q AS q, count(*) AS c");
+            let mut groups: BTreeMap<Option<&str>, i64> = BTreeMap::new();
+            for node in labelled() {
+                *groups.entry(node.q).or_default() += 1;
+            }
+            let want = groups
+                .into_iter()
+                .map(|(q, count)| {
+                    vec![
+                        optional(q.map(|q| Value::String(q.to_owned()))),
+                        Value::Integer(count),
+                    ]
+                })
+                .collect();
+            expect_rows_in_any_order(execute(&query, &Parameters::new())?, want, &query)
+        }
+        7 => {
+            let query = "MATCH (n) RETURN n.m AS m, count(*) AS c, count(n.p) AS p";
+            let mut groups: Vec<(Option<Mixed>, i64, i64)> = Vec::new();
+            for node in model.nodes.values() {
+                let with_p = i64::from(node.p.is_some());
+                match groups.iter_mut().find(|(m, _, _)| *m == node.m) {
+                    Some(group) => {
+                        group.1 += 1;
+                        group.2 += with_p;
+                    }
+                    None => groups.push((node.m, 1, with_p)),
+                }
+            }
+            let want = groups
+                .into_iter()
+                .map(|(m, count, p)| {
+                    vec![
+                        optional(m.map(Mixed::value)),
+                        Value::Integer(count),
+                        Value::Integer(p),
+                    ]
+                })
+                .collect();
+            expect_rows_in_any_order(execute(query, &Parameters::new())?, want, query)
+        }
+        8 => {
+            let query = "MATCH (n) WHERE n.q IS NOT NULL RETURN n.q, n.key ORDER BY n.q DESC, n.key LIMIT 4";
+            let mut rows: Vec<(&str, i64)> = model
+                .nodes
+                .iter()
+                .filter_map(|(key, node)| node.q.map(|q| (q, *key)))
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(a.0).then(a.1.cmp(&b.1)));
+            let want = rows
+                .into_iter()
+                .take(4)
+                .map(|(q, key)| vec![Value::String(q.to_owned()), Value::Integer(key)])
+                .collect();
+            expect_rows(execute(query, &Parameters::new())?, want, query)
+        }
         0 => {
             let query = format!(
                 "MATCH (n:{label}) WHERE n.p {} $c RETURN count(n)",
@@ -711,4 +923,23 @@ fn expect_count(
             "{query} with {parameters:?}: the database gave {rows:?}, the model {want}"
         )),
     }
+}
+
+fn expect_rows(got: Vec<Vec<Value>>, want: Vec<Vec<Value>>, query: &str) -> Result<(), String> {
+    if got == want {
+        return Ok(());
+    }
+    Err(format!(
+        "{query}: the database gave {got:?}, the model {want:?}"
+    ))
+}
+
+fn expect_rows_in_any_order(
+    mut got: Vec<Vec<Value>>,
+    mut want: Vec<Vec<Value>>,
+    query: &str,
+) -> Result<(), String> {
+    got.sort_by_key(|row| format!("{row:?}"));
+    want.sort_by_key(|row| format!("{row:?}"));
+    expect_rows(got, want, query)
 }

@@ -17,15 +17,13 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
-    fn an_encoded_node_reads_each_property_its_record_holds(
-        properties in properties(),
-        key in (0u32..9).prop_map(Token::new),
-    ) {
+    fn a_node_record_decodes_the_properties_it_encodes(properties in properties()) {
         let record = NodeRecord { labels: BTreeSet::new(), properties };
-        let read = EncodedNode(&record.encode()).property(key).unwrap();
-        prop_assert!(agrees(read, record.properties.get(&key)));
-        let decoded = EncodedNode(&record.encode()).properties().unwrap();
+        let decoded = NodeRecord::decode_properties(&record.encode()).unwrap();
         prop_assert_eq!(decoded.len(), record.properties.len());
+        for (key, value) in &decoded {
+            prop_assert!(agrees(Some(value.clone()), record.properties.get(key)));
+        }
     }
 
     #[test]

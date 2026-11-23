@@ -381,10 +381,10 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
         |write, tokens| {
             write.remove_label(head_id(1), tokens.done_label).unwrap();
         },
-        |write, _| {
+        |write, tokens| {
+            let (group, slot) = crate::graph::meta::locate(tail_id(2));
             write
-                .transaction
-                .delete(Table::Nodes, &keys::element_key(tail_id(2).0))
+                .set_column_value((group, tokens.at_key), slot, None)
                 .unwrap();
         },
         |write, _| {

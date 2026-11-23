@@ -19,7 +19,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - An adjacency index entry holds the node at the other end, so a traversal reads no relationship record.
 - Nodes fall into row groups of 4096 consecutive IDs.
 - Each row group with a live node has one node meta chunk, keyed by the group, that holds a live bitmap and each live node's label set.
-- A node record holds the node's properties, and the node's labels live only in node meta.
+- A node's labels live only in node meta, and its properties live only in property columns.
 - Each distinct set of labels is interned once to a `u32` label set ID in two tables, one by ID and one by labels.
 - Label set ID 0 is the empty set and has no stored entry.
 - Label sets are never deleted.
@@ -39,6 +39,23 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Node meta checksums are CRC-32, which needs no dependency outside the allowed licenses.
 - A write transaction reads each ID and token counter once and writes it once, at commit.
 - Opening a database written before node meta moves each node's labels into node meta and empties the old label index, in the opening write transaction.
+- Each row group keeps one property column per property key that a live node of the group holds, keyed by the group, the key, and a part number.
+- A property column chunk holds a presence bitmap of its group's slots and the values of the present slots in slot order.
+- A property column chunk whose values all have one type stores them in that type's encoding: booleans as bits, integers and floats as eight bytes each, strings as end offsets and one byte heap.
+- A property column chunk whose values differ in type, or are of another type, stores each value in its tagged value encoding.
+- A value of one of the four column types in a mixed chunk reads back as that type, so a chunk re-encoded from its values is the same bytes.
+- Only a live node's slot holds a property value, so deleting a node removes its value from every column of its group.
+- A column with no value has no chunk.
+- A read of one value checks the chunk's head and the one block of 64 values that holds it, and a read of many values of one column in a query loads and checks the chunk once.
+- A query reads only the columns of the properties it reads.
+- A commit that changes a few slots of a column writes one small delta per changed slot beside the chunk, holding the slot's value now.
+- A column keeps at most 64 deltas, and a commit that would leave more rewrites the chunk and deletes them.
+- A delta whose value is the chunk's value again is deleted, with values compared bit for bit, so `-0.0` and `0.0` differ.
+- A property column chunk keeps one checksum over its head and bitmap and one over each block of 64 values, and a varying block's checksum covers the end of the value before it.
+- A property column chunk holds its group and key inside its head checksum, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
+- A write keeps only the bitmap of each stored chunk it edits, and re-encodes the chunk from its stored values only when it rewrites it.
+- Setting a property updates only the indexes on a label of the node that cover that property, and changing a label updates only the indexes on that label.
+- Opening a database written before property columns moves each node record's properties into property columns and deletes the records, in the opening write transaction.
 - Stored property values are null-free.
 - Setting a property to null removes it.
 - A stored value is a boolean, integer, float, string, byte string, temporal value, or a list of stored values.

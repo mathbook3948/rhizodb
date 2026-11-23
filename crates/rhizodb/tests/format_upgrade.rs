@@ -194,3 +194,92 @@ fn a_database_of_format_seven_with_many_label_sets_and_groups_answers_after_the_
         WIDE_ANSWERS_AT_FORMAT_SEVEN,
     );
 }
+
+const FORMAT_EIGHT: &str = "tests/fixtures/format-8.redb";
+
+/// Each query the format 8 generator ran, with the answer it printed at format 8.
+fn answers_at_format_eight() -> Vec<(String, String)> {
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-8.answers"),
+    )
+    .unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len() % 2, 0, "each query has one answer line");
+    lines
+        .chunks(2)
+        .map(|pair| {
+            let answer = pair[1]
+                .strip_prefix("  ")
+                .expect("an answer line is indented");
+            (pair[0].to_owned(), answer.to_owned())
+        })
+        .collect()
+}
+
+fn assert_format_eight_answers(db: &Database) {
+    let answers = answers_at_format_eight();
+    assert_eq!(answers.len(), 13);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn a_database_of_format_eight_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_EIGHT, directory.path());
+    assert_format_eight_answers(&Database::open(&path).unwrap());
+    assert_format_eight_answers(&Database::open(&path).unwrap());
+}
+
+#[test]
+fn a_database_of_format_eight_takes_writes_of_every_type_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_EIGHT, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH (n:Bulk) WHERE n.i % 10 = 0 SET n.i = toString(n.i)",
+        );
+        // A string `i` compares with no integer, so the nodes made strings above stay.
+        run(&db, "MATCH (n:Bulk) WHERE n.i >= 8000 DETACH DELETE n");
+        run(&db, "MATCH (n:Odd) SET n.zero = 0.0, n.new = [1.5]");
+        run(&db, "MATCH (n:Person {name: 'Edsger'}) SET n.age = 31");
+        run(&db, "UNWIND range(1, 5000) AS i CREATE (:Late {i: i})");
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:Bulk) WHERE n.i STARTS WITH '' RETURN count(*)"
+        ),
+        [vec![int(424)]]
+    );
+    assert_eq!(
+        run(&db, "MATCH (n:Bulk) RETURN count(*), max(id(n))"),
+        [vec![int(4146), int(8290)]]
+    );
+    assert_eq!(
+        run(&db, "MATCH (n:Odd) RETURN n.zero, n.new ORDER BY id(n)"),
+        [
+            vec![float(0.0), list(vec![float(1.5)])],
+            vec![float(0.0), list(vec![float(1.5)])]
+        ]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n:Person) WHERE n.age > 30 RETURN n.name ORDER BY n.name"
+        ),
+        [
+            vec![string("Ada")],
+            vec![string("Charles")],
+            vec![string("Edsger")]
+        ]
+    );
+    assert_eq!(
+        run(&db, "MATCH (n:Late) RETURN count(*), sum(n.i), min(id(n))"),
+        [vec![int(5000), int(12_502_500), int(8309)]]
+    );
+}

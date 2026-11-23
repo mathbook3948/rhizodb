@@ -1,9 +1,7 @@
 use std::any::Any;
 use std::cell::OnceCell;
-use std::cmp::Ordering;
 use std::error::Error;
 use std::fmt;
-use std::ops::Bound;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
@@ -20,9 +18,7 @@ use redb::TableDefinition;
 use redb::backends::InMemoryBackend;
 use self_cell::self_cell;
 
-use super::Cursor;
 use super::Entry;
-use super::Reach;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
@@ -474,169 +470,7 @@ fn visit_entries<T: ReadableTable<&'static [u8], &'static [u8]>, E: From<Storage
     })
 }
 
-const MAX_STEPS: usize = 8;
-
-/// A read cursor that keeps its place and the two values it read last.
-pub(crate) struct ReadCursor<'a> {
-    table: &'a Guarded<OpenTable>,
-    place: Option<Place<'a>>,
-    recent: [Option<(Vec<u8>, Option<Guard<'a>>)>; 2],
-    older: usize,
-}
-
-struct Place<'a> {
-    cursor: redb::Cursor<'a, &'static [u8], &'static [u8]>,
-    reached: Vec<u8>,
-    ahead: Option<(Guard<'a>, Guard<'a>)>,
-}
-
-impl<'a> Place<'a> {
-    fn step_to(
-        &mut self,
-        key: &[u8],
-        steps: usize,
-    ) -> Result<Option<Option<Guard<'a>>>, redb::StorageError> {
-        for _ in 0..=steps {
-            let entry = match self.ahead.take() {
-                Some(entry) => Some(entry),
-                None => self.cursor.next()?,
-            };
-            let (ordering, value) = match entry {
-                None => (Ordering::Greater, None),
-                Some((found, value)) => match found.value().cmp(key) {
-                    Ordering::Less => continue,
-                    Ordering::Equal => (Ordering::Equal, Some(value)),
-                    Ordering::Greater => {
-                        self.ahead = Some((found, value));
-                        (Ordering::Greater, None)
-                    }
-                },
-            };
-            self.reached.clear();
-            self.reached.extend_from_slice(key);
-            return Ok(Some(value.filter(|_| ordering == Ordering::Equal)));
-        }
-        Ok(None)
-    }
-}
-
-impl<'a> ReadCursor<'a> {
-    fn seek(
-        &mut self,
-        table: &'a OpenTable,
-        key: &[u8],
-    ) -> Result<Option<Guard<'a>>, redb::StorageError> {
-        let place = self.place.insert(Place {
-            cursor: table.lower_bound(Bound::Included(key))?,
-            reached: Vec::new(),
-            ahead: None,
-        });
-        Ok(place.step_to(key, 0)?.flatten())
-    }
-
-    fn find(
-        &mut self,
-        table: &'a OpenTable,
-        key: &[u8],
-        reach: Reach,
-    ) -> Result<Option<Guard<'a>>, redb::StorageError> {
-        match (reach, &mut self.place) {
-            (Reach::Step, Some(place)) if key > place.reached.as_slice() => {
-                match place.step_to(key, MAX_STEPS)? {
-                    Some(found) => Ok(found),
-                    None => self.seek(table, key),
-                }
-            }
-            (Reach::Lookup, Some(_)) => table.get(key),
-            _ => self.seek(table, key),
-        }
-    }
-
-    fn locate(
-        &mut self,
-        table: &'a OpenTable,
-        key: &[u8],
-        reach: Reach,
-    ) -> Result<Option<&[u8]>, redb::StorageError> {
-        let holds = |entry: &Option<(Vec<u8>, Option<Guard<'_>>)>| matches!(entry, Some((held, _)) if held == key);
-        let newer = 1 - self.older;
-        let slot = if holds(&self.recent[newer]) {
-            newer
-        } else if holds(&self.recent[self.older]) {
-            self.older
-        } else {
-            let slot = self.older;
-            let found = self.find(table, key, reach)?;
-            let (held, value) = self.recent[slot].get_or_insert_with(|| (Vec::new(), None));
-            held.clear();
-            held.extend_from_slice(key);
-            *value = found;
-            slot
-        };
-        self.older = 1 - slot;
-        Ok(match &self.recent[slot] {
-            Some((_, Some(value))) => Some(value.value()),
-            _ => None,
-        })
-    }
-}
-
-impl Drop for ReadCursor<'_> {
-    fn drop(&mut self) {
-        let place = self.place.take();
-        let recent = std::mem::take(&mut self.recent);
-        self.table.poison().release((place, recent));
-    }
-}
-
-impl Cursor for ReadCursor<'_> {
-    fn get_with<R, E: From<StorageError>>(
-        &mut self,
-        key: &[u8],
-        reach: Reach,
-        read: impl FnOnce(&[u8]) -> Result<R, E>,
-    ) -> Result<Option<R>, E> {
-        let table = self.table;
-        let cursor = &mut *self;
-        let value = table
-            .call(move |open| cursor.locate(open, key, reach))?
-            .map_err(redb_error)?;
-        match value {
-            Some(value) => read(value).map(Some),
-            None => Ok(None),
-        }
-    }
-}
-
-/// A write transaction's cursor, which looks each key up on its own.
-pub(crate) struct WriteCursor<'a> {
-    transaction: &'a RedbWrite,
-    table: Table,
-}
-
-impl Cursor for WriteCursor<'_> {
-    fn get_with<R, E: From<StorageError>>(
-        &mut self,
-        key: &[u8],
-        _reach: Reach,
-        read: impl FnOnce(&[u8]) -> Result<R, E>,
-    ) -> Result<Option<R>, E> {
-        self.transaction.get_with(self.table, key, read)
-    }
-}
-
 impl ReadTransaction for RedbRead {
-    type Cursor<'a> = ReadCursor<'a>;
-
-    fn cursor(&self, table: Table) -> Result<ReadCursor<'_>, StorageError> {
-        Ok(ReadCursor {
-            table: self.table(table)?,
-            place: None,
-            recent: [None, None],
-            older: 0,
-        })
-    }
-
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         read_copy(self.table(table)?, key)
     }
@@ -674,15 +508,6 @@ impl ReadTransaction for RedbRead {
 }
 
 impl ReadTransaction for RedbWrite {
-    type Cursor<'a> = WriteCursor<'a>;
-
-    fn cursor(&self, table: Table) -> Result<WriteCursor<'_>, StorageError> {
-        Ok(WriteCursor {
-            transaction: self,
-            table,
-        })
-    }
-
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_table(table, |table| read_copy(table, key))
     }

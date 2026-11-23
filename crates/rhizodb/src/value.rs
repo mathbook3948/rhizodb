@@ -11,10 +11,10 @@ use crate::temporal::Time;
 
 pub(crate) const MAX_DEPTH: usize = 64;
 
-const TAG_BOOLEAN: u8 = 0;
-const TAG_INTEGER: u8 = 1;
-const TAG_FLOAT: u8 = 2;
-const TAG_STRING: u8 = 3;
+pub(crate) const TAG_BOOLEAN: u8 = 0;
+pub(crate) const TAG_INTEGER: u8 = 1;
+pub(crate) const TAG_FLOAT: u8 = 2;
+pub(crate) const TAG_STRING: u8 = 3;
 const TAG_BYTES: u8 = 4;
 const TAG_LIST: u8 = 5;
 const TAG_DATE: u8 = 6;

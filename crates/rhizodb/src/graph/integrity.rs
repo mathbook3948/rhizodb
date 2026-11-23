@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
 use crate::storage::Table;
+use crate::value::PropertyValue;
 
 use super::FORMAT_VERSION;
 use super::GraphError;
@@ -12,6 +13,7 @@ use super::NodeId;
 use super::NodeRecord;
 use super::RelationshipId;
 use super::RelationshipRecord;
+use super::columns;
 use super::decode_u32;
 use super::decode_u64;
 use super::ids::Label;
@@ -91,8 +93,18 @@ pub(crate) enum IntegrityViolation {
         node: NodeId,
         set: u32,
     },
-    MissingNodeMeta(NodeId),
-    MissingNodeRecord(NodeId),
+    PropertyOfMissingNode {
+        node: NodeId,
+        key: u32,
+    },
+    NonCanonicalColumn {
+        group: u64,
+        key: u32,
+    },
+    StrayColumnDelta {
+        node: NodeId,
+        key: u32,
+    },
     NonCanonicalNodeMeta(u64),
     StrayNodeMetaDelta(NodeId),
     DuplicateIndexId(u32),
@@ -154,7 +166,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     check_named(RelationshipType::TAG, rel_type.id());
                 }
             }
-            for property in covered_properties(&index.definition.kind) {
+            for property in index.definition.kind.properties() {
                 check_named(PropertyKey::TAG, property.id());
             }
         }
@@ -412,32 +424,71 @@ impl<T: ReadTransaction> GraphTx<T> {
                 live.insert(node, set);
             }
         }
+        let properties = self.load_columns(&live, violations)?;
         let mut nodes = BTreeMap::new();
-        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
-            let (Ok(id), Ok(properties)) =
-                (decode_u64(&key), NodeRecord::decode_properties(&value))
-            else {
-                violations.push(IntegrityViolation::Undecodable {
-                    table: Table::Nodes,
-                    key,
-                });
-                continue;
-            };
-            let id = NodeId(id);
-            let Some(set) = live.remove(&id) else {
-                violations.push(IntegrityViolation::MissingNodeMeta(id));
-                continue;
-            };
+        for (node, set) in live {
             let labels = label_sets
                 .get(&set)
                 .map(|labels| labels.iter().copied().collect())
                 .unwrap_or_default();
-            nodes.insert(id, NodeRecord { labels, properties });
-        }
-        for node in live.into_keys() {
-            violations.push(IntegrityViolation::MissingNodeRecord(node));
+            let properties = properties.get(&node).cloned().unwrap_or_default();
+            nodes.insert(node, NodeRecord { labels, properties });
         }
         Ok(nodes)
+    }
+
+    fn load_columns(
+        &self,
+        live: &BTreeMap<NodeId, LabelSetId>,
+        violations: &mut Vec<IntegrityViolation>,
+    ) -> Result<BTreeMap<NodeId, Properties>, GraphError> {
+        let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = self
+            .transaction
+            .scan_prefix(Table::NodeColumns, &[])?
+            .into_iter()
+            .collect();
+        for (id, edit) in &self.columns {
+            for (key, value) in self.column_writes(*id, edit.clone())? {
+                match value {
+                    Some(value) => entries.insert(key.to_vec(), value),
+                    None => entries.remove(key.as_slice()),
+                };
+            }
+        }
+        let mut stored: BTreeMap<columns::ColumnId, StoredGroup> = BTreeMap::new();
+        for (key, value) in entries {
+            match columns::parse_key(&key) {
+                Ok((group, token, columns::Part::Chunk)) => {
+                    stored.entry((group, token)).or_default().chunk = Some(value);
+                }
+                Ok((group, token, columns::Part::Delta(_))) => {
+                    stored
+                        .entry((group, token))
+                        .or_default()
+                        .deltas
+                        .push((key, value));
+                }
+                Err(_) => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::NodeColumns,
+                    key,
+                }),
+            }
+        }
+        let mut properties: BTreeMap<NodeId, Properties> = BTreeMap::new();
+        for ((group, token), column) in stored {
+            for (slot, value) in check_column(group, token, column, violations)? {
+                let node = meta::node_at(group, slot);
+                if live.contains_key(&node) {
+                    properties.entry(node).or_default().insert(token, value);
+                } else {
+                    violations.push(IntegrityViolation::PropertyOfMissingNode {
+                        node,
+                        key: token.id(),
+                    });
+                }
+            }
+        }
+        Ok(properties)
     }
 
     fn load_relationships(
@@ -696,6 +747,71 @@ fn check_group(
     Ok(Some(edit))
 }
 
+fn check_column(
+    group: u64,
+    token: Token<PropertyKey>,
+    stored: StoredGroup,
+    violations: &mut Vec<IntegrityViolation>,
+) -> Result<BTreeMap<usize, PropertyValue>, GraphError> {
+    let key = token.id();
+    let undecodable = |key: Vec<u8>| IntegrityViolation::Undecodable {
+        table: Table::NodeColumns,
+        key,
+    };
+    let Some(chunk) = stored.chunk else {
+        for (delta_key, value) in stored.deltas {
+            match columns::parse_delta(&delta_key, &value) {
+                Ok((slot, _)) => violations.push(IntegrityViolation::StrayColumnDelta {
+                    node: meta::node_at(group, slot),
+                    key,
+                }),
+                Err(_) => violations.push(undecodable(delta_key)),
+            }
+        }
+        return Ok(BTreeMap::new());
+    };
+    let decoded = columns::ChunkRef::parse(group, token, &chunk).and_then(|view| {
+        view.verify()?;
+        view.cells()
+            .map(|cell| {
+                let (slot, cell) = cell?;
+                Ok((slot, cell.to_value()?))
+            })
+            .collect::<Result<BTreeMap<usize, PropertyValue>, GraphError>>()
+    });
+    let Ok(mut values) = decoded else {
+        violations.push(undecodable(columns::chunk_key(group, token).to_vec()));
+        return Ok(BTreeMap::new());
+    };
+    let cells: Vec<(usize, columns::Cell<'_>)> = values
+        .iter()
+        .map(|(slot, value)| (*slot, columns::Cell::of(value)))
+        .collect();
+    let mut canonical = columns::encode_chunk(group, token, &cells)?.as_deref() == Some(&chunk[..]);
+    canonical &= stored.deltas.len() <= columns::MAX_DELTAS;
+    let mut changes = BTreeMap::new();
+    for (delta_key, bytes) in stored.deltas {
+        let Ok((slot, after)) = columns::parse_delta(&delta_key, &bytes) else {
+            violations.push(undecodable(delta_key));
+            continue;
+        };
+        let before = values.get(&slot).map(columns::Cell::of);
+        canonical &= !columns::same_state(before, after.as_ref().map(columns::Cell::of));
+        changes.insert(slot, after);
+    }
+    for (slot, after) in changes {
+        match after {
+            Some(value) => values.insert(slot, value),
+            None => values.remove(&slot),
+        };
+    }
+    canonical &= !values.is_empty();
+    if !canonical {
+        violations.push(IntegrityViolation::NonCanonicalColumn { group, key });
+    }
+    Ok(values)
+}
+
 fn encode(
     group: u64,
     edit: &MetaEdit,
@@ -706,15 +822,6 @@ fn encode(
             "a node has a label set that does not exist",
         ))
     })
-}
-
-fn covered_properties(kind: &IndexKind) -> &[Token<PropertyKey>] {
-    match kind {
-        IndexKind::Keyword { properties } => properties,
-        IndexKind::Vector { property, .. } | IndexKind::Property { property } => {
-            std::slice::from_ref(property)
-        }
-    }
 }
 
 fn check_properties(properties: &Properties, check_named: &mut impl FnMut(u8, u32)) {

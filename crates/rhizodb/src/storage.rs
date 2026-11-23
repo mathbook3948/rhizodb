@@ -15,6 +15,8 @@ pub(crate) enum Table {
     Metadata,
     TokenByName,
     TokenById,
+    /// The node records of format versions before property columns, which only their upgrade
+    /// reads.
     Nodes,
     Relationships,
     Outgoing,
@@ -30,10 +32,11 @@ pub(crate) enum Table {
     NodeChunks,
     LabelSets,
     LabelSetByTokens,
+    NodeColumns,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 17] = [
+    pub(crate) const ALL: [Table; 18] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -51,12 +54,13 @@ impl Table {
         Table::NodeChunks,
         Table::LabelSets,
         Table::LabelSetByTokens,
+        Table::NodeColumns,
     ];
 
     /// Whether only the upgrade of an older format version reads the table, so a new database
     /// does not create it.
     pub(crate) const fn is_legacy(self) -> bool {
-        matches!(self, Table::LabelIndex)
+        matches!(self, Table::LabelIndex | Table::Nodes)
     }
 
     pub(crate) const fn name(self) -> &'static str {
@@ -78,6 +82,7 @@ impl Table {
             Table::NodeChunks => "node_chunks",
             Table::LabelSets => "label_sets",
             Table::LabelSetByTokens => "label_set_by_tokens",
+            Table::NodeColumns => "node_columns",
         }
     }
 }
@@ -140,14 +145,6 @@ pub(crate) trait Storage {
 }
 
 pub(crate) trait ReadTransaction {
-    type Cursor<'a>: Cursor
-    where
-        Self: 'a;
-
-    /// A cursor that reads entries of `table` by key, cheapest when the keys come in ascending
-    /// order.
-    fn cursor(&self, table: Table) -> Result<Self::Cursor<'_>, StorageError>;
-
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Every entry whose key starts with `prefix`, in ascending key order. An empty prefix scans the table.
@@ -177,29 +174,6 @@ pub(crate) trait ReadTransaction {
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
-}
-
-/// How a cursor reaches the key it reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Reach {
-    /// Steps forward from the cursor's place, for a key just after the one it reached last.
-    Step,
-    /// Moves the cursor's place to the key with a search from the root.
-    Seek,
-    /// Looks the key up and leaves the cursor's place where it is.
-    Lookup,
-}
-
-/// Reads the entries of one table by key. A cursor may keep the values it read last at hand, so
-/// reading one of their keys again costs nothing.
-pub(crate) trait Cursor {
-    /// Calls `read` with the value stored under `key`, without copying it.
-    fn get_with<R, E: From<StorageError>>(
-        &mut self,
-        key: &[u8],
-        reach: Reach,
-        read: impl FnOnce(&[u8]) -> Result<R, E>,
-    ) -> Result<Option<R>, E>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

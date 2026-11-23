@@ -10,12 +10,11 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
-use crate::graph::EncodedNode;
+use crate::graph::ColumnReader;
 use crate::graph::GraphTx;
 use crate::graph::Label;
 use crate::graph::LabelReader;
 use crate::graph::NodeId;
-use crate::graph::NodeReader;
 use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
@@ -55,8 +54,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) patterns: &'a Patterns,
     /// Set when evaluation only looks for the type errors the query text fixes.
     pub(crate) check: Option<&'a Check>,
-    /// The reader of node records, opened on the first read.
-    pub(crate) nodes: RefCell<Option<NodeReader<'a, T>>>,
+    /// The property columns read so far.
+    pub(crate) columns: RefCell<ColumnReader>,
     /// The property keys looked up so far that have a token.
     pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
     /// The reader of node labels, opened on the first read.
@@ -110,9 +109,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let labels = self
             .with_labels(id, |labels| labels.iter().copied().collect())?
             .ok_or_else(deleted)?;
-        let properties = self
-            .with_node(id, |node| Ok(node.properties()?))?
-            .ok_or_else(deleted)?;
+        let properties = self.node_properties(id)?.ok_or_else(deleted)?;
         Ok(NodeRecord { labels, properties })
     }
 
@@ -147,21 +144,41 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(token)
     }
 
-    /// Calls `read` with the stored record of the node with ID `id`, if there is one. A read
-    /// started inside `read` looks the record up on its own.
-    pub(crate) fn with_node<R>(
+    /// One property of the node with ID `id`, or `None` when there is no such node. A `key` of
+    /// `None` names a property no node holds.
+    pub(crate) fn node_property(
         &self,
         id: NodeId,
-        read: impl FnOnce(EncodedNode<'_>) -> Result<R, Error>,
-    ) -> Result<Option<R>, Error> {
-        let Ok(mut nodes) = self.nodes.try_borrow_mut() else {
-            return self.tx.with_node(id, read);
+        key: Option<Token<PropertyKey>>,
+    ) -> Result<Option<Option<crate::value::PropertyValue>>, Error> {
+        let (Ok(mut labels), Ok(mut columns)) =
+            (self.labels.try_borrow_mut(), self.columns.try_borrow_mut())
+        else {
+            return Ok(self.tx.node_property(
+                &mut LabelReader::default(),
+                &mut ColumnReader::default(),
+                id,
+                key,
+            )?);
         };
-        let reader = match &mut *nodes {
-            Some(reader) => reader,
-            empty => empty.insert(self.tx.node_reader()?),
+        Ok(self.tx.node_property(&mut labels, &mut columns, id, key)?)
+    }
+
+    /// Every property of the node with ID `id`, or `None` when there is no such node.
+    pub(crate) fn node_properties(
+        &self,
+        id: NodeId,
+    ) -> Result<Option<crate::graph::Properties>, Error> {
+        let (Ok(mut labels), Ok(mut columns)) =
+            (self.labels.try_borrow_mut(), self.columns.try_borrow_mut())
+        else {
+            return Ok(self.tx.node_properties(
+                &mut LabelReader::default(),
+                &mut ColumnReader::default(),
+                id,
+            )?);
         };
-        reader.with_node(id, read)
+        Ok(self.tx.node_properties(&mut labels, &mut columns, id)?)
     }
 
     pub(crate) fn relationship(&self, id: RelationshipId) -> Result<RelationshipRecord, Error> {
@@ -209,11 +226,8 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
         let token = self.property_key(key)?;
         let stored = match (value, token) {
-            (Datum::Node(id), Some(token)) => {
-                self.with_node(*id, |node| Ok(node.property(token)?))?
-            }
+            (Datum::Node(id), token) => self.node_property(*id, token)?,
             (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
-            (Datum::Node(id), None) => self.with_node(*id, |_| Ok(None))?,
             (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
             _ => return Ok(None),
         };

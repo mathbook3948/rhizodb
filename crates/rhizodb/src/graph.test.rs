@@ -443,10 +443,10 @@ fn a_version_six_database_reads_its_float_lists_after_the_upgrade() {
             PropertyValue::Float(-1.0)
         ]))
     );
-    let after = read
-        .with_node(NodeId(0), |node| node.property(Token::new(1)))
-        .unwrap();
-    assert_eq!(after, Some(Some(PropertyValue::Integer(7))));
+    assert_eq!(
+        node.properties.get(&Token::new(1)),
+        Some(&PropertyValue::Integer(7))
+    );
 }
 
 #[test]
@@ -466,7 +466,14 @@ fn a_property_after_a_list_of_single_precision_floats_reads_back() {
 
     let read = graph.read().unwrap();
     assert_eq!(read.node(node).unwrap(), Some(record));
-    let found = read.with_node(node, |node| node.property(age)).unwrap();
+    let found = read
+        .node_property(
+            &mut LabelReader::default(),
+            &mut ColumnReader::default(),
+            node,
+            Some(age),
+        )
+        .unwrap();
     assert_eq!(found, Some(Some(PropertyValue::Integer(41))));
 }
 
@@ -554,6 +561,76 @@ fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() 
     assert_eq!(read.check_integrity().unwrap(), vec![]);
 }
 
+/// Deletes every property column and returns the properties they held, by node.
+pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId, Properties> {
+    let mut nodes: BTreeMap<NodeId, Properties> = BTreeMap::new();
+    let mut chunk = None;
+    let mut deltas: BTreeMap<usize, Option<PropertyValue>> = BTreeMap::new();
+    let mut flush = |id: Option<columns::ColumnId>,
+                     chunk: &mut Option<columns::Column>,
+                     deltas: &mut BTreeMap<usize, Option<PropertyValue>>| {
+        let Some((group, token)) = id else {
+            return;
+        };
+        for slot in 0..meta::SLOTS {
+            let stored = chunk
+                .as_ref()
+                .and_then(|chunk: &columns::Column| chunk.cell_at(slot).unwrap())
+                .map(|cell| cell.to_value().unwrap());
+            let value = deltas.remove(&slot).unwrap_or(stored);
+            if let Some(value) = value {
+                nodes
+                    .entry(meta::node_at(group, slot))
+                    .or_default()
+                    .insert(token, value);
+            }
+        }
+        *chunk = None;
+    };
+    let mut current = None;
+    for (key, value) in write.scan_prefix(Table::NodeColumns, &[]).unwrap() {
+        let (group, token, part) = columns::parse_key(&key).unwrap();
+        if current != Some((group, token)) {
+            flush(current, &mut chunk, &mut deltas);
+            current = Some((group, token));
+        }
+        match part {
+            columns::Part::Chunk => {
+                chunk = Some(columns::Column::load(group, token, &value).unwrap());
+            }
+            columns::Part::Delta(_) => {
+                let (slot, value) = columns::parse_delta(&key, &value).unwrap();
+                deltas.insert(slot, value);
+            }
+        }
+        write.delete(Table::NodeColumns, &key).unwrap();
+    }
+    flush(current, &mut chunk, &mut deltas);
+    nodes
+}
+
+/// Rewrites a database of the current format in the layout of format 8, which kept each node's
+/// properties in one record under its ID, so a test can open it as an older version.
+pub(crate) fn store_as_format_eight(write: &mut impl WriteTransaction) {
+    for (node, properties) in take_columns(write) {
+        let record = NodeRecord {
+            labels: BTreeSet::new(),
+            properties,
+        }
+        .encode();
+        write
+            .put(Table::Nodes, &keys::element_key(node.0), &record)
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &8u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
 /// Rewrites a database of the current format in the layout of format 7, which kept each node's
 /// labels at the front of its record and in a label index, so a test can open it as an older
 /// version.
@@ -589,9 +666,8 @@ pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
             labels.insert(meta::node_at(group, slot), held);
         }
     }
-    for (key, value) in write.scan_prefix(Table::Nodes, &[]).unwrap() {
-        let node = NodeId(decode_u64(&key).unwrap());
-        let held = labels.get(&node).cloned().unwrap_or_else(|| Arc::from([]));
+    let mut properties = take_columns(write);
+    for (node, held) in labels {
         let mut record = Vec::new();
         crate::value::put_varint(&mut record, held.len());
         for label in held.iter() {
@@ -600,9 +676,19 @@ pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
                 .put(Table::LabelIndex, &keys::label_key(*label, node), &[])
                 .unwrap();
         }
-        record.extend_from_slice(&value);
-        write.put(Table::Nodes, &key, &record).unwrap();
+        let properties = properties.remove(&node).unwrap_or_default();
+        record.extend_from_slice(
+            &NodeRecord {
+                labels: BTreeSet::new(),
+                properties,
+            }
+            .encode(),
+        );
+        write
+            .put(Table::Nodes, &keys::element_key(node.0), &record)
+            .unwrap();
     }
+    assert!(properties.is_empty(), "a property column holds a dead node");
     write
         .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
         .unwrap();

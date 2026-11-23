@@ -6,7 +6,6 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 use crate::value::put_varint;
 
-use super::GraphError;
 use super::ids::Label;
 use super::ids::NodeId;
 use super::ids::PropertyKey;
@@ -68,25 +67,6 @@ fn find_property(
         reader.skip_value()?;
     }
     Ok(None)
-}
-
-/// A node's stored properties, read one at a time instead of decoded whole. The node's labels
-/// live in its group's node meta.
-#[derive(Debug)]
-pub(crate) struct EncodedNode<'a>(pub(super) &'a [u8]);
-
-impl EncodedNode<'_> {
-    /// The value of `key`, decoding none of the other values.
-    pub(crate) fn property(
-        &self,
-        key: Token<PropertyKey>,
-    ) -> Result<Option<PropertyValue>, GraphError> {
-        Ok(find_property(&mut Reader::new(self.0), key)?)
-    }
-
-    pub(crate) fn properties(&self) -> Result<Properties, GraphError> {
-        Ok(NodeRecord::decode_properties(self.0)?)
-    }
 }
 
 impl NodeRecord {

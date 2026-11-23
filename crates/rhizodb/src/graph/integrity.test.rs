@@ -149,11 +149,11 @@ fn a_foreign_format_version_is_caught() {
                 .put(
                     Table::Metadata,
                     keys::FORMAT_VERSION_KEY,
-                    &9u32.to_be_bytes(),
+                    &(FORMAT_VERSION + 1).to_be_bytes(),
                 )
                 .unwrap();
         },
-        IntegrityViolation::FormatVersionMismatch(9),
+        IntegrityViolation::FormatVersionMismatch(FORMAT_VERSION + 1),
     );
 }
 
@@ -161,9 +161,7 @@ fn a_foreign_format_version_is_caught() {
 fn a_relationship_with_a_missing_source_is_caught() {
     assert_caught(
         |write| {
-            write
-                .delete(Table::Nodes, &keys::element_key(ALICE.0))
-                .unwrap();
+            kill(write, ALICE);
         },
         IntegrityViolation::DanglingEndpoint {
             relationship: FRIENDSHIP,
@@ -176,9 +174,7 @@ fn a_relationship_with_a_missing_source_is_caught() {
 fn a_relationship_with_a_missing_target_is_caught() {
     assert_caught(
         |write| {
-            write
-                .delete(Table::Nodes, &keys::element_key(BOB.0))
-                .unwrap();
+            kill(write, BOB);
         },
         IntegrityViolation::DanglingEndpoint {
             relationship: FRIENDSHIP,
@@ -344,6 +340,31 @@ fn put_delta(write: &mut Write<'_>, group: u64, delta: meta::Delta) {
         .unwrap();
 }
 
+fn kill(write: &mut Write<'_>, node: NodeId) {
+    let (group, slot) = meta::locate(node);
+    put_delta(
+        write,
+        group,
+        meta::Delta {
+            slot,
+            before: Some(LabelSetId(PERSON_SET)),
+            after: None,
+        },
+    );
+}
+
+fn put_column_delta(write: &mut Write<'_>, group: u64, slot: usize, value: Option<PropertyValue>) {
+    let token = Token::new(NAME);
+    let bytes = columns::encode_delta(group, token, slot, value.as_ref().map(columns::Cell::of));
+    write
+        .put(
+            Table::NodeColumns,
+            &columns::delta_key(group, token, slot),
+            &bytes,
+        )
+        .unwrap();
+}
+
 #[test]
 fn a_node_meta_delta_that_does_not_amend_its_chunk_is_caught() {
     assert_caught(
@@ -424,26 +445,147 @@ fn more_node_meta_deltas_than_a_group_keeps_are_caught() {
 }
 
 #[test]
-fn a_node_record_without_node_meta_is_caught() {
+fn a_property_of_a_node_that_is_not_live_is_caught() {
     assert_caught(
-        |write| {
-            write
-                .put(Table::Nodes, &keys::element_key(40), &[0])
-                .unwrap();
+        |write| put_column_delta(write, 0, 40, Some(PropertyValue::Integer(1))),
+        IntegrityViolation::PropertyOfMissingNode {
+            node: NodeId(40),
+            key: NAME,
         },
-        IntegrityViolation::MissingNodeMeta(NodeId(40)),
     );
 }
 
 #[test]
-fn a_live_node_without_a_record_is_caught() {
+fn a_property_of_a_deleted_node_is_caught() {
+    assert_caught(
+        |write| kill(write, ALICE),
+        IntegrityViolation::PropertyOfMissingNode {
+            node: ALICE,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_delta_without_a_chunk_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 7, 3, Some(PropertyValue::Integer(1))),
+        IntegrityViolation::StrayColumnDelta {
+            node: meta::node_at(7, 3),
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_delta_that_changes_nothing_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 0, 0, Some(PropertyValue::String("Alice".to_owned()))),
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_delta_that_removes_an_absent_value_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 0, 1, None),
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_whose_deltas_leave_it_empty_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 0, 0, None),
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn more_column_deltas_than_a_column_keeps_are_caught() {
+    assert_caught(
+        |write| {
+            for slot in 100..101 + columns::MAX_DELTAS {
+                put_column_delta(write, 0, slot, Some(PropertyValue::Integer(1)));
+            }
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_chunk_in_another_encoding_than_its_values_take_is_caught() {
+    assert_caught(
+        |write| {
+            let mut tagged = Vec::new();
+            PropertyValue::String("Alice".to_owned()).encode_into(&mut tagged);
+            let chunk =
+                columns::encode_chunk(0, Token::new(NAME), &[(0, columns::Cell::Encoded(&tagged))])
+                    .unwrap()
+                    .unwrap();
+            write
+                .put(
+                    Table::NodeColumns,
+                    &columns::chunk_key(0, Token::new(NAME)),
+                    &chunk,
+                )
+                .unwrap();
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn an_unreadable_column_chunk_is_caught() {
+    let key = columns::chunk_key(0, Token::new(NAME));
+    assert_caught(
+        |write| write.put(Table::NodeColumns, &key, &[0xff]).unwrap(),
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
+fn an_unreadable_column_delta_is_caught() {
+    let key = columns::delta_key(0, Token::new(NAME), 1);
     assert_caught(
         |write| {
             write
-                .delete(Table::Nodes, &keys::element_key(CAROL.0))
-                .unwrap();
+                .put(Table::NodeColumns, &key, &[1, 0, 0, 0, 0])
+                .unwrap()
         },
-        IntegrityViolation::MissingNodeRecord(CAROL),
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
+fn a_column_key_of_the_wrong_length_is_caught() {
+    assert_caught(
+        |write| write.put(Table::NodeColumns, &[0; 15], &[]).unwrap(),
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: vec![0; 15],
+        },
     );
 }
 
@@ -668,21 +810,6 @@ fn a_token_counter_that_is_not_above_the_highest_token_is_caught() {
         IntegrityViolation::CounterNotAboveAllocated {
             counter: Counter::Token(Label::TAG),
             highest: u64::from(PERSON),
-        },
-    );
-}
-
-#[test]
-fn an_unreadable_node_record_is_caught() {
-    assert_caught(
-        |write| {
-            write
-                .put(Table::Nodes, &keys::element_key(BOB.0), &[0xff])
-                .unwrap();
-        },
-        IntegrityViolation::Undecodable {
-            table: Table::Nodes,
-            key: keys::element_key(BOB.0).to_vec(),
         },
     );
 }

@@ -113,7 +113,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             graveyard: &*self.graveyard,
             patterns: self.patterns,
             check: None,
-            nodes: RefCell::default(),
+            columns: RefCell::default(),
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
@@ -395,7 +395,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
         if detach {
             for node in &nodes {
-                if self.tx.with_node(*node, |_| Ok::<_, Error>(()))?.is_some() {
+                if self.tx.node_label_set(*node)?.is_some() {
                     for adjacent in self.tx.adjacent(*node, Adjacency::Both, None)? {
                         relationships.push(adjacent.relationship);
                     }

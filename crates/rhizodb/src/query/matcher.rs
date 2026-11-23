@@ -137,8 +137,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(true);
         };
         let expected = self.expected_properties(expected, row)?;
-        let matches = self.with_node(id, |node| holds(&expected, |key| Ok(node.property(key)?)))?;
-        Ok(matches == Some(true))
+        holds(&expected, |key| {
+            Ok(self.node_property(id, Some(key))?.flatten())
+        })
     }
 
     fn relationship_matches(

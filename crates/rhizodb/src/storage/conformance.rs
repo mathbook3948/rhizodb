@@ -6,9 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use super::Cursor;
 use super::Entry;
-use super::Reach;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
@@ -28,7 +26,7 @@ type Case<H> = (&'static str, fn(&mut H));
 /// Runs every conformance case on a store from a fresh harness, and fails naming each case
 /// that failed.
 pub(crate) fn run<H: Harness>(mut fresh: impl FnMut() -> H) {
-    let cases: [Case<H>; 20] = [
+    let cases: [Case<H>; 18] = [
         ("reads_what_was_committed", reads_what_was_committed),
         ("a_put_replaces_the_value", a_put_replaces_the_value),
         ("a_delete_removes_its_key", a_delete_removes_its_key),
@@ -61,16 +59,8 @@ pub(crate) fn run<H: Harness>(mut fresh: impl FnMut() -> H) {
             get_with_hands_over_the_value_and_errors,
         ),
         (
-            "a_cursor_reads_what_get_reads",
-            a_cursor_reads_what_get_reads,
-        ),
-        (
             "a_write_transaction_reads_its_own_writes",
             a_write_transaction_reads_its_own_writes,
-        ),
-        (
-            "a_write_cursor_sees_later_writes",
-            a_write_cursor_sees_later_writes,
         ),
         (
             "rollback_and_drop_discard_writes",
@@ -409,59 +399,6 @@ fn get_with_hands_over_the_value_and_errors<H: Harness>(harness: &mut H) {
     );
 }
 
-fn check_cursor(read: &impl ReadTransaction, table: Table, probes: &[(u64, Reach)]) {
-    let mut cursor = read.cursor(table).unwrap();
-    for (key, reach) in probes {
-        let key = key.to_be_bytes();
-        let found = cursor
-            .get_with(&key, *reach, |value| Ok::<_, StorageError>(value.to_vec()))
-            .unwrap();
-        assert_eq!(
-            found,
-            read.get(table, &key).unwrap(),
-            "key {key:?} by {reach:?}"
-        );
-    }
-}
-
-fn cursor_probes() -> Vec<(u64, Reach)> {
-    let reaches = [Reach::Step, Reach::Seek, Reach::Lookup];
-    let order = (0..45)
-        .chain([3, 3, 2, 40, 0, 44, 1, 1])
-        .chain((0..45).rev())
-        .chain((0..45).step_by(7));
-    order
-        .enumerate()
-        .map(|(index, key)| (key, reaches[index * 7 % 3]))
-        .collect()
-}
-
-fn a_cursor_reads_what_get_reads<H: Harness>(harness: &mut H) {
-    let store = harness.open();
-    let stored: Vec<([u8; 8], Vec<u8>)> = (0..40u64)
-        .step_by(3)
-        .map(|key| (key.to_be_bytes(), patterned(key as usize % 5, key as u8)))
-        .collect();
-    let pairs: Vec<(&[u8], &[u8])> = stored
-        .iter()
-        .map(|(key, value)| (key.as_slice(), value.as_slice()))
-        .collect();
-    put_all(&store, Table::Nodes, &pairs);
-    let read = store.begin_read().unwrap();
-    for reach in [Reach::Step, Reach::Seek, Reach::Lookup] {
-        let probes: Vec<(u64, Reach)> = (0..45).map(|key| (key, reach)).collect();
-        check_cursor(&read, Table::Nodes, &probes);
-    }
-    check_cursor(&read, Table::Nodes, &cursor_probes());
-    check_cursor(&read, Table::Relationships, &cursor_probes());
-    let mut write = store.begin_write().unwrap();
-    write.delete(Table::Nodes, &3u64.to_be_bytes()).unwrap();
-    write
-        .put(Table::Nodes, &4u64.to_be_bytes(), b"new")
-        .unwrap();
-    check_cursor(&write, Table::Nodes, &cursor_probes());
-}
-
 fn a_write_transaction_reads_its_own_writes<H: Harness>(harness: &mut H) {
     let store = harness.open();
     put_all(
@@ -502,25 +439,6 @@ fn a_write_transaction_reads_its_own_writes<H: Harness>(harness: &mut H) {
         dump(&store.begin_read().unwrap(), Table::LabelIndex),
         entries(&[(b"a1", b"new"), (b"a3", b"added"), (b"b1", b"old")])
     );
-}
-
-fn a_write_cursor_sees_later_writes<H: Harness>(harness: &mut H) {
-    let store = harness.open();
-    let key = 1u64.to_be_bytes();
-    let read_by_cursor = |write: &<H::Store as Storage>::Write<'_>, reach| {
-        write
-            .cursor(Table::Nodes)
-            .unwrap()
-            .get_with(&key, reach, |value| Ok::<_, StorageError>(value.to_vec()))
-            .unwrap()
-    };
-    let mut write = store.begin_write().unwrap();
-    write.put(Table::Nodes, &key, b"1").unwrap();
-    assert_eq!(read_by_cursor(&write, Reach::Seek), Some(b"1".to_vec()));
-    write.put(Table::Nodes, &key, b"2").unwrap();
-    assert_eq!(read_by_cursor(&write, Reach::Step), Some(b"2".to_vec()));
-    write.delete(Table::Nodes, &key).unwrap();
-    assert_eq!(read_by_cursor(&write, Reach::Lookup), None);
 }
 
 fn rollback_and_drop_discard_writes<H: Harness>(harness: &mut H) {
@@ -577,7 +495,6 @@ fn a_reader_keeps_its_snapshot_across_commits<H: Harness>(harness: &mut H) {
     );
     assert_eq!(first.get(Table::Nodes, b"c").unwrap(), Some(b"1".to_vec()));
     assert_eq!(copied(&second, Table::Nodes, b"c"), None);
-    check_cursor(&first, Table::Nodes, &cursor_probes());
 }
 
 fn a_reader_begun_during_a_write_does_not_see_it<H: Harness>(harness: &mut H) {
