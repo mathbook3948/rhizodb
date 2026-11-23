@@ -3,6 +3,7 @@ use std::io::ErrorKind;
 use super::*;
 use crate::engine::mem_fs::MemFs;
 use crate::engine::os_fs::OsFs;
+use crate::engine::sim_fs::SimFs;
 
 fn page(fill: u8) -> Page {
     [fill; PAGE_SIZE]
@@ -68,6 +69,7 @@ fn every_file_system_holds_pages_by_number() {
     let directory = tempfile::tempdir().unwrap();
     holds_pages_by_number(&OsFs::new(directory.path()));
     holds_pages_by_number(&MemFs::default());
+    holds_pages_by_number(&SimFs::new());
 }
 
 #[test]
@@ -75,6 +77,7 @@ fn every_file_system_creates_renames_and_removes_files() {
     let directory = tempfile::tempdir().unwrap();
     names_files(&OsFs::new(directory.path()));
     names_files(&MemFs::default());
+    names_files(&SimFs::new());
 }
 
 #[test]
