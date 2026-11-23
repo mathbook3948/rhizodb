@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -7,6 +8,7 @@ use redb::ReadableDatabase;
 use redb::ReadableTable;
 use redb::TableDefinition;
 use redb::backends::InMemoryBackend;
+use self_cell::self_cell;
 
 use super::Entry;
 use super::ReadTransaction;
@@ -67,7 +69,9 @@ impl Storage for RedbStorage {
 
     fn begin_write(&self) -> Result<RedbWrite, StorageError> {
         let transaction = self.database.begin_write().map_err(StorageError::new)?;
-        Ok(RedbWrite { transaction })
+        Ok(RedbWrite {
+            cell: WriteCell::new(transaction, |_| std::array::from_fn(|_| OnceCell::new())),
+        })
     }
 }
 
@@ -92,8 +96,65 @@ impl RedbRead {
     }
 }
 
+type WriteTables<'a> = [OnceCell<redb::Table<'a, &'static [u8], &'static [u8]>>; Table::ALL.len()];
+
+self_cell!(
+    struct WriteCell {
+        owner: redb::WriteTransaction,
+        #[not_covariant]
+        dependent: WriteTables,
+    }
+);
+
+/// A write transaction that opens each table once, on its first use, and keeps it open until
+/// the transaction ends.
 pub(crate) struct RedbWrite {
-    transaction: redb::WriteTransaction,
+    cell: WriteCell,
+}
+
+fn open_write<'t, 'a>(
+    transaction: &'a redb::WriteTransaction,
+    tables: &'t WriteTables<'a>,
+    table: Table,
+) -> Result<&'t redb::Table<'a, &'static [u8], &'static [u8]>, StorageError> {
+    let cell = &tables[table as usize];
+    if let Some(open) = cell.get() {
+        return Ok(open);
+    }
+    let open = transaction
+        .open_table(definition(table))
+        .map_err(StorageError::new)?;
+    Ok(cell.get_or_init(|| open))
+}
+
+impl RedbWrite {
+    fn with_table<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        work: impl FnOnce(&redb::Table<'_, &'static [u8], &'static [u8]>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        self.cell
+            .with_dependent(|transaction, tables| work(open_write(transaction, tables, table)?))
+    }
+
+    fn with_table_mut<R>(
+        &mut self,
+        table: Table,
+        work: impl FnOnce(&mut redb::Table<'_, &'static [u8], &'static [u8]>) -> Result<R, StorageError>,
+    ) -> Result<R, StorageError> {
+        self.cell.with_dependent_mut(|transaction, tables| {
+            let slot = &mut tables[table as usize];
+            let mut open = match std::mem::take(slot).into_inner() {
+                Some(open) => open,
+                None => transaction
+                    .open_table(definition(table))
+                    .map_err(StorageError::new)?,
+            };
+            let result = work(&mut open);
+            *slot = OnceCell::from(open);
+            result
+        })
+    }
 }
 
 fn collect_prefix<T: ReadableTable<&'static [u8], &'static [u8]>>(
@@ -193,20 +254,14 @@ impl ReadTransaction for RedbRead {
 
 impl ReadTransaction for RedbWrite {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        let value = table.get(key).map_err(StorageError::new)?;
-        Ok(value.map(|guard| guard.value().to_vec()))
+        self.with_table(table, |table| {
+            let value = table.get(key).map_err(StorageError::new)?;
+            Ok(value.map(|guard| guard.value().to_vec()))
+        })
     }
 
     fn scan_prefix(&self, table: Table, prefix: &[u8]) -> Result<Vec<Entry>, StorageError> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        collect_prefix(&table, prefix)
+        self.with_table(table, |table| collect_prefix(table, prefix))
     }
 
     fn scan_range(
@@ -215,11 +270,7 @@ impl ReadTransaction for RedbWrite {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<Entry>, StorageError> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        collect_range(&table, start, end)
+        self.with_table(table, |table| collect_range(table, start, end))
     }
 
     fn get_with<R, E: From<StorageError>>(
@@ -228,11 +279,7 @@ impl ReadTransaction for RedbWrite {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> Result<R, E>,
     ) -> Result<Option<R>, E> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        read_value(&table, key, read)
+        self.with_table(table, |table| read_value(table, key, read))
     }
 
     fn visit_prefix<E: From<StorageError>>(
@@ -241,39 +288,31 @@ impl ReadTransaction for RedbWrite {
         prefix: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        let table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        visit_entries(&table, prefix, visit)
+        self.with_table(table, |table| visit_entries(table, prefix, visit))
     }
 }
 
 impl WriteTransaction for RedbWrite {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        let mut table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        table.insert(key, value).map_err(StorageError::new)?;
-        Ok(())
+        self.with_table_mut(table, |table| {
+            table.insert(key, value).map_err(StorageError::new)?;
+            Ok(())
+        })
     }
 
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
-        let mut table = self
-            .transaction
-            .open_table(definition(table))
-            .map_err(StorageError::new)?;
-        table.remove(key).map_err(StorageError::new)?;
-        Ok(())
+        self.with_table_mut(table, |table| {
+            table.remove(key).map_err(StorageError::new)?;
+            Ok(())
+        })
     }
 
     fn commit(self) -> Result<(), StorageError> {
-        self.transaction.commit().map_err(StorageError::new)
+        self.cell.into_owner().commit().map_err(StorageError::new)
     }
 
     fn rollback(self) -> Result<(), StorageError> {
-        self.transaction.abort().map_err(StorageError::new)
+        self.cell.into_owner().abort().map_err(StorageError::new)
     }
 }
 
