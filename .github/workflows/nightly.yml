@@ -23,8 +23,25 @@ jobs:
       - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
       - run: mise run storage-deep
+      - run: mise run random-deep
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: proptest-regressions-${{ matrix.os }}
           path: crates/rhizodb/proptest-regressions
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install cargo-fuzz --locked
+      - run: sh fuzz/run.sh 600
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

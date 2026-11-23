@@ -100,3 +100,5 @@ pub use temporal::Temporal;
 pub use temporal::Time;
 pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
+#[doc(hidden)]
+pub use value::read_value_for_fuzzing;
