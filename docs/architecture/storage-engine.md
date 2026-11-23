@@ -4,7 +4,7 @@ Decides the design of RhizoDB's own storage engine, which replaces redb.
 
 ## Background
 
-redb's B-tree and allocator set a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore builds its own engine behind the storage trait, in phases.
+redb's B-tree and allocator set a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore builds its own engine behind the storage trait, in phases, and leaves room for replication and for spreading data over several disks and servers.
 
 ## Decisions
 
@@ -26,20 +26,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Opening a database that has WAL segments replays them before any transaction begins.
 - After a crash, the database holds a prefix of the commits that includes every acknowledged commit.
 - A failed fsync makes the engine refuse every later commit until the database is reopened.
-- The database file is made of 4 KiB pages.
-- Every page carries a checksum, its own page number, and the LSN that last wrote it.
-- A checksum or page number mismatch is reported as corruption, never returned as data.
-- The file header has two slots written alternately, and opening uses the newest valid one.
-- The engine has its own format version in the file header, apart from the graph layout's format version.
-- Tables are B+trees whose leaves use a fixed-width layout when the table declares fixed key and value widths, and a slotted layout otherwise.
-- A value above a size threshold is stored as an extent of contiguous pages that its leaf entry points to.
-- Free pages are tracked in a bitmap stored in pages of the file.
-- The file grows by a fraction of its size, never by doubling.
-- Free pages at the end of the file are cut off by truncation.
-- Pages are read with positional reads into an explicit page cache, with no memory mapping.
-- A second process opening the same database is refused by an exclusive file lock.
-- The engine does all I/O through a file-access trait that reads and writes whole pages by page number, never arbitrary byte ranges.
+- The engine does all I/O through a file-access trait that reads and writes whole fixed-size blocks by block number, never arbitrary byte ranges.
+- Each file has one block size, chosen when it is created.
 - A layer over several files or devices, such as a mirror, a stripe, or parity, can implement the file-access trait without the engine knowing.
+- Every page the engine writes carries a checksum and the LSN that last wrote it.
+- A checksum mismatch is reported as corruption, never returned as data.
 - The file-access trait has an implementation over the operating system's files, one in memory, and a simulated file system for fault tests.
 - A database in memory runs the same engine over the in-memory implementation.
 - The simulated file system is deterministic for a given seed.
@@ -58,6 +49,10 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 
 ## Open
 
-- How a checkpoint changes the database file without losing a page that an older snapshot or a crash still needs.
+- The page layout of the database file, including the page size and the file header.
+- Whether the database file reuses free pages in place or appends extents in a log-structured way, and how free space is reclaimed.
+- The size of an extent and where extents are placed across files, disks, and servers.
+- How data is replicated, erasure-coded, and partitioned across servers.
+- How a checkpoint changes the database file without losing data that an older snapshot or a crash still needs.
 - How a read transaction combines committed WAL records that are not checkpointed yet with the database file.
 - Whether checksums use crc32c or xxHash.
