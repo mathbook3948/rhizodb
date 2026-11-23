@@ -372,22 +372,28 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     pub(crate) fn node_ids(&self) -> Result<Vec<NodeId>, GraphError> {
-        self.transaction
-            .scan_prefix(Table::Nodes, &[])?
-            .iter()
-            .map(|(key, _)| Ok(NodeId(decode_u64(key)?)))
-            .collect()
+        let mut ids = Vec::new();
+        self.transaction.visit_prefix(Table::Nodes, &[], |key, _| {
+            ids.push(NodeId(decode_u64(key)?));
+            Ok::<(), GraphError>(())
+        })?;
+        Ok(ids)
     }
 
     pub(crate) fn node_ids_with_label(
         &self,
         label: Token<Label>,
     ) -> Result<Vec<NodeId>, GraphError> {
-        self.transaction
-            .scan_prefix(Table::LabelIndex, &keys::label_prefix(label))?
-            .iter()
-            .map(|(key, _)| Ok(keys::parse_label_key(key)?))
-            .collect()
+        let mut ids = Vec::new();
+        self.transaction.visit_prefix(
+            Table::LabelIndex,
+            &keys::label_prefix(label),
+            |key, _| {
+                ids.push(keys::parse_label_key(key)?);
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(ids)
     }
 
     /// Fails with `NodeHasRelationships` while any relationship still touches the node.
