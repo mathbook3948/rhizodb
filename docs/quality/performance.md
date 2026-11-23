@@ -60,6 +60,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - RhizoDB, and any engine that scans, must score 1.
 - Write workloads time closing the database as well, and report the close within the time.
 - Mutating workloads start from a fresh copy of the loaded database.
+- A copy of a database is flushed to disk before the workload that uses it starts.
 - A server is cleared and loaded again, outside the timer, before each workload that changes it.
 - A server's on-disk size is reported as n/a.
 - A load that fails is remembered and not retried, and a half-loaded database is never reused.

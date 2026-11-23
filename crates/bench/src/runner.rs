@@ -332,7 +332,8 @@ fn copy_directory(from: &Path, to: &Path) -> io::Result<()> {
         if entry.metadata()?.is_dir() {
             copy_directory(&entry.path(), &target)?;
         } else {
-            fs::copy(entry.path(), target)?;
+            fs::copy(entry.path(), &target)?;
+            fs::File::open(&target)?.sync_all()?;
         }
     }
     Ok(())
