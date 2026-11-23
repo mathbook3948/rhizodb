@@ -370,7 +370,9 @@ fn the_oracle_accepts_whole_iterations_and_continues_the_sequence() {
 #[test]
 fn the_oracle_rejects_a_partially_applied_iteration() {
     let tear_down: [Damage; 5] = [
-        |write, _| write.delete_relationship(link_id(2)).unwrap(),
+        |write, _| {
+            write.delete_relationship(link_id(2)).unwrap();
+        },
         |write, tokens| {
             write
                 .set_node_property(head_id(1), tokens.next_key, integer(99))

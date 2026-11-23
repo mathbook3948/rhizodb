@@ -192,14 +192,8 @@ fn a_node_with_relationships_is_not_detached_until_they_are_gone() {
     write.delete_node(a).unwrap();
     write.delete_node(b).unwrap();
     assert_eq!(write.node_ids().unwrap(), Vec::new());
-    assert!(matches!(
-        write.delete_node(a),
-        Err(GraphError::NodeNotFound(_))
-    ));
-    assert!(matches!(
-        write.delete_relationship(edge),
-        Err(GraphError::RelationshipNotFound(_))
-    ));
+    assert_eq!(write.delete_node(a).unwrap(), None);
+    assert_eq!(write.delete_relationship(edge).unwrap(), None);
 }
 
 #[test]

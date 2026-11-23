@@ -390,7 +390,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
         if detach {
             for node in &nodes {
-                if self.tx.node(*node)?.is_some() {
+                if self.tx.with_node(*node, |_| Ok::<_, Error>(()))?.is_some() {
                     for adjacent in self.tx.adjacent(*node, Adjacency::Both, None)? {
                         relationships.push(adjacent.relationship);
                     }
@@ -398,16 +398,14 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
         }
         for relationship in relationships {
-            if let Some(record) = self.tx.relationship(relationship)? {
-                self.tx.delete_relationship(relationship)?;
-                if retain {
-                    self.graveyard.relationships.insert(relationship, record);
-                }
+            if let Some(record) = self.tx.delete_relationship(relationship)?
+                && retain
+            {
+                self.graveyard.relationships.insert(relationship, record);
             }
         }
         for node in nodes {
-            if let Some(record) = self.tx.node(node)? {
-                self.tx.delete_node(node)?;
+            if let Some(record) = self.tx.delete_node(node)? {
                 self.graveyard.deleted_nodes.insert(node);
                 if retain {
                     self.graveyard.nodes.insert(node, record);

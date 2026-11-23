@@ -628,10 +628,14 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    pub(crate) fn delete_relationship(&mut self, id: RelationshipId) -> Result<(), GraphError> {
-        let record = self
-            .relationship(id)?
-            .ok_or(GraphError::RelationshipNotFound(id))?;
+    /// Removes the relationship and returns its record, or returns `None` when it does not exist.
+    pub(crate) fn delete_relationship(
+        &mut self,
+        id: RelationshipId,
+    ) -> Result<Option<RelationshipRecord>, GraphError> {
+        let Some(record) = self.relationship(id)? else {
+            return Ok(None);
+        };
         self.transaction
             .delete(Table::Relationships, &keys::element_key(id.0))?;
         self.transaction.delete(
@@ -642,22 +646,25 @@ impl<T: WriteTransaction> GraphTx<T> {
             Table::Incoming,
             &keys::adjacency_key(record.target, record.rel_type, id),
         )?;
-        self.reindex(id.0, Some(Element::Relationship(&record)), None)
+        self.reindex(id.0, Some(Element::Relationship(&record)), None)?;
+        Ok(Some(record))
     }
 
-    /// Removes the node with its label and property index entries. Relationships that touch it
-    /// are left alone, so the caller must delete them or reject the transaction, which
-    /// `ensure_detached` checks.
-    pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<(), GraphError> {
-        let record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
+    /// Removes the node with its label and property index entries and returns its record, or
+    /// returns `None` when it does not exist. Relationships that touch it are left alone, so the
+    /// caller must delete them or reject the transaction, which `ensure_detached` checks.
+    pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
+        let Some(record) = self.node(id)? else {
+            return Ok(None);
+        };
         self.reindex(id.0, Some(Element::Node(&record)), None)?;
-        for label in record.labels {
+        for label in &record.labels {
             self.transaction
-                .delete(Table::LabelIndex, &keys::label_key(label, id))?;
+                .delete(Table::LabelIndex, &keys::label_key(*label, id))?;
         }
         self.transaction
             .delete(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(())
+        Ok(Some(record))
     }
 
     fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
