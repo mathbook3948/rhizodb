@@ -121,11 +121,20 @@ fn two_writers(clear: Clear) {
 #[ignore = "bug: the slot is cleared after the storage lock is released, so a thread that \
             takes the lock in between loses its claim and its own second write waits forever"]
 fn the_writer_slot_names_the_holder_for_as_long_as_it_holds_the_write_lock() {
-    shuttle::check_random(|| two_writers(Clear::Always), 10_000);
+    shuttle::check_random(|| two_writers(Clear::Always), schedules());
 }
 
 #[test]
 fn clearing_only_an_own_claim_keeps_the_holder_in_the_slot() {
-    shuttle::check_random(|| two_writers(Clear::IfOwn), 10_000);
-    shuttle::check_pct(|| two_writers(Clear::IfOwn), 10_000, 3);
+    shuttle::check_random(|| two_writers(Clear::IfOwn), schedules());
+    shuttle::check_pct(|| two_writers(Clear::IfOwn), schedules(), 3);
+}
+
+/// 10000 schedules, times the scale that `RHIZODB_TEST_SCALE` sets for nightly runs.
+fn schedules() -> usize {
+    let scale = std::env::var("RHIZODB_TEST_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse::<usize>().ok())
+        .unwrap_or(1);
+    10_000 * scale.max(1)
 }

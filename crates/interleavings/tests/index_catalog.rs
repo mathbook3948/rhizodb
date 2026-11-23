@@ -97,6 +97,15 @@ fn readers_and_writers() {
 
 #[test]
 fn every_transaction_sees_the_index_definitions_of_its_snapshot() {
-    shuttle::check_random(readers_and_writers, 10_000);
-    shuttle::check_pct(readers_and_writers, 10_000, 3);
+    shuttle::check_random(readers_and_writers, schedules());
+    shuttle::check_pct(readers_and_writers, schedules(), 3);
+}
+
+/// 10000 schedules, times the scale that `RHIZODB_TEST_SCALE` sets for nightly runs.
+fn schedules() -> usize {
+    let scale = std::env::var("RHIZODB_TEST_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse::<usize>().ok())
+        .unwrap_or(1);
+    10_000 * scale.max(1)
 }
