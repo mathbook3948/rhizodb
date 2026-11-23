@@ -326,3 +326,100 @@ fn the_engine_opens_on_a_directory_and_in_memory() {
     fill(&memory, 3);
     assert_eq!(everything(&memory).unwrap(), expected);
 }
+
+fn put_round(write: &mut impl WriteTransaction, round: u64) {
+    for item in 0..100u64 {
+        write
+            .put(
+                Table::Nodes,
+                &(round * 100 + item).to_be_bytes(),
+                &[7u8; 40],
+            )
+            .unwrap();
+    }
+}
+
+fn probe_earlier_commits_while_checkpointing(checkpoint: CheckpointMode, rounds: u64) -> u64 {
+    let options = EngineOptions {
+        memtable_limit: 64 << 10,
+        ..tiny(checkpoint)
+    };
+    let engine = Engine::open(Arc::new(MemFs::default()), NAME, options).unwrap();
+    let mut missing = 0;
+    for round in 0..rounds {
+        let mut write = engine.begin_write().unwrap();
+        for step in 0..8u64 {
+            if round == 0 {
+                break;
+            }
+            let probe =
+                (round.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 7).wrapping_add(step * 977) % round;
+            if write
+                .get(Table::Nodes, &(probe * 100).to_be_bytes())
+                .unwrap()
+                .is_none()
+            {
+                missing += 1;
+            }
+        }
+        put_round(&mut write, round);
+        write.commit().unwrap();
+    }
+    missing
+}
+
+fn range_deletes_across_checkpoints_then_reopen(checkpoint: CheckpointMode, rounds: u64) -> usize {
+    let fs = Arc::new(MemFs::default());
+    let options = EngineOptions {
+        memtable_limit: 64 << 10,
+        ..tiny(checkpoint)
+    };
+    {
+        let engine = Engine::open(Arc::clone(&fs), NAME, options).unwrap();
+        for round in 0..rounds {
+            let mut write = engine.begin_write().unwrap();
+            put_round(&mut write, round);
+            if round >= 3 {
+                let old = round - 3;
+                write
+                    .delete_range(
+                        Table::Nodes,
+                        &(old * 100).to_be_bytes(),
+                        &((old + 1) * 100).to_be_bytes(),
+                    )
+                    .unwrap();
+            }
+            write.commit().unwrap();
+        }
+    }
+    let engine = Engine::open(fs, NAME, options).unwrap();
+    engine.check().unwrap();
+    let read = engine.begin_read().unwrap();
+    read.scan_prefix(Table::Nodes, &[]).unwrap().len()
+}
+
+fn race_rounds() -> u64 {
+    u64::from(test_scale::cases(6000)).min(60_000)
+}
+
+#[test]
+fn a_writer_sees_every_earlier_commit_while_checkpoints_publish() {
+    for checkpoint in [CheckpointMode::Background, CheckpointMode::Inline] {
+        assert_eq!(
+            probe_earlier_commits_while_checkpointing(checkpoint, race_rounds()),
+            0,
+            "{checkpoint:?}"
+        );
+    }
+}
+
+#[test]
+fn range_deletes_stay_deleted_across_checkpoints_and_a_reopen() {
+    for checkpoint in [CheckpointMode::Background, CheckpointMode::Inline] {
+        assert_eq!(
+            range_deletes_across_checkpoints_then_reopen(checkpoint, race_rounds()),
+            300,
+            "{checkpoint:?}"
+        );
+    }
+}

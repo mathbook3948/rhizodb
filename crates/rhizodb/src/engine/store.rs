@@ -443,10 +443,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
         layers.active.apply(lsn, staged.into_changes(), horizon);
-        lock(&shared.published).view = View {
-            snapshot: lsn,
-            layers: Arc::clone(&layers),
-        };
+        lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
         let full = layers.active.bytes() > shared.options.memtable_limit
             || wal_size > shared.options.wal_limit;
