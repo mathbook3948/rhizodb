@@ -16,6 +16,7 @@ use crate::storage::ReadTransaction;
 use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
+use super::aggregate::Groups;
 use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
@@ -60,7 +61,10 @@ pub(crate) fn run_read<T: ReadTransaction>(
         nodes: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
-    let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
+    let rows = run(program, |clauses, rows| match clauses {
+        [first, rest @ ..] => env.read_clauses(first, rest.first(), rows),
+        [] => Ok((rows, 0)),
+    })?;
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
@@ -85,8 +89,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         nodes: RefCell::default(),
     }
     .check_closed(&program.closed)?;
-    let rows = run(program, |clause, rows| match clause {
-        Clause::Read(clause) => Env {
+    let rows = run(program, |clauses, rows| match clauses {
+        [Clause::Read(clause), rest @ ..] => Env {
             tx: &*tx,
             slots,
             parameters,
@@ -96,8 +100,15 @@ pub(crate) fn run_write<W: WriteTransaction>(
             check: None,
             nodes: RefCell::default(),
         }
-        .read_clause(clause, rows),
-        Clause::Update(clause) => Writer {
+        .read_clauses(
+            clause,
+            match rest.first() {
+                Some(Clause::Read(next)) => Some(next),
+                _ => None,
+            },
+            rows,
+        ),
+        [Clause::Update(clause), ..] => Writer {
             tx,
             slots,
             parameters,
@@ -105,7 +116,9 @@ pub(crate) fn run_write<W: WriteTransaction>(
             patterns: &patterns,
             graveyard: &mut graveyard,
         }
-        .apply(clause, rows),
+        .apply(clause, rows)
+        .map(|rows| (rows, 1)),
+        [] => Ok((rows, 0)),
     })?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
@@ -125,13 +138,16 @@ pub(crate) fn run_write<W: WriteTransaction>(
 
 fn run<C>(
     program: &Program<C>,
-    mut apply: impl FnMut(&C, Vec<Row>) -> Result<Vec<Row>, Error>,
+    mut apply: impl FnMut(&[C], Vec<Row>) -> Result<(Vec<Row>, usize), Error>,
 ) -> Result<Vec<Vec<Datum>>, Error> {
     let mut results = Vec::new();
     for part in &program.parts {
         let mut rows = vec![vec![Datum::Null; program.slot_count]];
-        for clause in &part.clauses {
-            rows = apply(clause, rows)?;
+        let mut clauses = part.clauses.as_slice();
+        while !clauses.is_empty() {
+            let (next, applied) = apply(clauses, rows)?;
+            rows = next;
+            clauses = clauses.get(applied.max(1)..).unwrap_or_default();
         }
         if part.output.is_empty() {
             continue;
@@ -170,6 +186,42 @@ fn materialize<T: ReadTransaction>(
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
+    /// Applies `clause`, and `next` with it when a match feeds an aggregating projection, which
+    /// then aggregates each match without collecting the matched rows. Says how many clauses it
+    /// applied.
+    pub(crate) fn read_clauses(
+        &self,
+        clause: &ReadClause,
+        next: Option<&ReadClause>,
+        rows: Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        if let (ReadClause::Match(found), Some(ReadClause::Project(projection))) = (clause, next)
+            && !found.optional
+            && let Items::Aggregate {
+                keys,
+                aggregates,
+                finals,
+            } = &projection.items
+        {
+            let mut groups = Groups::new(keys, aggregates);
+            for row in &rows {
+                self.match_patterns(&found.patterns, row, &mut |matched| {
+                    let keep = match &found.filter {
+                        Some(filter) => self.predicate(filter, matched)?,
+                        None => true,
+                    };
+                    if keep {
+                        groups.add(self, matched)?;
+                    }
+                    Ok(true)
+                })?;
+            }
+            let rows = groups.finish(self, finals)?;
+            return Ok((self.arrange(projection, rows)?, 2));
+        }
+        Ok((self.read_clause(clause, rows)?, 1))
+    }
+
     pub(crate) fn read_clause(
         &self,
         clause: &ReadClause,
@@ -325,7 +377,7 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn project(&self, projection: &Projection, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
-        let mut rows = match &projection.items {
+        let rows = match &projection.items {
             Items::Plain(items) => {
                 let mut rows = rows;
                 for row in &mut rows {
@@ -342,6 +394,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                 finals,
             } => self.aggregate(rows, keys, aggregates, finals)?,
         };
+        self.arrange(projection, rows)
+    }
+
+    fn arrange(&self, projection: &Projection, mut rows: Vec<Row>) -> Result<Vec<Row>, Error> {
         if projection.distinct {
             let mut seen = BTreeSet::new();
             rows.retain(|row| {

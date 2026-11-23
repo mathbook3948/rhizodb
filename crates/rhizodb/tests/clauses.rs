@@ -451,6 +451,41 @@ fn aggregates_group_by_the_non_aggregated_items() {
 }
 
 #[test]
+fn a_match_aggregates_the_matches_of_every_incoming_row() {
+    let db = people();
+    let rows = run(
+        &db,
+        "UNWIND [20, 30, 40, 50] AS floor MATCH (n:Person) WHERE n.age > floor \
+         RETURN floor, count(*) AS c, collect(n.name) AS names ORDER BY floor",
+    );
+    assert_eq!(
+        rows,
+        [
+            vec![
+                int(20),
+                int(3),
+                list([string("Ada"), string("Bob"), string("Cy")])
+            ],
+            vec![int(30), int(2), list([string("Ada"), string("Cy")])],
+            vec![int(40), int(1), list([string("Cy")])],
+        ]
+    );
+    let rows = run(
+        &db,
+        "UNWIND [30, 50] AS floor OPTIONAL MATCH (n:Person) WHERE n.age > floor \
+         RETURN floor, count(n) AS c ORDER BY floor",
+    );
+    assert_eq!(rows, [vec![int(30), int(2)], vec![int(50), int(0)]]);
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [1, 2] AS x MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT b.name)"
+        ),
+        int(2)
+    );
+}
+
+#[test]
 fn aggregates_over_no_rows_still_return_one_row_without_keys() {
     let db = db();
     assert_eq!(

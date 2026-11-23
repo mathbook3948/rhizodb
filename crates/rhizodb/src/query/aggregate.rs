@@ -41,6 +41,101 @@ impl Seen {
     }
 }
 
+/// The groups an aggregating projection has seen so far, each with the state of every
+/// aggregate. Rows are added one at a time, so a match can feed them without collecting rows.
+pub(crate) struct Groups<'p> {
+    keys: &'p [(Expr, Slot)],
+    aggregates: &'p [(Aggregate, Slot)],
+    index: BTreeMap<Key, usize>,
+    groups: Vec<(Vec<Datum>, Vec<Accumulator>)>,
+}
+
+#[derive(Default)]
+struct Accumulator {
+    rows: usize,
+    counted: usize,
+    values: Vec<Datum>,
+    seen: Seen,
+    percentile: Option<Datum>,
+}
+
+impl<'p> Groups<'p> {
+    pub(crate) fn new(keys: &'p [(Expr, Slot)], aggregates: &'p [(Aggregate, Slot)]) -> Self {
+        Self {
+            keys,
+            aggregates,
+            index: BTreeMap::new(),
+            groups: Vec::new(),
+        }
+    }
+
+    pub(crate) fn add<T: ReadTransaction>(
+        &mut self,
+        env: &Env<'_, T>,
+        row: &Row,
+    ) -> Result<(), Error> {
+        let values = self
+            .keys
+            .iter()
+            .map(|(expr, _)| env.eval(expr, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = Key(values);
+        let position = match self.index.get(&key) {
+            Some(position) => *position,
+            None => {
+                let position = self.groups.len();
+                let accumulators = self
+                    .aggregates
+                    .iter()
+                    .map(|_| Accumulator::default())
+                    .collect();
+                self.groups.push((key.0.clone(), accumulators));
+                self.index.insert(key, position);
+                position
+            }
+        };
+        if let Some((_, accumulators)) = self.groups.get_mut(position) {
+            for ((aggregate, _), accumulator) in self.aggregates.iter().zip(accumulators) {
+                accumulator.add(env, aggregate, row)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One row per group with keys, aggregates, and final expressions filled in. Without keys,
+    /// even no rows make one group.
+    pub(crate) fn finish<T: ReadTransaction>(
+        mut self,
+        env: &Env<'_, T>,
+        finals: &[(Expr, Slot)],
+    ) -> Result<Vec<Row>, Error> {
+        if self.keys.is_empty() && self.groups.is_empty() {
+            let accumulators = self
+                .aggregates
+                .iter()
+                .map(|_| Accumulator::default())
+                .collect();
+            self.groups.push((Vec::new(), accumulators));
+        }
+        let mut out = Vec::with_capacity(self.groups.len());
+        for (values, accumulators) in self.groups {
+            let mut row = vec![Datum::Null; env.slots];
+            for ((_, slot), value) in self.keys.iter().zip(values) {
+                set(&mut row, *slot, value);
+            }
+            for ((aggregate, slot), accumulator) in self.aggregates.iter().zip(accumulators) {
+                set(&mut row, *slot, accumulator.finish(aggregate)?);
+            }
+            for (expr, slot) in finals {
+                let value = env.eval(expr, &row)?;
+                set(&mut row, *slot, value);
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+}
+
 impl<T: ReadTransaction> Env<'_, T> {
     /// Groups `rows` by the key values and yields one row per group with keys, aggregates, and
     /// final expressions filled in. Without keys, even no rows make one group.
@@ -51,55 +146,46 @@ impl<T: ReadTransaction> Env<'_, T> {
         aggregates: &[(Aggregate, Slot)],
         finals: &[(Expr, Slot)],
     ) -> Result<Vec<Row>, Error> {
-        let mut groups: Vec<(Vec<Datum>, Vec<Row>)> = Vec::new();
-        let mut index: BTreeMap<Key, usize> = BTreeMap::new();
-        for row in rows {
-            let values = keys
-                .iter()
-                .map(|(expr, _)| self.eval(expr, &row))
-                .collect::<Result<Vec<_>, _>>()?;
-            let key = Key(values.clone());
-            match index.get(&key) {
-                Some(position) => groups[*position].1.push(row),
-                None => {
-                    index.insert(key, groups.len());
-                    groups.push((values, vec![row]));
+        let mut groups = Groups::new(keys, aggregates);
+        for row in &rows {
+            groups.add(self, row)?;
+        }
+        groups.finish(self, finals)
+    }
+}
+
+impl Accumulator {
+    fn add<T: ReadTransaction>(
+        &mut self,
+        env: &Env<'_, T>,
+        aggregate: &Aggregate,
+        row: &Row,
+    ) -> Result<(), Error> {
+        self.rows += 1;
+        let Some(argument) = &aggregate.argument else {
+            return Ok(());
+        };
+        let function = aggregate.function;
+        let value = env.eval(argument, row)?;
+        if !value.is_null() {
+            function.admit(&value)?;
+            if !aggregate.distinct || self.seen.insert(&value) {
+                if function == AggregateFunction::Count {
+                    self.counted += 1;
+                } else {
+                    self.values.push(value);
                 }
             }
         }
-        if keys.is_empty() && groups.is_empty() {
-            groups.push((Vec::new(), Vec::new()));
-        }
-        let mut out = Vec::with_capacity(groups.len());
-        for (values, members) in groups {
-            let mut row = vec![Datum::Null; self.slots];
-            for ((_, slot), value) in keys.iter().zip(values) {
-                set(&mut row, *slot, value);
-            }
-            for (aggregate, slot) in aggregates {
-                let value = self.compute(aggregate, &members)?;
-                set(&mut row, *slot, value);
-            }
-            for (expr, slot) in finals {
-                let value = self.eval(expr, &row)?;
-                set(&mut row, *slot, value);
-            }
-            out.push(row);
-        }
-        Ok(out)
-    }
-
-    fn group_percentile(
-        &self,
-        function: AggregateFunction,
-        extra: &Expr,
-        rows: &[Row],
-    ) -> Result<Option<Datum>, Error> {
-        let mut percentile: Option<Datum> = None;
-        for row in rows {
-            let value = self.eval(extra, row)?;
+        if let Some(extra) = &aggregate.extra
+            && matches!(
+                function,
+                AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc
+            )
+        {
+            let value = env.eval(extra, row)?;
             function.admit(&value)?;
-            match &percentile {
+            match &self.percentile {
                 Some(first) if order(first, &value) != Ordering::Equal => {
                     return Err(Error::new(
                         ErrorKind::InvalidArgumentValue,
@@ -107,35 +193,22 @@ impl<T: ReadTransaction> Env<'_, T> {
                     ));
                 }
                 Some(_) => {}
-                None => percentile = Some(value),
+                None => self.percentile = Some(value),
             }
         }
-        Ok(percentile)
+        Ok(())
     }
 
-    fn compute(&self, aggregate: &Aggregate, rows: &[Row]) -> Result<Datum, Error> {
-        let Some(argument) = &aggregate.argument else {
-            return Ok(Datum::Integer(
-                i64::try_from(rows.len()).unwrap_or(i64::MAX),
-            ));
-        };
-        let mut values = Vec::new();
-        let mut seen = Seen::default();
-        for row in rows {
-            let value = self.eval(argument, row)?;
-            if value.is_null() {
-                continue;
-            }
-            aggregate.function.admit(&value)?;
-            if aggregate.distinct && !seen.insert(&value) {
-                continue;
-            }
-            values.push(value);
-        }
+    fn finish(self, aggregate: &Aggregate) -> Result<Datum, Error> {
+        let values = self.values;
         match aggregate.function {
-            AggregateFunction::Count => Ok(Datum::Integer(
-                i64::try_from(values.len()).unwrap_or(i64::MAX),
-            )),
+            AggregateFunction::Count => {
+                let count = match aggregate.argument {
+                    Some(_) => self.counted,
+                    None => self.rows,
+                };
+                Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+            }
             AggregateFunction::Collect => Ok(Datum::List(values)),
             AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
@@ -163,7 +236,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc => {
                 let percentile = match &aggregate.extra {
-                    Some(extra) => self.group_percentile(aggregate.function, extra, rows)?,
+                    Some(_) => self.percentile,
                     None => Some(Datum::Null),
                 };
                 match percentile {
