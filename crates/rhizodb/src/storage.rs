@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
+#[cfg(test)]
+pub(crate) mod conformance;
 pub(crate) mod redb_backend;
 
 /// The fixed set of ordered key-value tables the graph layer is built on.
