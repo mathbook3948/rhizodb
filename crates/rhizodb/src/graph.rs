@@ -652,8 +652,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
-        self.node(id)?
-            .map(|_| ())
+        self.with_node(id, |_| Ok::<_, GraphError>(()))?
             .ok_or(GraphError::NodeNotFound(id))
     }
 
