@@ -89,6 +89,25 @@ proptest! {
     }
 
     #[test]
+    fn skipping_a_list_of_runs_of_one_type_lands_on_the_next_value(
+        runs in prop::collection::vec((property_value(), 1usize..12), 0..6),
+        cut in any::<prop::sample::Index>(),
+    ) {
+        let items = runs
+            .into_iter()
+            .flat_map(|(value, count)| std::iter::repeat_n(value, count))
+            .collect();
+        let mut bytes = PropertyValue::List(items).encode();
+        let list_end = bytes.len();
+        PropertyValue::Integer(7).encode_into(&mut bytes);
+        let mut reader = Reader::new(&bytes);
+        reader.skip_value().unwrap();
+        prop_assert_eq!(reader.value(), Ok(PropertyValue::Integer(7)));
+        let mut truncated = Reader::new(&bytes[..cut.index(list_end)]);
+        prop_assert_eq!(truncated.skip_value(), Err(DecodeError::UnexpectedEnd));
+    }
+
+    #[test]
     fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
         let _ = PropertyValue::decode(&bytes);
     }

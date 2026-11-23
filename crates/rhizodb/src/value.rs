@@ -345,13 +345,24 @@ impl<'a> Reader<'a> {
                     if depth >= MAX_DEPTH {
                         return Err(DecodeError::NestingTooDeep);
                     }
-                    for _ in 0..self.varint()? {
-                        match self.bytes.first().copied().and_then(fixed_width) {
-                            Some(width) => {
-                                self.take(1 + width)?;
-                            }
-                            None => self.skip_at_depth(depth + 1)?,
+                    let mut remaining = self.varint()?;
+                    while remaining > 0 {
+                        let Some((tag, width)) = self
+                            .bytes
+                            .first()
+                            .and_then(|tag| Some((*tag, fixed_width(*tag)?)))
+                        else {
+                            self.skip_at_depth(depth + 1)?;
+                            remaining -= 1;
+                            continue;
+                        };
+                        let stride = 1 + width;
+                        let mut run = 1;
+                        while run < remaining && self.bytes.get(run * stride) == Some(&tag) {
+                            run += 1;
                         }
+                        self.take(run * stride)?;
+                        remaining -= run;
                     }
                     0
                 }
