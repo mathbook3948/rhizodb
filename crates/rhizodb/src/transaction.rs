@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::database::Backend;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::GraphTx;
@@ -7,8 +8,7 @@ use crate::query;
 use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
-use crate::storage::redb_backend::RedbRead;
-use crate::storage::redb_backend::RedbWrite;
+use crate::storage::Storage;
 use crate::temporal;
 use crate::temporal::DateTime;
 
@@ -17,13 +17,16 @@ use crate::temporal::DateTime;
 /// its view. Dropping it ends it.
 #[derive(Debug)]
 pub struct ReadTransaction<'db> {
-    tx: GraphTx<RedbRead>,
+    tx: GraphTx<<Backend as Storage>::Read<'db>>,
     began: DateTime,
     statements: &'db Statements,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbRead>, statements: &'db Statements) -> Self {
+    pub(crate) fn new(
+        tx: GraphTx<<Backend as Storage>::Read<'db>>,
+        statements: &'db Statements,
+    ) -> Self {
         Self {
             tx,
             began: temporal::now(),
@@ -44,13 +47,16 @@ impl<'db> ReadTransaction<'db> {
 /// other transactions see them only after [`WriteTransaction::commit`]. Dropping it without a
 /// commit rolls it back.
 pub struct WriteTransaction<'db> {
-    tx: Option<GraphTx<RedbWrite>>,
+    tx: Option<GraphTx<<Backend as Storage>::Write<'db>>>,
     began: DateTime,
     statements: &'db Statements,
 }
 
 impl<'db> WriteTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbWrite>, statements: &'db Statements) -> Self {
+    pub(crate) fn new(
+        tx: GraphTx<<Backend as Storage>::Write<'db>>,
+        statements: &'db Statements,
+    ) -> Self {
         Self {
             tx: Some(tx),
             began: temporal::now(),

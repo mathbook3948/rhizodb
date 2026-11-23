@@ -54,7 +54,7 @@
 
 mod database;
 #[cfg_attr(
-    not(test),
+    not(any(test, rhizodb_engine)),
     expect(
         dead_code,
         reason = "the engine that reads these files arrives in a later phase"
@@ -102,3 +102,17 @@ pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
 #[doc(hidden)]
 pub use value::read_value_for_fuzzing;
+
+/// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value
+/// encodes to other bytes.
+#[doc(hidden)]
+pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::decode_formats(bytes)
+}
+
+/// Damages a database file of RhizoDB's own engine by `bytes`, opens it, and reads every entry,
+/// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[doc(hidden)]
+pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::open_damaged_file(bytes)
+}
