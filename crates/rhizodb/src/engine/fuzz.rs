@@ -1,0 +1,94 @@
+use super::header::Header;
+use super::layout::BLOCK;
+use super::layout::BlockRef;
+use super::layout::WAL_BLOCK;
+use super::page::PageHeader;
+use super::wal_format::Body;
+use super::wal_format::Op;
+use super::wal_format::SegmentHeader;
+use super::wal_format::batch_record;
+use super::wal_format::checkpoint_record;
+use super::wal_format::decode_record;
+use super::wal_format::seal_record;
+
+fn block_of(bytes: &[u8], size: usize) -> Vec<u8> {
+    let mut block = bytes.to_vec();
+    block.resize(size, 0);
+    block
+}
+
+/// Decodes `bytes` with the engine decoder its first byte picks, and fails when a decoded value
+/// does not encode back to the bytes it came from. A panic anywhere is a bug the fuzzer reports.
+pub(crate) fn decode_formats(bytes: &[u8]) -> Result<(), String> {
+    let Some((&choice, rest)) = bytes.split_first() else {
+        return Ok(());
+    };
+    match choice % 5 {
+        0 => {
+            let block = block_of(rest, BLOCK);
+            if let Ok(header) = Header::decode(&block)
+                && header.encode() != block
+            {
+                return Err(format!("header {header:?} encodes to other bytes"));
+            }
+        }
+        1 => {
+            let block = block_of(rest, WAL_BLOCK);
+            if let Ok(header) = SegmentHeader::decode(&block)
+                && header.encode() != block
+            {
+                return Err(format!("segment header {header:?} encodes to other bytes"));
+            }
+        }
+        2 => {
+            let at = rest
+                .get(12..20)
+                .and_then(|raw| <[u8; 8]>::try_from(raw).ok())
+                .map(u64::from_le_bytes)
+                .and_then(|raw| BlockRef::from_raw(raw).ok())
+                .unwrap_or(BlockRef::NULL);
+            let blocks = rest.len().div_ceil(BLOCK).max(1);
+            let page = block_of(rest, blocks * BLOCK);
+            if let Ok(header) = PageHeader::open(0, &page, at) {
+                let mut again = page.clone();
+                header
+                    .seal(0, &mut again)
+                    .map_err(|error| error.to_string())?;
+                if again != page {
+                    return Err(format!("page header {header:?} seals to other bytes"));
+                }
+            }
+        }
+        _ => {
+            let mut record = rest.to_vec();
+            if choice % 5 == 4 && record.len() >= 54 {
+                seal_record(0, &mut record).map_err(|error| error.to_string())?;
+            }
+            if let Ok((decoded, length)) = decode_record(0, &record) {
+                let mut again = match &decoded.body {
+                    Body::Batch(ops) => batch_record(
+                        decoded.lsn,
+                        decoded.hlc,
+                        decoded.txn,
+                        ops.iter().map(Op::borrowed),
+                    )
+                    .map_err(|error| error.to_string())?,
+                    Body::Checkpoint { lsn, generation } => {
+                        checkpoint_record(decoded.lsn, decoded.hlc, *lsn, *generation)
+                    }
+                };
+                again[20..28].copy_from_slice(&decoded.term.to_le_bytes());
+                again[36..52].copy_from_slice(&decoded.txn.to_le_bytes());
+                seal_record(0, &mut again).map_err(|error| error.to_string())?;
+                if again != record[..length] {
+                    return Err(format!("record {decoded:?} encodes to other bytes"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "fuzz.test.rs"]
+mod tests;

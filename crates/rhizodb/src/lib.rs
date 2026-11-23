@@ -102,3 +102,10 @@ pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
 #[doc(hidden)]
 pub use value::read_value_for_fuzzing;
+
+/// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value
+/// encodes to other bytes.
+#[doc(hidden)]
+pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::decode_formats(bytes)
+}
