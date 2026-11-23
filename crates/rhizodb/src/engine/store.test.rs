@@ -305,3 +305,24 @@ fn readers_keep_their_snapshots_while_background_checkpoints_publish_new_trees()
     assert!(engine.header().generation > 4);
     engine.check().unwrap();
 }
+
+#[test]
+fn the_engine_opens_on_a_directory_and_in_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizo");
+    let engine = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+    fill(&engine, 3);
+    let expected = everything(&engine).unwrap();
+    drop(engine);
+    let names: Vec<String> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["graph.rhizo"]);
+    let engine = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+    assert_eq!(everything(&engine).unwrap(), expected);
+    engine.check().unwrap();
+    let memory = crate::engine::any_fs::in_memory(EngineOptions::default()).unwrap();
+    fill(&memory, 3);
+    assert_eq!(everything(&memory).unwrap(), expected);
+}

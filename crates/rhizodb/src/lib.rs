@@ -54,7 +54,7 @@
 
 mod database;
 #[cfg_attr(
-    not(test),
+    not(any(test, rhizodb_engine)),
     expect(
         dead_code,
         reason = "the engine that reads these files arrives in a later phase"

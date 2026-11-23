@@ -10,15 +10,47 @@ use crate::query;
 use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
+#[cfg(not(rhizodb_engine))]
 use crate::storage::redb_backend::RedbStorage;
 use crate::transaction::ReadTransaction;
 use crate::transaction::WriteTransaction;
+
+#[cfg(not(rhizodb_engine))]
+pub(crate) type Backend = RedbStorage;
+
+#[cfg(not(rhizodb_engine))]
+fn open_backend(path: &Path) -> Result<Backend, Error> {
+    Ok(RedbStorage::open(path)?)
+}
+
+#[cfg(not(rhizodb_engine))]
+fn in_memory_backend() -> Result<Backend, Error> {
+    Ok(RedbStorage::in_memory()?)
+}
+
+// ast-grep-ignore
+// Building with `--cfg rhizodb_engine` runs every test on RhizoDB's own engine instead of redb.
+#[cfg(rhizodb_engine)]
+pub(crate) type Backend = crate::engine::store::Engine<crate::engine::any_fs::AnyFs>;
+
+#[cfg(rhizodb_engine)]
+fn open_backend(path: &Path) -> Result<Backend, Error> {
+    let options = crate::engine::store::EngineOptions::default();
+    Ok(crate::engine::any_fs::open_path(path, options)
+        .map_err(crate::storage::StorageError::from)?)
+}
+
+#[cfg(rhizodb_engine)]
+fn in_memory_backend() -> Result<Backend, Error> {
+    let options = crate::engine::store::EngineOptions::default();
+    Ok(crate::engine::any_fs::in_memory(options).map_err(crate::storage::StorageError::from)?)
+}
 
 /// An embedded graph database. Share one `Database` across threads: reads run concurrently, and
 /// writing queries run one at a time.
 #[derive(Debug)]
 pub struct Database {
-    graph: Graph<RedbStorage>,
+    graph: Graph<Backend>,
     statements: Statements,
 }
 
@@ -34,7 +66,7 @@ impl Database {
     /// default on standard error.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
-            graph: Graph::open(RedbStorage::open(path)?)?,
+            graph: Graph::open(open_backend(path.as_ref())?)?,
             statements: Statements::default(),
         })
     }
@@ -42,7 +74,7 @@ impl Database {
     /// Creates a database that lives in memory and is gone when dropped.
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
-            graph: Graph::open(RedbStorage::in_memory()?)?,
+            graph: Graph::open(in_memory_backend()?)?,
             statements: Statements::default(),
         })
     }

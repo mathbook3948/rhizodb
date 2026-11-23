@@ -39,6 +39,11 @@ description = "Run the randomized integration tests (isolation history check, ki
 env = { RHIZODB_TEST_SCALE = "100" }
 run = "cargo test --release --package rhizodb --test isolation --test kill_recovery --test model_ops --test corrupt_file"
 
+[tasks.engine-suite]
+description = "Run every rhizodb test with Database on RhizoDB's own engine instead of redb, skipping the tests that read redb files"
+env = { RUSTFLAGS = "--cfg rhizodb_engine" }
+run = "cargo test --package rhizodb --target-dir target/engine-suite -- --skip a_database_of_format --skip the_undamaged_format_eight_file --skip a_pattern_property_map_reads_the_index_for_its_start_node"
+
 [tasks.fuzz]
 description = "Fuzz every target for the given seconds each (default 300), and fail on any panic that escapes RhizoDB, hang, or out-of-memory, for example: mise run fuzz 600"
 run = "sh fuzz/run.sh"

@@ -101,6 +101,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
+- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, less the tests that read redb files.
+- The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 
 ## Open
@@ -108,5 +110,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How free space in sealed extents is reclaimed and the file shrinks.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.
+- How point reads reach redb's speed, which they trail by a per-read overhead beyond the block cache.
+- The default size of the block cache.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.

@@ -1,3 +1,4 @@
+pub(crate) mod any_fs;
 pub(crate) mod blob;
 pub(crate) mod block_file;
 pub(crate) mod cache;
@@ -28,3 +29,11 @@ pub(crate) mod wal_format;
 #[cfg(test)]
 #[path = "engine/crash.test.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+#[path = "engine/differential.test.rs"]
+mod differential_tests;
+
+#[cfg(test)]
+#[path = "engine/bench.test.rs"]
+mod bench_tests;
