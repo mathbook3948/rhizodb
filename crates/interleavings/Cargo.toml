@@ -1,0 +1,13 @@
+[package]
+name = "interleavings"
+description = "Shuttle models of the synchronization protocols in rhizodb, explored across thread interleavings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+shuttle = "0.9.10"
+
+[lints]
+workspace = true
