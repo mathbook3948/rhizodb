@@ -1009,3 +1009,81 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
         }
     });
 }
+
+#[test]
+fn a_commit_that_changes_more_nodes_than_a_group_has_room_for_deltas_folds_even_without_a_difference()
+ {
+    let (fs, graph, mut model) = graph_of(300, only_b(PropertyValue::Integer(1)));
+    let entries = |graph: &Graph<RedbStorage>| {
+        graph
+            .read()
+            .unwrap()
+            .transaction
+            .scan_prefix(Table::NodeColumns, &[])
+            .unwrap()
+    };
+    let before = entries(&graph);
+    let mut write = graph.write().unwrap();
+    for id in 0..=columns::MAX_DELTAS as u64 {
+        set(
+            &mut write,
+            &mut model,
+            id,
+            "b",
+            Some(PropertyValue::Integer(1)),
+        );
+    }
+    write.commit().unwrap();
+    assert_eq!(
+        entries(&graph),
+        before,
+        "folding values equal to the segments' rewrites nothing"
+    );
+    let mut write = graph.write().unwrap();
+    for id in 0..=columns::MAX_DELTAS as u64 {
+        let value = (id == 7).then_some(PropertyValue::Integer(9));
+        set(&mut write, &mut model, id, "b", value);
+    }
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    let b = read.lookup_token::<PropertyKey>("b").unwrap().unwrap();
+    assert_eq!(stored(&read).deltas.get(&0), None, "the changes are folded");
+    assert_eq!(segment_values(&read, 0, b), 300 - columns::MAX_DELTAS);
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    check(&read, &model).unwrap();
+    drop(read);
+    drop(graph);
+    check(&open(&fs).read().unwrap(), &model).unwrap();
+}
+
+#[test]
+fn a_query_reads_a_few_values_of_a_column_in_place_and_loads_the_column_to_read_more() {
+    let (_fs, graph, _model) = graph_of(300, |id| {
+        Values::from([("b", PropertyValue::Integer(id as i64))])
+    });
+    let read = graph.read().unwrap();
+    let b = read.lookup_token::<PropertyKey>("b").unwrap().unwrap();
+    let mut labels = LabelReader::default();
+    let mut columns = ColumnReader::default();
+    let state = |columns: &ColumnReader| match columns.columns.as_slice() {
+        [(_, columns::Cached::Probed(probes))] => Some(*probes),
+        [(_, columns::Cached::Loaded(_))] => None,
+        other => panic!("{other:?}"),
+    };
+    for id in 0..=columns::PROBES as u64 {
+        if id > 0 {
+            assert_eq!(state(&columns), Some(id as usize), "after {id} reads");
+        }
+        let value = read
+            .node_property(&mut labels, &mut columns, NodeId(id * 7), Some(b))
+            .unwrap()
+            .flatten();
+        assert_eq!(value, Some(PropertyValue::Integer(id as i64 * 7)));
+    }
+    assert_eq!(state(&columns), None, "the column is loaded");
+    let value = read
+        .node_property(&mut labels, &mut columns, NodeId(299), Some(b))
+        .unwrap()
+        .flatten();
+    assert_eq!(value, Some(PropertyValue::Integer(299)));
+}

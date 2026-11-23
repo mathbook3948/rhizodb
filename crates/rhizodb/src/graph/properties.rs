@@ -219,17 +219,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         let index = match reader.columns.binary_search_by_key(&id, |(held, _)| *held) {
             Ok(index) => index,
             Err(index) => {
-                reader.columns.insert(index, (id, Cached::Probed(())));
+                reader.columns.insert(index, (id, Cached::Probed(1)));
                 return self.probe_segment(id, slot);
             }
         };
         let cached = &mut reader.columns[index].1;
-        if matches!(cached, Cached::Probed(())) {
+        if let Cached::Probed(probes) = cached {
+            if *probes < columns::PROBES {
+                *probes += 1;
+                return self.probe_segment(id, slot);
+            }
             *cached = Cached::Loaded(self.load_column(id)?);
         }
         match cached {
             Cached::Loaded(column) => column.cell_at(slot)?.map(Cell::to_value).transpose(),
-            Cached::Probed(()) => self.probe_segment(id, slot),
+            Cached::Probed(_) => self.probe_segment(id, slot),
         }
     }
 
@@ -397,14 +401,15 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     /// What commit writes for the property columns of one group: a delta for each changed node
-    /// that differs from the segments, or, once the group would keep more than
-    /// `MAX_DELTAS` deltas, the segments its deltas and changes touch, rewritten.
+    /// that differs from the segments, or, once the group's stored deltas and changed nodes
+    /// together exceed `MAX_DELTAS`, the segments its deltas and changes touch, rewritten.
     pub(crate) fn column_writes(
         &self,
         group: u64,
         edit: ColumnsEdit,
     ) -> Result<(Vec<ColumnWrite>, usize), GraphError> {
         let (stored, slots, heap) = edit.into_slots();
+        let folds = stored + slots.len() > columns::MAX_DELTAS;
         let mut merged: Merged<'_> = Vec::with_capacity(slots.len());
         let mut kept = stored;
         for (slot, edit) in slots {
@@ -417,7 +422,10 @@ impl<T: ReadTransaction> GraphTx<T> {
                 Some(bytes) => {
                     kept = kept.checked_sub(1).ok_or(DELTA_UNCOUNTED)?;
                     let changes = delta_changes(&key, bytes)?;
-                    SlotChanges::Owned(self.changes_over(group, slot, changes, edit.values)?)
+                    SlotChanges::Owned(match folds {
+                        true => overlaid(changes, edit.values),
+                        false => self.changes_over(group, slot, changes, edit.values)?,
+                    })
                 }
                 None if edit.fresh => match edit.created(&heap) {
                     Some(created) if edit.values.is_empty() => SlotChanges::Packed(created),
@@ -427,6 +435,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                         SlotChanges::Owned(values)
                     }
                 },
+                None if folds => SlotChanges::Owned(edit.values),
                 None => SlotChanges::Owned(self.changes_over(
                     group,
                     slot,
@@ -437,7 +446,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             kept += usize::from(!changes.is_empty());
             merged.push((slot, (changes, before)));
         }
-        if kept > columns::MAX_DELTAS {
+        if folds {
             return Ok((self.fold(group, merged)?, 0));
         }
         let mut writes = Vec::new();
@@ -608,6 +617,13 @@ impl<T: ReadTransaction> GraphTx<T> {
 }
 
 type SegmentChanges<'a> = Vec<(usize, Option<Cell<'a>>)>;
+
+fn overlaid(mut changes: Changes, values: Changes) -> Changes {
+    for (token, value) in values {
+        columns::put_change(&mut changes, token, value);
+    }
+    changes
+}
 
 type SlotCells<'a> = Vec<(usize, Option<Cell<'a>>)>;
 

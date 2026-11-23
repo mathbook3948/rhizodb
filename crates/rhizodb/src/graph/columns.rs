@@ -1334,10 +1334,10 @@ pub(crate) fn merged<'a>(
     Ok(cells)
 }
 
-/// A stored column or set of deltas a reader read once in place, or loaded whole.
+/// A stored column or set of deltas a reader read in place so far, or loaded whole.
 #[derive(Debug)]
 pub(crate) enum Cached<P, L> {
-    /// Read once in place. The next read of another part loads the whole.
+    /// Read in place: a column after fewer than `PROBES` reads, a group's deltas after one.
     Probed(P),
     /// Loaded whole.
     Loaded(L),
@@ -1349,12 +1349,18 @@ pub(crate) type Deltas = Vec<(usize, Delta)>;
 /// The delta of one slot a reader read in place, or none, or every delta of the group, loaded.
 pub(crate) type CachedDeltas = Cached<(usize, Option<Delta>), Deltas>;
 
-/// The stored columns and deltas one query read so far. A column or a group's deltas read once
-/// are read in place, so a point lookup copies nothing; read again, they are loaded and checked
-/// whole, so a scan reads each value with one storage access per segment.
+/// How many values of one column of a group a query reads in place before it loads the column
+/// whole. Loading a full column costs about as much as this many reads in place, so a query that
+/// reads a few nodes of a group, as a traversal does, never loads it.
+pub(crate) const PROBES: usize = 16;
+
+/// The stored columns and deltas one query read so far. A column read fewer than `PROBES` times
+/// and a group's deltas read once are read in place, so a point lookup copies nothing; read more,
+/// they are loaded and checked whole, so a scan reads each value with one storage access per
+/// segment.
 #[derive(Debug, Default)]
 pub(crate) struct ColumnReader {
-    pub(crate) columns: Vec<(ColumnId, Cached<(), Column>)>,
+    pub(crate) columns: Vec<(ColumnId, Cached<usize, Column>)>,
     pub(crate) deltas: Vec<(u64, CachedDeltas)>,
     pub(crate) keys: Vec<(u64, Vec<Token<PropertyKey>>)>,
 }
