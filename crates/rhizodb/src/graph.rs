@@ -188,6 +188,7 @@ impl<S: Storage> Graph<S> {
                 catalog: None,
                 tokens: Arc::default(),
                 reads_committed_tokens: false,
+                own_tokens: CommittedTokens::default(),
             };
             let found = match tx
                 .transaction
@@ -226,6 +227,7 @@ impl<S: Storage> Graph<S> {
             catalog: None,
             tokens: Arc::default(),
             reads_committed_tokens: false,
+            own_tokens: CommittedTokens::default(),
         }
         .index_definitions()?;
         Ok(Self {
@@ -246,6 +248,7 @@ impl<S: Storage> Graph<S> {
             catalog: None,
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: true,
+            own_tokens: CommittedTokens::default(),
         })
     }
 
@@ -269,6 +272,7 @@ impl<S: Storage> Graph<S> {
             }),
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: false,
+            own_tokens: CommittedTokens::default(),
         })
     }
 }
@@ -282,6 +286,7 @@ pub(crate) struct GraphTx<T> {
     catalog: Option<Catalog>,
     tokens: Arc<CommittedTokens>,
     reads_committed_tokens: bool,
+    own_tokens: CommittedTokens,
 }
 
 #[derive(Debug)]
@@ -445,7 +450,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
-        if let Some(token) = self.tokens.get(name) {
+        if let Some(token) = self.tokens.get(name).or_else(|| self.own_tokens.get(name)) {
             return Ok(Some(token));
         }
         let bytes = self
@@ -454,10 +459,12 @@ impl<T: ReadTransaction> GraphTx<T> {
         let token = bytes
             .map(|bytes| decode_u32(&bytes).map(Token::new))
             .transpose()?;
-        if let Some(token) = token
-            && self.reads_committed_tokens
-        {
-            self.tokens.insert(name, token);
+        if let Some(token) = token {
+            if self.reads_committed_tokens {
+                self.tokens.insert(name, token);
+            } else {
+                self.own_tokens.insert(name, token);
+            }
         }
         Ok(token)
     }
@@ -510,7 +517,9 @@ impl<T: WriteTransaction> GraphTx<T> {
             &keys::token_id_key(K::TAG, id),
             name.as_bytes(),
         )?;
-        Ok(Token::new(id))
+        let token = Token::new(id);
+        self.own_tokens.insert(name, token);
+        Ok(token)
     }
 
     pub(crate) fn create_node(&mut self, record: &NodeRecord) -> Result<NodeId, GraphError> {
