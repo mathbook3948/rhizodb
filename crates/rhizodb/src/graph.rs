@@ -1124,3 +1124,15 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "graph/maintenance.test.rs"]
 mod maintenance_tests;
+
+#[cfg(test)]
+#[path = "graph/node_meta.test.rs"]
+mod node_meta_tests;
+
+#[cfg(test)]
+#[path = "graph/node_meta_crash.test.rs"]
+mod node_meta_crash_tests;
+
+#[cfg(test)]
+#[path = "graph/upgrade.test.rs"]
+mod upgrade_tests;

@@ -6,6 +6,8 @@ pub(crate) mod conformance;
 #[cfg(test)]
 pub(crate) mod model;
 pub(crate) mod redb_backend;
+#[cfg(test)]
+pub(crate) mod sim_backend;
 
 /// The fixed set of ordered key-value tables the graph layer is built on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

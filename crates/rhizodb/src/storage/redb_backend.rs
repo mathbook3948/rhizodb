@@ -48,6 +48,14 @@ impl RedbStorage {
         Self::with_all_tables(database)
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: impl redb::StorageBackend) -> Result<Self, StorageError> {
+        let database = Database::builder()
+            .create_with_backend(backend)
+            .map_err(StorageError::new)?;
+        Self::with_all_tables(database)
+    }
+
     fn with_all_tables(database: Database) -> Result<Self, StorageError> {
         let read = database.begin_read().map_err(StorageError::new)?;
         let complete = Table::ALL

@@ -210,6 +210,28 @@ fn a_scrambled_power_loss_never_touches_synced_data_and_reaches_every_outcome() 
 }
 
 #[test]
+fn a_reordered_power_loss_keeps_each_sector_old_or_new_and_reaches_both() {
+    let mut sector_outcomes = BTreeSet::new();
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        let file = synced_file(&fs, "db", &[page(1), page(2)]);
+        file.write(1, [page(3)].as_flattened()).unwrap();
+        file.write(1, [page(4)].as_flattened()).unwrap();
+        let image = pages(&fs.crash(Crash::Reorder { seed }), "db");
+        assert_eq!(image[0], page(1));
+        for sector in sectors(&image[1]) {
+            let fill = sector[0];
+            assert!(
+                sector.iter().all(|byte| *byte == fill),
+                "a sector is torn inside"
+            );
+            sector_outcomes.insert(fill);
+        }
+    }
+    assert_eq!(sector_outcomes, BTreeSet::from([2, 3, 4]));
+}
+
+#[test]
 fn a_scrambled_power_loss_can_lose_a_block_count_change() {
     let mut lengths = BTreeSet::new();
     for seed in 0..SEEDS {

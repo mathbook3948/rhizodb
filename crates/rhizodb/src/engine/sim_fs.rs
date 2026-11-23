@@ -43,6 +43,9 @@ pub(crate) enum Crash {
     /// order, may lose an unsynced change of length, and keeps a prefix of the unsynced name
     /// changes.
     Scramble { seed: u64 },
+    /// Like [`Crash::Scramble`], but each sector holds its old or its new bytes, never
+    /// garbage, as on a device whose sector writes are atomic.
+    Reorder { seed: u64 },
 }
 
 /// How long an injected I/O error lasts.
@@ -203,13 +206,13 @@ impl SimFs {
     pub(crate) fn crash(&self, crash: Crash) -> SimFs {
         let state = lock(&self.state);
         let mut random = SplitMix(match crash {
-            Crash::Scramble { seed } => seed,
+            Crash::Scramble { seed } | Crash::Reorder { seed } => seed,
             Crash::DropUnsynced | Crash::KeepUnsynced => 0,
         });
         let names = match crash {
             Crash::DropUnsynced => state.durable_names.clone(),
             Crash::KeepUnsynced => state.live_names.clone(),
-            Crash::Scramble { .. } => {
+            Crash::Scramble { .. } | Crash::Reorder { .. } => {
                 let kept = random.below(state.pending_names.len() as u64 + 1) as usize;
                 let mut names = state.durable_names.clone();
                 for change in &state.pending_names[..kept] {
@@ -225,7 +228,8 @@ impl SimFs {
             let bytes = match crash {
                 Crash::DropUnsynced => stored.durable.clone(),
                 Crash::KeepUnsynced => stored.live.clone(),
-                Crash::Scramble { .. } => scramble(stored, &mut random),
+                Crash::Scramble { .. } => scramble(stored, &mut random, Torn::WithGarbage),
+                Crash::Reorder { .. } => scramble(stored, &mut random, Torn::OldOrNew),
             };
             renumbered.insert(inode, inodes.len());
             inodes.push(Inode {
@@ -258,7 +262,13 @@ impl SimFs {
     }
 }
 
-fn scramble(inode: &Inode, random: &mut SplitMix) -> Vec<u8> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Torn {
+    WithGarbage,
+    OldOrNew,
+}
+
+fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
     let mut bytes = inode.durable.clone();
     let mut order: Vec<&DataChange> = inode.pending.iter().collect();
     random.shuffle(&mut order);
@@ -279,7 +289,7 @@ fn scramble(inode: &Inode, random: &mut SplitMix) -> Vec<u8> {
                     }
                     _ => {
                         grow(&mut bytes, end);
-                        tear(&mut bytes[*start..end], data, random);
+                        tear(&mut bytes[*start..end], data, random, torn);
                     }
                 }
             }
@@ -299,11 +309,15 @@ fn grow(bytes: &mut Vec<u8>, end: usize) {
     }
 }
 
-fn tear(block: &mut [u8], new: &[u8], random: &mut SplitMix) {
+fn tear(block: &mut [u8], new: &[u8], random: &mut SplitMix, torn: Torn) {
     let (sectors, _) = block.as_chunks_mut::<SECTOR_SIZE>();
     let (new_sectors, _) = new.as_chunks::<SECTOR_SIZE>();
+    let outcomes = match torn {
+        Torn::WithGarbage => 3,
+        Torn::OldOrNew => 2,
+    };
     for (sector, new) in sectors.iter_mut().zip(new_sectors) {
-        match random.below(3) {
+        match random.below(outcomes) {
             0 => {}
             1 => *sector = *new,
             _ => sector.fill_with(|| random.next() as u8),

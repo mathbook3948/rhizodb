@@ -1,7 +1,9 @@
 use super::*;
+use crate::engine::sim_fs::SimFs;
 use crate::storage::conformance;
 use crate::storage::conformance::Harness;
 use crate::storage::model;
+use crate::storage::sim_backend;
 use crate::test_scale;
 use proptest::prelude::*;
 
@@ -25,9 +27,30 @@ impl Harness for RedbFile {
     }
 }
 
+struct RedbOnSimFs {
+    fs: SimFs,
+}
+
+impl Harness for RedbOnSimFs {
+    type Store = RedbStorage;
+
+    fn open(&mut self) -> RedbStorage {
+        sim_backend::storage(&self.fs).unwrap()
+    }
+}
+
+fn on_sim_fs() -> RedbOnSimFs {
+    RedbOnSimFs { fs: SimFs::new() }
+}
+
 #[test]
 fn the_redb_backend_passes_the_storage_conformance_suite() {
     conformance::run(RedbFile::new);
+}
+
+#[test]
+fn the_redb_backend_on_the_simulated_file_system_passes_the_storage_conformance_suite() {
+    conformance::run(on_sim_fs);
 }
 
 proptest! {
@@ -36,6 +59,11 @@ proptest! {
     #[test]
     fn the_redb_backend_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut RedbFile::new(), &ops)?;
+    }
+
+    #[test]
+    fn the_redb_backend_on_the_simulated_file_system_matches_the_versioned_model(ops in model::ops()) {
+        model::check(&mut on_sim_fs(), &ops)?;
     }
 }
 
