@@ -66,6 +66,13 @@ fn workload<S: Storage>(store: &S, results: &mut Vec<(String, Duration)>) {
             assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
         }
     });
+    timed("the same 200k point reads again", results, || {
+        let read = store.begin_read().unwrap();
+        for index in 0..READS {
+            let id = index * 7_919 % KEYS;
+            assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
+        }
+    });
     timed("full scan of 1M keys", results, || {
         let read = store.begin_read().unwrap();
         let mut count = 0;
@@ -96,6 +103,10 @@ fn the_engine_against_redb_on_kv_workloads() {
                 .ok()
                 .and_then(|pages| pages.parse().ok())
                 .unwrap_or(EngineOptions::default().cache_pages),
+            memtable_limit: std::env::var("BENCH_MEMTABLE")
+                .ok()
+                .and_then(|bytes| bytes.parse().ok())
+                .unwrap_or(EngineOptions::default().memtable_limit),
             ..EngineOptions::default()
         };
         let store = open_path(&engine_directory.path().join("graph.rhizo"), options).unwrap();
@@ -121,4 +132,34 @@ fn the_engine_against_redb_on_kv_workloads() {
         redb_size as f64 / 1048576.0,
         engine_size as f64 / 1048576.0
     );
+}
+
+fn read_points(store: &impl Storage, keys: u64, reads: u64) {
+    let read = store.begin_read().unwrap();
+    for index in 0..reads {
+        let id = index * 7_919 % keys;
+        assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
+    }
+}
+
+#[test]
+#[ignore = "a profiling target, run under callgrind"]
+fn point_reads_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = open_path(
+        &directory.path().join("graph.rhizo"),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let keys = 100_000;
+    for batch in 0..keys / BATCH {
+        let mut write = store.begin_write().unwrap();
+        for id in batch * BATCH..(batch + 1) * BATCH {
+            write.put(Table::Nodes, &key(id), &value(id)).unwrap();
+        }
+        write.commit().unwrap();
+    }
+    store.checkpoint().unwrap();
+    read_points(&store, keys, 20_000);
+    read_points(&store, keys, 100_000);
 }

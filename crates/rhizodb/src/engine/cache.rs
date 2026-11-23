@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -18,9 +20,32 @@ struct Entry {
     used: bool,
 }
 
+/// Hashes a block reference by one multiplication, since references are not chosen by an
+/// adversary and the cache is on every read.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BlockHasher(u64);
+
+impl Hasher for BlockHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(29);
+    }
+}
+
 #[derive(Debug, Default)]
 struct Shard {
-    index: HashMap<BlockRef, usize>,
+    index: HashMap<BlockRef, usize, BuildHasherDefault<BlockHasher>>,
     entries: Vec<Entry>,
     hand: usize,
 }

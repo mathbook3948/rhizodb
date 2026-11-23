@@ -82,6 +82,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Each table is an append-only B+tree of one-block pages, and a checkpoint writes the leaves it changes and their paths as new pages.
 - A child pointer holds the child's block reference and LSN, and a child of another LSN, kind, level, or table is corruption.
 - A page shares the common prefix of its keys, capped at 512 bytes, and stores each key's rest.
+- A cell stores its key before its value or child pointer, and a search compares the page prefix once and then the stored rests.
 - A leaf whose keys and values all have one width uses a fixed format without per-cell offsets.
 - A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
 - A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
