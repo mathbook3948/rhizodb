@@ -33,6 +33,12 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Each listed difference in returned rows carries the reason the engines differ.
 - A query that only one engine accepts is listed with the error it raised.
 - Consistency after a forced shutdown is tested.
+- Every storage backend passes one conformance suite written against the storage trait.
+- Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
+- The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
+- CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
+- A failing case a randomized test finds is checked in, and every later run replays it.
+- Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
 - The parser is fuzzed.
 - Code and tests taken from other projects keep their source and license.
 

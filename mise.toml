@@ -29,6 +29,11 @@ run = [
   "cargo test --workspace",
 ]
 
+[tasks.storage-deep]
+description = "Run the storage and engine tests with 100 times the random cases that check runs, as the nightly workflow does"
+env = { RHIZODB_TEST_SCALE = "100" }
+run = "cargo test --release --package rhizodb --lib -- storage:: engine::"
+
 [tasks.differential]
 description = "Compare query results with LadybugDB, which builds from C++ source"
 dir = "crates/differential"
