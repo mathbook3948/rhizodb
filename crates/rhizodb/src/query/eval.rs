@@ -56,6 +56,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) check: Option<&'a Check>,
     /// The reader of node records, opened on the first read.
     pub(crate) nodes: RefCell<Option<NodeReader<'a, T>>>,
+    /// The property keys looked up so far that have a token.
+    pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step
@@ -152,8 +154,19 @@ impl<T: ReadTransaction> Env<'_, T> {
             .collect()
     }
 
-    fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
+    fn property_key(&self, key: &str) -> Result<Option<Token<PropertyKey>>, Error> {
+        if let Some((_, token)) = self.keys.borrow().iter().find(|(name, _)| name == key) {
+            return Ok(Some(*token));
+        }
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
+        if let Some(token) = token {
+            self.keys.borrow_mut().push((key.to_owned(), token));
+        }
+        Ok(token)
+    }
+
+    fn element_property(&self, value: &Datum, key: &str) -> Result<Option<Datum>, Error> {
+        let token = self.property_key(key)?;
         let stored = match (value, token) {
             (Datum::Node(id), Some(token)) => {
                 self.with_node(*id, |node| Ok(node.property(token)?))?

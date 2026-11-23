@@ -114,6 +114,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             patterns: self.patterns,
             check: None,
             nodes: RefCell::default(),
+            keys: RefCell::default(),
         }
     }
 

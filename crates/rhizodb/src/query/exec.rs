@@ -59,6 +59,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         patterns: &patterns,
         check: None,
         nodes: RefCell::default(),
+        keys: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -87,6 +88,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         patterns: &patterns,
         check: None,
         nodes: RefCell::default(),
+        keys: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -99,6 +101,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             patterns: &patterns,
             check: None,
             nodes: RefCell::default(),
+            keys: RefCell::default(),
         }
         .read_clauses(
             clause,
@@ -132,6 +135,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         patterns: &patterns,
         check: None,
         nodes: RefCell::default(),
+        keys: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -450,6 +454,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             patterns: self.patterns,
             check: Some(&check),
             nodes: RefCell::default(),
+            keys: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {

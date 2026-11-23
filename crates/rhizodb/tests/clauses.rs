@@ -296,6 +296,21 @@ fn insert_is_accepted_as_the_gql_form_of_create() {
 }
 
 #[test]
+fn a_property_key_set_after_a_read_of_it_is_read_back() {
+    let db = db();
+    run(&db, "CREATE ({k: 1}), ({k: 2})");
+    let rows = run(
+        &db,
+        "MATCH (n) WITH n, n.fresh AS before SET n.fresh = n.k * 10 \
+         RETURN before, n.fresh ORDER BY n.fresh",
+    );
+    assert_eq!(
+        rows,
+        [vec![Value::Null, int(10)], vec![Value::Null, int(20)]]
+    );
+}
+
+#[test]
 fn set_supports_every_form() {
     let db = db();
     run(&db, "CREATE (:N {a: 1, b: 2})");
