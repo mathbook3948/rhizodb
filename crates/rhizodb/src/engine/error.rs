@@ -15,8 +15,12 @@ pub(crate) enum EngineError {
     Unsupported(String),
     /// The header says the log holds commits, but no log segment is there.
     WalMissing,
+    /// An earlier write or sync failed, so the engine refuses every write until it is reopened.
+    Poisoned,
     /// A key, value, or transaction exceeds what the engine can store.
     TooLarge,
+    /// A failure that already crossed the storage trait, such as one a scan's visitor raised.
+    Storage(StorageError),
 }
 
 impl EngineError {
@@ -25,7 +29,11 @@ impl EngineError {
     }
 
     pub(crate) fn is_corrupt(&self) -> bool {
-        matches!(self, Self::Corrupt(_) | Self::WalMissing)
+        match self {
+            Self::Corrupt(_) | Self::WalMissing => true,
+            Self::Storage(error) => error.is_corrupt(),
+            _ => false,
+        }
     }
 }
 
@@ -39,7 +47,11 @@ impl fmt::Display for EngineError {
                 "write-ahead log missing: the database was not closed cleanly and its log segments \
                  are gone",
             ),
+            Self::Poisoned => formatter.write_str(
+                "an earlier write failed, so the database refuses writes until it is opened again",
+            ),
             Self::TooLarge => formatter.write_str("a key, value, or transaction is too large"),
+            Self::Storage(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -48,6 +60,7 @@ impl Error for EngineError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
+            Self::Storage(error) => Some(error),
             _ => None,
         }
     }
@@ -59,8 +72,17 @@ impl From<io::Error> for EngineError {
     }
 }
 
+impl From<StorageError> for EngineError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
 impl From<EngineError> for StorageError {
     fn from(error: EngineError) -> Self {
+        if let EngineError::Storage(error) = error {
+            return error;
+        }
         if error.is_corrupt() {
             StorageError::corrupt(error)
         } else {

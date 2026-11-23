@@ -66,6 +66,17 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
 - A log that ends before the checkpoint's LSN is corruption.
 - Segments wholly before the checkpoint are removed, not reused.
+- The database file is created under a temporary name and renamed into place once its header is synced, and opening removes a leftover temporary file.
+- Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
+- A database in memory keeps its log on the in-memory file system too.
+- A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
+- The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
+- Every reader registers its snapshot, and a commit drops each version that no registered snapshot or later one can see.
+- A write transaction keeps its operations in order, for the log, and each written key's value now, for its own reads and for the memtable.
+- A range delete puts a tombstone in the memtable for each key it removes, and replaying its log operation finds the same keys.
+- A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
+- A commit's timestamp is the wall clock in microseconds, or one past the previous commit's when the clock has not moved past it.
+- A replayed operation on a table id this build does not know refuses the log.
 
 ## Open
 
@@ -74,4 +85,3 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The size of an extent and where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
 - How a checkpoint changes the database file without losing data that an older snapshot or a crash still needs.
-- How a read transaction combines committed WAL records that are not checkpointed yet with the database file.
