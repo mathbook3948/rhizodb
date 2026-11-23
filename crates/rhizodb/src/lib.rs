@@ -53,6 +53,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod database;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the engine that reads these files arrives in a later phase"
+    )
+)]
+mod engine;
 mod error;
 pub mod gql;
 mod graph;
