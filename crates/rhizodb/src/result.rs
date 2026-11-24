@@ -84,6 +84,10 @@ impl Path {
     }
 
     /// The nodes in walk order, starting with the start node.
+    pub(crate) fn into_parts(self) -> (Vec<Node>, Vec<Relationship>) {
+        (self.nodes, self.relationships)
+    }
+
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }

@@ -106,8 +106,8 @@ impl Parser {
                 })
             )
         };
-        let mut clauses = vec![self.clause()?];
-        while self.at_clause_start() {
+        let mut clauses = Vec::new();
+        while clauses.is_empty() || self.at_clause_start() {
             if clauses.iter().any(yields_star) {
                 return Err(self.unexpected());
             }

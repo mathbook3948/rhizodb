@@ -70,6 +70,46 @@ impl From<PropertyValue> for Datum {
     }
 }
 
+/// How deep lists and maps may nest in a value while a query runs. Every step that walks a value
+/// recursively, from comparing and hashing to dropping, stays within a bounded stack this way.
+pub(crate) const MAX_NESTING: usize = 128;
+
+fn nesting_too_deep() -> Error {
+    Error::new(
+        ErrorKind::NestingTooDeep,
+        format!("a value cannot nest lists and maps deeper than {MAX_NESTING} levels"),
+    )
+}
+
+fn fits(value: &Datum, levels: usize) -> bool {
+    match value {
+        Datum::List(items) => levels > 0 && items.iter().all(|item| fits(item, levels - 1)),
+        Datum::Map(entries) => levels > 0 && entries.values().all(|item| fits(item, levels - 1)),
+        _ => true,
+    }
+}
+
+/// Fails unless `item` can be an item of a list or a map entry.
+pub(crate) fn check_item(item: &Datum) -> Result<(), Error> {
+    if fits(item, MAX_NESTING - 1) {
+        Ok(())
+    } else {
+        Err(nesting_too_deep())
+    }
+}
+
+/// The list of `items`, or an error when it would nest too deeply.
+pub(crate) fn list(items: Vec<Datum>) -> Result<Datum, Error> {
+    items.iter().try_for_each(check_item)?;
+    Ok(Datum::List(items))
+}
+
+/// The map of `entries`, or an error when it would nest too deeply.
+pub(crate) fn map(entries: BTreeMap<String, Datum>) -> Result<Datum, Error> {
+    entries.values().try_for_each(check_item)?;
+    Ok(Datum::Map(entries))
+}
+
 /// What writing `value` as a property does: `None` removes the property.
 pub(crate) fn to_property(value: &Datum) -> Result<Option<PropertyValue>, Error> {
     match value {
@@ -106,8 +146,45 @@ fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
     }
 }
 
-/// Turns a parameter into a runtime value. Graph elements are kept by ID.
-pub(crate) fn from_parameter(value: &Value) -> Datum {
+/// Turns a parameter into a runtime value, or fails when it nests too deeply. Graph elements are
+/// kept by ID.
+pub(crate) fn from_parameter(value: &Value) -> Result<Datum, Error> {
+    let mut pending = vec![(value, 0)];
+    while let Some((value, depth)) = pending.pop() {
+        let items: Box<dyn Iterator<Item = &Value>> = match value {
+            Value::List(items) => Box::new(items.iter()),
+            Value::Map(entries) => Box::new(entries.values()),
+            _ => continue,
+        };
+        if depth == MAX_NESTING {
+            return Err(nesting_too_deep());
+        }
+        pending.extend(items.map(|item| (item, depth + 1)));
+    }
+    Ok(converted(value))
+}
+
+/// Drops `values` one level at a time, so a value of any depth is dropped without recursing.
+pub(crate) fn dismantle(mut values: Vec<Value>) {
+    while let Some(value) = values.pop() {
+        match value {
+            Value::List(items) => values.extend(items),
+            Value::Map(entries) => values.extend(entries.into_values()),
+            Value::Node(node) => values.extend(node.properties.into_values()),
+            Value::Relationship(relationship) => {
+                values.extend(relationship.properties.into_values());
+            }
+            Value::Path(path) => {
+                let (nodes, relationships) = path.into_parts();
+                values.extend(nodes.into_iter().map(Value::Node));
+                values.extend(relationships.into_iter().map(Value::Relationship));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn converted(value: &Value) -> Datum {
     match value {
         Value::Null => Datum::Null,
         Value::Boolean(value) => Datum::Boolean(*value),
@@ -116,11 +193,11 @@ pub(crate) fn from_parameter(value: &Value) -> Datum {
         Value::String(value) => Datum::String(value.clone()),
         Value::Bytes(value) => Datum::Bytes(value.clone()),
         Value::Temporal(value) => Datum::Temporal(value.clone()),
-        Value::List(items) => Datum::List(items.iter().map(from_parameter).collect()),
+        Value::List(items) => Datum::List(items.iter().map(converted).collect()),
         Value::Map(entries) => Datum::Map(
             entries
                 .iter()
-                .map(|(key, value)| (key.clone(), from_parameter(value)))
+                .map(|(key, value)| (key.clone(), converted(value)))
                 .collect(),
         ),
         Value::Node(node) => Datum::Node(node.id),

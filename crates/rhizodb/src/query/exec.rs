@@ -20,6 +20,8 @@ use super::aggregate::Groups;
 use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
+use super::datum::PathIds;
+use super::datum::dismantle;
 use super::datum::from_parameter;
 use super::eval::Check;
 use super::eval::Env;
@@ -376,10 +378,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                 source,
             )
         })?;
-        Ok(results
+        let rows: Result<Vec<Vec<Datum>>, Error> = results
             .iter()
             .map(|result| result.iter().map(from_parameter).collect())
-            .collect())
+            .collect();
+        if rows.is_err() {
+            dismantle(results.into_iter().flatten().collect());
+        }
+        rows
     }
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
@@ -565,26 +571,20 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
             Datum::Temporal(value) => Value::Temporal(value),
-            Datum::List(items) => Value::List(
-                items
-                    .into_iter()
-                    .map(|item| self.value(item, graveyard))
-                    .collect::<Result<_, _>>()?,
-            ),
+            Datum::List(items) => Value::List(self.list_value(items, graveyard)?),
             Datum::Map(entries) => Value::Map(self.map_value(entries, graveyard)?),
             Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
             Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
-            Datum::Path(path) => Value::Path(result::Path::new(
-                path.nodes
-                    .into_iter()
-                    .map(|id| self.node_value(id, graveyard))
-                    .collect::<Result<_, _>>()?,
-                path.relationships
-                    .into_iter()
-                    .map(|id| self.relationship_value(id, graveyard))
-                    .collect::<Result<_, _>>()?,
-            )),
+            Datum::Path(path) => Value::Path(self.path_value(path, graveyard)?),
         })
+    }
+
+    fn list_value(&self, items: Vec<Datum>, graveyard: &Graveyard) -> Result<Vec<Value>, Error> {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.value(item, graveyard)?);
+        }
+        Ok(values)
     }
 
     fn map_value(
@@ -592,10 +592,24 @@ impl<T: ReadTransaction> Env<'_, T> {
         entries: BTreeMap<String, Datum>,
         graveyard: &Graveyard,
     ) -> Result<BTreeMap<String, Value>, Error> {
-        entries
-            .into_iter()
-            .map(|(key, value)| Ok((key, self.value(value, graveyard)?)))
-            .collect()
+        let mut values = BTreeMap::new();
+        for (key, value) in entries {
+            values.insert(key, self.value(value, graveyard)?);
+        }
+        Ok(values)
+    }
+
+    fn path_value(&self, path: PathIds, graveyard: &Graveyard) -> Result<result::Path, Error> {
+        Ok(result::Path::new(
+            path.nodes
+                .into_iter()
+                .map(|id| self.node_value(id, graveyard))
+                .collect::<Result<_, _>>()?,
+            path.relationships
+                .into_iter()
+                .map(|id| self.relationship_value(id, graveyard))
+                .collect::<Result<_, _>>()?,
+        ))
     }
 
     fn node_value(

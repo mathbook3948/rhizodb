@@ -11,6 +11,7 @@ use crate::storage::ReadTransaction;
 
 use super::compare::Key;
 use super::compare::order;
+use super::datum;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
@@ -229,7 +230,7 @@ impl Accumulator {
                 };
                 Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
             }
-            AggregateFunction::Collect => Ok(Datum::List(values)),
+            AggregateFunction::Collect => datum::list(values),
             AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Sum => sum(&values),

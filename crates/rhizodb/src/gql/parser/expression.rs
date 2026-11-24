@@ -102,58 +102,82 @@ impl Parser {
             self.deepen()?;
             lhs = match infix {
                 Infix::Is => {
-                    self.pos += 1;
-                    let negated = self.eat_keyword("NOT");
                     in_comparison_chain = false;
-                    if self.eat_keyword("LABELED") {
-                        let test = Expr::HasLabels {
-                            operand: Box::new(lhs),
-                            labels: self.label_expression(self.label_pipe_allowed())?,
-                        };
-                        if negated {
-                            Expr::Unary {
-                                op: UnaryOp::Not,
-                                operand: Box::new(test),
-                            }
-                        } else {
-                            test
-                        }
-                    } else {
-                        self.expect_keyword("NULL")?;
-                        Expr::IsNull {
-                            operand: Box::new(lhs),
-                            negated,
-                        }
-                    }
+                    self.is_suffix(lhs)?
                 }
                 Infix::Comparison(op) => {
-                    self.pos += 1;
-                    let rhs = self.binary(precedence + 1)?;
                     let chained = std::mem::replace(&mut in_comparison_chain, true);
-                    match lhs {
-                        Expr::Comparison { first, mut rest } if chained => {
-                            rest.push((op, rhs));
-                            Expr::Comparison { first, rest }
-                        }
-                        first => Expr::Comparison {
-                            first: Box::new(first),
-                            rest: vec![(op, rhs)],
-                        },
-                    }
+                    self.comparison_rest(op, precedence, lhs, chained)?
                 }
                 Infix::Binary(op, token_count) => {
-                    self.pos += token_count;
-                    let rhs = self.binary(precedence + 1)?;
                     in_comparison_chain = false;
-                    Expr::Binary {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    }
+                    self.binary_rest(op, token_count, precedence, lhs)?
                 }
             };
         }
         Ok(lhs)
+    }
+
+    fn is_suffix(&mut self, lhs: Expr) -> ParseResult<Expr> {
+        self.pos += 1;
+        let negated = self.eat_keyword("NOT");
+        if self.eat_keyword("LABELED") {
+            let test = Expr::HasLabels {
+                operand: Box::new(lhs),
+                labels: self.label_expression(self.label_pipe_allowed())?,
+            };
+            Ok(if negated {
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(test),
+                }
+            } else {
+                test
+            })
+        } else {
+            self.expect_keyword("NULL")?;
+            Ok(Expr::IsNull {
+                operand: Box::new(lhs),
+                negated,
+            })
+        }
+    }
+
+    fn comparison_rest(
+        &mut self,
+        op: ComparisonOp,
+        precedence: u8,
+        lhs: Expr,
+        chained: bool,
+    ) -> ParseResult<Expr> {
+        self.pos += 1;
+        let rhs = self.binary(precedence + 1)?;
+        Ok(match lhs {
+            Expr::Comparison { first, mut rest } if chained => {
+                rest.push((op, rhs));
+                Expr::Comparison { first, rest }
+            }
+            first => Expr::Comparison {
+                first: Box::new(first),
+                rest: vec![(op, rhs)],
+            },
+        })
+    }
+
+    fn binary_rest(
+        &mut self,
+        op: BinaryOp,
+        token_count: usize,
+        precedence: u8,
+        lhs: Expr,
+    ) -> ParseResult<Expr> {
+        self.pos += token_count;
+        let rhs = self.binary(precedence + 1)?;
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
     }
 
     fn peek_infix(&self) -> Option<Infix> {
@@ -329,7 +353,7 @@ impl Parser {
             if !self.in_where {
                 return Err(self.unexpected());
             }
-            return Ok(Expr::Pattern(self.pattern_element()?));
+            return Ok(Expr::Pattern(Box::new(self.pattern_element()?)));
         }
         self.pos += 1;
         let inner = self.expression()?;
@@ -402,12 +426,12 @@ impl Parser {
         self.expect_punct(Punct::Pipe)?;
         let projection = Box::new(self.expression()?);
         self.expect_punct(Punct::RBracket)?;
-        Ok(Expr::PatternComprehension(PatternComprehension {
+        Ok(Expr::PatternComprehension(Box::new(PatternComprehension {
             path_variable,
             element,
             filter,
             projection,
-        }))
+        })))
     }
 
     fn exists_subquery(&mut self) -> ParseResult<Expr> {
@@ -525,12 +549,12 @@ impl Parser {
             self.comma_separated(Self::expression)?
         };
         self.expect_punct(Punct::RParen)?;
-        Ok(Expr::Function(FunctionCall {
+        Ok(Expr::Function(Box::new(FunctionCall {
             namespace,
             name,
             distinct,
             args,
-        }))
+        })))
     }
 
     fn list_predicate(&mut self, quantifier: Quantifier) -> ParseResult<Expr> {

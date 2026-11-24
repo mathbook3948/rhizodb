@@ -93,6 +93,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - A pattern part that uses an index over a relationship type starts at the ends of the relationships the index returns.
 - The conditions a property index serves are a property in the pattern's map and `=`, `IN`, `<`, `<=`, `>`, and `>=` on the property in the `WHERE` of the `MATCH`, alone or joined by `AND`.
 - A served condition compares the property with an expression that reads no variable the pattern part or a later one binds.
+- A served condition's expression is evaluated once per incoming row, so it must give every element the same value: an expression that calls `rand()` or a realtime clock, or holds a subquery, a pattern, or a pattern comprehension, leaves the condition to the scan.
 - `id()` compared with `=` or `IN` in the `WHERE` of a `MATCH` reads the node, or the ends of the relationship, by ID.
 - A pattern part tries an ID lookup first, then an index lookup by `=` or `IN`, then an index range, then the label scan.
 - A comparison that is never true, such as one with null, NaN, a byte string, or a duration, makes an index lookup return nothing.

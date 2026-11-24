@@ -6,6 +6,8 @@ dml_node/create/create_empty.test::MultipleCreations
 dml_node/delete/delete_empty.test::DeleteFromFirstVector
 dml_node/delete/delete_empty.test::MultipleDeletionsSingleTransaction
 dml_node/set/set_empty.test::MultipleSet
+dml_rel/create/create_batch.test::CreateRelBatch1
+dml_rel/create/create_batch.test::CreateRelBatchAndDelete
 dml_rel/create/create_small.test::CreateAndScanManyToManyRel
 dml_rel/create/create_small.test::CreateAndScanOneToOneRel
 dml_rel/create/create_small.test::CreateOneToOneRel1

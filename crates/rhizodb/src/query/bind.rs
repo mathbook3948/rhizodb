@@ -291,160 +291,14 @@ impl Binder<'_> {
                     "an EXISTS subquery cannot update the graph",
                 ));
             }
-            match clause {
-                ast::Clause::Match(found) => {
-                    clauses.push(Clause::Read(self.match_clause(found, &mut scope)?));
-                }
-                ast::Clause::Unwind(unwind) => {
-                    let expr = self.expr(&unwind.expr, &scope, &mut Mode::Plain)?;
-                    let name = &unwind.variable.0;
-                    if scope.get(name).is_some() {
-                        return Err(error(
-                            ErrorKind::VariableAlreadyBound,
-                            format!("variable `{name}` is already bound"),
-                        ));
-                    }
-                    let slot = self.slot();
-                    scope.insert(name, slot, Kind::Unknown);
-                    clauses.push(Clause::Read(ReadClause::Unwind { expr, slot }));
-                }
-                ast::Clause::Call(call) => {
-                    let standalone = !subquery && query.clauses.len() == 1;
-                    let (bound, columns) = self.call(call, &mut scope, standalone)?;
-                    if standalone {
-                        result_reads_variables = true;
-                        let slots = bound.yields.iter().map(|(_, slot)| *slot).collect();
-                        output = Some((slots, columns));
-                    }
-                    clauses.push(Clause::Read(ReadClause::Call(Box::new(bound))));
-                }
-                ast::Clause::Filter(condition) => {
-                    let condition = self.filter(condition, &scope, &mut Mode::Plain)?;
-                    clauses.push(Clause::Read(ReadClause::Filter(condition)));
-                }
-                ast::Clause::Let(bindings) => {
-                    let mut next = scope.clone();
-                    let mut bound = Vec::new();
-                    for (variable, value) in bindings {
-                        let expr = self.expr(value, &scope, &mut Mode::Plain)?;
-                        let name = &variable.0;
-                        if next.get(name).is_some() {
-                            return Err(error(
-                                ErrorKind::VariableAlreadyBound,
-                                format!("variable `{name}` is already bound"),
-                            ));
-                        }
-                        let slot = self.slot();
-                        next.insert(name, slot, kind_of(value, &scope));
-                        bound.push((expr, slot));
-                    }
-                    scope = next;
-                    clauses.push(Clause::Read(ReadClause::Let(bound)));
-                }
-                ast::Clause::With(with) => {
-                    let (projection, next, _) =
-                        self.projection(&with.projection, &scope, true, with.filter.as_ref())?;
-                    scope = next;
-                    clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
-                }
-                ast::Clause::Return(returned) => {
-                    let reads_before = self.parameter_reads;
-                    let (projection, _, columns) =
-                        self.projection(returned, &scope, false, None)?;
-                    result_reads_variables =
-                        reads_variables(returned, &scope) || self.parameter_reads > reads_before;
-                    output = Some((projection.outputs.clone(), columns));
-                    clauses.push(Clause::Read(ReadClause::Project(Box::new(projection))));
-                }
-                ast::Clause::Insert(parts) => {
-                    let mut introduced = Vec::new();
-                    let mut parts_bound = Vec::new();
-                    for part in parts {
-                        parts_bound.push(self.pattern_part(
-                            part,
-                            &mut scope,
-                            PatternUse::Create,
-                            &mut introduced,
-                        )?);
-                    }
-                    clauses.push(Clause::Update(UpdateClause::Create(parts_bound)));
-                }
-                ast::Clause::Merge(merge) => {
-                    let mut introduced = Vec::new();
-                    let mut pattern = self.pattern_part(
-                        &merge.pattern,
-                        &mut scope,
-                        PatternUse::Merge,
-                        &mut introduced,
-                    )?;
-                    pattern.seeks = seek::derive(&pattern, None, &introduced);
-                    let on_create = self.set_items(&merge.on_create, &scope)?;
-                    let on_match = self.set_items(&merge.on_match, &scope)?;
-                    clauses.push(Clause::Update(UpdateClause::Merge(Box::new(MergeClause {
-                        pattern,
-                        on_create,
-                        on_match,
-                    }))));
-                }
-                ast::Clause::Set(items) => {
-                    clauses.push(Clause::Update(UpdateClause::Set(
-                        self.set_items(items, &scope)?,
-                    )));
-                }
-                ast::Clause::Remove(items) => {
-                    let mut actions = Vec::new();
-                    for item in items {
-                        actions.push(match item {
-                            ast::RemoveItem::Property { base, key } => RemoveAction::Property {
-                                target: self.expr(base, &scope, &mut Mode::Plain)?,
-                                key: key.0.clone(),
-                            },
-                            ast::RemoveItem::Labels { variable, labels } => RemoveAction::Labels {
-                                target: self.lookup(&variable.0, &scope)?.slot,
-                                labels: label_set(labels)?,
-                            },
-                        });
-                    }
-                    clauses.push(Clause::Update(UpdateClause::Remove(actions)));
-                }
-                ast::Clause::Delete(delete) => {
-                    let mut targets = Vec::new();
-                    for target in &delete.targets {
-                        if is_label_predicate(target) {
-                            return Err(error(
-                                ErrorKind::InvalidDelete,
-                                "DELETE takes an element, not a label expression",
-                            ));
-                        }
-                        self.expect_shape(
-                            target,
-                            &scope,
-                            &[Shape::Node, Shape::Relationship, Shape::Path, Shape::List],
-                        );
-                        let bound = self.expr(target, &scope, &mut Mode::Plain)?;
-                        if let ast::Expr::Variable(name) = target
-                            && self.lookup(&name.0, &scope)?.kind == Kind::Value
-                        {
-                            return Err(error(
-                                ErrorKind::InvalidArgumentType,
-                                "DELETE takes a node, relationship, or path",
-                            ));
-                        }
-                        targets.push(bound);
-                    }
-                    let mut later_reads = Vec::new();
-                    collect_clauses_free(
-                        &query.clauses[index + 1..],
-                        &mut Vec::new(),
-                        &mut later_reads,
-                    );
-                    clauses.push(Clause::Update(UpdateClause::Delete {
-                        retain: later_reads.iter().any(|name| scope.get(name).is_some()),
-                        detach: delete.detach,
-                        targets,
-                    }));
-                }
-            }
+            clauses.push(self.clause(
+                clause,
+                &query.clauses[index + 1..],
+                !subquery && query.clauses.len() == 1,
+                &mut scope,
+                &mut output,
+                &mut result_reads_variables,
+            )?);
             let ends_without_return = index == last && output.is_none() && !subquery;
             if ends_without_return
                 && matches!(
@@ -469,6 +323,202 @@ impl Binder<'_> {
             columns,
             result_reads_variables,
         ))
+    }
+
+    fn clause(
+        &mut self,
+        clause: &ast::Clause,
+        later: &[ast::Clause],
+        standalone: bool,
+        scope: &mut Scope,
+        output: &mut Option<(Vec<Slot>, Vec<String>)>,
+        reads: &mut bool,
+    ) -> Result<Clause, Error> {
+        match clause {
+            ast::Clause::Match(found) => Ok(Clause::Read(self.match_clause(found, scope)?)),
+            ast::Clause::Unwind(unwind) => self.unwind_clause(unwind, scope),
+            ast::Clause::Call(call) => self.call_clause(call, scope, standalone, output, reads),
+            ast::Clause::Filter(condition) => self.filter_clause(condition, scope),
+            ast::Clause::Let(bindings) => self.let_clause(bindings, scope),
+            ast::Clause::With(with) => self.with_clause(with, scope),
+            ast::Clause::Return(returned) => self.return_clause(returned, scope, output, reads),
+            ast::Clause::Insert(parts) => self.insert_clause(parts, scope),
+            ast::Clause::Merge(merge) => self.merge_clause(merge, scope),
+            ast::Clause::Set(items) => Ok(Clause::Update(UpdateClause::Set(
+                self.set_items(items, scope)?,
+            ))),
+            ast::Clause::Remove(items) => self.remove_clause(items, scope),
+            ast::Clause::Delete(delete) => self.delete_clause(delete, later, scope),
+        }
+    }
+
+    fn call_clause(
+        &mut self,
+        call: &ast::Call,
+        scope: &mut Scope,
+        standalone: bool,
+        output: &mut Option<(Vec<Slot>, Vec<String>)>,
+        reads: &mut bool,
+    ) -> Result<Clause, Error> {
+        let (bound, columns) = self.call(call, scope, standalone)?;
+        if standalone {
+            *reads = true;
+            let slots = bound.yields.iter().map(|(_, slot)| *slot).collect();
+            *output = Some((slots, columns));
+        }
+        Ok(Clause::Read(ReadClause::Call(Box::new(bound))))
+    }
+
+    fn return_clause(
+        &mut self,
+        returned: &ast::Projection,
+        scope: &Scope,
+        output: &mut Option<(Vec<Slot>, Vec<String>)>,
+        reads: &mut bool,
+    ) -> Result<Clause, Error> {
+        let reads_before = self.parameter_reads;
+        let (projection, _, columns) = self.projection(returned, scope, false, None)?;
+        *reads = reads_variables(returned, scope) || self.parameter_reads > reads_before;
+        *output = Some((projection.outputs.clone(), columns));
+        Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
+    }
+
+    fn delete_clause(
+        &mut self,
+        delete: &ast::Delete,
+        later: &[ast::Clause],
+        scope: &Scope,
+    ) -> Result<Clause, Error> {
+        let mut targets = Vec::new();
+        for target in &delete.targets {
+            if is_label_predicate(target) {
+                return Err(error(
+                    ErrorKind::InvalidDelete,
+                    "DELETE takes an element, not a label expression",
+                ));
+            }
+            self.expect_shape(
+                target,
+                scope,
+                &[Shape::Node, Shape::Relationship, Shape::Path, Shape::List],
+            );
+            let bound = self.expr(target, scope, &mut Mode::Plain)?;
+            if let ast::Expr::Variable(name) = target
+                && self.lookup(&name.0, scope)?.kind == Kind::Value
+            {
+                return Err(error(
+                    ErrorKind::InvalidArgumentType,
+                    "DELETE takes a node, relationship, or path",
+                ));
+            }
+            targets.push(bound);
+        }
+        let mut later_reads = Vec::new();
+        collect_clauses_free(later, &mut Vec::new(), &mut later_reads);
+        Ok(Clause::Update(UpdateClause::Delete {
+            retain: later_reads.iter().any(|name| scope.get(name).is_some()),
+            detach: delete.detach,
+            targets,
+        }))
+    }
+
+    fn unwind_clause(&mut self, unwind: &ast::Unwind, scope: &mut Scope) -> Result<Clause, Error> {
+        let expr = self.expr(&unwind.expr, scope, &mut Mode::Plain)?;
+        let name = &unwind.variable.0;
+        if scope.get(name).is_some() {
+            return Err(error(
+                ErrorKind::VariableAlreadyBound,
+                format!("variable `{name}` is already bound"),
+            ));
+        }
+        let slot = self.slot();
+        scope.insert(name, slot, Kind::Unknown);
+        Ok(Clause::Read(ReadClause::Unwind { expr, slot }))
+    }
+
+    fn filter_clause(&mut self, condition: &ast::Expr, scope: &Scope) -> Result<Clause, Error> {
+        let condition = self.filter(condition, scope, &mut Mode::Plain)?;
+        Ok(Clause::Read(ReadClause::Filter(condition)))
+    }
+
+    fn let_clause(
+        &mut self,
+        bindings: &[(ast::Name, ast::Expr)],
+        scope: &mut Scope,
+    ) -> Result<Clause, Error> {
+        let mut next = scope.clone();
+        let mut bound = Vec::new();
+        for (variable, value) in bindings {
+            let expr = self.expr(value, scope, &mut Mode::Plain)?;
+            let name = &variable.0;
+            if next.get(name).is_some() {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("variable `{name}` is already bound"),
+                ));
+            }
+            let slot = self.slot();
+            next.insert(name, slot, kind_of(value, scope));
+            bound.push((expr, slot));
+        }
+        *scope = next;
+        Ok(Clause::Read(ReadClause::Let(bound)))
+    }
+
+    fn with_clause(&mut self, with: &ast::With, scope: &mut Scope) -> Result<Clause, Error> {
+        let (projection, next, _) =
+            self.projection(&with.projection, scope, true, with.filter.as_ref())?;
+        *scope = next;
+        Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
+    }
+
+    fn insert_clause(
+        &mut self,
+        parts: &[ast::PatternPart],
+        scope: &mut Scope,
+    ) -> Result<Clause, Error> {
+        let mut introduced = Vec::new();
+        let mut parts_bound = Vec::new();
+        for part in parts {
+            parts_bound.push(self.pattern_part(
+                part,
+                scope,
+                PatternUse::Create,
+                &mut introduced,
+            )?);
+        }
+        Ok(Clause::Update(UpdateClause::Create(parts_bound)))
+    }
+
+    fn merge_clause(&mut self, merge: &ast::Merge, scope: &mut Scope) -> Result<Clause, Error> {
+        let mut introduced = Vec::new();
+        let mut pattern =
+            self.pattern_part(&merge.pattern, scope, PatternUse::Merge, &mut introduced)?;
+        pattern.seeks = seek::derive(&pattern, None, &introduced);
+        let on_create = self.set_items(&merge.on_create, scope)?;
+        let on_match = self.set_items(&merge.on_match, scope)?;
+        Ok(Clause::Update(UpdateClause::Merge(Box::new(MergeClause {
+            pattern,
+            on_create,
+            on_match,
+        }))))
+    }
+
+    fn remove_clause(&mut self, items: &[ast::RemoveItem], scope: &Scope) -> Result<Clause, Error> {
+        let mut actions = Vec::new();
+        for item in items {
+            actions.push(match item {
+                ast::RemoveItem::Property { base, key } => RemoveAction::Property {
+                    target: self.expr(base, scope, &mut Mode::Plain)?,
+                    key: key.0.clone(),
+                },
+                ast::RemoveItem::Labels { variable, labels } => RemoveAction::Labels {
+                    target: self.lookup(&variable.0, scope)?.slot,
+                    labels: label_set(labels)?,
+                },
+            });
+        }
+        Ok(Clause::Update(UpdateClause::Remove(actions)))
     }
 
     fn call(
@@ -1260,13 +1310,58 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
+        if let Some(bound) = self.projected_slot(expr, scope, mode)? {
+            return Ok(bound);
+        }
+        match expr {
+            ast::Expr::Literal(literal) => Ok(Expr::Constant(literal_value(literal))),
+            ast::Expr::Parameter(name) => Ok(Expr::Parameter(self.parameter(&name.0)?)),
+            ast::Expr::Variable(name) => self.variable(name, scope, mode),
+            ast::Expr::List(items) => Ok(Expr::List(self.exprs(items, scope, mode)?)),
+            ast::Expr::Map(entries) => self.map(entries, scope, mode),
+            ast::Expr::Property { base, key } => self.property(base, key, scope, mode),
+            ast::Expr::Index { base, index } => self.index(base, index, scope, mode),
+            ast::Expr::Slice { base, from, to } => {
+                self.slice(base, from.as_deref(), to.as_deref(), scope, mode)
+            }
+            ast::Expr::HasLabels { operand, labels } => {
+                self.has_labels(operand, labels, scope, mode)
+            }
+            ast::Expr::Unary { op, operand } => self.unary(*op, operand, scope, mode),
+            ast::Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, scope, mode),
+            ast::Expr::Comparison { first, rest } => self.comparison(first, rest, scope, mode),
+            ast::Expr::IsNull { operand, negated } => Ok(Expr::IsNull {
+                operand: self.boxed(operand, scope, mode)?,
+                negated: *negated,
+            }),
+            ast::Expr::Function(call) => self.function(call, scope, mode),
+            ast::Expr::CountStar => Err(aggregate_not_allowed(mode)),
+            ast::Expr::Case(case) => self.case(case, scope, mode),
+            ast::Expr::ListComprehension(comprehension) => {
+                self.list_comprehension(comprehension, scope, mode)
+            }
+            ast::Expr::ListPredicate(predicate) => self.list_predicate(predicate, scope, mode),
+            ast::Expr::Pattern(element) => self.pattern_predicate(element, scope, mode),
+            ast::Expr::Exists(subquery) => self.exists(subquery, scope, mode),
+            ast::Expr::PatternComprehension(comprehension) => {
+                self.pattern_comprehension(comprehension, scope, mode)
+            }
+        }
+    }
+
+    fn projected_slot(
+        &mut self,
+        expr: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Option<Expr>, Error> {
         if let Mode::Projected(projected) = mode
             && let Some((_, slot)) = projected
                 .items
                 .iter()
                 .find(|(item, _)| same_meaning(item, projected.scope, expr, scope))
         {
-            return Ok(Expr::Slot(*slot));
+            return Ok(Some(Expr::Slot(*slot)));
         }
         if let Mode::Grouped(grouping) = mode {
             if let Some((key, slot)) = grouping
@@ -1281,7 +1376,7 @@ impl Binder<'_> {
                          next to an aggregate",
                     ));
                 }
-                return Ok(Expr::Slot(*slot));
+                return Ok(Some(Expr::Slot(*slot)));
             }
             if let Some((function, distinct, args)) = aggregate_call(expr) {
                 if grouping.ordering {
@@ -1292,7 +1387,7 @@ impl Binder<'_> {
                 let aggregate = self.aggregate(function, distinct, args, &grouping.input)?;
                 let slot = self.slot();
                 grouping.aggregates.push((aggregate, slot));
-                return Ok(Expr::Slot(slot));
+                return Ok(Some(Expr::Slot(slot)));
             }
             if let ast::Expr::Variable(name) = expr
                 && scope.get(&name.0).is_none()
@@ -1314,304 +1409,387 @@ impl Binder<'_> {
                 });
             }
         }
-        Ok(match expr {
-            ast::Expr::Literal(literal) => Expr::Constant(match literal {
-                ast::Literal::Integer(value) => Datum::Integer(*value),
-                ast::Literal::Float(value) => Datum::Float(*value),
-                ast::Literal::String(value) => Datum::String(value.clone()),
-                ast::Literal::Boolean(value) => Datum::Boolean(*value),
-                ast::Literal::Null => Datum::Null,
-            }),
-            ast::Expr::Parameter(name) => Expr::Parameter(self.parameter(&name.0)?),
-            ast::Expr::Variable(name) => {
-                if matches!(mode, Mode::Constant) && scope.get(&name.0).is_none() {
-                    return Err(error(
-                        ErrorKind::NonConstantExpression,
-                        "SKIP and LIMIT cannot refer to variables",
-                    ));
-                }
-                Expr::Slot(self.lookup(&name.0, scope)?.slot)
-            }
-            ast::Expr::List(items) => Expr::List(self.exprs(items, scope, mode)?),
-            ast::Expr::Map(entries) => {
-                let mut bound = Vec::new();
-                for (key, value) in entries {
-                    bound.push((key.0.clone(), self.expr(value, scope, mode)?));
-                }
-                Expr::Map(bound)
-            }
-            ast::Expr::Property { base, key } => {
-                let bound = self.boxed(base, scope, mode)?;
-                self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map]);
-                Expr::Property(bound, key.0.clone())
-            }
-            ast::Expr::Index { base, index } => {
-                let bound_base = self.boxed(base, scope, mode)?;
-                let bound_index = self.boxed(index, scope, mode)?;
-                if let (Some(base), Some(index)) =
-                    (self.shape(base, scope), self.shape(index, scope))
-                {
-                    self.reject(index_error(base, index), || {
-                        format!("a {base:?} cannot be indexed with a {index:?}")
+        Ok(None)
+    }
+
+    fn variable(
+        &mut self,
+        name: &ast::Name,
+        scope: &Scope,
+        mode: &Mode<'_>,
+    ) -> Result<Expr, Error> {
+        if matches!(mode, Mode::Constant) && scope.get(&name.0).is_none() {
+            return Err(error(
+                ErrorKind::NonConstantExpression,
+                "SKIP and LIMIT cannot refer to variables",
+            ));
+        }
+        Ok(Expr::Slot(self.lookup(&name.0, scope)?.slot))
+    }
+
+    fn map(
+        &mut self,
+        entries: &[(ast::Name, ast::Expr)],
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let mut bound = Vec::new();
+        for (key, value) in entries {
+            bound.push((key.0.clone(), self.expr(value, scope, mode)?));
+        }
+        Ok(Expr::Map(bound))
+    }
+
+    fn property(
+        &mut self,
+        base: &ast::Expr,
+        key: &ast::Name,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let bound = self.boxed(base, scope, mode)?;
+        self.expect_shape(base, scope, &[Shape::Node, Shape::Relationship, Shape::Map]);
+        Ok(Expr::Property(bound, key.0.clone()))
+    }
+
+    fn index(
+        &mut self,
+        base: &ast::Expr,
+        index: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let bound_base = self.boxed(base, scope, mode)?;
+        let bound_index = self.boxed(index, scope, mode)?;
+        if let (Some(base), Some(index)) = (self.shape(base, scope), self.shape(index, scope)) {
+            self.reject(index_error(base, index), || {
+                format!("a {base:?} cannot be indexed with a {index:?}")
+            });
+        }
+        Ok(Expr::Index(bound_base, bound_index))
+    }
+
+    fn slice(
+        &mut self,
+        base: &ast::Expr,
+        from: Option<&ast::Expr>,
+        to: Option<&ast::Expr>,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let bound_base = self.boxed(base, scope, mode)?;
+        let bound_from = match from {
+            Some(from) => Some(self.boxed(from, scope, mode)?),
+            None => None,
+        };
+        let bound_to = match to {
+            Some(to) => Some(self.boxed(to, scope, mode)?),
+            None => None,
+        };
+        if let Some(shape) = self.shape(base, scope) {
+            self.reject(slice_error(shape), || {
+                format!("a {shape:?} cannot be sliced")
+            });
+            for bound in [from, to].into_iter().flatten() {
+                if let Some(bound) = self.shape(bound, scope) {
+                    self.reject(slice_bound_error(bound), || {
+                        format!("a slice bound cannot be a {bound:?}")
                     });
                 }
-                Expr::Index(bound_base, bound_index)
             }
-            ast::Expr::Slice { base, from, to } => {
-                let bound_base = self.boxed(base, scope, mode)?;
-                let bound_from = match from {
-                    Some(from) => Some(self.boxed(from, scope, mode)?),
-                    None => None,
-                };
-                let bound_to = match to {
-                    Some(to) => Some(self.boxed(to, scope, mode)?),
-                    None => None,
-                };
-                if let Some(shape) = self.shape(base, scope) {
-                    self.reject(slice_error(shape), || {
-                        format!("a {shape:?} cannot be sliced")
-                    });
-                    for bound in [from, to].into_iter().flatten() {
-                        if let Some(bound) = self.shape(bound, scope) {
-                            self.reject(slice_bound_error(bound), || {
-                                format!("a slice bound cannot be a {bound:?}")
-                            });
-                        }
-                    }
-                }
-                Expr::Slice(bound_base, bound_from, bound_to)
+        }
+        Ok(Expr::Slice(bound_base, bound_from, bound_to))
+    }
+
+    fn has_labels(
+        &mut self,
+        operand: &ast::Expr,
+        labels: &ast::LabelExpr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let bound = self.boxed(operand, scope, mode)?;
+        if let Some(shape) = self.shape(operand, scope) {
+            self.reject(label_test_error(shape), || {
+                format!("labels cannot be tested on a {shape:?}")
+            });
+        }
+        Ok(Expr::HasLabels(bound, labels.clone()))
+    }
+
+    fn unary(
+        &mut self,
+        op: ast::UnaryOp,
+        ast_operand: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let operand = self.boxed(ast_operand, scope, mode)?;
+        if let Some(shape) = self.shape(ast_operand, scope) {
+            self.reject(unary_error(op, shape), || {
+                format!("{op:?} cannot take a {shape:?}")
+            });
+        }
+        Ok(match op {
+            ast::UnaryOp::Not => Expr::Not(operand),
+            ast::UnaryOp::Negate => Expr::Negate(operand),
+            ast::UnaryOp::Plus => Expr::UnaryPlus(operand),
+        })
+    }
+
+    fn binary(
+        &mut self,
+        op: ast::BinaryOp,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let bound_lhs = self.boxed(lhs, scope, mode)?;
+        let bound_rhs = self.boxed(rhs, scope, mode)?;
+        if let (Some(left), Some(right)) = (self.shape(lhs, scope), self.shape(rhs, scope)) {
+            self.reject(binary_error(op, left, right), || {
+                format!("{op:?} cannot take a {left:?} and a {right:?}")
+            });
+        }
+        Ok(Expr::Binary(op, bound_lhs, bound_rhs))
+    }
+
+    fn comparison(
+        &mut self,
+        first: &ast::Expr,
+        rest: &[(ast::ComparisonOp, ast::Expr)],
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let first = self.boxed(first, scope, mode)?;
+        let mut chain = Vec::new();
+        for (op, operand) in rest {
+            chain.push((*op, self.expr(operand, scope, mode)?));
+        }
+        Ok(Expr::Comparison(first, chain))
+    }
+
+    fn function(
+        &mut self,
+        call: &ast::FunctionCall,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let name = qualified_name(call);
+        if aggregate_function(&name).is_some() {
+            return Err(aggregate_not_allowed(mode));
+        }
+        let function = Function::lookup(&name).ok_or_else(|| {
+            error(
+                ErrorKind::UnknownFunction,
+                format!("function `{name}` does not exist"),
+            )
+        })?;
+        if !function.accepts(call.args.len()) {
+            return Err(error(
+                ErrorKind::InvalidNumberOfArguments,
+                format!("function `{name}` got {} arguments", call.args.len()),
+            ));
+        }
+        let bound = self.exprs(&call.args, scope, mode)?;
+        for (index, arg) in call.args.iter().enumerate() {
+            self.expect_argument(
+                arg,
+                scope,
+                function.parameter(index),
+                function.argument_error(),
+            );
+        }
+        Ok(Expr::Call(function, bound))
+    }
+
+    fn case(
+        &mut self,
+        case: &ast::Case,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let scrutinee = match &case.scrutinee {
+            Some(scrutinee) => Some(self.expr(scrutinee, scope, mode)?),
+            None => None,
+        };
+        let mut branches = Vec::new();
+        for branch in &case.branches {
+            let when = self.expr(&branch.when, scope, mode)?;
+            if case.scrutinee.is_none() {
+                self.expect_shape(&branch.when, scope, &[Shape::Boolean]);
             }
-            ast::Expr::HasLabels { operand, labels } => {
-                let bound = self.boxed(operand, scope, mode)?;
-                if let Some(shape) = self.shape(operand, scope) {
-                    self.reject(label_test_error(shape), || {
-                        format!("labels cannot be tested on a {shape:?}")
-                    });
-                }
-                Expr::HasLabels(bound, labels.clone())
-            }
-            ast::Expr::Unary {
-                op,
-                operand: ast_operand,
-            } => {
-                let operand = self.boxed(ast_operand, scope, mode)?;
-                if let Some(shape) = self.shape(ast_operand, scope) {
-                    self.reject(unary_error(*op, shape), || {
-                        format!("{op:?} cannot take a {shape:?}")
-                    });
-                }
-                match op {
-                    ast::UnaryOp::Not => Expr::Not(operand),
-                    ast::UnaryOp::Negate => Expr::Negate(operand),
-                    ast::UnaryOp::Plus => Expr::UnaryPlus(operand),
-                }
-            }
-            ast::Expr::Binary { op, lhs, rhs } => {
-                let bound_lhs = self.boxed(lhs, scope, mode)?;
-                let bound_rhs = self.boxed(rhs, scope, mode)?;
-                if let (Some(left), Some(right)) = (self.shape(lhs, scope), self.shape(rhs, scope))
-                {
-                    self.reject(binary_error(*op, left, right), || {
-                        format!("{op:?} cannot take a {left:?} and a {right:?}")
-                    });
-                }
-                Expr::Binary(*op, bound_lhs, bound_rhs)
-            }
-            ast::Expr::Comparison { first, rest } => {
-                let first = self.boxed(first, scope, mode)?;
-                let mut chain = Vec::new();
-                for (op, operand) in rest {
-                    chain.push((*op, self.expr(operand, scope, mode)?));
-                }
-                Expr::Comparison(first, chain)
-            }
-            ast::Expr::IsNull { operand, negated } => Expr::IsNull {
-                operand: self.boxed(operand, scope, mode)?,
-                negated: *negated,
-            },
-            ast::Expr::Function(call) => {
-                let name = qualified_name(call);
-                if aggregate_function(&name).is_some() {
-                    return Err(aggregate_not_allowed(mode));
-                }
-                let function = Function::lookup(&name).ok_or_else(|| {
-                    error(
-                        ErrorKind::UnknownFunction,
-                        format!("function `{name}` does not exist"),
-                    )
-                })?;
-                if !function.accepts(call.args.len()) {
-                    return Err(error(
-                        ErrorKind::InvalidNumberOfArguments,
-                        format!("function `{name}` got {} arguments", call.args.len()),
-                    ));
-                }
-                let bound = self.exprs(&call.args, scope, mode)?;
-                for (index, arg) in call.args.iter().enumerate() {
-                    self.expect_argument(
-                        arg,
-                        scope,
-                        function.parameter(index),
-                        function.argument_error(),
-                    );
-                }
-                Expr::Call(function, bound)
-            }
-            ast::Expr::CountStar => return Err(aggregate_not_allowed(mode)),
-            ast::Expr::Case(case) => {
-                let scrutinee = match &case.scrutinee {
-                    Some(scrutinee) => Some(self.expr(scrutinee, scope, mode)?),
-                    None => None,
-                };
-                let mut branches = Vec::new();
-                for branch in &case.branches {
-                    let when = self.expr(&branch.when, scope, mode)?;
-                    if case.scrutinee.is_none() {
-                        self.expect_shape(&branch.when, scope, &[Shape::Boolean]);
-                    }
-                    branches.push((when, self.expr(&branch.then, scope, mode)?));
-                }
-                let otherwise = match &case.otherwise {
-                    Some(otherwise) => Some(self.expr(otherwise, scope, mode)?),
-                    None => None,
-                };
-                Expr::Case(Box::new(Case {
-                    scrutinee,
-                    branches,
-                    otherwise,
-                }))
-            }
-            ast::Expr::ListComprehension(comprehension) => {
-                if comprehension
-                    .filter
+            branches.push((when, self.expr(&branch.then, scope, mode)?));
+        }
+        let otherwise = match &case.otherwise {
+            Some(otherwise) => Some(self.expr(otherwise, scope, mode)?),
+            None => None,
+        };
+        Ok(Expr::Case(Box::new(Case {
+            scrutinee,
+            branches,
+            otherwise,
+        })))
+    }
+
+    fn list_comprehension(
+        &mut self,
+        comprehension: &ast::ListComprehension,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        if comprehension
+            .filter
+            .iter()
+            .chain(&comprehension.projection)
+            .any(|body| contains_aggregate(body))
+        {
+            return Err(per_element_aggregate());
+        }
+        let source = self.expr(&comprehension.source, scope, mode)?;
+        let slot = self.slot();
+        let mut inner = scope.clone();
+        inner.insert(&comprehension.variable.0, slot, Kind::Unknown);
+        let filter = match &comprehension.filter {
+            Some(filter) => Some(self.filter(filter, &inner, mode)?),
+            None => None,
+        };
+        let projection = match &comprehension.projection {
+            Some(projection) => Some(self.expr(projection, &inner, mode)?),
+            None => None,
+        };
+        Ok(Expr::ListComprehension(Box::new(ListComprehension {
+            slot,
+            source,
+            filter,
+            projection,
+        })))
+    }
+
+    fn list_predicate(
+        &mut self,
+        predicate: &ast::ListPredicate,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        if contains_aggregate(&predicate.predicate) {
+            return Err(per_element_aggregate());
+        }
+        let source = self.expr(&predicate.source, scope, mode)?;
+        let slot = self.slot();
+        let mut inner = scope.clone();
+        inner.insert(&predicate.variable.0, slot, Kind::Unknown);
+        let condition = self.filter(&predicate.predicate, &inner, mode)?;
+        Ok(Expr::Quantified(Box::new(Quantified {
+            quantifier: predicate.quantifier,
+            slot,
+            source,
+            predicate: condition,
+        })))
+    }
+
+    fn pattern_predicate(
+        &mut self,
+        element: &ast::PatternElement,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let scope = &self.pattern_scope(scope, names_of(pattern_variables(element)), mode)?;
+        if let Some(name) = pattern_variables(element).find(|name| scope.get(&name.0).is_none()) {
+            return Err(error(
+                ErrorKind::UndefinedVariable,
+                format!(
+                    "variable `{}` is not defined; a pattern predicate cannot introduce one",
+                    name.0
+                ),
+            ));
+        }
+        let part = ast::PatternPart {
+            path_variable: None,
+            element: element.clone(),
+        };
+        Ok(Expr::Exists(Box::new(self.pattern_query(
+            std::slice::from_ref(&part),
+            None,
+            scope,
+            mode,
+        )?)))
+    }
+
+    fn exists(
+        &mut self,
+        subquery: &ast::ExistsSubquery,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        match subquery {
+            ast::ExistsSubquery::Pattern { patterns, filter } => {
+                let names = patterns
                     .iter()
-                    .chain(&comprehension.projection)
-                    .any(|body| contains_aggregate(body))
-                {
-                    return Err(per_element_aggregate());
-                }
-                let source = self.expr(&comprehension.source, scope, mode)?;
-                let slot = self.slot();
-                let mut inner = scope.clone();
-                inner.insert(&comprehension.variable.0, slot, Kind::Unknown);
-                let filter = match &comprehension.filter {
-                    Some(filter) => Some(self.filter(filter, &inner, mode)?),
-                    None => None,
-                };
-                let projection = match &comprehension.projection {
-                    Some(projection) => Some(self.expr(projection, &inner, mode)?),
-                    None => None,
-                };
-                Expr::ListComprehension(Box::new(ListComprehension {
-                    slot,
-                    source,
-                    filter,
-                    projection,
-                }))
-            }
-            ast::Expr::ListPredicate(predicate) => {
-                if contains_aggregate(&predicate.predicate) {
-                    return Err(per_element_aggregate());
-                }
-                let source = self.expr(&predicate.source, scope, mode)?;
-                let slot = self.slot();
-                let mut inner = scope.clone();
-                inner.insert(&predicate.variable.0, slot, Kind::Unknown);
-                let condition = self.filter(&predicate.predicate, &inner, mode)?;
-                Expr::Quantified(Box::new(Quantified {
-                    quantifier: predicate.quantifier,
-                    slot,
-                    source,
-                    predicate: condition,
-                }))
-            }
-            ast::Expr::Pattern(element) => {
-                let scope =
-                    &self.pattern_scope(scope, names_of(pattern_variables(element)), mode)?;
-                if let Some(name) =
-                    pattern_variables(element).find(|name| scope.get(&name.0).is_none())
-                {
-                    return Err(error(
-                        ErrorKind::UndefinedVariable,
-                        format!(
-                            "variable `{}` is not defined; a pattern predicate cannot introduce one",
-                            name.0
-                        ),
-                    ));
-                }
-                let part = ast::PatternPart {
-                    path_variable: None,
-                    element: element.clone(),
-                };
-                Expr::Exists(Box::new(self.pattern_query(
-                    std::slice::from_ref(&part),
-                    None,
+                    .flat_map(|part| pattern_variables(&part.element));
+                let scope = &self.pattern_scope(scope, names_of(names), mode)?;
+                Ok(Expr::Exists(Box::new(self.pattern_query(
+                    patterns,
+                    filter.as_ref(),
                     scope,
                     mode,
-                )?))
+                )?)))
             }
-            ast::Expr::Exists(subquery) => match subquery.as_ref() {
-                ast::ExistsSubquery::Pattern { patterns, filter } => {
-                    let names = patterns
-                        .iter()
-                        .flat_map(|part| pattern_variables(&part.element));
-                    let scope = &self.pattern_scope(scope, names_of(names), mode)?;
-                    Expr::Exists(Box::new(self.pattern_query(
-                        patterns,
-                        filter.as_ref(),
-                        scope,
-                        mode,
-                    )?))
-                }
-                ast::ExistsSubquery::Query(query) => {
-                    let mut free = Vec::new();
-                    collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
-                    let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
-                    let (pipeline, _, _) =
-                        self.root(|binder| binder.single_query(query, scope, true))?;
-                    let clauses = pipeline
-                        .clauses
-                        .into_iter()
-                        .filter_map(|clause| match clause {
-                            Clause::Read(clause) => Some(clause),
-                            Clause::Update(_) => None,
-                        })
-                        .collect();
-                    Expr::Subquery(clauses)
-                }
-            },
-            ast::Expr::PatternComprehension(comprehension) => {
-                if comprehension
-                    .filter
-                    .iter()
-                    .chain(std::iter::once(&comprehension.projection))
-                    .any(|body| contains_aggregate(body))
-                {
-                    return Err(per_element_aggregate());
-                }
-                let part = ast::PatternPart {
-                    path_variable: comprehension.path_variable.clone(),
-                    element: comprehension.element.clone(),
-                };
-                let mut inner =
-                    self.pattern_scope(scope, names_of(pattern_variables(&part.element)), mode)?;
-                let mut introduced = Vec::new();
-                let pattern =
-                    self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
-                let filter = match &comprehension.filter {
-                    Some(filter) => Some(self.expr(filter, &inner, mode)?),
-                    None => None,
-                };
-                let projection = self.expr(&comprehension.projection, &inner, mode)?;
-                Expr::PatternComprehension(
-                    Box::new(PatternQuery {
-                        patterns: vec![pattern],
-                        filter,
-                    }),
-                    Box::new(projection),
-                )
+            ast::ExistsSubquery::Query(query) => {
+                let mut free = Vec::new();
+                collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
+                let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
+                let (pipeline, _, _) =
+                    self.root(|binder| binder.single_query(query, scope, true))?;
+                let clauses = pipeline
+                    .clauses
+                    .into_iter()
+                    .filter_map(|clause| match clause {
+                        Clause::Read(clause) => Some(clause),
+                        Clause::Update(_) => None,
+                    })
+                    .collect();
+                Ok(Expr::Subquery(clauses))
             }
-        })
+        }
+    }
+
+    fn pattern_comprehension(
+        &mut self,
+        comprehension: &ast::PatternComprehension,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        if comprehension
+            .filter
+            .iter()
+            .chain(std::iter::once(&comprehension.projection))
+            .any(|body| contains_aggregate(body))
+        {
+            return Err(per_element_aggregate());
+        }
+        let part = ast::PatternPart {
+            path_variable: comprehension.path_variable.clone(),
+            element: comprehension.element.clone(),
+        };
+        let mut inner =
+            self.pattern_scope(scope, names_of(pattern_variables(&part.element)), mode)?;
+        let mut introduced = Vec::new();
+        let pattern =
+            self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
+        let filter = match &comprehension.filter {
+            Some(filter) => Some(self.expr(filter, &inner, mode)?),
+            None => None,
+        };
+        let projection = self.expr(&comprehension.projection, &inner, mode)?;
+        Ok(Expr::PatternComprehension(
+            Box::new(PatternQuery {
+                patterns: vec![pattern],
+                filter,
+            }),
+            Box::new(projection),
+        ))
     }
 
     fn pattern_scope<'n>(
@@ -2333,6 +2511,16 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         | ast::Expr::Exists(_)
         | ast::Expr::CountStar => Kind::Value,
         _ => Kind::Unknown,
+    }
+}
+
+fn literal_value(literal: &ast::Literal) -> Datum {
+    match literal {
+        ast::Literal::Integer(value) => Datum::Integer(*value),
+        ast::Literal::Float(value) => Datum::Float(*value),
+        ast::Literal::String(value) => Datum::String(value.clone()),
+        ast::Literal::Boolean(value) => Datum::Boolean(*value),
+        ast::Literal::Null => Datum::Null,
     }
 }
 

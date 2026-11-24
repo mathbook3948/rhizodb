@@ -375,14 +375,14 @@ pub(crate) enum Expr {
         operand: Box<Expr>,
         negated: bool,
     },
-    Function(FunctionCall),
+    Function(Box<FunctionCall>),
     CountStar,
     Case(Case),
     ListComprehension(ListComprehension),
     ListPredicate(ListPredicate),
     /// A pattern used as a boolean expression, as in `WHERE (a)-->(b)`.
-    Pattern(PatternElement),
-    PatternComprehension(PatternComprehension),
+    Pattern(Box<PatternElement>),
+    PatternComprehension(Box<PatternComprehension>),
     Exists(Box<ExistsSubquery>),
 }
 

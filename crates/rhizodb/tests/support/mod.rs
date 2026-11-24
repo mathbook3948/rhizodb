@@ -189,12 +189,12 @@ pub fn isolated(test: &str, limit: std::time::Duration) -> bool {
     false
 }
 
-/// Runs `work` on a thread with the 2 MiB stack Rust gives a spawned thread by default, the
-/// smallest stack a host is likely to call RhizoDB on.
+/// Runs `work` on a thread with 1 MiB of stack, the most a query may use, which leaves a host
+/// half of the 2 MiB stack Rust gives a spawned thread by default.
 pub fn on_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(2 << 20)
+            .stack_size(1 << 20)
             .spawn_scoped(scope, work)
             .unwrap()
             .join()

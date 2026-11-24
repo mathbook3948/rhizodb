@@ -29,6 +29,8 @@ use super::plan::SeekElement;
 use super::plan::SeekKey;
 use super::plan::SeekTest;
 use super::plan::Slot;
+use super::temporals::Moment;
+use super::temporals::TemporalFunction;
 
 const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
 
@@ -184,15 +186,59 @@ fn is_point(test: &SeekTest) -> bool {
 }
 
 fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
+    let all = |items: &[Expr]| items.iter().all(|item| independent(item, bound_later));
+    let maybe = |item: Option<&Expr>| item.is_none_or(|item| independent(item, bound_later));
     match expr {
         Expr::Constant(_) | Expr::Parameter(_) => true,
         Expr::Slot(slot) => !bound_later.contains(slot),
-        Expr::Property(inner, _) | Expr::Negate(inner) | Expr::UnaryPlus(inner) => {
-            independent(inner, bound_later)
+        Expr::Property(inner, _)
+        | Expr::Not(inner)
+        | Expr::Negate(inner)
+        | Expr::UnaryPlus(inner)
+        | Expr::HasLabels(inner, _)
+        | Expr::IsNull { operand: inner, .. } => independent(inner, bound_later),
+        Expr::Index(left, right) | Expr::Binary(_, left, right) => {
+            independent(left, bound_later) && independent(right, bound_later)
         }
-        Expr::List(items) => items.iter().all(|item| independent(item, bound_later)),
-        _ => false,
+        Expr::Slice(list, from, to) => {
+            independent(list, bound_later) && maybe(from.as_deref()) && maybe(to.as_deref())
+        }
+        Expr::Comparison(first, rest) => {
+            independent(first, bound_later)
+                && rest.iter().all(|(_, item)| independent(item, bound_later))
+        }
+        Expr::List(items) => all(items),
+        Expr::Map(entries) => entries
+            .iter()
+            .all(|(_, value)| independent(value, bound_later)),
+        Expr::Call(function, args) => deterministic(*function) && all(args),
+        Expr::Case(case) => {
+            maybe(case.scrutinee.as_ref())
+                && maybe(case.otherwise.as_ref())
+                && case.branches.iter().all(|(when, then)| {
+                    independent(when, bound_later) && independent(then, bound_later)
+                })
+        }
+        Expr::ListComprehension(comprehension) => {
+            independent(&comprehension.source, bound_later)
+                && maybe(comprehension.filter.as_ref())
+                && maybe(comprehension.projection.as_ref())
+        }
+        Expr::Quantified(quantified) => {
+            independent(&quantified.source, bound_later)
+                && independent(&quantified.predicate, bound_later)
+        }
+        Expr::Admit(..) | Expr::Exists(_) | Expr::Subquery(_) | Expr::PatternComprehension(..) => {
+            false
+        }
     }
+}
+
+fn deterministic(function: Function) -> bool {
+    !matches!(
+        function,
+        Function::Rand | Function::Temporal(TemporalFunction::Clock(_, Moment::Realtime))
+    )
 }
 
 type Found = (Vec<u64>, Option<Token<PropertyKey>>);
