@@ -367,7 +367,7 @@ impl<'c> Arg<'c> {
 
     fn probe(self) -> Result<Probe<'c>, Error> {
         Ok(match self {
-            Arg::Cell(Cell::Str(text)) => Probe::Text(text.to_str()?),
+            Arg::Cell(Cell::Str(text)) => Probe::Text(text),
             Arg::Cell(cell) => Probe::Value(Cow::Owned(cell_datum(cell)?)),
             Arg::Datum(datum) => Probe::Value(datum),
         })
@@ -1215,11 +1215,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                     .iter()
                     .map(|value| at.arg(value)?.probe())
                     .collect::<Result<Vec<_>, _>>()?;
-                if !seen.insert_probe(&output) {
+                if !seen.insert_probe(&output)? {
                     return Ok(true);
                 }
                 if outputs_are_items && !early {
-                    values = Some(output.iter().map(Probe::owned).collect());
+                    values = Some(output.iter().map(Probe::owned).collect::<Result<_, _>>()?);
                 }
             }
             if values.is_none() && !early {

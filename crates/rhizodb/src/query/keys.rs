@@ -8,6 +8,9 @@ use std::hash::BuildHasherDefault;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use crate::error::Error;
+use crate::graph::Text;
+
 use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
@@ -44,26 +47,29 @@ impl Hasher for Hashed {
     }
 }
 
-/// One value of a row looked up in a [`KeyIndex`], borrowed from where it is stored.
+/// One value of a row looked up in a [`KeyIndex`], borrowed from where it is stored. Stored
+/// text is checked as UTF-8 only when a row is kept.
 #[derive(Clone, Debug)]
 pub(crate) enum Probe<'a> {
-    Text(&'a str),
+    Text(Text<'a>),
     Value(Cow<'a, Datum>),
 }
 
 impl Probe<'_> {
     fn matches(&self, held: &Datum) -> bool {
         match self {
-            Probe::Text(text) => matches!(held, Datum::String(held) if held == text),
+            Probe::Text(text) => {
+                matches!(held, Datum::String(held) if held.as_bytes() == text.bytes())
+            }
             Probe::Value(value) => order(held, value) == Ordering::Equal,
         }
     }
 
-    pub(crate) fn owned(&self) -> Datum {
-        match self {
-            Probe::Text(text) => Datum::String((*text).to_owned()),
+    pub(crate) fn owned(&self) -> Result<Datum, Error> {
+        Ok(match self {
+            Probe::Text(text) => Datum::String(text.to_str()?.to_owned()),
             Probe::Value(value) => value.as_ref().clone(),
-        }
+        })
     }
 }
 
@@ -83,22 +89,20 @@ impl KeyIndex {
     }
 
     /// The value held for the row equivalent to `probe`.
-    pub(crate) fn probe(&self, probe: &[Probe<'_>]) -> Option<usize> {
+    pub(crate) fn probe(&self, probe: &[Probe<'_>]) -> Result<Option<usize>, Error> {
         let mut hasher = self.state.build_hasher();
         let hashed = probe.iter().all(|value| match value {
             Probe::Text(text) => {
-                (3u8, text).hash(&mut hasher);
+                hash_text(text.bytes(), &mut hasher);
                 true
             }
             Probe::Value(value) => hash_value(value, &mut hasher),
         });
         if !hashed {
-            return self
-                .ordered
-                .get(&Key(probe.iter().map(Probe::owned).collect()))
-                .copied();
+            let key = probe.iter().map(Probe::owned).collect::<Result<_, _>>()?;
+            return Ok(self.ordered.get(&Key(key)).copied());
         }
-        self.hashed.get(&hasher.finish()).and_then(|bucket| {
+        Ok(self.hashed.get(&hasher.finish()).and_then(|bucket| {
             bucket
                 .iter()
                 .find(|(held, _)| {
@@ -109,7 +113,7 @@ impl KeyIndex {
                             .all(|(held, value)| value.matches(held))
                 })
                 .map(|(_, value)| *value)
-        })
+        }))
     }
 
     /// Holds `value` for `key`, which no held row is equivalent to.
@@ -143,18 +147,24 @@ impl KeySet {
     }
 
     /// [`insert`](Self::insert) for a row of borrowed values, which are copied only when kept.
-    pub(crate) fn insert_probe(&mut self, probe: &[Probe<'_>]) -> bool {
-        if self.index.probe(probe).is_some() {
-            return false;
+    pub(crate) fn insert_probe(&mut self, probe: &[Probe<'_>]) -> Result<bool, Error> {
+        if self.index.probe(probe)?.is_some() {
+            return Ok(false);
         }
-        self.index
-            .insert(probe.iter().map(Probe::owned).collect(), 0);
-        true
+        let key = probe.iter().map(Probe::owned).collect::<Result<_, _>>()?;
+        self.index.insert(key, 0);
+        Ok(true)
     }
 }
 
 fn equivalent(a: &[Datum], b: &[Datum]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| order(x, y) == Ordering::Equal)
+}
+
+fn hash_text(bytes: &[u8], hasher: &mut impl Hasher) {
+    3u8.hash(hasher);
+    hasher.write(bytes);
+    hasher.write_u8(0xff);
 }
 
 fn hash_value(value: &Datum, hasher: &mut impl Hasher) -> bool {
@@ -163,7 +173,7 @@ fn hash_value(value: &Datum, hasher: &mut impl Hasher) -> bool {
         Datum::Boolean(value) => (1u8, value).hash(hasher),
         Datum::Integer(value) => (2u8, value).hash(hasher),
         Datum::Float(value) => float(*value, hasher),
-        Datum::String(value) => (3u8, value.as_str()).hash(hasher),
+        Datum::String(value) => hash_text(value.as_bytes(), hasher),
         Datum::Bytes(value) => (4u8, value).hash(hasher),
         Datum::Node(id) => (5u8, id.0).hash(hasher),
         Datum::Relationship(id) => (6u8, id.0).hash(hasher),
