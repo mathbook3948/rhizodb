@@ -182,3 +182,43 @@ proptest! {
         }
     }
 }
+
+fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![vec(0u8..3, 0..40), vec(any::<u8>(), 0..20)]
+}
+
+proptest! {
+    #[test]
+    fn memtable_keys_rank_as_their_bytes_do(left in key_strategy(), right in key_strategy()) {
+        let (left_key, right_key) = (Key::new(bytes(&left)), Key::new(bytes(&right)));
+        prop_assert_eq!(left_key.cmp(&right_key), left.cmp(&right));
+        let probe = Probe::new(&right);
+        prop_assert_eq!(rank(&left_key, &probe), left.cmp(&right));
+    }
+
+    #[test]
+    fn a_range_holds_the_keys_between_its_bounds(
+        keys in proptest::collection::btree_set(key_strategy(), 0..40),
+        start in key_strategy(),
+        end in key_strategy(),
+        inclusive in any::<bool>(),
+    ) {
+        let memtable = Memtable::default();
+        memtable.apply(1, keys.iter().map(|key| put(key, b"v")), 0);
+        for key in &keys {
+            prop_assert_eq!(memtable.get(TABLE, key, 1), Lookup::Found(bytes(b"v")));
+        }
+        let end_bound = if inclusive { Bound::Included(end.as_slice()) } else { Bound::Excluded(end.as_slice()) };
+        let ranged: Vec<Vec<u8>> = memtable
+            .range(TABLE, Bound::Included(start.as_slice()), end_bound, 1)
+            .into_iter()
+            .map(|(key, _)| key.to_vec())
+            .collect();
+        let expected: Vec<Vec<u8>> = keys
+            .iter()
+            .filter(|key| **key >= start && if inclusive { **key <= end } else { **key < end })
+            .cloned()
+            .collect();
+        prop_assert_eq!(ranged, expected);
+    }
+}

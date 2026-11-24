@@ -1,6 +1,21 @@
 use std::marker::PhantomData;
 
 /// Identifies a node. Node IDs only grow and are never reused after a delete.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::Parameters;
+/// use rhizodb::Value;
+///
+/// let db = Database::in_memory()?;
+/// let result = db.execute("INSERT (n) RETURN n", &Parameters::new())?;
+/// let Value::Node(node) = &result.rows()[0][0] else { panic!("not a node") };
+/// assert_eq!(node.id().as_u64(), 0);
+/// db.execute("MATCH (n) DETACH DELETE n", &Parameters::new())?;
+/// let next = db.execute("INSERT (n) RETURN id(n)", &Parameters::new())?;
+/// assert_eq!(next.rows(), [vec![Value::Integer(1)]]);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub(crate) u64);
 
@@ -18,6 +33,18 @@ impl NodeId {
 }
 
 /// Identifies a relationship. Relationship IDs only grow and are never reused after a delete.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::Parameters;
+/// use rhizodb::Value;
+///
+/// let db = Database::in_memory()?;
+/// let result = db.execute("INSERT ()-[r:R]->() RETURN r", &Parameters::new())?;
+/// let Value::Relationship(r) = &result.rows()[0][0] else { panic!("not a relationship") };
+/// assert_eq!(r.id().as_u64(), 0);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RelationshipId(pub(crate) u64);
 

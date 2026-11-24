@@ -130,10 +130,16 @@ impl Staged {
         Ok(())
     }
 
-    pub(crate) fn get(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
+    /// Calls `read` with the value under `key`, this transaction's own writes included.
+    pub(crate) fn get_with<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
         match self.overlay.get(&table).and_then(|keys| keys.get(key)) {
-            Some(slot) => Ok(slot.clone()),
-            None => self.view.get(table, key),
+            Some(slot) => Ok(slot.as_deref().map(read)),
+            None => self.view.get_with(table, key, read),
         }
     }
 

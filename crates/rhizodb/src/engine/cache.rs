@@ -2,22 +2,31 @@ use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use super::layout::BlockRef;
 use super::page::PageHeader;
 
-/// A checked page and its header, which never changes once written.
-pub(crate) type CachedPage = (PageHeader, Arc<[u8]>);
+/// A page that passed its checksum and placement checks, with its decoded header.
+#[derive(Debug)]
+pub(crate) struct CheckedPage {
+    pub(crate) header: PageHeader,
+    pub(crate) bytes: Box<[u8]>,
+}
 
-const SHARDS: usize = 16;
+/// A checked page, which never changes once written.
+pub(crate) type CachedPage = Arc<CheckedPage>;
+
+const SHARDS: usize = 64;
 
 #[derive(Debug)]
 struct Entry {
-    at: BlockRef,
     page: CachedPage,
-    used: bool,
+    used: AtomicBool,
 }
 
 /// Hashes a block reference by one multiplication, since references are not chosen by an
@@ -45,16 +54,18 @@ impl Hasher for BlockHasher {
 
 #[derive(Debug, Default)]
 struct Shard {
-    index: HashMap<BlockRef, usize, BuildHasherDefault<BlockHasher>>,
-    entries: Vec<Entry>,
+    entries: HashMap<BlockRef, Entry, BuildHasherDefault<BlockHasher>>,
+    clock: Vec<BlockRef>,
     hand: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 /// A sharded CLOCK cache of checked pages keyed by block reference. Pages are immutable, so an
 /// entry is never invalidated.
 #[derive(Debug)]
 pub(crate) struct Cache {
-    shards: Vec<Mutex<Shard>>,
+    shards: Vec<RwLock<Shard>>,
     per_shard: usize,
 }
 
@@ -62,68 +73,89 @@ impl Cache {
     /// A cache holding about `pages` pages.
     pub(crate) fn new(pages: usize) -> Self {
         Self {
-            shards: (0..SHARDS).map(|_| Mutex::default()).collect(),
+            shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             per_shard: pages.div_ceil(SHARDS).max(1),
         }
     }
 
-    fn shard(&self, at: BlockRef) -> std::sync::MutexGuard<'_, Shard> {
+    fn shard(&self, at: BlockRef) -> &RwLock<Shard> {
         let mixed = at.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58;
-        self.shards[mixed as usize % SHARDS]
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        &self.shards[mixed as usize % SHARDS]
     }
 
     pub(crate) fn get(&self, at: BlockRef) -> Option<CachedPage> {
-        let mut shard = self.shard(at);
-        let index = *shard.index.get(&at)?;
-        let entry = &mut shard.entries[index];
-        entry.used = true;
-        Some(entry.page.clone())
+        let shard = self
+            .shard(at)
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(entry) = shard.entries.get(&at) else {
+            shard.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        shard.hits.fetch_add(1, Ordering::Relaxed);
+        if !entry.used.load(Ordering::Relaxed) {
+            entry.used.store(true, Ordering::Relaxed);
+        }
+        Some(Arc::clone(&entry.page))
     }
 
     pub(crate) fn insert(&self, at: BlockRef, page: CachedPage) {
         let per_shard = self.per_shard;
-        let mut shard = self.shard(at);
-        if shard.index.contains_key(&at) {
+        let mut shard = self
+            .shard(at)
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let shard = &mut *shard;
+        if shard.entries.contains_key(&at) {
             return;
         }
-        if shard.entries.len() < per_shard {
-            let index = shard.entries.len();
-            shard.entries.push(Entry {
-                at,
-                page,
-                used: false,
-            });
-            shard.index.insert(at, index);
+        let entry = Entry {
+            page,
+            used: AtomicBool::new(false),
+        };
+        if shard.clock.len() < per_shard {
+            shard.clock.push(at);
+            shard.entries.insert(at, entry);
             return;
         }
         loop {
             let hand = shard.hand;
-            shard.hand = (hand + 1) % shard.entries.len();
-            let entry = &mut shard.entries[hand];
-            if entry.used {
-                entry.used = false;
+            shard.hand = (hand + 1) % shard.clock.len();
+            let held = shard.clock[hand];
+            if let Some(used) = shard
+                .entries
+                .get_mut(&held)
+                .map(|entry| entry.used.get_mut())
+                && *used
+            {
+                *used = false;
                 continue;
             }
-            let evicted = entry.at;
-            *entry = Entry {
-                at,
-                page,
-                used: false,
-            };
-            shard.index.remove(&evicted);
-            shard.index.insert(at, hand);
+            shard.entries.remove(&held);
+            shard.clock[hand] = at;
+            shard.entries.insert(at, entry);
             return;
         }
     }
 
+    /// The lookups that found their page and those that did not, since the cache was made.
+    pub(crate) fn hits_and_misses(&self) -> (u64, u64) {
+        self.shards.iter().fold((0, 0), |(hits, misses), shard| {
+            let shard = shard.read().unwrap_or_else(PoisonError::into_inner);
+            (
+                hits + shard.hits.load(Ordering::Relaxed),
+                misses + shard.misses.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shards
             .iter()
             .map(|shard| {
                 shard
-                    .lock()
+                    .read()
                     .unwrap_or_else(PoisonError::into_inner)
                     .entries
                     .len()

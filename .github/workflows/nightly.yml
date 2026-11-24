@@ -31,6 +31,19 @@ jobs:
           name: proptest-regressions-${{ matrix.os }}
           path: crates/rhizodb/proptest-regressions
 
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run soak
+        env:
+          RHIZODB_SOAK_SECS: "1200"
+
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 120

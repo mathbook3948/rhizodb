@@ -557,3 +557,177 @@ fn a_write_transaction_of_many_statements_and_nodes_commits_whole_or_rolls_back_
         int(total)
     );
 }
+
+/// Where the wide node of a run comes from.
+#[derive(Clone, Copy, Debug)]
+enum Wide {
+    Committed,
+    TouchedInTheTransaction,
+    CreatedInTheTransaction,
+}
+
+/// The fastest of three runs of `work` in a write transaction on a node with `count`
+/// properties.
+fn fastest_on_a_node_with_properties(count: i64, work: &str, wide: Wide) -> Duration {
+    let insert = "INSERT (n:Wide) SET n += $properties";
+    (0..3)
+        .map(|_| {
+            let db = db();
+            let properties = Parameters::from([(
+                "properties".to_owned(),
+                Value::Map(
+                    (0..count)
+                        .map(|i| (format!("p{i}"), Value::Integer(i)))
+                        .collect(),
+                ),
+            )]);
+            if !matches!(wide, Wide::CreatedInTheTransaction) {
+                db.execute(insert, &properties).unwrap();
+            }
+            let mut tx = db.begin_write().unwrap();
+            match wide {
+                Wide::Committed => {}
+                Wide::TouchedInTheTransaction => {
+                    tx.execute("MATCH (n:Wide) SET n.extra = 1", &Parameters::new())
+                        .unwrap();
+                }
+                Wide::CreatedInTheTransaction => {
+                    tx.execute(insert, &properties).unwrap();
+                }
+            }
+            let started = std::time::Instant::now();
+            tx.execute(work, &Parameters::new()).unwrap();
+            let elapsed = started.elapsed();
+            tx.commit().unwrap();
+            elapsed
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_number() {
+    for work in [
+        "MATCH (n:Wide) RETURN size(keys(properties(n)))",
+        "MATCH (n:Wide) SET n = {}",
+        "MATCH (n:Wide) DELETE n",
+    ] {
+        for wide in [
+            Wide::Committed,
+            Wide::TouchedInTheTransaction,
+            Wide::CreatedInTheTransaction,
+        ] {
+            let small = fastest_on_a_node_with_properties(1_000, work, wide);
+            let large = fastest_on_a_node_with_properties(16_000, work, wide);
+            assert!(
+                large < small * 100,
+                "{work} on a node {wide:?}: {small:?} for 1000 properties but {large:?} for 16000"
+            );
+        }
+    }
+}
+
+/// The fastest of three runs of `work` on a relationship with `count` committed properties.
+fn fastest_on_a_relationship_with_properties(count: i64, work: &str) -> Duration {
+    (0..3)
+        .map(|_| {
+            let db = db();
+            let properties = Parameters::from([(
+                "properties".to_owned(),
+                Value::Map(
+                    (0..count)
+                        .map(|i| (format!("p{i}"), Value::Integer(i)))
+                        .collect(),
+                ),
+            )]);
+            db.execute("INSERT ()-[r:WIDE]->() SET r += $properties", &properties)
+                .unwrap();
+            let started = std::time::Instant::now();
+            db.execute(work, &properties).unwrap();
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number() {
+    for work in [
+        "MATCH ()-[r:WIDE]->() SET r = {}",
+        "MATCH ()-[r:WIDE]->() SET r = {a: 1}",
+        "MATCH ()-[r:WIDE]->() SET r += $properties",
+        "MATCH ()-[r:WIDE]->() SET r = $properties",
+    ] {
+        let small = fastest_on_a_relationship_with_properties(2_000, work);
+        let large = fastest_on_a_relationship_with_properties(32_000, work);
+        assert!(
+            large < small * 100,
+            "{work}: {small:?} for 2000 properties but {large:?} for 32000"
+        );
+    }
+}
+
+fn directory_bytes(directory: &std::path::Path) -> u64 {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum()
+}
+
+#[test]
+fn setting_or_removing_many_labels_at_once_stores_no_label_set_in_between() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::open(directory.path().join("labels.rhizodb")).unwrap();
+    let labels: String = (0..3_000).map(|i| format!(":L{i}")).collect();
+    run(&db, &format!("INSERT (n:Start{labels})"));
+    run(&db, "INSERT (:Other)");
+    let before = directory_bytes(directory.path());
+    run(&db, &format!("MATCH (n:Start) REMOVE n{labels}"));
+    run(&db, &format!("MATCH (n:Other) SET n{labels}"));
+    let grown = directory_bytes(directory.path()).saturating_sub(before);
+    assert!(
+        grown < 4 << 20,
+        "setting and removing 3000 labels grew the files by {grown} bytes"
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n) RETURN size(labels(n)) AS count ORDER BY count"
+        ),
+        [[int(1)], [int(3_001)]]
+    );
+}
+
+/// How long one write transaction takes to run `statements` statements that each match one
+/// node by its label and insert a node of another label.
+fn label_matches_in_one_transaction(statements: i64) -> Duration {
+    let db = db();
+    run(&db, "INSERT (:Hub)");
+    let started = std::time::Instant::now();
+    let mut tx = db.begin_write().unwrap();
+    for i in 0..statements {
+        tx.execute(
+            "MATCH (h:Hub) INSERT (:Leaf {i: $i})",
+            &Parameters::from([("i".to_owned(), Value::Integer(i))]),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    started.elapsed()
+}
+
+#[test]
+fn a_label_scan_in_a_write_transaction_skips_the_nodes_it_created_without_the_label() {
+    let small = (0..3)
+        .map(|_| label_matches_in_one_transaction(2_000))
+        .min()
+        .unwrap();
+    let large = (0..3)
+        .map(|_| label_matches_in_one_transaction(32_000))
+        .min()
+        .unwrap();
+    assert!(
+        large < small * 100,
+        "{small:?} for 2000 statements but {large:?} for 32000"
+    );
+}

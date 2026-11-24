@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use crate::storage::ReadTransaction;
@@ -86,7 +87,6 @@ fn state(
     token: Token<PropertyKey>,
 ) -> Result<Option<Option<PropertyValue>>, GraphError> {
     delta
-        .view()
         .get(token)?
         .map(|cell| cell.map(Cell::to_value).transpose())
         .transpose()
@@ -389,9 +389,29 @@ impl<T: ReadTransaction> GraphTx<T> {
         id: NodeId,
     ) -> Result<Properties, GraphError> {
         let (group, slot) = meta::locate(id);
+        let (mut edited, fresh) = match self.columns.get(&group) {
+            Some(edit) => edit.current_all(slot)?,
+            None => (BTreeMap::new(), false),
+        };
+        let mut stored = BTreeMap::new();
+        if !fresh && let Some(delta) = self.stored_delta(reader, group, slot)? {
+            for entry in delta.view().entries() {
+                let (token, cell) = entry?;
+                stored.insert(token, cell.map(Cell::to_value).transpose()?);
+            }
+        }
         let mut properties = Properties::new();
         for token in self.node_keys(reader, group, slot)? {
-            if let Some(value) = self.column_value(reader, group, slot, token)? {
+            let value = if let Some(value) = edited.remove(&token) {
+                value
+            } else if fresh {
+                None
+            } else if let Some(value) = stored.remove(&token) {
+                value
+            } else {
+                self.segment_value(reader, (group, token), slot)?
+            };
+            if let Some(value) = value {
                 properties.insert(token, value);
             }
         }

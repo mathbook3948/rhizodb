@@ -292,6 +292,78 @@ fn a_database_of_format_eight_takes_writes_of_every_type_after_the_upgrade() {
     );
 }
 
+const FORMAT_NINE_TYPED: &str = "tests/fixtures/format-9-typed.redb";
+
+fn assert_format_nine_typed_answers(db: &Database) {
+    let answers = answers_in("format-9-typed.answers");
+    assert_eq!(answers.len(), 13);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[cfg(rhizodb_engine)]
+fn assert_converted(directory: &Path, path: &Path) {
+    let bytes = std::fs::read(path).unwrap();
+    assert!(
+        !bytes.starts_with(b"redb"),
+        "the redb file was not converted"
+    );
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let name = entry.unwrap().file_name();
+        assert!(
+            !name.to_string_lossy().starts_with('.'),
+            "a conversion left {name:?} behind"
+        );
+    }
+}
+
+#[cfg(not(rhizodb_engine))]
+fn assert_converted(_directory: &Path, _path: &Path) {}
+
+#[test]
+fn a_database_of_format_nine_answers_after_reopening_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_NINE_TYPED, directory.path());
+    assert_format_nine_typed_answers(&Database::open(&path).unwrap());
+    assert_converted(directory.path(), &path);
+    assert_format_nine_typed_answers(&Database::open(&path).unwrap());
+}
+
+#[test]
+fn a_database_of_format_nine_keeps_writes_across_reopening() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_NINE_TYPED, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(&db, "MATCH (n:Bulk) WHERE n.i < 100 DETACH DELETE n");
+        run(
+            &db,
+            "UNWIND range(1, 3000) AS i CREATE (:Late {i: i, s: toString(i)})",
+        );
+        run(&db, "MATCH (n:Person {name: 'Edsger'}) SET n.age = 31");
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        format!("{:?}", run(&db, "MATCH (n) RETURN count(*)")),
+        "[[Integer(7155)]]"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            run(
+                &db,
+                "MATCH (n:Person) WHERE n.age > 30 RETURN n.name ORDER BY n.name"
+            )
+        ),
+        "[[String(\"Ada\")], [String(\"Charles\")], [String(\"Edsger\")]]"
+    );
+    assert_eq!(
+        format!("{:?}", run(&db, "MATCH (n:Late) RETURN sum(n.i)")),
+        "[[Integer(4501500)]]"
+    );
+}
+
 const FORMAT_EIGHT_DB_FILE: &str = "tests/fixtures/format-8-db-file.redb";
 
 fn assert_format_eight_db_file_answers(db: &Database) {

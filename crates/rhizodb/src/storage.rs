@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
+pub(crate) mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
 #[cfg(test)]
@@ -104,6 +106,7 @@ pub(crate) type Entry = (Vec<u8>, Vec<u8>);
 pub(crate) struct StorageError {
     source: Box<dyn Error + Send + Sync>,
     corrupt: bool,
+    unsupported: bool,
 }
 
 impl StorageError {
@@ -111,6 +114,7 @@ impl StorageError {
         Self {
             source: Box::new(source),
             corrupt: false,
+            unsupported: false,
         }
     }
 
@@ -124,6 +128,18 @@ impl StorageError {
 
     pub(crate) fn is_corrupt(&self) -> bool {
         self.corrupt
+    }
+
+    /// An operation this backend does not offer.
+    pub(crate) fn unsupported(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            unsupported: true,
+            ..Self::new(source)
+        }
+    }
+
+    pub(crate) fn is_unsupported(&self) -> bool {
+        self.unsupported
     }
 }
 
@@ -152,6 +168,45 @@ pub(crate) trait Storage {
     fn begin_read(&self) -> Result<Self::Read<'_>, StorageError>;
 
     fn begin_write(&self) -> Result<Self::Write<'_>, StorageError>;
+
+    /// Writes every table that `snapshot` sees into a new database of this backend at `path`,
+    /// where no file exists, and returns once that one file holds the copy durably and whole.
+    fn write_copy(snapshot: &Self::Read<'_>, path: &Path) -> Result<(), StorageError>
+    where
+        Self: Sized;
+}
+
+const COPY_BATCH_BYTES: usize = 64 << 20;
+
+/// Copies every table but the legacy ones from `snapshot` into the empty database `target`, in
+/// write transactions that each commit once they hold [`COPY_BATCH_BYTES`].
+pub(crate) fn copy_tables<S: Storage>(
+    snapshot: &impl ReadTransaction,
+    target: &S,
+) -> Result<(), StorageError> {
+    let mut write: Option<S::Write<'_>> = None;
+    let mut pending = 0usize;
+    for table in Table::ALL.into_iter().filter(|table| !table.is_legacy()) {
+        snapshot.visit_prefix(table, &[], |key, value| {
+            let open = match &mut write {
+                Some(open) => open,
+                None => write.insert(target.begin_write()?),
+            };
+            open.put(table, key, value)?;
+            pending = pending.saturating_add(key.len() + value.len());
+            if pending >= COPY_BATCH_BYTES {
+                pending = 0;
+                if let Some(full) = write.take() {
+                    full.commit()?;
+                }
+            }
+            Ok::<(), StorageError>(())
+        })?;
+    }
+    match write {
+        Some(last) => last.commit(),
+        None => Ok(()),
+    }
 }
 
 pub(crate) trait ReadTransaction {
@@ -194,6 +249,32 @@ pub(crate) trait ReadTransaction {
         end: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
+}
+
+/// The size of a database on disk and how its cache serves reads, as a backend reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StorageStats {
+    pub(crate) file_bytes: u64,
+    pub(crate) live_bytes: u64,
+    pub(crate) live_extents: u64,
+    pub(crate) free_extents: u64,
+    pub(crate) wal_bytes: u64,
+    pub(crate) cache_hits: u64,
+    pub(crate) cache_misses: u64,
+}
+
+/// Upkeep of a database file that no transaction does: compaction, statistics, and a check of
+/// every stored invariant.
+pub(crate) trait Maintenance {
+    /// Writes every commit into the file and moves the live data into as little of it as it
+    /// needs, then shortens the file.
+    fn compact(&self) -> Result<(), StorageError>;
+
+    fn stats(&self) -> Result<StorageStats, StorageError>;
+
+    /// Reads every page the file's last durable state reaches and fails as corrupt data on the
+    /// first broken invariant.
+    fn check(&self) -> Result<(), StorageError>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

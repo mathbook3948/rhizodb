@@ -5,6 +5,7 @@ use std::error::Error as StdError;
 use std::fmt::Debug;
 
 use rhizodb::Database;
+use rhizodb::DatabaseStats;
 use rhizodb::Date;
 use rhizodb::DateTime;
 use rhizodb::Duration;
@@ -41,6 +42,7 @@ fn error<T: StdError + Send + Sync + 'static>() {}
 fn values_and_handles_move_and_share_across_threads() {
     shared::<Database>();
     shared::<OpenOptions>();
+    shared::<DatabaseStats>();
     shared::<Parameters>();
     shared::<QueryResult>();
     shared::<Value>();

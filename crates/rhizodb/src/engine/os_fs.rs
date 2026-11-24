@@ -87,6 +87,10 @@ impl FileSystem for OsFs {
         File::open(&self.directory)?.sync_all()
     }
 
+    fn path(&self, name: &str) -> Option<PathBuf> {
+        Some(self.directory.join(name))
+    }
+
     #[cfg(not(unix))]
     fn sync_names(&self) -> io::Result<()> {
         Ok(())

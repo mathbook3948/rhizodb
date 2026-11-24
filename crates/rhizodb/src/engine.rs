@@ -6,6 +6,7 @@ pub(crate) mod catalog;
 pub(crate) mod check;
 pub(crate) mod checkpoint;
 pub(crate) mod codec;
+pub(crate) mod convert;
 pub(crate) mod error;
 pub(crate) mod extent;
 #[cfg(any(test, feature = "fuzzing"))]

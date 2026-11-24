@@ -13,6 +13,7 @@ use super::blob::item_checksum;
 use super::block_file::BlockFile;
 use super::cache::Cache;
 use super::cache::CachedPage;
+use super::cache::CheckedPage;
 use super::error::EngineError;
 use super::header::Header;
 use super::layout::BLOCK;
@@ -130,7 +131,13 @@ impl<B: BlockFile> Pages<B> {
     pub(crate) fn write_page(&self, at: BlockRef, bytes: Vec<u8>) -> Result<(), EngineError> {
         self.write(at, &bytes)?;
         let header = PageHeader::open(self.seed, &bytes, at)?;
-        self.cache.insert(at, (header, Arc::from(bytes)));
+        self.cache.insert(
+            at,
+            Arc::new(CheckedPage {
+                header,
+                bytes: bytes.into_boxed_slice(),
+            }),
+        );
         Ok(())
     }
 
@@ -142,6 +149,15 @@ impl<B: BlockFile> Pages<B> {
             self.file.set_block_count(end)?;
         }
         Ok(())
+    }
+
+    /// The bytes of the database file.
+    pub(crate) fn file_bytes(&self) -> Result<u64, EngineError> {
+        Ok(self.file.block_count()? * BLOCK as u64)
+    }
+
+    pub(crate) fn cache_hits_and_misses(&self) -> (u64, u64) {
+        self.cache.hits_and_misses()
     }
 
     pub(crate) fn sync(&self) -> Result<(), EngineError> {
@@ -164,8 +180,11 @@ impl<B: BlockFile> PageSource for Pages<B> {
         let mut bytes = vec![0; BLOCK];
         self.file.read(self.physical(at, 1)?, &mut bytes)?;
         let header = PageHeader::open(self.seed, &bytes, at)?;
-        let page = (header, Arc::from(bytes));
-        self.cache.insert(at, page.clone());
+        let page = Arc::new(CheckedPage {
+            header,
+            bytes: bytes.into_boxed_slice(),
+        });
+        self.cache.insert(at, Arc::clone(&page));
         Ok(page)
     }
 
