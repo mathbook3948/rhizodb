@@ -346,7 +346,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
             return Ok(None);
         };
-        let Some(index) = self.tx.property_index(target, property)? else {
+        let Some(index) = self.property_index(target, property)? else {
             return Ok(None);
         };
         let mut points: Option<Vec<KeyRange>> = None;

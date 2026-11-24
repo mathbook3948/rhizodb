@@ -41,6 +41,15 @@ impl Seen {
     }
 }
 
+/// Which value of a row an aggregating projection asks for: a key, or the argument or the extra
+/// argument of an aggregate, each by its index.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Part {
+    Key(usize),
+    Argument(usize),
+    Extra(usize),
+}
+
 /// The groups an aggregating projection has seen so far, each with the state of every
 /// aggregate. Rows are added one at a time, so a match can feed them without collecting rows.
 pub(crate) struct Groups<'p> {
@@ -74,10 +83,19 @@ impl<'p> Groups<'p> {
         env: &Env<'_, T>,
         row: &Row,
     ) -> Result<(), Error> {
+        self.add_with(|_, expr| env.eval(expr, row))
+    }
+
+    /// Adds one row whose values `eval` gives, asked in the order a row is evaluated.
+    pub(crate) fn add_with(
+        &mut self,
+        mut eval: impl FnMut(Part, &Expr) -> Result<Datum, Error>,
+    ) -> Result<(), Error> {
         let values = self
             .keys
             .iter()
-            .map(|(expr, _)| env.eval(expr, row))
+            .enumerate()
+            .map(|(index, (expr, _))| eval(Part::Key(index), expr))
             .collect::<Result<Vec<_>, _>>()?;
         let position = match self.index.get(&values) {
             Some(position) => position,
@@ -94,8 +112,10 @@ impl<'p> Groups<'p> {
             }
         };
         if let Some((_, accumulators)) = self.groups.get_mut(position) {
-            for ((aggregate, _), accumulator) in self.aggregates.iter().zip(accumulators) {
-                accumulator.add(env, aggregate, row)?;
+            for (index, ((aggregate, _), accumulator)) in
+                self.aggregates.iter().zip(accumulators).enumerate()
+            {
+                accumulator.add(aggregate, index, &mut eval)?;
             }
         }
         Ok(())
@@ -174,18 +194,18 @@ impl<T: ReadTransaction> Env<'_, T> {
 }
 
 impl Accumulator {
-    fn add<T: ReadTransaction>(
+    fn add(
         &mut self,
-        env: &Env<'_, T>,
         aggregate: &Aggregate,
-        row: &Row,
+        index: usize,
+        eval: &mut impl FnMut(Part, &Expr) -> Result<Datum, Error>,
     ) -> Result<(), Error> {
         self.rows += 1;
         let Some(argument) = &aggregate.argument else {
             return Ok(());
         };
         let function = aggregate.function;
-        let value = env.eval(argument, row)?;
+        let value = eval(Part::Argument(index), argument)?;
         if !value.is_null() {
             function.admit(&value)?;
             if !aggregate.distinct || self.seen.insert(&value) {
@@ -202,7 +222,7 @@ impl Accumulator {
                 AggregateFunction::PercentileCont | AggregateFunction::PercentileDisc
             )
         {
-            let value = env.eval(extra, row)?;
+            let value = eval(Part::Extra(index), extra)?;
             function.admit(&value)?;
             match &self.percentile {
                 Some(first) if order(first, &value) != Ordering::Equal => {

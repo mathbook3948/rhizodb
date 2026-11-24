@@ -32,6 +32,7 @@ mod records;
 mod tokenize;
 mod value_key;
 
+pub(crate) use columns::Cell;
 pub(crate) use columns::ColumnReader;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
@@ -45,6 +46,7 @@ pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use meta::LabelReader;
+pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;

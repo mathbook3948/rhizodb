@@ -19,6 +19,7 @@ use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
+use crate::graph::Target;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::temporal::Clocks;
@@ -46,6 +47,9 @@ use super::update::Graveyard;
 /// One row: a value for every slot of the query.
 pub(crate) type Row = Vec<Datum>;
 
+/// A property index looked up: what it covers, its property, and its ID or none.
+pub(crate) type IndexLookup = (Target, Token<PropertyKey>, Option<u32>);
+
 /// Evaluates expressions and matches patterns against one transaction's view of the graph.
 pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) tx: &'a GraphTx<T>,
@@ -70,6 +74,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) labels: RefCell<LabelReader>,
     /// The labels looked up so far that have a token.
     pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
+    /// The property indexes looked up so far, each with its ID or none.
+    pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step
@@ -152,6 +158,27 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(token)
     }
 
+    /// The ID of the property index over `property` of the elements `target` covers, if any.
+    pub(crate) fn property_index(
+        &self,
+        target: Target,
+        property: Token<PropertyKey>,
+    ) -> Result<Option<u32>, Error> {
+        if let Some((_, _, index)) = self
+            .property_indexes
+            .borrow()
+            .iter()
+            .find(|(held, key, _)| *held == target && *key == property)
+        {
+            return Ok(*index);
+        }
+        let index = self.tx.property_index(target, property)?;
+        self.property_indexes
+            .borrow_mut()
+            .push((target, property, index));
+        Ok(index)
+    }
+
     /// One property of the node with ID `id`, or `None` when there is no such node. A `key` of
     /// `None` names a property no node holds.
     pub(crate) fn node_property(
@@ -220,7 +247,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             .collect()
     }
 
-    fn property_key(&self, key: &str) -> Result<Option<Token<PropertyKey>>, Error> {
+    #[inline]
+    pub(crate) fn property_key(&self, key: &str) -> Result<Option<Token<PropertyKey>>, Error> {
         if let Some((_, token)) = self.keys.borrow().iter().find(|(name, _)| name == key) {
             return Ok(Some(*token));
         }
@@ -862,7 +890,7 @@ fn settle(
     }
 }
 
-fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+pub(crate) fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     match (a, b) {
         (Some(false), _) | (_, Some(false)) => Some(false),
         (Some(true), Some(true)) => Some(true),
@@ -870,7 +898,7 @@ fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
-fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+pub(crate) fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     match (a, b) {
         (Some(true), _) | (_, Some(true)) => Some(true),
         (Some(false), Some(false)) => Some(false),
@@ -878,7 +906,7 @@ fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
-fn comparison(op: ComparisonOp, left: &Datum, right: &Datum) -> Option<bool> {
+pub(crate) fn comparison(op: ComparisonOp, left: &Datum, right: &Datum) -> Option<bool> {
     match op {
         ComparisonOp::Equal => equals(left, right),
         ComparisonOp::NotEqual => equals(left, right).map(|equal| !equal),

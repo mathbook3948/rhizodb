@@ -1219,16 +1219,30 @@ impl ColumnsEdit {
         slot: usize,
         token: Token<PropertyKey>,
     ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        self.current_cell(slot, token)?
+            .map(|cell| cell.map(Cell::to_value).transpose())
+            .transpose()
+    }
+
+    /// [`current`](Self::current), read in place.
+    pub(crate) fn current_cell(
+        &self,
+        slot: usize,
+        token: Token<PropertyKey>,
+    ) -> Result<Option<Option<Cell<'_>>>, GraphError> {
         let Some(edit) = self.find(slot) else {
             return Ok(None);
         };
         if let Ok(index) = edit.values.binary_search_by_key(&token, |(held, _)| *held) {
-            return Ok(edit.values.get(index).map(|(_, value)| value.clone()));
+            return Ok(edit
+                .values
+                .get(index)
+                .map(|(_, value)| value.as_ref().map(Cell::of)));
         }
         if let Some(created) = edit.created(&self.heap)
             && let Some(cell) = created.get(token)?
         {
-            return Ok(Some(cell.map(|cell| cell.to_value()).transpose()?));
+            return Ok(Some(cell));
         }
         Ok(edit.fresh.then_some(None))
     }

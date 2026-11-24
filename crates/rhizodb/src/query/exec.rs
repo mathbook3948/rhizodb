@@ -64,6 +64,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -95,6 +96,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -110,6 +112,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
         }
         .read_clauses(
             clause,
@@ -146,6 +149,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -236,6 +240,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let rows = groups.finish(self, finals)?;
                 return Ok((self.arrange(projection, rows)?, 2));
             }
+            if let Some(scan) = self.node_scan(found)?
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
             for row in &rows {
                 self.match_patterns(&found.patterns, row, &mut |matched| {
                     let keep = match &found.filter {
@@ -250,6 +259,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             let rows = groups.finish(self, finals)?;
             return Ok((self.arrange(projection, rows)?, 2));
+        }
+        if let ReadClause::Match(found) = clause
+            && let Some(scan) = self.node_scan(found)?
+        {
+            if let Some(ReadClause::Project(projection)) = next
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
+            if let Some(rows) = self.scan_match(scan, found, &rows)? {
+                return Ok((rows, 1));
+            }
         }
         Ok((self.read_clause(clause, rows)?, 1))
     }
@@ -433,7 +454,11 @@ impl<T: ReadTransaction> Env<'_, T> {
         self.arrange(projection, rows)
     }
 
-    fn arrange(&self, projection: &Projection, mut rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    pub(crate) fn arrange(
+        &self,
+        projection: &Projection,
+        mut rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         if projection.distinct {
             let mut seen = KeySet::default();
             rows.retain(|row| {
@@ -491,6 +516,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
@@ -504,7 +530,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(())
     }
 
-    fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
+    pub(crate) fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
         match self.eval(expr, row)? {
             Datum::Integer(value) if value < 0 => Err(Error::new(
                 ErrorKind::NegativeIntegerArgument,

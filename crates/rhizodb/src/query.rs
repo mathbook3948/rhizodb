@@ -11,6 +11,7 @@ mod keys;
 mod matcher;
 mod plan;
 mod regex;
+mod scan;
 mod seek;
 mod shape;
 mod taint;

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -43,6 +44,29 @@ impl Hasher for Hashed {
     }
 }
 
+/// One value of a row looked up in a [`KeyIndex`], borrowed from where it is stored.
+#[derive(Clone, Debug)]
+pub(crate) enum Probe<'a> {
+    Text(&'a str),
+    Value(Cow<'a, Datum>),
+}
+
+impl Probe<'_> {
+    fn matches(&self, held: &Datum) -> bool {
+        match self {
+            Probe::Text(text) => matches!(held, Datum::String(held) if held == text),
+            Probe::Value(value) => order(held, value) == Ordering::Equal,
+        }
+    }
+
+    pub(crate) fn owned(&self) -> Datum {
+        match self {
+            Probe::Text(text) => Datum::String((*text).to_owned()),
+            Probe::Value(value) => value.as_ref().clone(),
+        }
+    }
+}
+
 impl KeyIndex {
     /// The value held for the row equivalent to `key`.
     pub(crate) fn get(&self, key: &[Datum]) -> Option<usize> {
@@ -54,6 +78,36 @@ impl KeyIndex {
             bucket
                 .iter()
                 .find(|(held, _)| equivalent(held, key))
+                .map(|(_, value)| *value)
+        })
+    }
+
+    /// The value held for the row equivalent to `probe`.
+    pub(crate) fn probe(&self, probe: &[Probe<'_>]) -> Option<usize> {
+        let mut hasher = self.state.build_hasher();
+        let hashed = probe.iter().all(|value| match value {
+            Probe::Text(text) => {
+                (3u8, text).hash(&mut hasher);
+                true
+            }
+            Probe::Value(value) => hash_value(value, &mut hasher),
+        });
+        if !hashed {
+            return self
+                .ordered
+                .get(&Key(probe.iter().map(Probe::owned).collect()))
+                .copied();
+        }
+        self.hashed.get(&hasher.finish()).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|(held, _)| {
+                    held.len() == probe.len()
+                        && held
+                            .iter()
+                            .zip(probe)
+                            .all(|(held, value)| value.matches(held))
+                })
                 .map(|(_, value)| *value)
         })
     }
@@ -85,6 +139,16 @@ impl KeySet {
             return false;
         }
         self.index.insert(key.to_vec(), 0);
+        true
+    }
+
+    /// [`insert`](Self::insert) for a row of borrowed values, which are copied only when kept.
+    pub(crate) fn insert_probe(&mut self, probe: &[Probe<'_>]) -> bool {
+        if self.index.probe(probe).is_some() {
+            return false;
+        }
+        self.index
+            .insert(probe.iter().map(Probe::owned).collect(), 0);
         true
     }
 }
