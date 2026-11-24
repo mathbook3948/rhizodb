@@ -97,6 +97,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.path(name),
             AnyFs::Memory(fs) => fs.path(name),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.path(name),
         }
     }
 }
