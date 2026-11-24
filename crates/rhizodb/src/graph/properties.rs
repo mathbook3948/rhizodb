@@ -92,6 +92,42 @@ fn state(
         .transpose()
 }
 
+/// Some columns of one row group read whole, which give the value of each as a transaction sees
+/// it, in place.
+#[derive(Debug)]
+pub(crate) struct ScanGroup<'t> {
+    group: u64,
+    edit: Option<&'t ColumnsEdit>,
+    deltas: Deltas,
+    columns: Vec<Option<(Token<PropertyKey>, Column)>>,
+}
+
+impl ScanGroup<'_> {
+    /// Whether `node` lies in the row group.
+    pub(crate) fn holds(&self, node: NodeId) -> bool {
+        meta::locate(node).0 == self.group
+    }
+
+    /// The value of column `column` of the live node `node`, which the group must hold.
+    pub(crate) fn cell(&self, node: NodeId, column: usize) -> Result<Option<Cell<'_>>, GraphError> {
+        let Some(Some((token, stored))) = self.columns.get(column) else {
+            return Ok(None);
+        };
+        let (_, slot) = meta::locate(node);
+        if let Some(edit) = self.edit
+            && let Some(cell) = edit.current_cell(slot, *token)?
+        {
+            return Ok(cell);
+        }
+        if let Some(delta) = columns::find_delta(&self.deltas, slot)
+            && let Some(cell) = delta.view().get(*token)?
+        {
+            return Ok(cell);
+        }
+        stored.cell_at(slot)
+    }
+}
+
 impl<T: ReadTransaction> GraphTx<T> {
     fn load_column(&self, (group, token): ColumnId) -> Result<Column, GraphError> {
         let mut column = Column::new();
@@ -266,6 +302,30 @@ impl<T: ReadTransaction> GraphTx<T> {
             return Ok(value);
         }
         self.stored_value(reader, (group, token), slot)
+    }
+
+    /// Reads the columns `tokens` of the row group that holds `node` whole, for a scan of its
+    /// nodes.
+    pub(crate) fn scan_group(
+        &self,
+        node: NodeId,
+        tokens: &[Option<Token<PropertyKey>>],
+    ) -> Result<ScanGroup<'_>, GraphError> {
+        let (group, _) = meta::locate(node);
+        let columns = tokens
+            .iter()
+            .map(|token| {
+                token
+                    .map(|token| Ok((token, self.load_column((group, token))?)))
+                    .transpose()
+            })
+            .collect::<Result<_, GraphError>>()?;
+        Ok(ScanGroup {
+            group,
+            edit: self.columns.get(&group),
+            deltas: self.load_deltas(group)?,
+            columns,
+        })
     }
 
     fn stored_keys(&self, group: u64) -> Result<Vec<Token<PropertyKey>>, GraphError> {

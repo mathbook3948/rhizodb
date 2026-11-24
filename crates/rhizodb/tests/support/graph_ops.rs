@@ -53,7 +53,7 @@ impl Choices for ByteChoices<'_> {
 const LABELS: [&str; 3] = ["A", "B", "C"];
 const STRINGS_OF_FIVE: [&str; 5] = ["0", "1", "2", "3", "4"];
 const TYPES: [&str; 2] = ["T", "U"];
-const STRINGS: [&str; 4] = ["", "a", "b", "é"];
+const STRINGS: [&str; 6] = ["", "a", "b", "é", "ab", "ba"];
 
 /// The values of `m`, a property whose type changes from node to node and write to write. No
 /// two of them are equal numbers, so grouping and equality do not depend on how GQL compares
@@ -448,7 +448,7 @@ impl Run {
                     .copied()
                     .filter(|_| choices.below(2) == 0)
                     .collect();
-                let q = match choices.below(5) {
+                let q = match choices.below(STRINGS.len() as u64 + 1) {
                     0 => None,
                     index => Some(STRINGS[usize::try_from(index - 1).unwrap_or(0)]),
                 };
@@ -465,7 +465,7 @@ impl Run {
             }
             3 => Step::SetP(Self::pick_node(*next_key, choices), Self::number(choices)),
             4 => {
-                let q = match choices.below(5) {
+                let q = match choices.below(STRINGS.len() as u64 + 1) {
                     0 => None,
                     index => Some(STRINGS[usize::try_from(index - 1).unwrap_or(0)]),
                 };
@@ -884,31 +884,134 @@ fn check_query(
                 &Parameters::new(),
             )
         }
-        _ => {
-            let query = format!(
-                "MATCH (n:{label}) WHERE n.p IS NOT NULL RETURN n.p ORDER BY n.p, n.key LIMIT 3"
-            );
-            let mut numbers: Vec<(f64, i64, Number)> = model
-                .nodes
-                .iter()
-                .filter(|(_, node)| node.labels.contains(label))
-                .filter_map(|(key, node)| node.p.map(|p| (p.as_f64(), *key, p)))
-                .collect();
-            numbers.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            let want: Vec<Vec<Value>> = numbers
-                .into_iter()
-                .take(3)
-                .map(|(_, _, p)| vec![p.value()])
-                .collect();
-            let got = execute(&query, &Parameters::new())?;
-            if got != want {
-                return Err(format!(
-                    "{query}: the database gave {got:?}, the model {want:?}"
-                ));
+        _ => match choices.below(7) {
+            0 => ordered_p(model, label, execute),
+            1 => {
+                let part =
+                    STRINGS[usize::try_from(choices.below(STRINGS.len() as u64)).unwrap_or(0)];
+                let s = parameters(&[("s", Value::String(part.to_owned()))]);
+                let query = format!("MATCH (n:{label}) WHERE n.q CONTAINS $s RETURN count(*)");
+                let want = labelled()
+                    .filter(|node| node.q.is_some_and(|q| q.contains(part)))
+                    .count();
+                expect_count(execute(&query, &s)?, want, &query, &s)
             }
-            Ok(())
-        }
+            2 => {
+                let part =
+                    STRINGS[usize::try_from(choices.below(STRINGS.len() as u64)).unwrap_or(0)];
+                let s = parameters(&[("s", Value::String(part.to_owned()))]);
+                let query =
+                    "MATCH (n) WHERE n.q STARTS WITH $s RETURN n.key ORDER BY n.key DESC LIMIT 3";
+                let want = model
+                    .nodes
+                    .iter()
+                    .rev()
+                    .filter(|(_, node)| node.q.is_some_and(|q| q.starts_with(part)))
+                    .take(3)
+                    .map(|(key, _)| vec![Value::Integer(*key)])
+                    .collect();
+                expect_rows(execute(query, &s)?, want, query)
+            }
+            3 => {
+                let query = format!("MATCH (n:{label}) RETURN DISTINCT n.q AS q");
+                let distinct: BTreeSet<Option<&str>> = labelled().map(|node| node.q).collect();
+                let want = distinct
+                    .into_iter()
+                    .map(|q| vec![optional(q.map(|q| Value::String(q.to_owned())))])
+                    .collect();
+                expect_rows_in_any_order(execute(&query, &Parameters::new())?, want, &query)
+            }
+            4 => {
+                let query = format!(
+                    "MATCH (n:{label}) WHERE n.p {} $c RETURN n.key, n.p ORDER BY n.p DESC, n.key LIMIT 5",
+                    comparison.symbol()
+                );
+                let mut rows: Vec<(i64, Number)> = model
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| node.labels.contains(label))
+                    .filter(|(_, node)| comparison.holds(node.p, constant) == Some(true))
+                    .filter_map(|(key, node)| node.p.map(|p| (*key, p)))
+                    .collect();
+                rows.sort_by(|a, b| b.1.as_f64().total_cmp(&a.1.as_f64()).then(a.0.cmp(&b.0)));
+                let want = rows
+                    .into_iter()
+                    .take(5)
+                    .map(|(key, p)| vec![Value::Integer(key), p.value()])
+                    .collect();
+                expect_rows(execute(&query, &c)?, want, &query)
+            }
+            5 => {
+                let query = format!(
+                    "MATCH (n:{label}) WHERE n.m IS NOT NULL AND n.key >= $c RETURN n.m AS m, count(*) AS c, min(n.key) AS low, collect(n.key) AS keys"
+                );
+                let mut groups: Vec<(Mixed, Vec<i64>)> = Vec::new();
+                for (key, node) in &model.nodes {
+                    let Some(m) = node.m else { continue };
+                    if !node.labels.contains(label) || (*key as f64) < constant.as_f64() {
+                        continue;
+                    }
+                    match groups.iter_mut().find(|(held, _)| *held == m) {
+                        Some((_, keys)) => keys.push(*key),
+                        None => groups.push((m, vec![*key])),
+                    }
+                }
+                let want = groups
+                    .into_iter()
+                    .map(|(m, keys)| {
+                        vec![
+                            m.value(),
+                            Value::Integer(keys.len() as i64),
+                            Value::Integer(keys[0]),
+                            Value::List(keys.into_iter().map(Value::Integer).collect()),
+                        ]
+                    })
+                    .collect();
+                expect_rows(execute(&query, &c)?, want, &query)
+            }
+            _ => {
+                let key = i64::try_from(choices.below(8)).unwrap_or(0);
+                let k = parameters(&[("k", Value::Integer(key))]);
+                let query = "MATCH (n {key: $k}) RETURN n.q, n.p";
+                let want = model
+                    .nodes
+                    .get(&key)
+                    .map(|node| {
+                        vec![
+                            optional(node.q.map(|q| Value::String(q.to_owned()))),
+                            optional(node.p.map(Number::value)),
+                        ]
+                    })
+                    .into_iter()
+                    .collect();
+                expect_rows(execute(query, &k)?, want, query)
+            }
+        },
     }
+}
+
+fn ordered_p(model: &Model, label: &str, execute: &Execute<'_>) -> Result<(), String> {
+    let query =
+        format!("MATCH (n:{label}) WHERE n.p IS NOT NULL RETURN n.p ORDER BY n.p, n.key LIMIT 3");
+    let mut numbers: Vec<(f64, i64, Number)> = model
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.labels.contains(label))
+        .filter_map(|(key, node)| node.p.map(|p| (p.as_f64(), *key, p)))
+        .collect();
+    numbers.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let want: Vec<Vec<Value>> = numbers
+        .into_iter()
+        .take(3)
+        .map(|(_, _, p)| vec![p.value()])
+        .collect();
+    let got = execute(&query, &Parameters::new())?;
+    if got != want {
+        return Err(format!(
+            "{query}: the database gave {got:?}, the model {want:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn expect_count(

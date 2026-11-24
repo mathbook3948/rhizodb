@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -17,7 +16,6 @@ use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
 use super::aggregate::Groups;
-use super::compare::Key;
 use super::compare::order;
 use super::datum::Datum;
 use super::datum::PathIds;
@@ -27,6 +25,7 @@ use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::keys::KeySet;
 use super::matcher::counted_nodes;
 use super::plan::CallClause;
 use super::plan::Callee;
@@ -65,6 +64,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -96,6 +96,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -111,6 +112,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
         }
         .read_clauses(
             clause,
@@ -147,6 +149,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         keys: RefCell::default(),
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -177,8 +180,8 @@ fn run<C>(
         }
     }
     if program.distinct {
-        let mut seen = BTreeSet::new();
-        results.retain(|row: &Vec<Datum>| seen.insert(Key(row.clone())));
+        let mut seen = KeySet::default();
+        results.retain(|row: &Vec<Datum>| seen.insert(row));
     }
     Ok(results)
 }
@@ -237,6 +240,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let rows = groups.finish(self, finals)?;
                 return Ok((self.arrange(projection, rows)?, 2));
             }
+            if let Some(scan) = self.node_scan(found)?
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
             for row in &rows {
                 self.match_patterns(&found.patterns, row, &mut |matched| {
                     let keep = match &found.filter {
@@ -251,6 +259,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             let rows = groups.finish(self, finals)?;
             return Ok((self.arrange(projection, rows)?, 2));
+        }
+        if let ReadClause::Match(found) = clause
+            && let Some(scan) = self.node_scan(found)?
+        {
+            if let Some(ReadClause::Project(projection)) = next
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
+            if let Some(rows) = self.scan_match(scan, found, &rows)? {
+                return Ok((rows, 1));
+            }
         }
         Ok((self.read_clause(clause, rows)?, 1))
     }
@@ -434,15 +454,21 @@ impl<T: ReadTransaction> Env<'_, T> {
         self.arrange(projection, rows)
     }
 
-    fn arrange(&self, projection: &Projection, mut rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    pub(crate) fn arrange(
+        &self,
+        projection: &Projection,
+        mut rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         if projection.distinct {
-            let mut seen = BTreeSet::new();
+            let mut seen = KeySet::default();
             rows.retain(|row| {
-                seen.insert(Key(projection
-                    .outputs
-                    .iter()
-                    .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
-                    .collect()))
+                seen.insert(
+                    &projection
+                        .outputs
+                        .iter()
+                        .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+                        .collect::<Vec<_>>(),
+                )
             });
         }
         let empty = vec![Datum::Null; self.slots];
@@ -490,6 +516,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
@@ -503,7 +530,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(())
     }
 
-    fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
+    pub(crate) fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
         match self.eval(expr, row)? {
             Datum::Integer(value) if value < 0 => Err(Error::new(
                 ErrorKind::NegativeIntegerArgument,

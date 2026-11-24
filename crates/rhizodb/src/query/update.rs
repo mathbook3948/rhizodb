@@ -117,6 +117,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             keys: RefCell::default(),
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
         }
     }
 
