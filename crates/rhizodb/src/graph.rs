@@ -999,25 +999,12 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     fn flush_adjacency(&mut self) -> Result<(), GraphError> {
         for (id, edit) in std::mem::take(&mut self.adjacency) {
-            match edit.flush(&id)? {
-                adjacency::Flush::Deltas { put, delete } => {
-                    for (key, bytes) in put {
-                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
-                    }
-                    for key in delete {
-                        self.transaction.delete(Table::Adjacency, &key)?;
-                    }
-                }
-                adjacency::Flush::Rewrite { stored, parts } => {
-                    if stored {
-                        let (start, end) = id.range();
-                        self.transaction
-                            .delete_range(Table::Adjacency, &start, &end)?;
-                    }
-                    for (key, bytes) in parts {
-                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
-                    }
-                }
+            let flush = edit.flush(&id)?;
+            for key in flush.delete {
+                self.transaction.delete(Table::Adjacency, &key)?;
+            }
+            for (key, bytes) in flush.put {
+                self.transaction.put(Table::Adjacency, &key, &bytes)?;
             }
         }
         Ok(())

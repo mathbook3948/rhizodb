@@ -12,6 +12,10 @@ const ID: SegmentId = SegmentId {
     rel_type: 9,
 };
 
+const LAST: usize = SEGMENT_SLOTS - 1;
+
+const MIDDLE: usize = SEGMENT_SLOTS / 2;
+
 fn is_corruption(error: &GraphError) -> bool {
     matches!(error, GraphError::Corrupt(_) | GraphError::Decode(_))
 }
@@ -84,8 +88,8 @@ fn a_segment_reads_back_every_slot_it_encodes() {
     let slots = vec![
         (0, vec![edge(0, 0)]),
         (1, vec![edge(5, 1), edge(6, 1), edge(9, 1)]),
-        (31, vec![edge(u64::MAX - 1, u64::MAX)]),
-        (63, vec![edge(2, 4095), edge(3, 4096), edge(4, 4097)]),
+        (MIDDLE, vec![edge(u64::MAX - 1, u64::MAX)]),
+        (LAST, vec![edge(2, 4095), edge(3, 4096), edge(4, 4097)]),
     ];
     let parts = encode(&slots);
     assert_eq!(parts.len(), 1);
@@ -107,9 +111,9 @@ fn self_loops_and_parallel_relationships_keep_one_entry_each() {
 fn positions_at_the_edges_of_a_group_land_in_the_first_and_last_segment() {
     for (node, group, segment, position) in [
         (0, 0, 0, 0),
-        (63, 0, 0, 63),
-        (64, 0, 1, 0),
-        (4095, 0, 63, 63),
+        (15, 0, 0, 15),
+        (16, 0, 1, 0),
+        (4095, 0, 255, 15),
         (4096, 1, 0, 0),
         (4097, 1, 0, 1),
     ] {
@@ -154,8 +158,8 @@ fn a_full_segment_splits_into_parts_of_one_span_that_each_fit_a_page() {
 fn a_hub_with_more_relationships_than_offsets_reach_gets_a_part_of_its_own() {
     let slots = vec![
         (0, vec![edge(1, 2)]),
-        (40, hub(70_000)),
-        (63, vec![edge(5, 6)]),
+        (MIDDLE, hub(70_000)),
+        (LAST, vec![edge(5, 6)]),
     ];
     let parts = encode(&slots);
     assert_eq!(span_of(&parts), 1);
@@ -292,18 +296,15 @@ fn a_part_whose_offsets_run_backwards_or_past_its_end_is_refused() {
 fn keys_that_name_no_entry_are_refused() {
     let mut bad_side = ID.delta_key(0);
     bad_side[SIDE_AT] = 2;
-    let mut bad_segment = ID.delta_key(0);
-    bad_segment[SEGMENT_AT] = 64;
     let mut bad_position = ID.delta_key(0);
-    bad_position[KIND_AT + 1] = 64;
+    bad_position[KIND_AT + 1] = SEGMENT_SLOTS as u8;
     let mut bad_kind = ID.delta_key(0);
     bad_kind[KIND_AT] = 2;
     let zero_span = ID.part_key(0, 0);
-    let past_last = ID.part_key(16, 4);
-    let wide_span = ID.part_key(65, 0);
+    let past_last = ID.part_key(4, 4);
+    let wide_span = ID.part_key(SEGMENT_SLOTS + 1, 0);
     for key in [
         bad_side.to_vec(),
-        bad_segment.to_vec(),
         bad_position.to_vec(),
         bad_kind.to_vec(),
         zero_span.to_vec(),
@@ -315,12 +316,12 @@ fn keys_that_name_no_entry_are_refused() {
         assert!(parse_key(&key).is_err(), "{key:?}");
     }
     assert_eq!(
-        parse_key(&ID.part_key(16, 3)).unwrap(),
-        (ID, Entry::Part { span: 16, index: 3 })
+        parse_key(&ID.part_key(4, 3)).unwrap(),
+        (ID, Entry::Part { span: 4, index: 3 })
     );
     assert_eq!(
-        parse_key(&ID.delta_key(63)).unwrap(),
-        (ID, Entry::Delta(63))
+        parse_key(&ID.delta_key(LAST)).unwrap(),
+        (ID, Entry::Delta(LAST))
     );
 }
 
@@ -350,8 +351,11 @@ fn a_delta_adds_to_a_slot_whose_part_is_not_stored() {
         removed: Vec::new(),
         added: vec![edge(5, 1)],
     };
-    stored.insert(ID.delta_key(60).to_vec(), change.encode(&ID.delta_key(60)));
-    assert_eq!(read_slot(&stored, 60).unwrap(), vec![edge(5, 1)]);
+    stored.insert(
+        ID.delta_key(LAST).to_vec(),
+        change.encode(&ID.delta_key(LAST)),
+    );
+    assert_eq!(read_slot(&stored, LAST).unwrap(), vec![edge(5, 1)]);
 }
 
 #[test]
@@ -414,9 +418,9 @@ fn a_delta_without_parts_is_caught() {
 
 #[test]
 fn parts_that_disagree_on_their_span_are_caught() {
-    let slots = vec![(0, vec![edge(1, 1)]), (40, vec![edge(2, 2)])];
-    let mut stored = store(encode_segment_by(&ID, &borrowed(&slots), 64));
-    stored.extend(encode_segment_by(&ID, &borrowed(&slots), 32));
+    let slots = vec![(0, vec![edge(1, 1)]), (MIDDLE, vec![edge(2, 2)])];
+    let mut stored = store(encode_segment_by(&ID, &borrowed(&slots), SEGMENT_SLOTS));
+    stored.extend(encode_segment_by(&ID, &borrowed(&slots), MIDDLE));
     assert!(fails_with(read_slot(&stored, 0), SPANS_DISAGREE));
     assert!(fails_with(
         SegmentEdit::load(
@@ -428,23 +432,15 @@ fn parts_that_disagree_on_their_span_are_caught() {
 }
 
 fn apply(stored: &mut BTreeMap<Vec<u8>, Vec<u8>>, edit: SegmentEdit) -> bool {
-    match edit.flush(&ID).unwrap() {
-        Flush::Deltas { put, delete } => {
-            for (key, bytes) in put {
-                stored.insert(key.to_vec(), bytes);
-            }
-            for key in delete {
-                stored.remove(key.as_slice());
-            }
-            false
-        }
-        Flush::Rewrite { stored: had, parts } => {
-            assert_eq!(had, !stored.is_empty());
-            stored.clear();
-            stored.extend(parts);
-            true
-        }
+    let flush = edit.flush(&ID).unwrap();
+    let is_part = |key: &[u8]| matches!(parse_key(key).unwrap().1, Entry::Part { .. });
+    let rewrote = flush.delete.iter().any(|key| is_part(key))
+        || flush.put.iter().any(|(key, _)| is_part(key));
+    for key in flush.delete {
+        assert!(stored.remove(&key).is_some(), "{key:?} is not stored");
     }
+    stored.extend(flush.put);
+    rewrote
 }
 
 fn load(stored: &BTreeMap<Vec<u8>, Vec<u8>>) -> SegmentEdit {
@@ -552,10 +548,12 @@ fn removing_a_relationship_a_slot_does_not_hold_is_corruption() {
 
 #[test]
 fn removing_every_relationship_of_a_segment_deletes_it_once_it_folds() {
-    let slots: Vec<(usize, Vec<Edge>)> = (0..40).map(|at| (at, vec![edge(at as u64, 1)])).collect();
+    let slots: Vec<(usize, Vec<Edge>)> = (0..SEGMENT_SLOTS)
+        .map(|at| (at, vec![edge(at as u64, 1)]))
+        .collect();
     let mut stored = store(encode(&slots));
     let mut edit = load(&stored);
-    for at in 0..40 {
+    for at in 0..SEGMENT_SLOTS {
         edit.remove(at, RelationshipId(at as u64)).unwrap();
     }
     assert!(apply(&mut stored, edit));
@@ -659,7 +657,7 @@ proptest! {
         slots in prop::collection::btree_map(
             0..SEGMENT_SLOTS,
             prop::collection::btree_map(any::<u64>(), any::<u64>(), 1..40),
-            0..64,
+            0..=SEGMENT_SLOTS,
         )
     ) {
         let slots: Vec<(usize, Vec<Edge>)> = slots
@@ -719,4 +717,36 @@ fn a_small_commit_that_removes_the_last_relationships_deletes_the_segment() {
     edit.remove(9, RelationshipId(1)).unwrap();
     assert!(apply(&mut stored, edit));
     assert!(stored.is_empty());
+}
+
+#[test]
+fn a_fold_beside_a_hub_writes_only_the_parts_that_change() {
+    let mut slots = vec![(0, hub(5_000))];
+    slots.extend((1..SEGMENT_SLOTS).map(|at| (at, vec![edge(at as u64, 1)])));
+    let mut stored = store(encode(&slots));
+    let hub_key = ID.part_key(1, 0).to_vec();
+    let hub_part = stored.get(&hub_key).cloned().unwrap();
+    let mut edit = load(&stored);
+    for at in 1..=MAX_DELTAS + 1 {
+        edit.add(at, edge(100_000 + at as u64, 2));
+    }
+    let flush = edit.flush(&ID).unwrap();
+    assert!(flush.put.iter().all(|(key, _)| *key != hub_key));
+    assert!(flush.delete.iter().all(|key| *key != hub_key));
+    assert!(!flush.put.is_empty());
+    for key in flush.delete {
+        stored.remove(&key);
+    }
+    stored.extend(flush.put);
+    assert_eq!(stored.get(&hub_key), Some(&hub_part));
+    assert_eq!(read_slot(&stored, 0).unwrap(), hub(5_000));
+    assert_eq!(
+        read_slot(&stored, 3).unwrap(),
+        vec![edge(3, 1), edge(100_003, 2)]
+    );
+    let parts: Vec<Stored> = stored
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    assert_eq!(encode(&decode(&parts)), parts);
 }

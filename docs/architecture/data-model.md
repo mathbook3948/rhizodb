@@ -17,7 +17,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Keys of the relationship and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
 - Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
 - An adjacency entry holds the relationship ID and the node at the other end, so a traversal reads no relationship record.
-- Adjacency is stored per row group, side, run of 64 slots, and relationship type, as one segment in compressed sparse row form.
+- Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
 - An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.
 - A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.
 - A segment is stored as parts that each cover the same run of slots, the longest under which every part fits a page, or one slot when none does, and a part without relationships is not stored.
@@ -27,7 +27,8 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A slot's relationships come out by type and then by ID, outgoing ones before incoming ones.
 - A commit that changes a few slots of a segment with stored parts writes one delta per changed slot, which lists the relationships it removes from the parts and the ones it adds.
 - Deltas sort before the parts of their segment, so a read of one slot meets its delta before its part and merges them in one pass.
-- A segment keeps at most 16 deltas and none larger than half a part, and a commit that would leave more or larger rewrites the segment's parts and deletes its deltas with one range delete.
+- A segment keeps at most 4 deltas and none larger than half a part, and a commit that would leave more or larger lays the segment out again and deletes its deltas.
+- Laying a segment out again copies the encoded relationships of each slot no change touched as they are stored, and writes only the parts whose bytes differ, so a change beside a hub does not rewrite the hub's part.
 - A commit that leaves a segment without relationships deletes its parts and deltas.
 - A write transaction loads a segment, with its deltas, the first time it changes it, and keeps each changed slot as its change against the stored parts until commit.
 - A commit writes the segments it changed in key order.
