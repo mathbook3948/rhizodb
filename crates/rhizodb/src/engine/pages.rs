@@ -13,6 +13,7 @@ use super::blob::item_checksum;
 use super::block_file::BlockFile;
 use super::cache::Cache;
 use super::cache::CachedPage;
+use super::cache::CheckedPage;
 use super::error::EngineError;
 use super::header::Header;
 use super::layout::BLOCK;
@@ -130,7 +131,13 @@ impl<B: BlockFile> Pages<B> {
     pub(crate) fn write_page(&self, at: BlockRef, bytes: Vec<u8>) -> Result<(), EngineError> {
         self.write(at, &bytes)?;
         let header = PageHeader::open(self.seed, &bytes, at)?;
-        self.cache.insert(at, (header, Arc::from(bytes)));
+        self.cache.insert(
+            at,
+            Arc::new(CheckedPage {
+                header,
+                bytes: bytes.into_boxed_slice(),
+            }),
+        );
         Ok(())
     }
 
@@ -164,8 +171,11 @@ impl<B: BlockFile> PageSource for Pages<B> {
         let mut bytes = vec![0; BLOCK];
         self.file.read(self.physical(at, 1)?, &mut bytes)?;
         let header = PageHeader::open(self.seed, &bytes, at)?;
-        let page = (header, Arc::from(bytes));
-        self.cache.insert(at, page.clone());
+        let page = Arc::new(CheckedPage {
+            header,
+            bytes: bytes.into_boxed_slice(),
+        });
+        self.cache.insert(at, Arc::clone(&page));
         Ok(page)
     }
 

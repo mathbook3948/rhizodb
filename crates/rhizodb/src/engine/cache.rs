@@ -2,22 +2,31 @@ use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use super::layout::BlockRef;
 use super::page::PageHeader;
 
-/// A checked page and its header, which never changes once written.
-pub(crate) type CachedPage = (PageHeader, Arc<[u8]>);
+/// A page that passed its checksum and placement checks, with its decoded header.
+#[derive(Debug)]
+pub(crate) struct CheckedPage {
+    pub(crate) header: PageHeader,
+    pub(crate) bytes: Box<[u8]>,
+}
 
-const SHARDS: usize = 16;
+/// A checked page, which never changes once written.
+pub(crate) type CachedPage = Arc<CheckedPage>;
+
+const SHARDS: usize = 64;
 
 #[derive(Debug)]
 struct Entry {
     at: BlockRef,
     page: CachedPage,
-    used: bool,
+    used: AtomicBool,
 }
 
 /// Hashes a block reference by one multiplication, since references are not chosen by an
@@ -54,7 +63,7 @@ struct Shard {
 /// entry is never invalidated.
 #[derive(Debug)]
 pub(crate) struct Cache {
-    shards: Vec<Mutex<Shard>>,
+    shards: Vec<RwLock<Shard>>,
     per_shard: usize,
 }
 
@@ -62,29 +71,34 @@ impl Cache {
     /// A cache holding about `pages` pages.
     pub(crate) fn new(pages: usize) -> Self {
         Self {
-            shards: (0..SHARDS).map(|_| Mutex::default()).collect(),
+            shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
             per_shard: pages.div_ceil(SHARDS).max(1),
         }
     }
 
-    fn shard(&self, at: BlockRef) -> std::sync::MutexGuard<'_, Shard> {
+    fn shard(&self, at: BlockRef) -> &RwLock<Shard> {
         let mixed = at.raw().wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58;
-        self.shards[mixed as usize % SHARDS]
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        &self.shards[mixed as usize % SHARDS]
     }
 
     pub(crate) fn get(&self, at: BlockRef) -> Option<CachedPage> {
-        let mut shard = self.shard(at);
-        let index = *shard.index.get(&at)?;
-        let entry = &mut shard.entries[index];
-        entry.used = true;
-        Some(entry.page.clone())
+        let shard = self
+            .shard(at)
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let entry = &shard.entries[*shard.index.get(&at)?];
+        if !entry.used.load(Ordering::Relaxed) {
+            entry.used.store(true, Ordering::Relaxed);
+        }
+        Some(Arc::clone(&entry.page))
     }
 
     pub(crate) fn insert(&self, at: BlockRef, page: CachedPage) {
         let per_shard = self.per_shard;
-        let mut shard = self.shard(at);
+        let mut shard = self
+            .shard(at)
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
         if shard.index.contains_key(&at) {
             return;
         }
@@ -93,7 +107,7 @@ impl Cache {
             shard.entries.push(Entry {
                 at,
                 page,
-                used: false,
+                used: AtomicBool::new(false),
             });
             shard.index.insert(at, index);
             return;
@@ -102,15 +116,15 @@ impl Cache {
             let hand = shard.hand;
             shard.hand = (hand + 1) % shard.entries.len();
             let entry = &mut shard.entries[hand];
-            if entry.used {
-                entry.used = false;
+            if *entry.used.get_mut() {
+                *entry.used.get_mut() = false;
                 continue;
             }
             let evicted = entry.at;
             *entry = Entry {
                 at,
                 page,
-                used: false,
+                used: AtomicBool::new(false),
             };
             shard.index.remove(&evicted);
             shard.index.insert(at, hand);
@@ -123,7 +137,7 @@ impl Cache {
             .iter()
             .map(|shard| {
                 shard
-                    .lock()
+                    .read()
                     .unwrap_or_else(PoisonError::into_inner)
                     .entries
                     .len()

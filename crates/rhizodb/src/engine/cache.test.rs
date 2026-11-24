@@ -16,7 +16,10 @@ fn page(at: BlockRef) -> CachedPage {
         lsn: 1,
         generation: 1,
     };
-    (header, Arc::from(vec![(at.raw() % 251) as u8; 8]))
+    Arc::new(CheckedPage {
+        header,
+        bytes: vec![(at.raw() % 251) as u8; 8].into_boxed_slice(),
+    })
 }
 
 fn at(block: u32) -> BlockRef {
@@ -28,9 +31,15 @@ fn a_cached_page_comes_back_until_evicted() {
     let cache = Cache::new(64);
     assert!(cache.get(at(1)).is_none());
     cache.insert(at(1), page(at(1)));
-    assert_eq!(cache.get(at(1)).unwrap().1[0], (at(1).raw() % 251) as u8);
+    assert_eq!(
+        cache.get(at(1)).unwrap().bytes[0],
+        (at(1).raw() % 251) as u8
+    );
     cache.insert(at(1), page(at(2)));
-    assert_eq!(cache.get(at(1)).unwrap().1[0], (at(1).raw() % 251) as u8);
+    assert_eq!(
+        cache.get(at(1)).unwrap().bytes[0],
+        (at(1).raw() % 251) as u8
+    );
 }
 
 #[test]
@@ -40,7 +49,7 @@ fn the_cache_stays_within_its_capacity_and_keeps_used_pages() {
         cache.insert(at(block), page(at(block)));
         assert!(cache.len() <= SHARDS * 4);
         if let Some(found) = cache.get(at(block)) {
-            assert_eq!(found.1[0], (at(block).raw() % 251) as u8);
+            assert_eq!(found.bytes[0], (at(block).raw() % 251) as u8);
         }
     }
     let hot = at(999);

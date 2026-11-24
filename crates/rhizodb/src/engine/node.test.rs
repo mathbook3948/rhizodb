@@ -57,7 +57,7 @@ fn sealed(content: &Content, level: u8, long_keys: &mut Vec<Vec<u8>>) -> Vec<u8>
 
 fn decoded(page: &[u8], long_keys: &[Vec<u8>], low: &Bytes) -> (Content, Vec<BlobRef>) {
     let header = PageHeader::open(SEED, page, at()).unwrap();
-    let node = Node::parse(header, page, TABLE).unwrap();
+    let node = Node::parse(&header, page, TABLE).unwrap();
     let load = |found: &BlobRef| Ok(long_keys[found.first.at.block() as usize].clone());
     node.content(&load, low).unwrap()
 }
@@ -115,7 +115,7 @@ fn long_keys_keep_a_stub_and_compare_through_their_run() {
     assert_eq!(found, content);
     assert_eq!(owned.len(), 2);
     let header = PageHeader::open(SEED, &page, at()).unwrap();
-    let node = Node::parse(header, &page, TABLE).unwrap();
+    let node = Node::parse(&header, &page, TABLE).unwrap();
     let load = |found: &BlobRef| Ok(long_keys[found.first.at.block() as usize].clone());
     assert_eq!(node.search(&second, &load).unwrap(), 1);
     assert_eq!(node.search(&first, &load).unwrap(), 0);
@@ -147,7 +147,7 @@ fn a_branch_searches_by_its_low_keys() {
     let page = sealed(&content, 1, &mut Vec::new());
     assert_eq!(decoded(&page, &[], &Bytes::from(&[][..])).0, content);
     let header = PageHeader::open(SEED, &page, at()).unwrap();
-    let node = Node::parse(header, &page, TABLE).unwrap();
+    let node = Node::parse(&header, &page, TABLE).unwrap();
     let load = |_: &BlobRef| Err(EngineError::corrupt("no long keys"));
     for (target, child) in [
         (&b"a"[..], 0),
@@ -242,7 +242,7 @@ proptest! {
             header = PageHeader::open(SEED, &page, at()).ok();
         }
         let Some(header) = header else { return Ok(()); };
-        let Ok(node) = Node::parse(header, &page, TABLE) else { return Ok(()); };
+        let Ok(node) = Node::parse(&header, &page, TABLE) else { return Ok(()); };
         let load = |found: &BlobRef| -> Result<Vec<u8>, EngineError> {
             long_keys.get(found.first.at.block() as usize).cloned().ok_or_else(|| EngineError::corrupt("no run"))
         };
@@ -254,5 +254,123 @@ proptest! {
         let _ = node.search(b"a", &load);
         let _ = node.search(&[b'w'; 1300], &load);
         let _ = node.content(&load, &Bytes::from(&[][..]));
+    }
+}
+
+fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        4 => vec(0u8..4, 0..12),
+        1 => vec(any::<u8>(), 0..24),
+        1 => vec(0u8..2, 1020..1100),
+    ]
+}
+
+fn long_key_loader(
+    long_keys: &[Vec<u8>],
+) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
+    |found: &BlobRef| {
+        long_keys
+            .get(found.first.at.block() as usize)
+            .cloned()
+            .ok_or_else(|| EngineError::corrupt("no run"))
+    }
+}
+
+proptest! {
+    #[test]
+    fn compare_bytes_orders_as_slices_do(left in key_strategy(), right in key_strategy()) {
+        prop_assert_eq!(compare_bytes(&left, &right), left.cmp(&right));
+        prop_assert_eq!(compare_bytes(&left, &left), Ordering::Equal);
+    }
+
+    #[test]
+    fn a_leaf_finds_the_first_key_at_or_above_the_target(
+        keys in proptest::collection::btree_set(key_strategy(), 1..30),
+        targets in vec(key_strategy(), 1..20),
+        same_width in any::<bool>(),
+    ) {
+        let keys: Vec<Vec<u8>> = keys.into_iter().collect();
+        let content = leaf(
+            &keys
+                .iter()
+                .map(|key| {
+                    let value = if same_width { vec![1; 8] } else { vec![2; key.len() % 5] };
+                    (key.as_slice(), inline(&value))
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut long_keys = Vec::new();
+        let page = sealed(&content, 0, &mut long_keys);
+        let header = PageHeader::open(SEED, &page, at()).unwrap();
+        let node = Node::parse(&header, &page, TABLE).unwrap();
+        let load = long_key_loader(&long_keys);
+        for target in targets.iter().chain(&keys) {
+            let first_at_or_above = keys.partition_point(|key| key < target);
+            let exact = keys.get(first_at_or_above) == Some(target);
+            prop_assert_eq!(node.find(target, &load).unwrap(), (first_at_or_above, exact));
+        }
+    }
+
+    #[test]
+    fn a_fixed_leaf_finds_the_first_key_at_or_above_the_target(
+        keys in proptest::collection::btree_set(vec(0u8..4, 9), 1..30),
+        targets in vec(key_strategy(), 1..20),
+    ) {
+        let keys: Vec<Vec<u8>> = keys.into_iter().collect();
+        let content = leaf(&keys.iter().map(|key| (key.as_slice(), inline(&[5; 3]))).collect::<Vec<_>>());
+        let page = sealed(&content, 0, &mut Vec::new());
+        let header = PageHeader::open(SEED, &page, at()).unwrap();
+        prop_assert_eq!(header.format, FIXED);
+        let node = Node::parse(&header, &page, TABLE).unwrap();
+        let load = long_key_loader(&[]);
+        for target in targets.iter().chain(&keys) {
+            let first_at_or_above = keys.partition_point(|key| key < target);
+            let exact = keys.get(first_at_or_above) == Some(target);
+            prop_assert_eq!(node.find(target, &load).unwrap(), (first_at_or_above, exact));
+        }
+    }
+
+    #[test]
+    fn a_branch_finds_the_child_whose_range_holds_the_target(
+        lows in proptest::collection::btree_set(key_strategy(), 1..30),
+        targets in vec(key_strategy(), 1..20),
+    ) {
+        let lows: Vec<Vec<u8>> = lows.into_iter().filter(|low| !low.is_empty()).collect();
+        let mut entries = vec![BranchEntry { low: Bytes::from(&b""[..]), child: ChildRef { at: at(), lsn: 1 } }];
+        entries.extend(lows.iter().map(|low| BranchEntry {
+            low: Bytes::from(low.as_slice()),
+            child: ChildRef { at: at(), lsn: 1 },
+        }));
+        let mut long_keys = Vec::new();
+        let page = sealed(&Content::Branch(entries), 1, &mut long_keys);
+        let header = PageHeader::open(SEED, &page, at()).unwrap();
+        let node = Node::parse(&header, &page, TABLE).unwrap();
+        let load = long_key_loader(&long_keys);
+        for target in targets.iter().chain(&lows) {
+            let child = lows.partition_point(|low| low <= target);
+            prop_assert_eq!(node.search(target, &load).unwrap(), child);
+        }
+    }
+}
+
+#[test]
+fn every_inline_key_of_a_variable_page_takes_the_direct_comparison() {
+    let keys: Vec<Vec<u8>> = (0u8..40).map(|key| vec![7, 7, key, key % 3]).collect();
+    let content = leaf(
+        &keys
+            .iter()
+            .map(|key| (key.as_slice(), inline(&vec![0; usize::from(key[2] % 4)])))
+            .collect::<Vec<_>>(),
+    );
+    let page = sealed(&content, 0, &mut Vec::new());
+    let header = PageHeader::open(SEED, &page, at()).unwrap();
+    let node = Node::parse(&header, &page, TABLE).unwrap();
+    let Layout::Variable { offsets } = node.layout else {
+        panic!("the page should use the variable format");
+    };
+    assert_eq!(node.cells(), keys.len());
+    for (index, key) in keys.iter().enumerate() {
+        let range = node.inline_key_range(offsets, index).unwrap();
+        assert_eq!(&[node.prefix, &page[range]].concat(), key);
     }
 }

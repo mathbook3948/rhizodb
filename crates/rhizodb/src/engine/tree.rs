@@ -9,6 +9,7 @@ use super::cache::CachedPage;
 use super::catalog::Root;
 use super::error::EngineError;
 use super::layout::TableId;
+#[cfg(test)]
 use super::memtable::Bytes;
 use super::node::CellKey;
 use super::node::CellValue;
@@ -61,11 +62,11 @@ pub(crate) fn fetch(
     } else {
         PageKind::Branch
     };
-    cached.0.expect(kind, page.lsn)?;
-    if cached.0.level != level || cached.0.table != table {
+    cached.header.expect(kind, page.lsn)?;
+    if cached.header.level != level || cached.header.table != table {
         return Err(EngineError::corrupt(format!(
             "the page at {:?} is at level {} of table {:#x} where level {level} of {:#x} was expected",
-            page.at, cached.0.level, cached.0.table.0, table.0
+            page.at, cached.header.level, cached.header.table.0, table.0
         )));
     }
     Ok(cached)
@@ -76,7 +77,18 @@ impl Tree {
         |blob| load_blob(&*self.source, blob, Role::Key)
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
+        self.get_with(table, key, |value| Bytes::from(value))
+    }
+
+    /// Calls `read` with the value stored under `key`, borrowed from its page when it is inline.
+    pub(crate) fn get_with<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
         let Some(root) = self.roots.get(&table) else {
             return Ok(None);
         };
@@ -85,20 +97,17 @@ impl Tree {
         let mut level = root.level;
         loop {
             let cached = fetch(&*self.source, table, page, level)?;
-            let node = Node::parse(cached.0, &cached.1, table)?;
-            let index = node.search(key, &load)?;
+            let node = Node::parse(&cached.header, &cached.bytes, table)?;
+            let (index, exact) = node.find(key, &load)?;
             if node.is_leaf() {
-                if index >= node.cells() || node.key(index)?.compare(key, &load)? != Ordering::Equal
-                {
+                if !exact {
                     return Ok(None);
                 }
                 return match node.value(index)? {
-                    CellValue::Inline(value) => Ok(Some(Bytes::from(value))),
-                    CellValue::External(blob) => Ok(Some(Bytes::from(load_blob(
-                        &*self.source,
-                        &blob,
-                        Role::Value,
-                    )?))),
+                    CellValue::Inline(value) => Ok(Some(read(value))),
+                    CellValue::External(blob) => {
+                        Ok(Some(read(&load_blob(&*self.source, &blob, Role::Value)?)))
+                    }
                 };
             }
             page = node.child(index)?;
@@ -147,7 +156,7 @@ impl Tree {
     ) -> Result<Flow, E> {
         let load = self.load_key();
         let cached = fetch(&*self.source, table, page, level).map_err(lift)?;
-        let node = Node::parse(cached.0, &cached.1, table).map_err(lift)?;
+        let node = Node::parse(&cached.header, &cached.bytes, table).map_err(lift)?;
         let first = match start {
             Bound::Unbounded => 0,
             Bound::Included(start) | Bound::Excluded(start) => {

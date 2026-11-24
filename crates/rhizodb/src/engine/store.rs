@@ -39,7 +39,6 @@ use super::header::WalIdentity;
 use super::layout::BLOCK;
 use super::layout::ExtentId;
 use super::layout::TableId;
-use super::memtable::Bytes;
 use super::memtable::Memtable;
 use super::page::page_seed;
 use super::pages::PageSource;
@@ -1006,7 +1005,12 @@ fn collect(
 }
 
 trait Reads {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError>;
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError>;
 
     fn walk<E: From<StorageError>>(
         &self,
@@ -1018,8 +1022,13 @@ trait Reads {
 }
 
 impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
-        self.view.get(table, key)
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
+        self.view.get_with(table, key, read)
     }
 
     fn walk<E: From<StorageError>>(
@@ -1034,8 +1043,13 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
 }
 
 impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
-        self.staged.get(table, key)
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
+        self.staged.get_with(table, key, read)
     }
 
     fn walk<E: From<StorageError>>(
@@ -1050,9 +1064,7 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
 }
 
 fn get<R: Reads>(reads: &R, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-    Ok(reads
-        .lookup(TableId::of(table), key)?
-        .map(|value| value.to_vec()))
+    Ok(reads.lookup(TableId::of(table), key, <[u8]>::to_vec)?)
 }
 
 fn scan_prefix<R: Reads>(
@@ -1089,13 +1101,10 @@ fn get_with<R: Reads, T, E: From<StorageError>>(
     key: &[u8],
     read: impl FnOnce(&[u8]) -> Result<T, E>,
 ) -> Result<Option<T>, E> {
-    match reads
-        .lookup(TableId::of(table), key)
+    reads
+        .lookup(TableId::of(table), key, read)
         .map_err(StorageError::from)?
-    {
-        Some(value) => read(&value).map(Some),
-        None => Ok(None),
-    }
+        .transpose()
 }
 
 fn visit_prefix<R: Reads, E: From<StorageError>>(
