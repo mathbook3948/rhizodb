@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::gql::ast::BinaryOp;
@@ -261,7 +262,9 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                     return Ok(None);
                 };
                 match self.value(list)? {
-                    Some(Value::Fixed(Datum::List(items))) => Pred::In(needle, Some(items)),
+                    Some(Value::Fixed(Datum::List(items))) => {
+                        Pred::In(needle, Some(Arc::unwrap_or_clone(items)))
+                    }
                     Some(Value::Fixed(Datum::Null)) => Pred::In(needle, None),
                     _ => return Ok(None),
                 }

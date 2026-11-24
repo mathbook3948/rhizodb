@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -803,7 +804,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         match (base, index) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::List(items), Datum::Integer(index)) => Ok(list_position(items.len(), index)
-                .and_then(|position| items.into_iter().nth(position))
+                .and_then(|position| items.get(position).cloned())
                 .unwrap_or(Datum::Null)),
             (Datum::List(_), other) => Err(Error::new(
                 ErrorKind::ListElementAccessByNonInteger,
@@ -812,8 +813,8 @@ impl<T: ReadTransaction> Env<'_, T> {
                     other.type_name()
                 ),
             )),
-            (Datum::Map(mut entries), Datum::String(key)) => {
-                Ok(entries.remove(&key).unwrap_or(Datum::Null))
+            (Datum::Map(entries), Datum::String(key)) => {
+                Ok(entries.get(&key).cloned().unwrap_or(Datum::Null))
             }
             (base @ (Datum::Node(_) | Datum::Relationship(_)), Datum::String(key)) => {
                 self.property(&base, &key)
@@ -836,7 +837,7 @@ pub(crate) fn set(row: &mut Row, slot: Slot, value: Datum) {
 fn list_operand(value: Datum) -> Result<Option<Vec<Datum>>, Error> {
     match value {
         Datum::Null => Ok(None),
-        Datum::List(items) => Ok(Some(items)),
+        Datum::List(items) => Ok(Some(Arc::unwrap_or_clone(items))),
         other => Err(type_error(format!(
             "expected a list, got a {}",
             other.type_name()
@@ -857,10 +858,10 @@ pub(crate) fn list_position(length: usize, index: i64) -> Option<usize> {
 fn slice(base: Datum, from: Option<&Datum>, to: Option<&Datum>) -> Result<Datum, Error> {
     let items = match base {
         Datum::Null => return Ok(Datum::Null),
-        Datum::List(items) => items,
+        Datum::List(items) => Arc::unwrap_or_clone(items),
         other => return Err(type_error(format!("cannot slice a {}", other.type_name()))),
     };
-    Ok(sliced(items, from, to)?.map_or(Datum::Null, Datum::List))
+    Ok(sliced(items, from, to)?.map_or(Datum::Null, |items| Datum::List(Arc::new(items))))
 }
 
 fn sliced<T>(
@@ -996,7 +997,7 @@ fn membership(needle: &Datum, haystack: Datum) -> Result<Datum, Error> {
         }
     };
     let mut unknown = false;
-    for item in &items {
+    for item in items.iter() {
         match equals(needle, item) {
             Some(true) => return Ok(Datum::Boolean(true)),
             None => unknown = true,
@@ -1014,17 +1015,17 @@ fn add(lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match (lhs, rhs) {
         (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
         (Datum::List(mut a), Datum::List(b)) => {
-            a.extend(b);
+            Arc::make_mut(&mut a).extend(Arc::unwrap_or_clone(b));
             Ok(Datum::List(a))
         }
         (Datum::List(mut a), b) => {
             datum::check_item(&b)?;
-            a.push(b);
+            Arc::make_mut(&mut a).push(b);
             Ok(Datum::List(a))
         }
         (a, Datum::List(mut b)) => {
             datum::check_item(&a)?;
-            b.insert(0, a);
+            Arc::make_mut(&mut b).insert(0, a);
             Ok(Datum::List(b))
         }
         (Datum::String(a), Datum::String(b)) => Ok(Datum::String(a + &b)),

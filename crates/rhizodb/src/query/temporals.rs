@@ -68,7 +68,7 @@ fn fields(value: &Datum) -> Result<Vec<(String, Input)>, Error> {
         return Ok(Vec::new());
     };
     let mut fields = Vec::new();
-    for (key, value) in entries {
+    for (key, value) in entries.iter() {
         if let Some(value) = input(key, value)? {
             fields.push((key.clone(), value));
         }

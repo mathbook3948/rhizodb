@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -18,8 +19,8 @@ pub(crate) enum Datum {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
-    List(Vec<Datum>),
-    Map(BTreeMap<String, Datum>),
+    List(Arc<Vec<Datum>>),
+    Map(Arc<BTreeMap<String, Datum>>),
     Node(NodeId),
     Relationship(RelationshipId),
     Path(PathIds),
@@ -64,7 +65,9 @@ impl From<PropertyValue> for Datum {
             PropertyValue::Float(value) => Datum::Float(value),
             PropertyValue::String(value) => Datum::String(value),
             PropertyValue::Bytes(value) => Datum::Bytes(value),
-            PropertyValue::List(items) => Datum::List(items.into_iter().map(Datum::from).collect()),
+            PropertyValue::List(items) => {
+                Datum::List(Arc::new(items.into_iter().map(Datum::from).collect()))
+            }
             PropertyValue::Temporal(value) => Datum::Temporal(value),
         }
     }
@@ -101,13 +104,13 @@ pub(crate) fn check_item(item: &Datum) -> Result<(), Error> {
 /// The list of `items`, or an error when it would nest too deeply.
 pub(crate) fn list(items: Vec<Datum>) -> Result<Datum, Error> {
     items.iter().try_for_each(check_item)?;
-    Ok(Datum::List(items))
+    Ok(Datum::List(Arc::new(items)))
 }
 
 /// The map of `entries`, or an error when it would nest too deeply.
 pub(crate) fn map(entries: BTreeMap<String, Datum>) -> Result<Datum, Error> {
     entries.values().try_for_each(check_item)?;
-    Ok(Datum::Map(entries))
+    Ok(Datum::Map(Arc::new(entries)))
 }
 
 /// What writing `value` as a property does: `None` removes the property.
@@ -193,13 +196,13 @@ fn converted(value: &Value) -> Datum {
         Value::String(value) => Datum::String(value.clone()),
         Value::Bytes(value) => Datum::Bytes(value.clone()),
         Value::Temporal(value) => Datum::Temporal(value.clone()),
-        Value::List(items) => Datum::List(items.iter().map(converted).collect()),
-        Value::Map(entries) => Datum::Map(
+        Value::List(items) => Datum::List(Arc::new(items.iter().map(converted).collect())),
+        Value::Map(entries) => Datum::Map(Arc::new(
             entries
                 .iter()
                 .map(|(key, value)| (key.clone(), converted(value)))
                 .collect(),
-        ),
+        )),
         Value::Node(node) => Datum::Node(node.id),
         Value::Relationship(relationship) => Datum::Relationship(relationship.id),
         Value::Path(path) => Datum::Path(PathIds {
