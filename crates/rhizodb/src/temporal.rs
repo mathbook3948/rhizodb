@@ -21,6 +21,21 @@ use self::zone::NamedZone;
 use self::zone::is_valid_offset;
 
 /// A date, time, or duration value of openCypher.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::Date;
+/// use rhizodb::Parameters;
+/// use rhizodb::Temporal;
+/// use rhizodb::Value;
+///
+/// let db = Database::in_memory()?;
+/// let day = Value::Temporal(Temporal::Date(Date::from_ymd(2024, 2, 29).unwrap()));
+/// let result = db.execute("RETURN $day + duration('P1D') AS next", &Parameters::from([("day".to_owned(), day)]))?;
+/// let Value::Temporal(next) = &result.rows()[0][0] else { panic!("not a temporal value") };
+/// assert_eq!(next.to_string(), "2024-03-01");
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Temporal {
     /// A calendar date.
@@ -38,18 +53,48 @@ pub enum Temporal {
 }
 
 /// A date of the proleptic Gregorian calendar, in years -999,999,999 to 999,999,999.
+///
+/// ```
+/// use rhizodb::Date;
+///
+/// let date = Date::from_ymd(-44, 3, 15).unwrap();
+/// assert_eq!((date.year(), date.month(), date.day()), (-44, 3, 15));
+/// assert!(Date::from_ymd(2023, 2, 29).is_none());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Date {
     days: i64,
 }
 
 /// A time of day with nanosecond precision.
+///
+/// ```
+/// use rhizodb::LocalTime;
+///
+/// let time = LocalTime::from_hms_nano(23, 59, 59, 999_999_999).unwrap();
+/// assert_eq!((time.hour(), time.minute(), time.second(), time.nanosecond()), (23, 59, 59, 999_999_999));
+/// assert_eq!(LocalTime::MIDNIGHT.hour(), 0);
+/// assert!(LocalTime::from_hms_nano(24, 0, 0, 0).is_none());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalTime {
     nanos: i64,
 }
 
 /// A time of day with a UTC offset of at most 18 hours either way.
+///
+/// ```
+/// use rhizodb::LocalTime;
+/// use rhizodb::Time;
+///
+/// let time = Time::new(LocalTime::from_hms_nano(9, 30, 0, 0).unwrap(), -5 * 3600).unwrap();
+/// assert_eq!(time.offset_seconds(), -18_000);
+/// assert_eq!(time.local_time().hour(), 9);
+/// assert_eq!(time.to_string(), "09:30-05:00");
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Time {
     time: LocalTime,
@@ -57,6 +102,18 @@ pub struct Time {
 }
 
 /// A date and a time of day, without a time zone.
+///
+/// ```
+/// use rhizodb::Date;
+/// use rhizodb::LocalDateTime;
+/// use rhizodb::LocalTime;
+///
+/// let local = LocalDateTime::new(Date::from_ymd(2024, 1, 2).unwrap(), LocalTime::MIDNIGHT);
+/// assert_eq!(local.date().day(), 2);
+/// assert_eq!(local.time(), LocalTime::MIDNIGHT);
+/// assert_eq!(local.to_string(), "2024-01-02T00:00");
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LocalDateTime {
     date: Date,
@@ -64,6 +121,27 @@ pub struct LocalDateTime {
 }
 
 /// An instant together with the time zone it is seen in: a fixed UTC offset or an IANA zone.
+///
+/// ```
+/// use rhizodb::Date;
+/// use rhizodb::DateTime;
+/// use rhizodb::LocalDateTime;
+/// use rhizodb::LocalTime;
+///
+/// let local = LocalDateTime::new(
+///     Date::from_ymd(2024, 7, 1).unwrap(),
+///     LocalTime::from_hms_nano(12, 0, 0, 0).unwrap(),
+/// );
+/// let paris = DateTime::in_zone(local, "Europe/Paris").unwrap();
+/// assert_eq!(paris.offset_seconds(), 7200);
+/// assert_eq!(paris.zone_name(), Some("Europe/Paris"));
+/// assert_eq!(paris.epoch_second(), 1_719_828_000);
+/// assert_eq!(paris.nanosecond(), 0);
+/// assert_eq!(paris.local(), local);
+/// let fixed = DateTime::with_offset(local, 3600).unwrap();
+/// assert_eq!(fixed.zone_name(), None);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DateTime {
     epoch_second: i64,
@@ -74,6 +152,16 @@ pub struct DateTime {
 
 /// An amount of time in months, days, seconds, and nanoseconds, each counted on its own because
 /// months and days have no fixed length.
+///
+/// ```
+/// use rhizodb::Duration;
+///
+/// let duration = Duration::new(14, 3, 0, -1).unwrap();
+/// assert_eq!((duration.months(), duration.days()), (14, 3));
+/// assert_eq!((duration.seconds(), duration.nanoseconds()), (-1, 999_999_999));
+/// assert_eq!(duration.to_string(), "P1Y2M3DT-0.000000001S");
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Duration {
     months: i64,

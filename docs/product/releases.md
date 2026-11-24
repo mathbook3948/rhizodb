@@ -18,6 +18,8 @@ The crate is developed and released from its own repository, and hosts depend on
 - Cutting a release renames `Unreleased` to the new version, and that section becomes the GitHub release notes.
 - Every pull request checks that the crate packages and builds from its packaged files alone.
 - The published crate carries both license texts.
+- The guide for hosts is the crate-level documentation, so docs.rs shows it and its examples run as doctests.
+- Every public item has documentation, which a lint enforces.
 
 ## Open
 

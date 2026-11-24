@@ -1,7 +1,20 @@
 use std::error::Error;
 use std::fmt;
 
-/// Why the query text was rejected by the parser.
+/// Why the query text was rejected by the parser, carried by
+/// [`ErrorKind::Syntax`](crate::ErrorKind::Syntax).
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+/// use rhizodb::SyntaxErrorKind;
+///
+/// let db = Database::in_memory()?;
+/// let error = db.execute("MATCH (n", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::Syntax(SyntaxErrorKind::UnexpectedEnd));
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SyntaxErrorKind {

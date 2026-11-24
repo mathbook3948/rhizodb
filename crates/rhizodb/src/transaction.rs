@@ -16,6 +16,19 @@ use crate::temporal::DateTime;
 /// A snapshot of the graph that several queries read, begun with
 /// [`Database::begin_read`](crate::Database::begin_read). Commits made after it began stay out of
 /// its view. Dropping it ends it.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let snapshot = db.begin_read()?;
+/// let error = snapshot.execute("INSERT ()", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::ReadOnlyTransaction);
+/// assert!(snapshot.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct ReadTransaction<'db> {
     tx: GraphTx<<Backend as Storage>::Read<'db>>,
@@ -51,6 +64,22 @@ impl<'db> ReadTransaction<'db> {
 /// It stays on the thread that began it, so a second write begun on that thread can fail
 /// instead of waiting for itself. A host that holds a write across `.await` points runs it on
 /// one thread, for example in `spawn_blocking`.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let mut tx = db.begin_write()?;
+/// tx.execute("INSERT (:Kept)", &Parameters::new())?;
+/// assert!(tx.execute("RETURN 1 / 0", &Parameters::new()).is_err());
+/// let error = tx.execute("INSERT (:Lost)", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::TransactionAborted);
+/// tx.rollback()?;
+/// assert!(db.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 ///
 /// ```compile_fail
 /// fn send<T: Send>(_: T) {}
