@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use proptest::prelude::*;
 
@@ -20,8 +20,10 @@ fn scalar() -> impl Strategy<Value = Datum> {
 fn datum() -> impl Strategy<Value = Datum> {
     scalar().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
-            prop::collection::vec(inner.clone(), 0..3).prop_map(Datum::List),
-            prop::collection::btree_map("[ab]", inner, 0..2).prop_map(Datum::Map),
+            prop::collection::vec(inner.clone(), 0..3)
+                .prop_map(|items| Datum::List(Arc::new(items))),
+            prop::collection::btree_map("[ab]", inner, 0..2)
+                .prop_map(|entries| Datum::Map(Arc::new(entries))),
         ]
     })
 }
@@ -61,8 +63,8 @@ fn integers_and_floats_compare_exactly_beyond_float_precision() {
 #[test]
 fn the_global_order_ranks_types() {
     let ascending = [
-        Datum::Map(BTreeMap::new()),
-        Datum::List(Vec::new()),
+        Datum::Map(Arc::default()),
+        Datum::List(Arc::default()),
         Datum::String(String::new()),
         Datum::Boolean(false),
         Datum::Integer(1),

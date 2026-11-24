@@ -14,11 +14,16 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each kind of token has its own token space.
 - The database remembers each committed token that a read transaction looks up, and a write transaction never adds to that memory.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
-- Keys of the relationship and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
+- Keys of the relationship chunk and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
 - Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
 - An adjacency entry holds the relationship ID and the node at the other end, so a traversal reads no relationship record.
 - A relationship record holds its type, its source and target node IDs, its property count, and each property key as varints, each key followed by its tagged value.
-- Opening a database written before varint relationship records rewrites every relationship record, in the opening write transaction.
+- An integer property of a relationship takes a tag of its own and a zigzag varint when that fits in eight bytes, and a record written before still reads its fixed-width integers as they are.
+- Relationship records are stored in chunks of 32 consecutive IDs, one entry per chunk under the chunk's number, so a load writes one entry per 32 relationships.
+- A chunk holds a layout byte, a bitmap of the slots that hold a relationship, and each of those records in slot order after its length as a varint.
+- A chunk without relationships is not stored.
+- A write transaction loads a chunk the first time it changes it and writes the chunks it changed at commit, or all of them earlier once they hold more than 4 MiB of records.
+- Opening a database written before relationship chunks moves every relationship record into its chunk, encoding again the records written before varint relationship records, in the opening write transaction.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
 - An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.
 - A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.

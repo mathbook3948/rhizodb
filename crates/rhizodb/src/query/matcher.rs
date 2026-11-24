@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::gql::ast::Direction;
@@ -141,7 +142,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )));
             }
         };
-        entries
+        Arc::unwrap_or_clone(entries)
             .into_iter()
             .map(|(key, value)| Ok((self.tx.lookup_token::<PropertyKey>(&key)?, value)))
             .collect()
@@ -633,7 +634,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let relationship = &self.patterns[index].steps[step_index].relationship;
         if !relationship.anonymous {
             let walked = &self.trails[index].relationships[base..];
-            let value = Datum::List(walked.iter().copied().map(Datum::Relationship).collect());
+            let value = Datum::List(Arc::new(
+                walked.iter().copied().map(Datum::Relationship).collect(),
+            ));
             if relationship.bound && row.get(relationship.slot) != Some(&value) {
                 return Ok(true);
             }

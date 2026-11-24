@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -31,6 +32,7 @@ mod keys;
 mod meta;
 mod properties;
 mod records;
+mod relationships;
 mod tokenize;
 mod value_key;
 
@@ -79,8 +81,10 @@ use meta::MetaEdit;
 use meta::MetaHead;
 use meta::Part;
 use meta::Slot;
+use relationships::ChunkEdit;
+use relationships::ChunkRef;
 
-const FORMAT_VERSION: u32 = 11;
+const FORMAT_VERSION: u32 = 13;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
@@ -88,6 +92,8 @@ const NODE_META_FORMAT_VERSION: u32 = 8;
 const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
 const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
 const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
+const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
+const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -235,8 +241,10 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
-            if found.is_some_and(|found| found < VARINT_RELATIONSHIPS_FORMAT_VERSION) {
-                tx.reencode_relationships()?;
+            if let Some(found) = found
+                && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
+            {
+                tx.move_relationships_to_chunks(found < VARINT_RELATIONSHIPS_FORMAT_VERSION)?;
             }
             if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
                 tx.tag_index_targets()?;
@@ -305,6 +313,8 @@ impl<S: Storage> Graph<S> {
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
             counters: Vec::new(),
         })
     }
@@ -351,6 +361,8 @@ impl<S: Storage> Graph<S> {
             column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
             counters: Vec::new(),
         })
     }
@@ -375,6 +387,8 @@ pub(crate) struct GraphTx<T> {
     column_deltas: Option<Arc<ColumnDeltas>>,
     own_column_deltas: BTreeMap<u64, usize>,
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
+    relationship_chunks: BTreeMap<u64, ChunkEdit>,
+    relationship_bytes: usize,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -397,6 +411,8 @@ impl<T> GraphTx<T> {
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
             counters: Vec::new(),
         }
     }
@@ -463,24 +479,58 @@ impl<T: ReadTransaction> GraphTx<T> {
         id: RelationshipId,
         key: Token<PropertyKey>,
     ) -> Result<Option<Option<PropertyValue>>, GraphError> {
-        let bytes = self
-            .transaction
-            .get(Table::Relationships, &keys::element_key(id.0))?;
-        Ok(bytes
-            .map(|bytes| RelationshipRecord::property(&bytes, key))
-            .transpose()?)
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::property(bytes, key)?))
     }
 
     pub(crate) fn relationship(
         &self,
         id: RelationshipId,
     ) -> Result<Option<RelationshipRecord>, GraphError> {
-        let bytes = self
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
+    }
+
+    fn with_relationship<R>(
+        &self,
+        id: RelationshipId,
+        read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        if let Some(edit) = self.relationship_chunks.get(&chunk) {
+            return edit.get(slot).map(read).transpose();
+        }
+        Ok(self
             .transaction
-            .get(Table::Relationships, &keys::element_key(id.0))?;
-        Ok(bytes
-            .map(|bytes| RelationshipRecord::decode(&bytes))
-            .transpose()?)
+            .get_with(
+                Table::RelationshipChunks,
+                &relationships::chunk_key(chunk),
+                |bytes| ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
+            )?
+            .flatten())
+    }
+
+    /// Calls `visit` with every relationship's ID and stored record, in ascending ID order, as
+    /// this transaction has left them.
+    pub(crate) fn visit_relationship_records(
+        &self,
+        mut visit: impl FnMut(RelationshipId, &[u8]) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let mut held = self.relationship_chunks.iter().peekable();
+        self.transaction
+            .visit_prefix(Table::RelationshipChunks, &[], |key, value| {
+                let chunk = relationships::parse_key(key)?;
+                while let Some((&at, edit)) = held.next_if(|(at, _)| **at <= chunk) {
+                    visit_held(at, edit, &mut visit)?;
+                    if at == chunk {
+                        return Ok(());
+                    }
+                }
+                for entry in ChunkRef::parse(value)?.entries() {
+                    let (slot, record) = entry?;
+                    visit(relationships::relationship_at(chunk, slot), record)?;
+                }
+                Ok::<(), GraphError>(())
+            })?;
+        held.try_for_each(|(&chunk, edit)| visit_held(chunk, edit, &mut visit))
     }
 
     /// The labels of the label set `set`.
@@ -1075,6 +1125,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         }
         self.flush_columns()?;
         self.flush_adjacency()?;
+        self.flush_relationships()?;
         for (group, edit) in std::mem::take(&mut self.meta) {
             match edit.flush()? {
                 Flush::Rewrite { view, stale } => {
@@ -1119,29 +1170,73 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
-        if !self.adjacency.contains_key(&id) {
-            let (start, end) = id.range();
-            let mut entries = Vec::new();
-            self.transaction
-                .visit_range(Table::Adjacency, &start, &end, |key, value| {
-                    entries.push((key.to_vec(), value.to_vec()));
-                    Ok::<(), GraphError>(())
-                })?;
-            let edit = SegmentEdit::load(
-                &id,
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.as_slice(), value.as_slice())),
-            )?;
-            self.adjacency.insert(id, edit);
+    fn flush_relationships(&mut self) -> Result<(), GraphError> {
+        for (chunk, edit) in std::mem::take(&mut self.relationship_chunks) {
+            let key = relationships::chunk_key(chunk);
+            match edit.encode() {
+                Some(bytes) => self
+                    .transaction
+                    .put(Table::RelationshipChunks, &key, &bytes)?,
+                None => self.transaction.delete(Table::RelationshipChunks, &key)?,
+            }
         }
-        self.adjacency
-            .get_mut(&id)
-            .ok_or(GraphError::Corrupt("an adjacency edit vanished"))
+        self.relationship_bytes = 0;
+        Ok(())
     }
 
-    fn reencode_relationships(&mut self) -> Result<(), GraphError> {
+    fn store_relationship(
+        &mut self,
+        id: RelationshipId,
+        record: Option<&RelationshipRecord>,
+    ) -> Result<(), GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        let edit = match self.relationship_chunks.entry(chunk) {
+            btree_map::Entry::Occupied(held) => held.into_mut(),
+            btree_map::Entry::Vacant(vacant) => {
+                let edit = self
+                    .transaction
+                    .get_with(
+                        Table::RelationshipChunks,
+                        &relationships::chunk_key(chunk),
+                        ChunkEdit::load,
+                    )?
+                    .unwrap_or_default();
+                self.relationship_bytes += edit.bytes();
+                vacant.insert(edit)
+            }
+        };
+        let before = edit.bytes();
+        edit.set(slot, record.map(RelationshipRecord::encode));
+        self.relationship_bytes = self.relationship_bytes - before + edit.bytes();
+        if self.relationship_bytes > HELD_RELATIONSHIP_BYTES {
+            self.flush_relationships()?;
+        }
+        Ok(())
+    }
+
+    fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
+        match self.adjacency.entry(id) {
+            btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
+            btree_map::Entry::Vacant(vacant) => {
+                let (start, end) = id.range();
+                let mut entries = Vec::new();
+                self.transaction
+                    .visit_range(Table::Adjacency, &start, &end, |key, value| {
+                        entries.push((key.to_vec(), value.to_vec()));
+                        Ok::<(), GraphError>(())
+                    })?;
+                let edit = SegmentEdit::load(
+                    &id,
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.as_slice(), value.as_slice())),
+                )?;
+                Ok(vacant.insert(edit))
+            }
+        }
+    }
+
+    fn move_relationships_to_chunks(&mut self, fixed: bool) -> Result<(), GraphError> {
         const BATCH_SHIFT: u32 = 16;
         let mut batches = BTreeSet::new();
         self.transaction
@@ -1155,14 +1250,32 @@ impl<T: WriteTransaction> GraphTx<T> {
                 .checked_add(1)
                 .and_then(|next| next.checked_mul(1 << BATCH_SHIFT))
                 .map_or([0xff; 9].to_vec(), |next| keys::element_key(next).to_vec());
-            for (key, value) in self
-                .transaction
-                .scan_range(Table::Relationships, &start, &end)?
-            {
-                let record = RelationshipRecord::decode_fixed(&value)?;
-                self.transaction
-                    .put(Table::Relationships, &key, &record.encode())?;
+            let mut chunks: BTreeMap<u64, ChunkEdit> = BTreeMap::new();
+            self.transaction
+                .visit_range(Table::Relationships, &start, &end, |key, value| {
+                    let record = if fixed {
+                        RelationshipRecord::decode_fixed(value)?
+                    } else {
+                        RelationshipRecord::decode(value)?
+                    };
+                    let (chunk, slot) = relationships::locate(RelationshipId(decode_u64(key)?));
+                    chunks
+                        .entry(chunk)
+                        .or_default()
+                        .set(slot, Some(record.encode()));
+                    Ok::<(), GraphError>(())
+                })?;
+            for (chunk, edit) in chunks {
+                if let Some(bytes) = edit.encode() {
+                    self.transaction.put(
+                        Table::RelationshipChunks,
+                        &relationships::chunk_key(chunk),
+                        &bytes,
+                    )?;
+                }
             }
+            self.transaction
+                .delete_range(Table::Relationships, &start, &end)?;
         }
         Ok(())
     }
@@ -1427,11 +1540,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.require_node(record.source)?;
         self.require_node(record.target)?;
         let id = RelationshipId(self.next_counter(keys::NEXT_RELATIONSHIP_ID_KEY)?);
-        self.transaction.put(
-            Table::Relationships,
-            &keys::element_key(id.0),
-            &record.encode(),
-        )?;
+        self.store_relationship(id, Some(record))?;
         for (side, node, other) in [
             (Side::Outgoing, record.source, record.target),
             (Side::Incoming, record.target, record.source),
@@ -1548,8 +1657,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         let Some(record) = self.relationship(id)? else {
             return Ok(None);
         };
-        self.transaction
-            .delete(Table::Relationships, &keys::element_key(id.0))?;
+        self.store_relationship(id, None)?;
         for (side, node) in [
             (Side::Outgoing, record.source),
             (Side::Incoming, record.target),
@@ -1689,11 +1797,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             .ok_or(GraphError::RelationshipNotFound(id))?;
         let mut record = before.clone();
         let result = edit(&mut record);
-        self.transaction.put(
-            Table::Relationships,
-            &keys::element_key(id.0),
-            &record.encode(),
-        )?;
+        self.store_relationship(id, Some(&record))?;
         self.reindex(
             id.0,
             Some(Element::Relationship(&before)),
@@ -1768,6 +1872,15 @@ mod adjacency_model_tests;
 #[cfg(test)]
 #[path = "graph/adjacency_crash.test.rs"]
 mod adjacency_crash_tests;
+
+fn visit_held(
+    chunk: u64,
+    edit: &ChunkEdit,
+    visit: &mut impl FnMut(RelationshipId, &[u8]) -> Result<(), GraphError>,
+) -> Result<(), GraphError> {
+    edit.entries()
+        .try_for_each(|(slot, record)| visit(relationships::relationship_at(chunk, slot), record))
+}
 
 fn typed(rel_type: u32, emit: &mut impl FnMut(Adjacent)) -> impl FnMut(Edge) + '_ {
     move |edge| {

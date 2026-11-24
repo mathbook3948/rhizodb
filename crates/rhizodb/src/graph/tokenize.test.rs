@@ -481,3 +481,37 @@ proptest! {
         }
     }
 }
+
+const ASCII_POOL: &[char] = &[
+    'a', 'B', 'z', '0', '9', '_', '\'', '.', ',', ':', ';', '-', '*', '"', ' ', '\t', '\r', '\n',
+    '\u{b}', '\u{c}', '\u{0}', '\u{7}', '\u{1f}', '\u{7f}', '!', '@', '/', '$', '%', '\u{301}',
+    '\u{ac00}', '\u{d55c}', '\u{e9}', '\u{fb01}', '\u{e31}', '\u{200d}',
+];
+
+fn ascii_heavy_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(prop::sample::select(ASCII_POOL), 0..40)
+        .prop_map(|characters| characters.into_iter().collect())
+}
+
+fn every_segment_through_unicode(text: &str, purpose: Purpose) -> (Vec<Term>, Vec<usize>) {
+    let normalized: String = text.nfkc().collect();
+    let scan = scan_by(&normalized, purpose, |_| false);
+    (scan.terms, scan.starred)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20000))]
+
+    #[test]
+    fn ascii_segments_give_the_terms_the_unicode_steps_give(text in ascii_heavy_text()) {
+        for purpose in PURPOSES {
+            let scan = scan(&nfkc(&text), purpose);
+            prop_assert_eq!(
+                (scan.terms, scan.starred),
+                every_segment_through_unicode(&text, purpose),
+                "{:?}",
+                text
+            );
+        }
+    }
+}

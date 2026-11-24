@@ -46,6 +46,8 @@ use super::meta::MetaEdit;
 use super::meta::Part;
 use super::properties::ColumnWrite;
 use super::records::Properties;
+use super::relationships;
+use super::relationships::ChunkRef;
 use super::tokenize;
 
 const TOKEN_TAGS: [u8; 3] = [Label::TAG, RelationshipType::TAG, PropertyKey::TAG];
@@ -600,15 +602,47 @@ impl<T: ReadTransaction> GraphTx<T> {
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<BTreeMap<RelationshipId, RelationshipRecord>, GraphError> {
         let mut relationships = BTreeMap::new();
-        for (key, value) in self.transaction.scan_prefix(Table::Relationships, &[])? {
-            match (decode_u64(&key), RelationshipRecord::decode(&value)) {
-                (Ok(id), Ok(record)) => {
-                    relationships.insert(RelationshipId(id), record);
+        for (key, value) in self
+            .transaction
+            .scan_prefix(Table::RelationshipChunks, &[])?
+        {
+            let chunk = match relationships::parse_key(&key) {
+                Ok(chunk) if !self.relationship_chunks.contains_key(&chunk) => chunk,
+                Ok(_) => continue,
+                Err(_) => {
+                    violations.push(IntegrityViolation::Undecodable {
+                        table: Table::RelationshipChunks,
+                        key,
+                    });
+                    continue;
                 }
-                _ => violations.push(IntegrityViolation::Undecodable {
-                    table: Table::Relationships,
+            };
+            let decoded: Result<Vec<_>, GraphError> = ChunkRef::parse(&value).and_then(|stored| {
+                stored
+                    .entries()
+                    .map(|entry| {
+                        let (slot, record) = entry?;
+                        Ok((
+                            relationships::relationship_at(chunk, slot),
+                            RelationshipRecord::decode(record)?,
+                        ))
+                    })
+                    .collect()
+            });
+            match decoded {
+                Ok(records) => relationships.extend(records),
+                Err(_) => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::RelationshipChunks,
                     key,
                 }),
+            }
+        }
+        for (&chunk, edit) in &self.relationship_chunks {
+            for (slot, record) in edit.entries() {
+                relationships.insert(
+                    relationships::relationship_at(chunk, slot),
+                    RelationshipRecord::decode(record)?,
+                );
             }
         }
         Ok(relationships)

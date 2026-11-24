@@ -25,6 +25,7 @@ const TAG_OFFSET_DATETIME: u8 = 10;
 const TAG_ZONED_DATETIME: u8 = 11;
 const TAG_DURATION: u8 = 12;
 const TAG_SINGLE_FLOATS: u8 = 13;
+const TAG_VARINT_INTEGER: u8 = 14;
 
 /// A stored property value. Null is never stored: setting a property to null removes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -131,6 +132,18 @@ impl PropertyValue {
         }
     }
 
+    /// The value as `encode_into` writes it, except that an integer whose zigzag varint fits in
+    /// eight bytes takes that varint instead, so the value is never longer.
+    pub(crate) fn encode_compact_into(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Integer(value) if zigzag(*value) < 1 << 56 => {
+                out.push(TAG_VARINT_INTEGER);
+                put_varint_u64(out, zigzag(*value));
+            }
+            other => other.encode_into(out),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = Reader::new(bytes);
@@ -185,6 +198,14 @@ fn encode_temporal(value: &Temporal, out: &mut Vec<u8>) {
             out.extend_from_slice(&duration.nanoseconds().to_be_bytes());
         }
     }
+}
+
+fn zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn unzigzag(value: u64) -> i64 {
+    (value >> 1) as i64 ^ -((value & 1) as i64)
 }
 
 fn fixed_width(tag: u8) -> Option<usize> {
@@ -313,6 +334,7 @@ impl<'a> Reader<'a> {
                 other => Err(DecodeError::InvalidBoolean(other)),
             },
             TAG_INTEGER => Ok(PropertyValue::Integer(self.u64()? as i64)),
+            TAG_VARINT_INTEGER => Ok(PropertyValue::Integer(unzigzag(self.varint_u64()?))),
             TAG_FLOAT => Ok(PropertyValue::Float(f64::from_bits(self.u64()?))),
             TAG_STRING => {
                 let length = self.varint()?;
@@ -370,6 +392,10 @@ impl<'a> Reader<'a> {
             Some(width) => width,
             None => match tag {
                 TAG_STRING | TAG_BYTES => self.varint()?,
+                TAG_VARINT_INTEGER => {
+                    self.varint_u64()?;
+                    0
+                }
                 TAG_ZONED_DATETIME => {
                     self.take(12)?;
                     self.varint()?

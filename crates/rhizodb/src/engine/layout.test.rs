@@ -21,12 +21,12 @@ fn the_table_ids_never_change() {
         .into_iter()
         .map(|table| TableId::of(table).0)
         .collect();
-    assert_eq!(ids, (0x100..0x113).collect::<Vec<u16>>());
+    assert_eq!(ids, (0x100..0x114).collect::<Vec<u16>>());
 }
 
 #[test]
 fn an_unknown_table_id_is_unsupported() {
-    for raw in [0, 1, 2, 0xFF, 0x113, 0x1FF, 0xFFFF] {
+    for raw in [0, 1, 2, 0xFF, 0x114, 0x1FF, 0xFFFF] {
         assert!(matches!(
             TableId(raw).table(),
             Err(EngineError::Unsupported(_))
