@@ -626,3 +626,43 @@ fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_numbe
         }
     }
 }
+
+/// The fastest of three runs of `work` on a relationship with `count` committed properties.
+fn fastest_on_a_relationship_with_properties(count: i64, work: &str) -> Duration {
+    (0..3)
+        .map(|_| {
+            let db = db();
+            let properties = Parameters::from([(
+                "properties".to_owned(),
+                Value::Map(
+                    (0..count)
+                        .map(|i| (format!("p{i}"), Value::Integer(i)))
+                        .collect(),
+                ),
+            )]);
+            db.execute("INSERT ()-[r:WIDE]->() SET r += $properties", &properties)
+                .unwrap();
+            let started = std::time::Instant::now();
+            db.execute(work, &properties).unwrap();
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number() {
+    for work in [
+        "MATCH ()-[r:WIDE]->() SET r = {}",
+        "MATCH ()-[r:WIDE]->() SET r = {a: 1}",
+        "MATCH ()-[r:WIDE]->() SET r += $properties",
+        "MATCH ()-[r:WIDE]->() SET r = $properties",
+    ] {
+        let small = fastest_on_a_relationship_with_properties(1_000, work);
+        let large = fastest_on_a_relationship_with_properties(8_000, work);
+        assert!(
+            large < small * 24,
+            "{work}: {small:?} for 1000 properties but {large:?} for 8000"
+        );
+    }
+}

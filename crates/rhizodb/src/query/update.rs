@@ -279,17 +279,18 @@ impl<W: WriteTransaction> Writer<'_, W> {
                     return Ok(());
                 }
                 let entries = self.map_operand(self.eval(value, row)?)?;
+                let mut changes = Vec::new();
                 if *replace {
                     for key in self.map_operand(target.clone())?.into_keys() {
                         if !entries.contains_key(&key) {
-                            self.write_property(&target, &key, None)?;
+                            changes.push((key, None));
                         }
                     }
                 }
                 for (key, value) in entries {
-                    self.write_property(&target, &key, to_property(&value)?)?;
+                    changes.push((key, to_property(&value)?));
                 }
-                Ok(())
+                self.write_properties(&target, changes)
             }
             SetAction::Labels { target, labels } => match row.get(*target) {
                 Some(Datum::Node(id)) => {
@@ -353,6 +354,29 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 other.type_name()
             ))),
         }
+    }
+
+    fn write_properties(
+        &mut self,
+        target: &Datum,
+        changes: Vec<(String, Option<crate::value::PropertyValue>)>,
+    ) -> Result<(), Error> {
+        let Datum::Relationship(id) = target else {
+            for (key, value) in changes {
+                self.write_property(target, &key, value)?;
+            }
+            return Ok(());
+        };
+        let mut tokens = Vec::new();
+        for (key, value) in changes {
+            if let Some(token) = self.property_token(&key, value.is_some())? {
+                tokens.push((token, value));
+            }
+        }
+        if !tokens.is_empty() {
+            self.tx.set_relationship_properties(*id, tokens)?;
+        }
+        Ok(())
     }
 
     fn remove(&mut self, action: &RemoveAction, row: &Row) -> Result<(), Error> {

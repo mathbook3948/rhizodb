@@ -1162,6 +1162,23 @@ impl<T: WriteTransaction> GraphTx<T> {
         })
     }
 
+    /// Sets each property of `changes` on the relationship, or removes it with `None`, in one
+    /// write of its record.
+    pub(crate) fn set_relationship_properties(
+        &mut self,
+        relationship: RelationshipId,
+        changes: Vec<(Token<PropertyKey>, Option<PropertyValue>)>,
+    ) -> Result<(), GraphError> {
+        self.edit_relationship(relationship, |record| {
+            for (key, value) in changes {
+                match value {
+                    Some(value) => record.properties.insert(key, value),
+                    None => record.properties.remove(&key),
+                };
+            }
+        })
+    }
+
     pub(crate) fn add_label(
         &mut self,
         node: NodeId,
