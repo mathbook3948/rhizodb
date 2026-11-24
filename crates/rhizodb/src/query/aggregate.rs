@@ -156,12 +156,18 @@ impl<'p> Groups<'p> {
             .enumerate()
             .map(|(index, (expr, _))| eval(Part::Key(index), expr))
             .collect::<Result<Vec<_>, _>>()?;
+        let position = self.group(values);
+        self.accumulate(position, eval)
+    }
+
+    /// The position of the group whose keys are `values`, added when there is none yet.
+    pub(crate) fn group(&mut self, values: Vec<Datum>) -> usize {
         let found = if self.keys.is_empty() {
             (!self.groups.is_empty()).then_some(0)
         } else {
             self.index.get(&values)
         };
-        let position = match found {
+        match found {
             Some(position) => position,
             None => {
                 let position = self.groups.len();
@@ -174,7 +180,16 @@ impl<'p> Groups<'p> {
                 self.groups.push((values, accumulators));
                 position
             }
-        };
+        }
+    }
+
+    /// Adds one row to the group at `position`, which [`Groups::group`] gave, with the argument
+    /// values `eval` gives.
+    pub(crate) fn accumulate(
+        &mut self,
+        position: usize,
+        mut eval: impl FnMut(Part, &Expr) -> Result<Datum, Error>,
+    ) -> Result<(), Error> {
         if let Some((_, accumulators)) = self.groups.get_mut(position) {
             for (index, ((aggregate, _), accumulator)) in
                 self.aggregates.iter().zip(accumulators).enumerate()

@@ -159,6 +159,23 @@ impl Graph {
                 &parameters(vec![("keys".to_owned(), Value::List(keys))]),
             );
         }
+        let pairs: Vec<Value> = (0..nodes / 3)
+            .map(|_| {
+                Value::List(vec![
+                    Value::Integer(rng.below(nodes as u64) as i64),
+                    Value::Integer(rng.below(nodes as u64) as i64),
+                    scalar(rng),
+                ])
+            })
+            .collect();
+        for rel_type in ["R", "S"] {
+            graph.write(
+                &format!(
+                    "MATCH (n) WITH collect(n) AS nodes UNWIND $pairs AS p WITH nodes[p[0]] AS a, nodes[p[1]] AS b, p CREATE (a)-[:{rel_type} {{w: p[2]}}]->(b)"
+                ),
+                &parameters(vec![("pairs".to_owned(), Value::List(pairs.clone()))]),
+            );
+        }
         let deleted = (0..nodes)
             .filter(|_| rng.chance(1, 10))
             .map(Value::Integer)
@@ -179,7 +196,18 @@ impl Graph {
 fn edit(rng: &mut Rng, next_key: i64) -> (String, Parameters) {
     let key = Value::Integer(rng.below(next_key.max(1) as u64) as i64);
     let property = *rng.pick(&["a", "b", "c"]);
-    match rng.below(7) {
+    match rng.below(8) {
+        7 => (
+            "MATCH (a) WHERE a.k = $key MATCH (b) WHERE b.k = $other CREATE (a)-[:R {w: 1}]->(b)"
+                .to_owned(),
+            parameters(vec![
+                ("key".to_owned(), key),
+                (
+                    "other".to_owned(),
+                    Value::Integer(rng.below(next_key.max(1) as u64) as i64),
+                ),
+            ]),
+        ),
         0 => (
             format!("MATCH (n) WHERE n.k = $key REMOVE n.{property}"),
             parameters(vec![("key".to_owned(), key)]),
@@ -310,6 +338,9 @@ impl Query {
     }
 
     fn generate(rng: &mut Rng) -> Query {
+        if rng.chance(1, 4) {
+            return Self::generate_hop(rng);
+        }
         let mut query = Query {
             text: String::new(),
             parameters: Vec::new(),
@@ -414,6 +445,39 @@ impl Query {
             ),
         };
         query.text = format!("{head} {tail}");
+        query
+    }
+}
+
+impl Query {
+    fn generate_hop(rng: &mut Rng) -> Query {
+        let mut query = Query {
+            text: String::new(),
+            parameters: Vec::new(),
+        };
+        let start = *rng.pick(&["", ":A", ":B", ":Missing"]);
+        let far = *rng.pick(&["", "", ":A", ":B", ":A|B", ":Missing"]);
+        let rel_type = *rng.pick(&["", ":R", ":R", ":S", ":R|S", ":Missing"]);
+        let variable = *rng.pick(&["", "r"]);
+        let (left, right) = *rng.pick(&[("-", "->"), ("<-", "-"), ("-", "-")]);
+        let filter = match rng.below(5) {
+            0 | 1 => String::new(),
+            2 => " WHERE m.a > 0".to_owned(),
+            _ => format!(" WHERE {}", query.pred(rng, 1)),
+        };
+        let tail = match rng.below(9) {
+            0 => "RETURN count(*)",
+            1 => "RETURN m.c AS c, count(*) AS count, collect(n.k) AS keys",
+            2 => "RETURN m, count(n), sum(n.k), avg(n.a)",
+            3 => "RETURN m.k, n.a, count(*), min(m.b)",
+            4 => "RETURN m.c, collect(m.k), max(n.b)",
+            5 if variable == "r" => "RETURN r.w, count(*), collect(n.k)",
+            6 if variable == "r" => "RETURN m.k, collect(r.w), sum(m.a)",
+            7 => "RETURN n.c AS c, count(DISTINCT m) AS far ORDER BY c LIMIT 2",
+            _ => "RETURN m.b, count(m.a), sum(n.a)",
+        };
+        query.text =
+            format!("MATCH (n{start}){left}[{variable}{rel_type}]{right}(m{far}){filter} {tail}");
         query
     }
 }
@@ -581,4 +645,34 @@ fn a_type_error_in_an_aggregate_fails_on_the_scan_as_on_the_row_path() {
     assert_eq!(compared.fast, Err(ErrorKind::TypeMismatch));
     let compared = takes_scan(&db, "MATCH (n:N) WHERE n.v < 3 RETURN sum(n.v)");
     assert_eq!(compared.fast.unwrap(), vec!["[Integer(3)]".to_owned()]);
+}
+
+#[test]
+fn a_hop_into_an_aggregate_takes_the_scan_unless_it_tests_the_far_node() {
+    let db = db_with(PEOPLE);
+    db.execute(
+        "UNWIND range(0, 9) AS i CREATE (:City {id: i, name: 'c' + toString(i % 4)})",
+        &Parameters::new(),
+    )
+    .unwrap();
+    db.execute(
+        "MATCH (p:Person) WHERE p.id % 13 <> 0 MATCH (c:City {id: p.id % 10}) CREATE (p)-[:LIVES_IN]->(c)",
+        &Parameters::new(),
+    )
+    .unwrap();
+    for query in [
+        "MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.name, count(p), avg(p.age)",
+        "MATCH (p:Person)-[r:LIVES_IN]->(c) WHERE p.age > 30 RETURN c, count(r), collect(p.id)[0..3]",
+        "MATCH (c:City)<-[:LIVES_IN]-(p) RETURN c.id % 2, count(*)",
+        "MATCH (p:Person)-[:LIVES_IN|KNOWS]->(c:City) RETURN count(*)",
+    ] {
+        assert!(takes_scan(&db, query).scanned, "{query} did not scan");
+    }
+    for query in [
+        "MATCH (p:Person)-[:LIVES_IN]->(c:City) WHERE c.id > 3 RETURN count(*)",
+        "MATCH (p:Person)-[:LIVES_IN*1..1]->(c:City) RETURN count(*)",
+        "MATCH (p:Person)-[:LIVES_IN]->(c:City {id: 2}) RETURN count(*)",
+    ] {
+        assert!(!takes_scan(&db, query).scanned, "{query} scanned");
+    }
 }

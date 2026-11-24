@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
 
 use memchr::memmem;
 
@@ -32,6 +35,7 @@ use super::eval::or;
 use super::eval::set;
 use super::keys::KeySet;
 use super::keys::Probe;
+use super::matcher::HopRead;
 use super::plan::Expr;
 use super::plan::Items;
 use super::plan::MatchClause;
@@ -40,6 +44,7 @@ use super::plan::Projection;
 use super::plan::SeekElement;
 use super::plan::SeekKey;
 use super::plan::Slot;
+use super::plan::Step;
 
 /// `MATCH (n)` or `MATCH (n:Label)` with no other pattern element: every live node, or every
 /// live node with the label, in ascending ID order.
@@ -52,6 +57,10 @@ pub(crate) struct NodeScan<'q> {
 
 impl<'q> NodeScan<'q> {
     pub(crate) fn of(found: &'q MatchClause) -> Option<Self> {
+        Self::start(found).filter(|scan| scan.part.steps.is_empty())
+    }
+
+    fn start(found: &'q MatchClause) -> Option<Self> {
         if found.optional || row_at_a_time() {
             return None;
         }
@@ -60,7 +69,6 @@ impl<'q> NodeScan<'q> {
         };
         let start = &part.start;
         if part.path.is_some()
-            || !part.steps.is_empty()
             || start.bound
             || !matches!(start.properties, None | Some(Expr::Map(_)))
         {
@@ -78,6 +86,61 @@ impl<'q> NodeScan<'q> {
         })
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+struct HopScan<'q> {
+    scan: NodeScan<'q>,
+    step: &'q Step,
+}
+
+impl<'q> HopScan<'q> {
+    fn of(found: &'q MatchClause) -> Option<Self> {
+        let scan = NodeScan::start(found)?;
+        let [step] = scan.part.steps.as_slice() else {
+            return None;
+        };
+        let relationship = &step.relationship;
+        if relationship.bound
+            || relationship.length.is_some()
+            || relationship.properties.is_some()
+            || step.node.bound
+            || step.node.properties.is_some()
+        {
+            return None;
+        }
+        Some(Self { scan, step })
+    }
+}
+
+enum HopValue<'q> {
+    Scanned(Value),
+    Row(&'q Expr),
+}
+
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+}
+
+type ById<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
 
 #[cfg(not(test))]
 fn row_at_a_time() -> bool {
@@ -173,6 +236,13 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
             },
             _ => return Ok(None),
         }))
+    }
+
+    fn hop_value<'q>(&mut self, expr: &'q Expr) -> Result<HopValue<'q>, Error> {
+        Ok(match self.value(expr)? {
+            Some(value) => HopValue::Scanned(value),
+            None => HopValue::Row(expr),
+        })
     }
 
     fn aliased(&self, slot: Slot) -> bool {
@@ -897,6 +967,161 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(Some(self.arrange(projection, rows)?))
             }
         }
+    }
+
+    /// `MATCH (a)-[r]->(b)`, one hop of fixed length with no property map on `r` or `b`, fed
+    /// straight into the aggregating projection after it. `a` is read as a node scan, which
+    /// answers the filter and what the projection reads of `a`, and the rest is evaluated on each
+    /// matched row. A node `b` is tested against its pattern once, and when the keys read only
+    /// `b` and values fixed for the input row, each `b` finds its group once. `None` when the
+    /// clause or the projection has another form, or an index or ID lookup may serve `a`.
+    pub(crate) fn hop_aggregate(
+        &self,
+        found: &MatchClause,
+        projection: &Projection,
+        rows: &[Row],
+    ) -> Result<Option<Vec<Row>>, Error> {
+        let Some(hop) = HopScan::of(found) else {
+            return Ok(None);
+        };
+        let Items::Aggregate {
+            keys,
+            aggregates,
+            finals,
+        } = &projection.items
+        else {
+            return Ok(None);
+        };
+        if self.check.is_some() || self.seek_possible(hop.scan.part)? {
+            return Ok(None);
+        }
+        let start = hop.scan.slot;
+        let relationship = &hop.step.relationship;
+        let far = hop.step.node.slot;
+        let mut compiler = Compiler::new(self, start);
+        compiler.forbidden = vec![relationship.slot, far];
+        let Some(filter) = self.scan_filter(&mut compiler, &hop.scan, found)? else {
+            return Ok(None);
+        };
+        compiler.forbidden.clear();
+        let mut key_values = Vec::with_capacity(keys.len());
+        for (expr, _) in keys {
+            key_values.push(compiler.hop_value(expr)?);
+        }
+        let mut arguments = Vec::with_capacity(aggregates.len());
+        let mut extras = Vec::with_capacity(aggregates.len());
+        for (aggregate, _) in aggregates {
+            arguments.push(
+                aggregate
+                    .argument
+                    .as_ref()
+                    .map(|expr| compiler.hop_value(expr))
+                    .transpose()?,
+            );
+            extras.push(
+                aggregate
+                    .extra
+                    .as_ref()
+                    .map(|expr| compiler.hop_value(expr))
+                    .transpose()?,
+            );
+        }
+        let by_far = key_values.iter().all(|value| match value {
+            HopValue::Scanned(Value::Fixed(_)) => true,
+            HopValue::Scanned(Value::Row(slot)) => *slot != relationship.slot,
+            HopValue::Scanned(Value::Column(_) | Value::Node) => false,
+            HopValue::Row(Expr::Property(base, _)) => {
+                matches!(base.as_ref(), Expr::Slot(slot) if *slot == far)
+            }
+            HopValue::Row(_) => false,
+        });
+        let tokens = compiler.tokens;
+        let mut groups = Groups::new(keys, aggregates);
+        let mut positions: ById<(usize, NodeId), usize> = ById::default();
+        let mut fits: ById<NodeId, bool> = ById::default();
+        let mut row = Vec::new();
+        let mut row_of = None;
+        let mut adjacent = Vec::new();
+        let read = self.hop_read(relationship)?;
+        if matches!(read, HopRead::Nothing) {
+            let rows = groups.finish(self, finals)?;
+            return Ok(Some(self.arrange(projection, rows)?));
+        }
+        self.scan(
+            &hop.scan,
+            rows,
+            &tokens,
+            filter.as_ref(),
+            &mut |at, input| {
+                adjacent.clear();
+                self.hop_into(at.node, relationship, read, &mut adjacent)?;
+                if adjacent.is_empty() {
+                    return Ok(true);
+                }
+                if row_of != Some(input) {
+                    row.clone_from(at.row);
+                    row_of = Some(input);
+                }
+                set(&mut row, start, Datum::Node(at.node));
+                for adjacent in &adjacent {
+                    let other = adjacent.other;
+                    let fit = match fits.get(&other) {
+                        Some(fit) => *fit,
+                        None => {
+                            let fit = self.node_fits(other, &hop.step.node, &row)?;
+                            fits.insert(other, fit);
+                            fit
+                        }
+                    };
+                    if !fit {
+                        continue;
+                    }
+                    set(
+                        &mut row,
+                        relationship.slot,
+                        Datum::Relationship(adjacent.relationship),
+                    );
+                    set(&mut row, far, Datum::Node(other));
+                    let here = At {
+                        group: at.group,
+                        node: at.node,
+                        row: &row,
+                    };
+                    let value = |value: &HopValue<'_>| match value {
+                        HopValue::Scanned(value) => here.datum(value),
+                        HopValue::Row(expr) => self.eval(expr, &row),
+                    };
+                    let position = match by_far.then(|| positions.get(&(input, other))).flatten() {
+                        Some(position) => *position,
+                        None => {
+                            let values = key_values
+                                .iter()
+                                .map(value)
+                                .collect::<Result<Vec<_>, _>>()?;
+                            let position = groups.group(values);
+                            if by_far {
+                                positions.insert((input, other), position);
+                            }
+                            position
+                        }
+                    };
+                    groups.accumulate(position, |part, _| {
+                        let read = match part {
+                            Part::Argument(index) => arguments.get(index).and_then(Option::as_ref),
+                            Part::Extra(index) => extras.get(index).and_then(Option::as_ref),
+                            Part::Key(index) => key_values.get(index),
+                        };
+                        match read {
+                            Some(read) => value(read),
+                            None => Ok(Datum::Null),
+                        }
+                    })?;
+                }
+                Ok(true)
+            },
+        )?;
+        let rows = groups.finish(self, finals)?;
+        Ok(Some(self.arrange(projection, rows)?))
     }
 
     fn scan_plain(

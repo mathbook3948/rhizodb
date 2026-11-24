@@ -253,6 +253,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             {
                 return Ok((rows, 2));
             }
+            if let Some(rows) = self.hop_aggregate(found, projection, &rows)? {
+                return Ok((rows, 2));
+            }
             for row in &rows {
                 self.match_patterns(&found.patterns, row, &mut |matched| {
                     let keep = match &found.filter {

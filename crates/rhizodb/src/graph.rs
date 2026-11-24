@@ -857,6 +857,19 @@ impl<T: ReadTransaction> GraphTx<T> {
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
         let mut found = Vec::new();
+        self.adjacent_into(reader, node, direction, rel_type, &mut found)?;
+        Ok(found)
+    }
+
+    /// Appends to `found` what [`GraphTx::adjacent_with`] returns.
+    pub(crate) fn adjacent_into(
+        &self,
+        reader: &mut AdjacencyReader,
+        node: NodeId,
+        direction: Direction,
+        rel_type: Option<Token<RelationshipType>>,
+        found: &mut Vec<Adjacent>,
+    ) -> Result<(), GraphError> {
         if direction != Direction::Incoming {
             self.visit_adjacency(reader, Side::Outgoing, node, rel_type, &mut |adjacent| {
                 found.push(adjacent);
@@ -870,7 +883,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }
             })?;
         }
-        Ok(found)
+        Ok(())
     }
 
     fn visit_adjacency_prefix(

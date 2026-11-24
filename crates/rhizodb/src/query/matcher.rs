@@ -33,6 +33,17 @@ pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
 
 type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
 
+/// How a hop of one relationship pattern reads the relationships at a node.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum HopRead {
+    /// The relationships on one side, of one type or of every type.
+    Stored(graph::Direction, Option<Token<graph::RelationshipType>>),
+    /// The relationships on one side, each tested against the pattern's type names.
+    Tested(graph::Direction),
+    /// None, since the pattern is undirected or names a type no relationship has.
+    Nothing,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Known {
     labels: bool,
@@ -260,54 +271,82 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((nodes, known))
     }
 
-    fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
+    /// Whether node `id` has what `pattern` asks for, its labels and properties read in full.
+    pub(crate) fn node_fits(
+        &self,
+        id: NodeId,
+        pattern: &NodePattern,
+        row: &Row,
+    ) -> Result<bool, Error> {
+        self.node_matches(id, pattern, Known::NOTHING, row)
+    }
+
+    /// How a hop of `pattern` reads the relationships at a node.
+    pub(crate) fn hop_read(&self, pattern: &RelationshipPattern) -> Result<HopRead, Error> {
         let direction = match pattern.direction {
             Direction::Outgoing | Direction::UndirectedOrOutgoing => graph::Direction::Outgoing,
             Direction::Incoming | Direction::IncomingOrUndirected => graph::Direction::Incoming,
             Direction::IncomingOrOutgoing | Direction::Any => graph::Direction::Both,
-            Direction::Undirected => return Ok(Vec::new()),
+            Direction::Undirected => return Ok(HopRead::Nothing),
         };
-        let labels = match &pattern.labels {
-            None => {
-                return Ok(self.tx.adjacent_with(
+        Ok(match &pattern.labels {
+            None => HopRead::Stored(direction, None),
+            Some(LabelExpr::Name(only)) => match self.rel_type_token(&only.0)? {
+                Some(token) => HopRead::Stored(direction, Some(token)),
+                None => HopRead::Nothing,
+            },
+            Some(_) => HopRead::Tested(direction),
+        })
+    }
+
+    /// Appends the relationships at `node` that match `pattern`, read as `read` says, to `found`.
+    pub(crate) fn hop_into(
+        &self,
+        node: NodeId,
+        pattern: &RelationshipPattern,
+        read: HopRead,
+        found: &mut Vec<Adjacent>,
+    ) -> Result<(), Error> {
+        let direction = match read {
+            HopRead::Stored(direction, rel_type) => {
+                return Ok(self.tx.adjacent_into(
                     &mut self.adjacency.borrow_mut(),
                     node,
                     direction,
-                    None,
+                    rel_type,
+                    found,
                 )?);
             }
-            Some(LabelExpr::Name(only)) => {
-                return match self.rel_type_token(&only.0)? {
-                    Some(token) => Ok(self.tx.adjacent_with(
-                        &mut self.adjacency.borrow_mut(),
-                        node,
-                        direction,
-                        Some(token),
-                    )?),
-                    None => Ok(Vec::new()),
-                };
-            }
-            Some(labels) => labels,
+            HopRead::Tested(direction) => direction,
+            HopRead::Nothing => return Ok(()),
+        };
+        let Some(labels) = &pattern.labels else {
+            return Ok(());
         };
         let mut tokens = Vec::new();
         for name in labels.names() {
             tokens.push((name.0.as_str(), self.rel_type_token(&name.0)?));
         }
-        let mut kept = Vec::new();
         let adjacent =
             self.tx
                 .adjacent_with(&mut self.adjacency.borrow_mut(), node, direction, None)?;
         for adjacent in adjacent {
-            let Ok(found) = labels.matches::<Infallible>(true, &mut |name| {
+            let Ok(matched) = labels.matches::<Infallible>(true, &mut |name| {
                 Ok(tokens
                     .iter()
                     .any(|(known, token)| *known == name && *token == Some(adjacent.rel_type)))
             });
-            if found {
-                kept.push(adjacent);
+            if matched {
+                found.push(adjacent);
             }
         }
-        Ok(kept)
+        Ok(())
+    }
+
+    fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
+        let mut found = Vec::new();
+        self.hop_into(node, pattern, self.hop_read(pattern)?, &mut found)?;
+        Ok(found)
     }
 }
 
