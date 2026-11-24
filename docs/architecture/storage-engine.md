@@ -1,6 +1,6 @@
 # Storage engine
 
-Decides the design of RhizoDB's own storage engine, which replaces redb.
+Decides the design of RhizoDB's own storage engine, which stores every database.
 
 ## Background
 
@@ -8,11 +8,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 
 ## Decisions
 
-- RhizoDB's own engine replaces redb as the storage backend.
+- RhizoDB's own engine is the only storage backend of `Database`, on disk and in memory.
+- redb stays only to convert the files of earlier releases, with no cargo feature or open option that stores a database in redb.
+- The redb code that writes a database is compiled only for tests, where it is the reference the engine is checked against and a backend for the graph layer's own tests.
 - The engine is a module of the `rhizodb` crate.
-- The graph layout changes ship on redb, developed in parallel with the engine.
 - The engine implements the same storage trait as the redb backend, and the swap changes no graph-layer behavior.
-- The redb backend stays as the reference for differential tests and as the reader of redb files.
 - A database at rest is one file.
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
 - On a file system without locks the engine opens a database unlocked.
@@ -49,9 +49,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
 - A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
-- During the transition, `OpenOptions` chooses the engine and sets the cache sizes.
+- `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
-- On a database stored by redb the three fail as unsupported, since redb compacts and checks only a database no thread shares.
 - Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
 - `stats` reports the file's bytes and live bytes, its live and free extents, the log's bytes, and the block cache's hits and misses since the open.
 - `check` checks the file as its last checkpoint left it, and the commits after that checkpoint are checked as the log replays them.
@@ -118,8 +117,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
 - A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
+- After each checkpoint but a clean close's, the engine compacts the file when it holds more than twice its live data plus 64 MiB and has grown by its live data, or by 64 MiB, since the last compaction.
+- An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
+- A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
-- Commits go on into a new memtable while a background checkpoint runs, and a commit waits for it once the new memtable reaches twice the limit.
+- Commits go on into a new memtable while a background checkpoint or compaction runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
@@ -129,13 +131,13 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
-- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, and each redb fixture is converted as it is opened.
+- Every test of `Database` runs on the engine, and each redb fixture is converted as it is opened.
 - The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 
 ## Open
 
-- How a sealed extent that is still partly live is cleaned without a compaction, and which extents a cleaner picks.
+- How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.

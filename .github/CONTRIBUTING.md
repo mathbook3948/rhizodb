@@ -46,7 +46,6 @@ The checks enforce these rules, so you do not need to remember them:
 | --- | --- | --- |
 | `mise run storage-deep` | Storage, engine, crash, dump, node meta, and property column tests at 100 times the random cases | Changes to storage, the graph layer, or the dump format |
 | `mise run random-deep` | Isolation history check, kill-and-reopen, random transaction model, damaged files, concurrency, resource limits, killed backups, and snapshot stress, at 100 times the cases | Changes to transactions, durability, or concurrency |
-| `mise run engine-suite` | Every `rhizodb` test with RhizoDB's own engine in place of redb | Changes to the storage trait or the engine |
 | `mise run fuzz 600` | Every fuzz target for the given seconds each; needs nightly Rust and cargo-fuzz | Changes to the parser, decoders, or file handling |
 
 The nightly workflow runs these tiers and the fuzzers. A failing random case is checked in so every later run replays it.

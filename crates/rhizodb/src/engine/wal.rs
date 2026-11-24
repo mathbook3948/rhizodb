@@ -264,6 +264,7 @@ impl<F: FileSystem> Wal<F> {
         })
     }
 
+    #[cfg(test)]
     /// The LSN the next record must carry.
     pub(crate) fn next_lsn(&self) -> u64 {
         self.next_lsn

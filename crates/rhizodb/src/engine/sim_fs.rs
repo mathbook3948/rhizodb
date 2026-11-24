@@ -66,6 +66,7 @@ struct State {
     names_sync_failed: bool,
     operations: u64,
     fault: Option<Fault>,
+    capacity: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,6 +133,25 @@ impl State {
         Err(injected())
     }
 
+    fn fits(&self, inode: usize, length: usize) -> io::Result<()> {
+        let Some(capacity) = self.capacity else {
+            return Ok(());
+        };
+        let growth = length.saturating_sub(self.inodes[inode].live.len());
+        let used: usize = self
+            .live_names
+            .values()
+            .map(|named| self.inodes[*named].live.len())
+            .sum();
+        if growth > 0 && (used + growth) as u64 > capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "no space left on the simulated device",
+            ));
+        }
+        Ok(())
+    }
+
     fn inode(&mut self, inode: usize) -> &mut Inode {
         &mut self.inodes[inode]
     }
@@ -190,6 +210,22 @@ impl SimFs {
             failing: false,
         });
         Ok(())
+    }
+
+    /// Makes writes that grow the files past `capacity` bytes in all fail as a full device, or
+    /// lifts the limit with `None`.
+    pub(crate) fn set_capacity(&self, capacity: Option<u64>) {
+        lock(&self.state).capacity = capacity;
+    }
+
+    /// The bytes every named file holds.
+    pub(crate) fn used(&self) -> u64 {
+        let state = lock(&self.state);
+        state
+            .live_names
+            .values()
+            .map(|inode| state.inodes[*inode].live.len() as u64)
+            .sum()
     }
 
     pub(crate) fn stop_failing(&self) {
@@ -440,9 +476,10 @@ impl BlockFile for SimFile {
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;
+        let start = byte_index(self.size.offset(first)?)?;
+        state.fits(self.inode, start + buffer.len())?;
         let inode = state.inode(self.inode);
         write_blocks(&mut inode.live, self.size, first, buffer)?;
-        let start = byte_index(self.size.offset(first)?)?;
         let blocks = buffer.chunks(self.size.bytes()).enumerate();
         inode
             .pending
@@ -472,6 +509,8 @@ impl BlockFile for SimFile {
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;
+        let length = byte_index(self.size.offset(count)?)?;
+        state.fits(self.inode, length)?;
         let inode = state.inode(self.inode);
         resize_blocks(&mut inode.live, self.size, count)?;
         let length = inode.live.len();

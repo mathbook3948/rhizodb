@@ -220,7 +220,6 @@ fn backups_taken_while_a_writer_commits_each_hold_one_commit_whole() {
 }
 
 #[test]
-#[cfg(not(rhizodb_engine))]
 fn a_failed_copy_leaves_no_file_behind() {
     use crate::storage::StorageError;
     use crate::storage::redb_backend::RedbRead;

@@ -1,5 +1,7 @@
 use super::*;
 use crate::engine::sim_fs::SimFs;
+use crate::storage::Storage;
+use crate::storage::WriteTransaction;
 use crate::storage::conformance;
 use crate::storage::conformance::Harness;
 use crate::storage::model;

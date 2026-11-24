@@ -22,6 +22,7 @@ workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"
+self_cell = "1"
 tempfile = "3.27.0"
 
 [dependencies]
@@ -31,6 +32,5 @@ jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-
 redb = "5.0.0"
 regex-automata = "0.4.18"
 regex-syntax = "0.8.11"
-self_cell = "1"
 unicode-normalization = "=0.1.26"
 unicode-segmentation = "=1.13.3"

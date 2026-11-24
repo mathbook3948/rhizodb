@@ -1,7 +1,4 @@
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 
 use redb::BackendError;
 use redb::StorageBackend;
@@ -25,7 +22,6 @@ const STAGING: &str = ".graph.redb.creating";
 #[derive(Debug)]
 pub(crate) struct SimBackend {
     file: SimFile,
-    capacity: Option<Arc<AtomicU64>>,
 }
 
 fn sector() -> BlockSize {
@@ -40,22 +36,6 @@ fn sectors(offset: u64, length: usize) -> io::Result<(u64, usize)> {
     let first = offset / sector;
     let last = end.div_ceil(sector);
     Ok((first, ((last - first) * sector) as usize))
-}
-
-impl SimBackend {
-    fn on(file: SimFile, capacity: Option<Arc<AtomicU64>>) -> Self {
-        Self { file, capacity }
-    }
-
-    fn fits(&self, end: u64) -> io::Result<()> {
-        match &self.capacity {
-            Some(capacity) if end > capacity.load(Ordering::Relaxed) => Err(io::Error::new(
-                io::ErrorKind::StorageFull,
-                "no space left on the simulated device",
-            )),
-            _ => Ok(()),
-        }
-    }
 }
 
 impl StorageBackend for SimBackend {
@@ -78,9 +58,6 @@ impl StorageBackend for SimBackend {
                 io::Error::new(io::ErrorKind::InvalidInput, "length is not whole sectors").into(),
             );
         }
-        if self.capacity.is_some() && len > self.len()? {
-            self.fits(len)?;
-        }
         Ok(self.file.set_block_count(len / SECTOR_SIZE as u64)?)
     }
 
@@ -90,7 +67,6 @@ impl StorageBackend for SimBackend {
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let (first, covered) = sectors(offset, data.len())?;
-        self.fits(first * SECTOR_SIZE as u64 + covered as u64)?;
         let skip = (offset - first * SECTOR_SIZE as u64) as usize;
         if skip == 0 && covered == data.len() {
             return Ok(self.file.write(first, data)?);
@@ -110,30 +86,11 @@ impl StorageBackend for SimBackend {
 /// A redb database on `fs`, created the way `RedbStorage::open` creates a file: under a staging
 /// name that is synced before it is renamed into place.
 pub(crate) fn storage(fs: &SimFs) -> Result<RedbStorage, StorageError> {
-    storage_on(fs, None)
-}
-
-/// The byte length of the database file on `fs`.
-pub(crate) fn length(fs: &SimFs) -> io::Result<u64> {
-    Ok(fs.open(FILE, sector())?.block_count()? * SECTOR_SIZE as u64)
-}
-
-/// A redb database on `fs` whose file cannot grow past the byte length `capacity` holds, and a
-/// write past it fails with [`io::ErrorKind::StorageFull`], as on a full disk, while reads keep
-/// working.
-pub(crate) fn storage_with_capacity(
-    fs: &SimFs,
-    capacity: Arc<AtomicU64>,
-) -> Result<RedbStorage, StorageError> {
-    storage_on(fs, Some(capacity))
-}
-
-fn storage_on(fs: &SimFs, capacity: Option<Arc<AtomicU64>>) -> Result<RedbStorage, StorageError> {
     if needs_creating(fs).map_err(StorageError::new)? {
-        create(fs, capacity.clone())?;
+        create(fs)?;
     }
     let file = fs.open(FILE, sector()).map_err(StorageError::new)?;
-    RedbStorage::with_backend(SimBackend::on(file, capacity))
+    RedbStorage::with_backend(SimBackend { file })
 }
 
 fn needs_creating(fs: &SimFs) -> io::Result<bool> {
@@ -144,13 +101,13 @@ fn needs_creating(fs: &SimFs) -> io::Result<bool> {
     }
 }
 
-fn create(fs: &SimFs, capacity: Option<Arc<AtomicU64>>) -> Result<(), StorageError> {
+fn create(fs: &SimFs) -> Result<(), StorageError> {
     let io = StorageError::new;
     if fs.names().map_err(io)?.iter().any(|name| name == STAGING) {
         fs.remove(STAGING).map_err(io)?;
     }
     let staged = fs.create(STAGING, sector()).map_err(io)?;
-    drop(RedbStorage::with_backend(SimBackend::on(staged, capacity))?);
+    drop(RedbStorage::with_backend(SimBackend { file: staged })?);
     fs.rename(STAGING, FILE).map_err(io)?;
     fs.sync_names().map_err(io)
 }

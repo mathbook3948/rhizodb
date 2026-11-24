@@ -36,7 +36,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every storage backend passes one conformance suite written against the storage trait.
 - Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
 - The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
-- The redb backend also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
+- The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
 - Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at each point, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
 - The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
 - A full disk is simulated by a backend that refuses to grow the file, and the database must fail writes as storage errors, keep reads, and open with every acknowledged step once space returns.
@@ -70,7 +70,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Random well-typed queries over a random graph are compared with a reference evaluator of the model, and with rewrites of the same query that must give the same answer.
 - Those queries also run inside a write transaction with uncommitted edits, with property indexes added and dropped, and on a reopened file.
 - Live heap bytes, counted by a global allocator, must level off over long loops of work that keeps no new data.
-- A nightly soak kills a child process that writes large values, so the own engine checkpoints in the background, at random points for twenty minutes on each backend, and checks every reopened file against what the child reported.
+- A nightly soak kills a child process that writes large values, so the own engine checkpoints in the background, at random points for twenty minutes, and checks every reopened file against what the child reported.
 - Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
 - The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
 - Code and tests taken from other projects keep their source and license.

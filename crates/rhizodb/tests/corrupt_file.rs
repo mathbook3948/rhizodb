@@ -227,6 +227,9 @@ fn flip_every(file: &mut [u8], needle: &[u8]) -> usize {
     found
 }
 
+/// Holds the adjacency of 4000 nodes, so the adjacency of node 0 and of node 3000 lie on pages
+/// apart, and the storage engine, which checksums each page, fails only the reads of the page a
+/// damaged byte is on.
 fn adjacency_file(path: &Path) {
     let db = Database::open(path).unwrap();
     run(&db, "UNWIND range(0, 199) AS i INSERT (:Item {i: i})");
@@ -237,6 +240,10 @@ fn adjacency_file(path: &Path) {
     run(
         &db,
         "MATCH (a:Item), (b:Item) WHERE a.i >= 1 AND a.i < 99 AND b.i = a.i + 1 INSERT (a)-[:T]->(b)",
+    );
+    run(
+        &db,
+        "UNWIND range(100, 1999) AS i INSERT (:Item {i: 2 * i})-[:T]->(:Item {i: 2 * i + 1})",
     );
 }
 
@@ -265,10 +272,10 @@ fn a_damaged_adjacency_part_fails_as_corrupt_data_where_it_is_read() {
     assert_eq!(
         run(
             &db,
-            "MATCH (b:Item {i: 103}) MATCH (b)<-[:T]-(a) RETURN a.i"
+            "MATCH (b:Item {i: 3001}) MATCH (b)<-[:T]-(a) RETURN a.i"
         ),
-        [vec![int(0)]],
-        "the incoming side is stored apart and still reads"
+        [vec![int(3000)]],
+        "the adjacency of a node on another page still reads"
     );
 }
 
@@ -303,8 +310,8 @@ fn a_damaged_adjacency_delta_fails_as_corrupt_data_where_it_is_read() {
         assert_eq!(error_kind(&db, query), ErrorKind::CorruptData, "{query}");
     }
     assert_eq!(
-        run(&db, "MATCH (a:Item {i: 5})-[:T]->(b) RETURN b.i"),
-        [vec![int(6)]],
-        "a slot without the damaged delta still reads"
+        run(&db, "MATCH (a:Item {i: 3000})-[:T]->(b) RETURN b.i"),
+        [vec![int(3001)]],
+        "the adjacency of a node on another page still reads"
     );
 }

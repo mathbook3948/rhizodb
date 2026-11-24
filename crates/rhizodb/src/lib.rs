@@ -5,13 +5,6 @@
 
 mod database;
 mod dump;
-#[cfg_attr(
-    not(any(test, rhizodb_engine)),
-    expect(
-        dead_code,
-        reason = "the engine that reads these files arrives in a later phase"
-    )
-)]
 mod engine;
 mod error;
 mod gql;

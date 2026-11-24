@@ -1,5 +1,9 @@
 use std::path::Path;
 
+use crate::engine::any_fs;
+use crate::engine::any_fs::AnyFs;
+use crate::engine::store::Engine;
+use crate::engine::store::EngineOptions;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::Graph;
@@ -11,40 +15,18 @@ use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
 use crate::storage::Maintenance;
-#[cfg(not(rhizodb_engine))]
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::StorageError;
 use crate::transaction::ReadTransaction;
 use crate::transaction::WriteTransaction;
 
-#[cfg(not(rhizodb_engine))]
-pub(crate) type Backend = RedbStorage;
+pub(crate) type Backend = Engine<AnyFs>;
 
-#[cfg(not(rhizodb_engine))]
 fn open_backend(path: &Path) -> Result<Backend, Error> {
-    Ok(RedbStorage::open(path)?)
+    Ok(any_fs::open_path(path, EngineOptions::default()).map_err(StorageError::from)?)
 }
 
-#[cfg(not(rhizodb_engine))]
 fn in_memory_backend() -> Result<Backend, Error> {
-    Ok(RedbStorage::in_memory()?)
-}
-
-// ast-grep-ignore
-// Building with `--cfg rhizodb_engine` runs every test on RhizoDB's own engine instead of redb.
-#[cfg(rhizodb_engine)]
-pub(crate) type Backend = crate::engine::store::Engine<crate::engine::any_fs::AnyFs>;
-
-#[cfg(rhizodb_engine)]
-fn open_backend(path: &Path) -> Result<Backend, Error> {
-    let options = crate::engine::store::EngineOptions::default();
-    Ok(crate::engine::any_fs::open_path(path, options)
-        .map_err(crate::storage::StorageError::from)?)
-}
-
-#[cfg(rhizodb_engine)]
-fn in_memory_backend() -> Result<Backend, Error> {
-    let options = crate::engine::store::EngineOptions::default();
-    Ok(crate::engine::any_fs::in_memory(options).map_err(crate::storage::StorageError::from)?)
+    Ok(any_fs::in_memory(EngineOptions::default()).map_err(StorageError::from)?)
 }
 
 /// How to open a database file, for settings beyond what [`Database::open`] chooses. Settings
@@ -55,7 +37,7 @@ fn in_memory_backend() -> Result<Backend, Error> {
 /// use rhizodb::OpenOptions;
 ///
 /// let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("graph.redb");
+/// let path = dir.path().join("graph.rhizodb");
 /// let missing = OpenOptions::new().create(false).open(&path).unwrap_err();
 /// assert_eq!(missing.kind(), ErrorKind::DatabaseNotFound);
 /// let created = OpenOptions::new().open(&path)?;
@@ -151,12 +133,15 @@ impl Database {
     /// Opens the database file at `path`, creating it when it does not exist.
     ///
     /// A damaged file fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on
-    /// open or on the operation that reads the damage. The storage engine can panic on some
-    /// damage. RhizoDB catches that panic, and from then on every operation on this `Database`
-    /// fails with `CorruptData` until the file is opened again. Catching needs the host built
-    /// with `panic = "unwind"`, the default, and with `panic = "abort"` the process still ends.
-    /// RhizoDB installs no panic hook, so the host's hook still reports the caught panic, by
-    /// default on standard error.
+    /// open or on the operation that reads the damage, since every page carries a checksum.
+    ///
+    /// A file that an earlier build of RhizoDB stored with redb is converted on open: its tables
+    /// are copied into a new file of the current format, which then replaces it. The old
+    /// file stays as it was until the copy is whole and synced, so a crash during the conversion
+    /// leaves one or the other. A damaged old file fails the open with `CorruptData` and is left
+    /// as it was. redb can panic on some damage, and RhizoDB catches that panic as
+    /// `CorruptData`, which needs the host built with `panic = "unwind"`, the default. RhizoDB
+    /// installs no panic hook, so the host's hook still reports the caught panic.
     ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     ///
@@ -567,14 +552,12 @@ impl Database {
     /// and writing transactions wait for it.
     ///
     /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
-    /// write transaction, and with [`ErrorKind::Unsupported`] on a database stored by redb.
+    /// write transaction.
     pub fn compact(&self) -> Result<(), Error> {
         Ok(self.graph.maintain(Maintenance::compact)??)
     }
 
     /// The size of the database on disk and how well its cache serves reads.
-    ///
-    /// Fails with [`ErrorKind::Unsupported`] on a database stored by redb.
     pub fn stats(&self) -> Result<DatabaseStats, Error> {
         let stats = self.graph.maintain(Maintenance::stats)??;
         Ok(DatabaseStats {
@@ -594,7 +577,7 @@ impl Database {
     /// are checked as they are read back from the log.
     ///
     /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
-    /// write transaction, and with [`ErrorKind::Unsupported`] on a database stored by redb.
+    /// write transaction.
     pub fn check(&self) -> Result<(), Error> {
         Ok(self.graph.maintain(Maintenance::check)??)
     }

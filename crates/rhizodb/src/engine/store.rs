@@ -74,6 +74,7 @@ pub(crate) enum CheckpointMode {
     /// On a thread of the engine's own, while commits go on.
     Background,
     /// On the committing thread, so a test sees the same operations every run.
+    #[cfg(any(test, feature = "fuzzing"))]
     Inline,
 }
 
@@ -89,6 +90,9 @@ pub(crate) struct EngineOptions {
     pub(crate) checkpoint: CheckpointMode,
     /// The pages the block cache holds.
     pub(crate) cache_pages: usize,
+    /// The bytes of free space the file may hold beyond twice its live data before a
+    /// checkpoint compacts it.
+    pub(crate) reclaim_slack: u64,
 }
 
 impl Default for EngineOptions {
@@ -99,6 +103,7 @@ impl Default for EngineOptions {
             wal_limit: 256 << 20,
             checkpoint: CheckpointMode::Background,
             cache_pages: (1 << 30) / BLOCK,
+            reclaim_slack: 64 << 20,
         }
     }
 }
@@ -173,6 +178,7 @@ struct Shared<F: FileSystem> {
     quarantine: Mutex<BTreeMap<u64, u64>>,
     poisoned: AtomicBool,
     wal_bytes: AtomicU64,
+    compacted_bytes: AtomicU64,
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
@@ -457,8 +463,10 @@ impl<F: FileSystem + 'static> Engine<F> {
             failure: Mutex::new(None),
             quarantine: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
+            compacted_bytes: AtomicU64::new(0),
         });
         let (jobs, worker) = match options.checkpoint {
+            #[cfg(any(test, feature = "fuzzing"))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
                 let (sender, receiver) = mpsc::channel::<Job>();
@@ -531,12 +539,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
         shared.wal_bytes.store(wal_size, Ordering::Relaxed);
-        let full = layers.active.bytes() > shared.options.memtable_limit
-            || wal_size > shared.options.wal_limit;
-        if full {
+        let memtable = layers.active.bytes();
+        drop(layers);
+        if memtable > shared.options.memtable_limit || wal_size > shared.options.wal_limit {
             self.start_checkpoint(writer);
-            if layers.frozen.is_some() && layers.active.bytes() > 2 * shared.options.memtable_limit
-            {
+            if memtable > 2 * shared.options.memtable_limit {
                 shared.wait_for_checkpoint();
             }
         }
@@ -560,6 +567,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
+    #[cfg(any(test, feature = "fuzzing"))]
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
@@ -637,6 +645,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         lock(&self.shared.durable).extents.clone()
     }
 
+    #[cfg(test)]
     /// The header of the last durable checkpoint.
     pub(crate) fn header(&self) -> Header {
         lock(&self.shared.durable).header
@@ -729,10 +738,33 @@ impl<F: FileSystem + 'static> Shared<F> {
                 });
                 drop(published);
                 *lock(&self.droppable) = Some(job.first_segment);
+                if !clean
+                    && self.holds_too_much_free_space()
+                    && let Err(error) = self.compact()
+                {
+                    self.poison_with(&error);
+                }
             }
             Err(error) => self.poison_with(&error),
         }
         finish.completed = true;
+    }
+
+    fn holds_too_much_free_space(&self) -> bool {
+        let Ok(file) = self.pages.file_bytes() else {
+            return false;
+        };
+        let live = lock(&self.durable)
+            .extents
+            .entries
+            .values()
+            .map(|entry| u64::from(entry.live))
+            .sum::<u64>()
+            * BLOCK as u64;
+        let slack = self.options.reclaim_slack;
+        let compacted = self.compacted_bytes.load(Ordering::Relaxed);
+        file > live.saturating_mul(2).saturating_add(slack)
+            && file > compacted.saturating_add(live.max(slack))
     }
 
     fn write_checkpoint(&self, job: &Job, clean: bool) -> Result<Arc<Tree>, EngineError> {
@@ -900,7 +932,11 @@ impl<F: FileSystem + 'static> Shared<F> {
             });
         }
         let mut durable = lock(&self.durable);
-        self.trim(&mut durable)
+        self.trim(&mut durable)?;
+        drop(durable);
+        self.compacted_bytes
+            .store(self.pages.file_bytes()?, Ordering::Relaxed);
+        Ok(())
     }
 
     fn close(&self) {

@@ -106,6 +106,7 @@ fn the_engine_against_redb_on_kv_workloads() {
                 .ok()
                 .and_then(|pages| pages.parse().ok())
                 .unwrap_or(EngineOptions::default().cache_pages),
+            reclaim_slack: EngineOptions::default().reclaim_slack,
             memtable_limit: std::env::var("BENCH_MEMTABLE")
                 .ok()
                 .and_then(|bytes| bytes.parse().ok())

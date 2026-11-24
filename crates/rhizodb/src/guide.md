@@ -1,7 +1,7 @@
 An embedded, schemaless property graph database queried with GQL.
 
-RhizoDB runs inside the host program, with no server. A [`Database`] is one file, or memory,
-that holds nodes with labels, relationships with a type, and properties on both. Queries are GQL,
+RhizoDB runs inside the host program, with no server. A [`Database`] is one file and its log,
+or memory, that holds nodes with labels, relationships with a type, and properties on both. Queries are GQL,
 and Cypher's `CREATE` is accepted as GQL `INSERT`.
 
 ```
@@ -37,9 +37,7 @@ file. [`OpenOptions`] opens with other settings, such as failing with
 [`Database::in_memory`] makes a database that is gone when dropped.
 
 A damaged file fails with [`ErrorKind::CorruptData`] when it is opened or when an operation
-reads the damage. If the storage engine panics on damage, RhizoDB catches the panic, and every
-later operation on that `Database` fails with `CorruptData` until the file is opened again.
-Catching needs the host built with `panic = "unwind"`, which is the default.
+reads the damage, since every page of the file carries a checksum.
 
 # Queries and parameters
 
@@ -127,10 +125,12 @@ errors, value errors such as [`ErrorKind::IntegerOverflow`], and misuse such as
 
 The kinds a host may retry are these.
 
-- [`ErrorKind::Storage`]: the file system failed, such as a full disk or an I/O error. Once
-  the cause is gone, retry the whole transaction. A failed commit may or may not have taken
-  effect, so retry only a transaction that is safe to run twice, such as one built with
-  `MERGE`, or read the graph first to find out.
+- [`ErrorKind::Storage`]: the file system failed, such as a full disk or an I/O error. After a
+  write or sync of the database fails, that `Database` keeps serving reads but refuses every
+  later write until the file is opened again. Once the cause is gone, drop it, open the file
+  again, and retry the whole transaction. A failed commit may or may not have taken effect, so
+  retry only a transaction that is safe to run twice, such as one built with `MERGE`, or read
+  the graph first to find out.
 - [`ErrorKind::TransactionAborted`]: a query failed earlier in the same write transaction. Begin
   a new transaction and run all of its queries again, after fixing what made the first query
   fail.
@@ -138,8 +138,8 @@ The kinds a host may retry are these.
 - [`ErrorKind::DatabaseAlreadyOpen`]: another `Database` holds the file. Open it again once
   that one is dropped.
 
-[`ErrorKind::CorruptData`] means the file is damaged or the storage engine panicked on it. Open
-the file again to recover from a panic, and restore from a backup when the damage stays.
+[`ErrorKind::CorruptData`] means a page of the file fails its checksum or breaks an invariant
+the file records. Restore from a backup when opening the file again does not clear it.
 [`ErrorKind::UnsupportedFormatVersion`] means a newer build wrote the file.
 
 # Indexes
@@ -259,16 +259,41 @@ version only adds, such as a value tag, so an older dump keeps its meaning.
 The file records a format version. Opening a file written by an older version of RhizoDB
 upgrades it in place, in one write transaction before anything else reads it, and opening one
 written by a newer version fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file
-cannot be opened by the older build again, so take a backup before upgrading the crate. Below
+cannot be opened by the older build again, so take a backup before upgrading the crate.
+
+A file that an earlier build stored with redb is converted when it is opened: every redb page is
+checked, every table is copied into a new file of the current format beside it, and that file
+then replaces the redb file. The redb file stays as it was until the copy is whole and synced,
+so a crash during the conversion leaves one or the other, and a damaged redb file fails with
+[`ErrorKind::CorruptData`] and is left as it was. redb can panic on some damage, and RhizoDB
+catches that panic, which needs the host built with `panic = "unwind"`, the default. Below
 1.0, a release that changes the API or the format raises the minor version, and the changelog
 lists the change.
 
 # Durability
 
-A commit returns once its writes are on disk, and a crash or power loss after that keeps them.
-A crash while it runs leaves the database as it was either before or after the transaction,
-never with part of it. These guarantees hold for a file system that keeps synced writes, and no database can keep
-them on a disk that lies about syncing. A backup is synced before it is linked into place.
+A commit returns once its writes are synced to the write-ahead log, a series of files beside the
+database file named after it with `-wal-` and a number, and a crash or power loss after that
+keeps them. A crash while it runs leaves the database as it was either before or after the
+transaction, never with part of it. These guarantees hold for a file system that keeps synced
+writes, and no database can keep them on a disk that lies about syncing. A backup is synced
+before it is linked into place.
+
+Checkpoints write the log into the database file in the background and remove the log files
+they no longer need, and dropping the `Database` checkpoints the rest, which leaves the file
+alone. Until then the file holds only part of the commits, so copy a database that is open, or
+that closed without dropping its `Database`, with [`Database::backup_to`] rather than by
+copying its file.
+
+# Disk space
+
+Writes go to new places in the file, never over the data they replace, and the space they free
+is reused by later checkpoints. When the file holds more than twice its live data and another
+64 MiB, a checkpoint also compacts it: it moves the live data to the start of the file and
+shortens the file. Reads and writes go on meanwhile, and a writer waits only when its commits
+outrun the compaction. [`Database::compact`] compacts at once, [`Database::stats`] reports the
+file's size, its live bytes, and its log's size, and [`Database::check`] reads every page and
+fails with [`ErrorKind::CorruptData`] on the first that does not hold.
 
 # Limits
 

@@ -119,6 +119,7 @@ fn fuzz_options() -> EngineOptions {
         wal_limit: u64::MAX,
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
+        reclaim_slack: 64 << 10,
     }
 }
 
