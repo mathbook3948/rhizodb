@@ -396,7 +396,6 @@ impl<F: FileSystem + 'static> Engine<F> {
             for sequence in segment_files(&*fs, name)? {
                 fs.remove(&segment_name(name, sequence))?;
             }
-            fs.sync_names()?;
             let identity = LogIdentity {
                 database_id: header.database_id,
                 shard_id: header.shard_id,
