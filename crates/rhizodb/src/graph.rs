@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -1181,8 +1182,8 @@ impl<T: WriteTransaction> GraphTx<T> {
     ) -> Result<(), GraphError> {
         let (chunk, slot) = relationships::locate(id);
         let edit = match self.relationship_chunks.entry(chunk) {
-            std::collections::btree_map::Entry::Occupied(held) => held.into_mut(),
-            std::collections::btree_map::Entry::Vacant(vacant) => {
+            btree_map::Entry::Occupied(held) => held.into_mut(),
+            btree_map::Entry::Vacant(vacant) => {
                 let edit = self
                     .transaction
                     .get_with(
@@ -1205,25 +1206,25 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
-        if !self.adjacency.contains_key(&id) {
-            let (start, end) = id.range();
-            let mut entries = Vec::new();
-            self.transaction
-                .visit_range(Table::Adjacency, &start, &end, |key, value| {
-                    entries.push((key.to_vec(), value.to_vec()));
-                    Ok::<(), GraphError>(())
-                })?;
-            let edit = SegmentEdit::load(
-                &id,
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.as_slice(), value.as_slice())),
-            )?;
-            self.adjacency.insert(id, edit);
+        match self.adjacency.entry(id) {
+            btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
+            btree_map::Entry::Vacant(vacant) => {
+                let (start, end) = id.range();
+                let mut entries = Vec::new();
+                self.transaction
+                    .visit_range(Table::Adjacency, &start, &end, |key, value| {
+                        entries.push((key.to_vec(), value.to_vec()));
+                        Ok::<(), GraphError>(())
+                    })?;
+                let edit = SegmentEdit::load(
+                    &id,
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.as_slice(), value.as_slice())),
+                )?;
+                Ok(vacant.insert(edit))
+            }
         }
-        self.adjacency
-            .get_mut(&id)
-            .ok_or(GraphError::Corrupt("an adjacency edit vanished"))
     }
 
     fn move_relationships_to_chunks(&mut self, fixed: bool) -> Result<(), GraphError> {
