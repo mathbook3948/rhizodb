@@ -69,6 +69,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - The benchmark crate's tests run every workload at tiny scale on the embedded engines built by default in the differential workflow.
 - A server's test runs only when the environment gives its URL.
 - Reopening is measured with a warm page cache.
+- The benchmark builds in release with one codegen unit, so a change to unrelated code cannot move a measurement through how the compiler splits the crate.
 
 ## Open
 

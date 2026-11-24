@@ -39,3 +39,6 @@ path = "src/main.rs"
 [profile.dev.package.lbug]
 opt-level = 3
 debug = false
+
+[profile.release]
+codegen-units = 1
