@@ -14,7 +14,7 @@ use crate::storage::WriteTransaction;
 use crate::storage::redb_backend::RedbStorage;
 use crate::test_scale;
 
-const TABLES: [Table; 3] = [Table::Outgoing, Table::NodeColumns, Table::KeywordPostings];
+const TABLES: [Table; 3] = [Table::Adjacency, Table::NodeColumns, Table::KeywordPostings];
 
 #[derive(Clone, Debug)]
 enum Step {
