@@ -231,3 +231,29 @@ fn memtable_point_reads_for_profiling() {
     load(&store, keys);
     profile_point_reads(&store, keys);
 }
+
+fn commit_small_batches(store: &impl Storage, keys: u64) {
+    for commit in 0..SMALL_COMMITS {
+        let mut write = store.begin_write().unwrap();
+        for item in 0..5 {
+            let id = (commit * 5 + item) * 997 % keys;
+            write.put(Table::Nodes, &key(id), &value(id + 1)).unwrap();
+        }
+        write.commit().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "a profiling target, run under callgrind"]
+fn commits_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
+    let options = EngineOptions {
+        checkpoint: crate::engine::store::CheckpointMode::Inline,
+        ..EngineOptions::default()
+    };
+    let store = open_path(&directory.path().join("graph.rhizo"), options).unwrap();
+    load(&store, keys);
+    commit_small_batches(&store, keys);
+    store.checkpoint().unwrap();
+}

@@ -800,6 +800,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                 ..durable.header.wal
             },
             clean,
+            minor: FORMAT_MINOR,
             ..durable.header
         };
         self.pages.write_header(&header)?;

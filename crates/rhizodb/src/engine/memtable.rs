@@ -242,7 +242,7 @@ impl Memtable {
     }
 
     pub(crate) fn get(&self, table: TableId, key: &[u8], snapshot: u64) -> Lookup {
-        if !self.filter.may_hold(filter_hash(table, key)) {
+        if self.bytes() == 0 || !self.filter.may_hold(filter_hash(table, key)) {
             return Lookup::Absent;
         }
         let chains = self.read();

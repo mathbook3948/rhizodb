@@ -32,7 +32,13 @@ pub(crate) struct Tree {
     pub(crate) generation: u64,
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) source: Arc<dyn PageSource>,
-    root_pages: BTreeMap<TableId, OnceLock<CachedPage>>,
+    pinned: BTreeMap<TableId, OnceLock<Pinned>>,
+}
+
+#[derive(Debug)]
+struct Pinned {
+    root: CachedPage,
+    children: Box<[OnceLock<CachedPage>]>,
 }
 
 fn lift<E: From<StorageError>>(error: EngineError) -> E {
@@ -80,7 +86,7 @@ impl Tree {
         roots: BTreeMap<TableId, Root>,
         source: Arc<dyn PageSource>,
     ) -> Self {
-        let root_pages = roots
+        let pinned = roots
             .keys()
             .map(|table| (*table, OnceLock::new()))
             .collect();
@@ -88,19 +94,44 @@ impl Tree {
             generation,
             roots,
             source,
-            root_pages,
+            pinned,
         }
     }
 
-    fn root_page(&self, table: TableId, root: &Root) -> Result<Option<&CachedPage>, EngineError> {
-        let Some(pinned) = self.root_pages.get(&table) else {
+    fn pinned(&self, table: TableId, root: &Root) -> Result<Option<&Pinned>, EngineError> {
+        let Some(slot) = self.pinned.get(&table) else {
             return Ok(None);
         };
-        if pinned.get().is_none() {
+        if slot.get().is_none() {
             let page = fetch(&*self.source, table, root.page, root.level)?;
-            let _ = pinned.set(page);
+            let children = if root.level > 0 {
+                Node::parse(&page.header, &page.bytes, table)?.cells()
+            } else {
+                0
+            };
+            let _ = slot.set(Pinned {
+                root: page,
+                children: (0..children).map(|_| OnceLock::new()).collect(),
+            });
         }
-        Ok(pinned.get())
+        Ok(slot.get())
+    }
+
+    fn pinned_child<'p>(
+        &self,
+        pinned: &'p Pinned,
+        table: TableId,
+        index: usize,
+        child: ChildRef,
+        level: u8,
+    ) -> Result<Option<&'p CachedPage>, EngineError> {
+        let Some(slot) = pinned.children.get(index) else {
+            return Ok(None);
+        };
+        if slot.get().is_none() {
+            let _ = slot.set(fetch(&*self.source, table, child, level)?);
+        }
+        Ok(slot.get())
     }
 
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
@@ -125,10 +156,12 @@ impl Tree {
         let load = self.load_key();
         let mut page = root.page;
         let mut level = root.level;
-        let mut pinned = self.root_page(table, root)?;
+        let pinned = self.pinned(table, root)?;
+        let mut held = pinned.map(|pinned| &pinned.root);
+        let mut at_root = true;
         loop {
             let fetched;
-            let cached = match pinned.take() {
+            let cached = match held.take() {
                 Some(cached) => cached,
                 None => {
                     fetched = fetch(&*self.source, table, page, level)?;
@@ -150,6 +183,10 @@ impl Tree {
             }
             page = node.child(index)?;
             level -= 1;
+            if let Some(pinned) = pinned.filter(|_| at_root) {
+                held = self.pinned_child(pinned, table, index, page, level)?;
+            }
+            at_root = false;
         }
     }
 

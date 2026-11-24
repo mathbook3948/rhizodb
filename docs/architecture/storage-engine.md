@@ -96,7 +96,9 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A child pointer holds the child's block reference and LSN, and a child of another LSN, kind, level, or table is corruption.
 - A page shares the common prefix of its keys, capped at 512 bytes, and stores each key's rest.
 - A cell stores its key before its value or child pointer, and a search compares the page prefix once and then the stored rests.
-- A leaf whose keys and values all have one width uses a fixed format without per-cell offsets.
+- A leaf whose keys and values all have one width uses a fixed format without per-cell offsets, which stores every key before every value, so a search reads only the cache lines that hold keys.
+- A fixed leaf of engine format minor 0 stores each key beside its value, and every later minor still reads it.
+- Every header a checkpoint writes records this build's minor, so an older build refuses a file that holds pages it cannot read.
 - A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
 - A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
 - A key longer than 1 KiB lives in a run too, and its cell keeps its first 64 bytes after the page prefix, so most comparisons read no run.
@@ -124,7 +126,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
 - The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
-- Each tree pins the root page of every table it holds, so no read takes the block cache or a reference count for a root.
+- Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
 - Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, and each redb fixture is converted as it is opened.
@@ -137,6 +139,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.
-- How point reads reach redb's speed, which they trail by a per-read overhead beyond the block cache.
+- How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.

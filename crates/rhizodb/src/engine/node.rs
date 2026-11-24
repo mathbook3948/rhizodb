@@ -32,6 +32,7 @@ pub(crate) const MAX_PREFIX: usize = 512;
 
 const VARIABLE: u8 = 1;
 const FIXED: u8 = 2;
+const FIXED_SPLIT: u8 = 3;
 
 const EXTERNAL_KEY: u16 = 0x8000;
 const BLOB_REF: usize = 36;
@@ -155,7 +156,7 @@ pub(crate) fn encode(
     match content {
         Content::Leaf(entries) => {
             if let Some(fixed) = encode_fixed(entries) {
-                return Ok((FIXED, entries.len() as u16, fixed));
+                return Ok((FIXED_SPLIT, entries.len() as u16, fixed));
             }
             let keys: Vec<&[u8]> = entries.iter().map(|entry| &*entry.key).collect();
             encode_variable(&keys, 0, &mut long_key, |out, index| {
@@ -245,6 +246,8 @@ fn encode_fixed(entries: &[LeafEntry]) -> Option<Vec<u8>> {
     put_u16(&mut out, width as u16);
     for entry in entries {
         out.extend_from_slice(&entry.key[prefix..]);
+    }
+    for entry in entries {
         if let StoredValue::Inline(value) = &entry.value {
             out.extend_from_slice(value);
         }
@@ -451,7 +454,10 @@ enum Layout<'a> {
     Fixed {
         suffix: usize,
         width: usize,
-        cells: &'a [u8],
+        keys: &'a [u8],
+        values: &'a [u8],
+        key_stride: usize,
+        value_stride: usize,
     },
 }
 
@@ -489,7 +495,7 @@ impl<'a> Node<'a> {
             VARIABLE => Layout::Variable {
                 offsets: reader.take(2 * cells)?,
             },
-            FIXED if leaf => {
+            FIXED | FIXED_SPLIT if leaf => {
                 let suffix = reader.u16()? as usize;
                 let width = reader.u16()? as usize;
                 let total = cells
@@ -498,10 +504,26 @@ impl<'a> Node<'a> {
                 if suffix + prefix_length > INLINE_KEY || width > INLINE_VALUE {
                     return Err(bad(header));
                 }
-                Layout::Fixed {
-                    suffix,
-                    width,
-                    cells: reader.take(total)?,
+                let all = reader.take(total)?;
+                if header.format == FIXED {
+                    Layout::Fixed {
+                        suffix,
+                        width,
+                        keys: all,
+                        values: all.get(suffix..).unwrap_or_default(),
+                        key_stride: suffix + width,
+                        value_stride: suffix + width,
+                    }
+                } else {
+                    let (keys, values) = all.split_at(cells * suffix);
+                    Layout::Fixed {
+                        suffix,
+                        width,
+                        keys,
+                        values,
+                        key_stride: suffix,
+                        value_stride: width,
+                    }
                 }
             }
             _ => return Err(bad(header)),
@@ -580,11 +602,12 @@ impl<'a> Node<'a> {
         match self.layout {
             Layout::Fixed {
                 suffix,
-                width,
-                cells,
+                keys,
+                key_stride,
+                ..
             } => {
-                let start = index * (suffix + width);
-                let suffix = cells
+                let start = index * key_stride;
+                let suffix = keys
                     .get(start..start + suffix)
                     .ok_or_else(|| bad(self.header))?;
                 Ok(CellKey::Inline {
@@ -606,12 +629,13 @@ impl<'a> Node<'a> {
     pub(crate) fn value(&self, index: usize) -> Result<CellValue<'a>, EngineError> {
         match self.layout {
             Layout::Fixed {
-                suffix,
                 width,
-                cells,
+                values,
+                value_stride,
+                ..
             } => {
-                let start = index * (suffix + width) + suffix;
-                cells
+                let start = index * value_stride;
+                values
                     .get(start..start + width)
                     .map(CellValue::Inline)
                     .ok_or_else(|| bad(self.header))
@@ -703,12 +727,12 @@ impl<'a> Node<'a> {
         let (low, exact) = match self.layout {
             Layout::Fixed {
                 suffix,
-                width,
-                cells: bytes,
+                keys,
+                key_stride,
+                ..
             } => lower_bound(first, cells, |index| {
-                let start = index * (suffix + width);
-                bytes
-                    .get(start..start + suffix)
+                let start = index * key_stride;
+                keys.get(start..start + suffix)
                     .map(|stored| compare_bytes(stored, rest))
                     .ok_or_else(|| bad(self.header))
             })?,

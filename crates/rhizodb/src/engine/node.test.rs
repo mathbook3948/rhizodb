@@ -86,7 +86,7 @@ fn a_leaf_of_equal_widths_uses_the_fixed_format() {
         (b"key-03", inline(b"cc")),
     ]);
     let page = sealed(&content, 0, &mut Vec::new());
-    assert_eq!(page[1], FIXED);
+    assert_eq!(page[1], FIXED_SPLIT);
     assert_eq!(decoded(&page, &[], &Bytes::from(&[][..])).0, content);
 }
 
@@ -320,7 +320,7 @@ proptest! {
         let content = leaf(&keys.iter().map(|key| (key.as_slice(), inline(&[5; 3]))).collect::<Vec<_>>());
         let page = sealed(&content, 0, &mut Vec::new());
         let header = PageHeader::open(SEED, &page, at()).unwrap();
-        prop_assert_eq!(header.format, FIXED);
+        prop_assert_eq!(header.format, FIXED_SPLIT);
         let node = Node::parse(&header, &page, TABLE).unwrap();
         let load = long_key_loader(&[]);
         for target in targets.iter().chain(&keys) {
@@ -373,4 +373,46 @@ fn every_inline_key_of_a_variable_page_takes_the_direct_comparison() {
         let range = node.inline_key_range(offsets, index).unwrap();
         assert_eq!(&[node.prefix, &page[range]].concat(), key);
     }
+}
+
+#[test]
+fn a_fixed_leaf_of_the_first_minor_with_keys_beside_values_still_reads() {
+    let keys: Vec<[u8; 6]> = (0u8..30).map(|key| [9, 9, key / 7, key, 1, 2]).collect();
+    let mut body = Vec::new();
+    put_u16(&mut body, 2);
+    body.extend_from_slice(&[9, 9]);
+    put_u16(&mut body, 4);
+    put_u16(&mut body, 3);
+    for key in &keys {
+        body.extend_from_slice(&key[2..]);
+        body.extend_from_slice(&[key[3], 0, 7]);
+    }
+    let mut page = vec![0; PAGE_HEADER];
+    page.extend_from_slice(&body);
+    page.resize(BLOCK, 0);
+    let header = PageHeader {
+        kind: PageKind::Leaf,
+        format: FIXED,
+        table: TABLE,
+        level: 0,
+        flags: 0,
+        cells: keys.len() as u16,
+        free: 0,
+        at: at(),
+        lsn: 4,
+        generation: 2,
+    };
+    header.seal(SEED, &mut page).unwrap();
+    let header = PageHeader::open(SEED, &page, at()).unwrap();
+    let node = Node::parse(&header, &page, TABLE).unwrap();
+    let load = long_key_loader(&[]);
+    for (index, key) in keys.iter().enumerate() {
+        assert_eq!(node.find(key, &load).unwrap(), (index, true));
+        assert_eq!(node.key(index).unwrap().full(&load).unwrap(), key.to_vec());
+        let CellValue::Inline(value) = node.value(index).unwrap() else {
+            panic!("a fixed leaf holds inline values");
+        };
+        assert_eq!(value, [key[3], 0, 7]);
+    }
+    assert_eq!(node.find(&[9, 9, 9], &load).unwrap(), (keys.len(), false));
 }
