@@ -1001,6 +1001,7 @@ fn check_segment(
             slots.insert(position, edges);
         }
     }
+    canonical &= !slots.is_empty();
     if !canonical {
         violations.push(IntegrityViolation::NonCanonicalAdjacency(*id));
     }

@@ -567,6 +567,14 @@ impl<'a> PartRef<'a> {
         &self.bytes[self.data + start..self.data + end]
     }
 
+    /// The positions the part covers whose slots hold relationships.
+    pub(crate) fn held(&self) -> impl Iterator<Item = usize> + '_ {
+        let start = self.index * self.span;
+        (0..run_of(self.span, self.index))
+            .filter(|at| !self.slot_bytes(*at).is_empty())
+            .map(move |at| start + at)
+    }
+
     /// Calls `visit` with each relationship of the slot at `position`, which the part covers,
     /// ascending by ID.
     pub(crate) fn visit_slot(
@@ -975,8 +983,23 @@ impl SegmentEdit {
         Ok(out)
     }
 
-    /// What commit stores: deltas beside the stored parts when the segment has parts and keeps
-    /// at most `MAX_DELTAS` deltas, none over `DELTA_BYTES`, and new parts otherwise.
+    fn emptied(&self) -> Result<bool, GraphError> {
+        if self.changes.values().any(|change| !change.added.is_empty()) {
+            return Ok(false);
+        }
+        for (key, bytes) in &self.parts {
+            for position in PartRef::trusted(key, bytes)?.held() {
+                if !self.changes.contains_key(&position) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(self.slots()?.is_empty())
+    }
+
+    /// What commit stores: deltas beside the stored parts when the segment has parts that keep
+    /// a relationship and at most `MAX_DELTAS` deltas, none over `DELTA_BYTES`, and new parts
+    /// otherwise.
     pub(crate) fn flush(self, id: &SegmentId) -> Result<Flush, GraphError> {
         let deltas = self
             .changes
@@ -988,7 +1011,7 @@ impl SegmentEdit {
             .iter()
             .filter_map(|position| self.changes.get(position))
             .any(|change| change.encoded_len() > DELTA_BYTES);
-        if self.parts.is_empty() || deltas > MAX_DELTAS || oversized {
+        if self.parts.is_empty() || deltas > MAX_DELTAS || oversized || self.emptied()? {
             let slots = self.slots()?;
             let borrowed: Vec<(usize, &[Edge])> = slots
                 .iter()

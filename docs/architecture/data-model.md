@@ -28,6 +28,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A commit that changes a few slots of a segment with stored parts writes one delta per changed slot, which lists the relationships it removes from the parts and the ones it adds.
 - Deltas sort before the parts of their segment, so a read of one slot meets its delta before its part and merges them in one pass.
 - A segment keeps at most 16 deltas and none larger than half a part, and a commit that would leave more or larger rewrites the segment's parts and deletes its deltas with one range delete.
+- A commit that leaves a segment without relationships deletes its parts and deltas.
 - A write transaction loads a segment, with its deltas, the first time it changes it, and keeps each changed slot as its change against the stored parts until commit.
 - A commit writes the segments it changed in key order.
 - Each adjacency part and delta carries a CRC-32 that covers its key, so a damaged entry or one read under another key is reported as corruption.
