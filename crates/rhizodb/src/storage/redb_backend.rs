@@ -1,14 +1,17 @@
 use std::any::Any;
 use std::cell::OnceCell;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::ops::Bound;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
@@ -25,11 +28,14 @@ use redb::backends::InMemoryBackend;
 use self_cell::self_cell;
 
 use super::Entry;
+use super::Maintenance;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
+use super::StorageStats;
 use super::Table;
 use super::WriteTransaction;
+use crate::engine::block_file::BlockFile;
 
 type RedbTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 
@@ -311,6 +317,299 @@ impl RedbStorage {
     }
 }
 
+/// A redb file reached through whole blocks of a file of the engine's file system, which takes
+/// no lock of its own, so the file's holder decides who else may open it.
+#[derive(Debug)]
+pub(crate) struct BlockBackend<B: BlockFile + 'static>(pub(crate) Arc<B>);
+
+fn invalid_input(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn block_span<B: BlockFile>(
+    file: &B,
+    offset: u64,
+    length: usize,
+) -> io::Result<(u64, usize, usize)> {
+    let size = file.block_size().bytes() as u64;
+    let end = offset
+        .checked_add(length as u64)
+        .ok_or_else(|| invalid_input("a range past the largest file"))?;
+    let first = offset / size;
+    let blocks = end.div_ceil(size) - first;
+    let span = usize::try_from(blocks * size).map_err(|_| invalid_input("a range past memory"))?;
+    Ok((first, (offset - first * size) as usize, span))
+}
+
+fn read_blocks<B: BlockFile>(file: &B, offset: u64, out: &mut [u8]) -> io::Result<()> {
+    let (first, skip, span) = block_span(file, offset, out.len())?;
+    if skip == 0 && span == out.len() {
+        return file.read(first, out);
+    }
+    let mut blocks = vec![0; span];
+    file.read(first, &mut blocks)?;
+    out.copy_from_slice(&blocks[skip..skip + out.len()]);
+    Ok(())
+}
+
+fn file_length<B: BlockFile>(file: &B) -> io::Result<u64> {
+    Ok(file.block_count()? * file.block_size().bytes() as u64)
+}
+
+impl<B: BlockFile + 'static> redb::StorageBackend for BlockBackend<B> {
+    fn len(&self) -> Result<u64, redb::BackendError> {
+        Ok(file_length(&*self.0)?)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), redb::BackendError> {
+        Ok(read_blocks(&*self.0, offset, out)?)
+    }
+
+    fn set_len(&self, length: u64) -> Result<(), redb::BackendError> {
+        let size = self.0.block_size().bytes() as u64;
+        if !length.is_multiple_of(size) {
+            return Err(invalid_input("a redb file length that is not whole blocks").into());
+        }
+        self.0.set_block_count(length / size)?;
+        Ok(())
+    }
+
+    fn sync_data(&self) -> Result<(), redb::BackendError> {
+        self.0.sync()?;
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), redb::BackendError> {
+        let (first, skip, span) = block_span(&*self.0, offset, data.len())?;
+        if skip == 0 && span == data.len() {
+            self.0.write(first, data)?;
+            return Ok(());
+        }
+        let mut blocks = vec![0; span];
+        let size = self.0.block_size().bytes() as u64;
+        let held = self.0.block_count()?.saturating_sub(first) * size;
+        let readable = usize::try_from(held).unwrap_or(usize::MAX).min(span);
+        self.0.read(first, &mut blocks[..readable])?;
+        blocks[skip..skip + data.len()].copy_from_slice(data);
+        self.0.write(first, &blocks)?;
+        Ok(())
+    }
+}
+
+const OVERLAY_SECTOR: u64 = 512;
+
+#[derive(Debug, Default)]
+struct Overlay {
+    sectors: BTreeMap<u64, Vec<u8>>,
+    length: u64,
+    file_readable: u64,
+}
+
+#[derive(Debug)]
+struct OverlayBackend<S: redb::StorageBackend> {
+    inner: S,
+    overlay: Mutex<Overlay>,
+}
+
+impl<S: redb::StorageBackend> OverlayBackend<S> {
+    fn new(inner: S) -> Result<Self, redb::BackendError> {
+        let length = inner.len()?;
+        Ok(Self {
+            inner,
+            overlay: Mutex::new(Overlay {
+                sectors: BTreeMap::new(),
+                length,
+                file_readable: length,
+            }),
+        })
+    }
+
+    fn overlay(&self) -> std::sync::MutexGuard<'_, Overlay> {
+        self.overlay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn read_into(
+        &self,
+        overlay: &Overlay,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<(), redb::BackendError> {
+        let end = offset
+            .checked_add(out.len() as u64)
+            .ok_or_else(|| invalid_input("a range past the largest file"))?;
+        let from_file = overlay.file_readable.clamp(offset, end) - offset;
+        let from_file = usize::try_from(from_file).unwrap_or(out.len());
+        out.fill(0);
+        if from_file > 0 {
+            self.inner.read(offset, &mut out[..from_file])?;
+        }
+        let first = offset / OVERLAY_SECTOR;
+        for (sector, bytes) in overlay.sectors.range(first..end.div_ceil(OVERLAY_SECTOR)) {
+            let start = sector * OVERLAY_SECTOR;
+            let (from, to) = (start.max(offset), (start + OVERLAY_SECTOR).min(end));
+            out[(from - offset) as usize..(to - offset) as usize]
+                .copy_from_slice(&bytes[(from - start) as usize..(to - start) as usize]);
+        }
+        Ok(())
+    }
+}
+
+impl<S: redb::StorageBackend> redb::StorageBackend for OverlayBackend<S> {
+    fn len(&self) -> Result<u64, redb::BackendError> {
+        Ok(self.overlay().length)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), redb::BackendError> {
+        let overlay = self.overlay();
+        self.read_into(&overlay, offset, out)
+    }
+
+    fn set_len(&self, length: u64) -> Result<(), redb::BackendError> {
+        let mut overlay = self.overlay();
+        overlay.length = length;
+        overlay.file_readable = overlay.file_readable.min(length);
+        overlay.sectors.split_off(&length.div_ceil(OVERLAY_SECTOR));
+        if let Some(last) = length.checked_sub(1).map(|last| last / OVERLAY_SECTOR)
+            && let Some(bytes) = overlay.sectors.get_mut(&last)
+        {
+            let tail = (length - last * OVERLAY_SECTOR) as usize;
+            bytes[tail..].fill(0);
+        }
+        Ok(())
+    }
+
+    fn sync_data(&self) -> Result<(), redb::BackendError> {
+        Ok(())
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), redb::BackendError> {
+        let mut overlay = self.overlay();
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| invalid_input("a range past the largest file"))?;
+        for sector in offset / OVERLAY_SECTOR..end.div_ceil(OVERLAY_SECTOR) {
+            let start = sector * OVERLAY_SECTOR;
+            let mut bytes = vec![0; OVERLAY_SECTOR as usize];
+            self.read_into(&overlay, start, &mut bytes)?;
+            let (from, to) = (start.max(offset), (start + OVERLAY_SECTOR).min(end));
+            bytes[(from - start) as usize..(to - start) as usize]
+                .copy_from_slice(&data[(from - offset) as usize..(to - offset) as usize]);
+            overlay.sectors.insert(sector, bytes);
+        }
+        overlay.length = overlay.length.max(end);
+        Ok(())
+    }
+
+    fn close(&self) -> Result<(), redb::BackendError> {
+        self.inner.close()
+    }
+
+    fn try_lock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, redb::BackendError> {
+        self.inner.try_lock_range(start, end)
+    }
+
+    fn try_lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, redb::BackendError> {
+        self.inner.try_lock_shared_range(start, end)
+    }
+
+    fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), redb::BackendError> {
+        self.inner.lock_range(start, end)
+    }
+
+    fn lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<(), redb::BackendError> {
+        self.inner.lock_shared_range(start, end)
+    }
+
+    fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), redb::BackendError> {
+        self.inner.unlock_range(start, end)
+    }
+
+    fn query_lock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, redb::BackendError> {
+        self.inner.query_lock_range(start, end)
+    }
+}
+
+/// A redb database whose every page passed redb's integrity check, opened so that nothing is
+/// written to its file, which a conversion copies into the engine.
+pub(crate) struct RedbSource {
+    database: Guarded<Database>,
+}
+
+impl fmt::Debug for RedbSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RedbSource")
+    }
+}
+
+impl RedbSource {
+    /// Opens the redb database at `path` under redb's own file locks, which keep out every other
+    /// open of it through redb, for as long as the source lives.
+    pub(crate) fn open_path(path: &Path) -> Result<Self, StorageError> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(StorageError::new)?;
+        Self::open(redb::backends::FileBackend::new(file))
+    }
+
+    /// Opens the redb database in `file`, which its holder keeps others out of.
+    pub(crate) fn open_blocks<B: BlockFile + 'static>(file: Arc<B>) -> Result<Self, StorageError> {
+        Self::open(BlockBackend(file))
+    }
+
+    fn open(inner: impl redb::StorageBackend) -> Result<Self, StorageError> {
+        let poison = Poison::default();
+        let backend = poison
+            .guard(|| OverlayBackend::new(inner))?
+            .map_err(redb_error)?;
+        let database = poison
+            .guard(|| {
+                Database::builder()
+                    .set_check_integrity_on_open(true)
+                    .create_with_backend(backend)
+            })?
+            .map_err(redb_error)?;
+        Ok(Self {
+            database: Guarded::new(database, &poison),
+        })
+    }
+
+    pub(crate) fn begin_read(&self) -> Result<RedbRead, StorageError> {
+        let transaction = self
+            .database
+            .call(|database| database.begin_read())?
+            .map_err(redb_error)?;
+        Ok(RedbRead {
+            tables: std::array::from_fn(|_| OnceLock::new()),
+            transaction: Guarded::new(transaction, self.database.poison()),
+        })
+    }
+}
+
+/// Whether `error` reports a redb database that another open holds.
+pub(crate) fn is_held_elsewhere(error: &StorageError) -> bool {
+    is_already_open(error)
+}
+
 const CREATION_WAIT: Duration = Duration::from_secs(10);
 
 fn is_already_open(error: &StorageError) -> bool {
@@ -364,6 +663,39 @@ fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct EngineOnlyError(&'static str);
+
+impl fmt::Display for EngineOnlyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} needs RhizoDB's own storage engine, and this database is stored by redb",
+            self.0
+        )
+    }
+}
+
+impl Error for EngineOnlyError {}
+
+impl Maintenance for RedbStorage {
+    fn compact(&self) -> Result<(), StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError("compaction")))
+    }
+
+    fn stats(&self) -> Result<StorageStats, StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError(
+            "storage statistics",
+        )))
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError(
+            "an integrity check",
+        )))
+    }
+}
+
 impl Storage for RedbStorage {
     type Read<'a> = RedbRead;
     type Write<'a> = RedbWrite;
@@ -390,6 +722,11 @@ impl Storage for RedbStorage {
             }),
         })
     }
+
+    fn write_copy(snapshot: &RedbRead, path: &Path) -> Result<(), StorageError> {
+        let copy = Self::create(|| Database::create(path))?;
+        super::copy_tables(snapshot, &copy)
+    }
 }
 
 /// A read transaction that opens each table once, on its first use.
@@ -400,6 +737,21 @@ pub(crate) struct RedbRead {
 }
 
 impl RedbRead {
+    /// Whether the database holds `table`, which a database of an older format may lack.
+    pub(crate) fn holds(&self, table: Table) -> Result<bool, StorageError> {
+        match self
+            .transaction
+            .call(|transaction| transaction.open_table(definition(table)))?
+        {
+            Ok(open) => {
+                self.transaction.poison().release(open);
+                Ok(true)
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(false),
+            Err(error) => Err(redb_error(error)),
+        }
+    }
+
     fn table(&self, table: Table) -> Result<&Guarded<OpenTable>, StorageError> {
         let cell = &self.tables[table as usize];
         if let Some(open) = cell.get() {

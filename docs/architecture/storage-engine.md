@@ -46,8 +46,16 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
 - The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
 - No backup of the redb file is kept after the conversion.
+- A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
+- A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
+- The copy is closed cleanly before the rename, so the renamed file needs no log.
 - During the transition, `OpenOptions` chooses the engine and sets the cache sizes.
-- `Database` gains `compact`, `stats`, and `check`.
+- `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
+- On a database stored by redb the three fail as unsupported, since redb compacts and checks only a database no thread shares.
+- Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
+- `stats` reports the file's bytes and live bytes, its live and free extents, the log's bytes, and the block cache's hits and misses since the open.
+- `check` checks the file as its last checkpoint left it, and the commits after that checkpoint are checked as the log replays them.
+- Each block cache shard counts its hits and misses beside its lock, so counting adds no shared cache line to a read.
 - A vector index may read its vectors from the property column instead of keeping a copy.
 - The concurrency core of the engine is checked with loom.
 - Every engine checksum is a 64-bit xxh3 hash, from the MIT-licensed twox-hash crate.
@@ -88,7 +96,9 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A child pointer holds the child's block reference and LSN, and a child of another LSN, kind, level, or table is corruption.
 - A page shares the common prefix of its keys, capped at 512 bytes, and stores each key's rest.
 - A cell stores its key before its value or child pointer, and a search compares the page prefix once and then the stored rests.
-- A leaf whose keys and values all have one width uses a fixed format without per-cell offsets.
+- A leaf whose keys and values all have one width uses a fixed format without per-cell offsets, which stores every key before every value, so a search reads only the cache lines that hold keys.
+- A fixed leaf of engine format minor 0 stores each key beside its value, and every later minor still reads it.
+- Every header a checkpoint writes records this build's minor, so an older build refuses a file that holds pages it cannot read.
 - A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
 - A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
 - A key longer than 1 KiB lives in a run too, and its cell keeps its first 64 bytes after the page prefix, so most comparisons read no run.
@@ -115,7 +125,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
-- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, less the tests that read redb files.
+- The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
+- Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
+- Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
+- The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
+- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, and each redb fixture is converted as it is opened.
 - The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 
@@ -125,7 +139,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.
-- How point reads reach redb's speed, which they trail by a per-read overhead beyond the block cache.
-- The default size of the block cache.
+- How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.

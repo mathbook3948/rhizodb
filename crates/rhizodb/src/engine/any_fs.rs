@@ -1,6 +1,12 @@
+use std::fs;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::storage::ReadTransaction;
+use crate::storage::StorageError;
+use crate::storage::copy_tables;
 
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
@@ -18,12 +24,16 @@ use super::store::EngineOptions;
 pub(crate) enum AnyFs {
     Os(OsFs),
     Memory(MemFs),
+    #[cfg(all(test, rhizodb_engine))]
+    Sim(super::sim_fs::SimFs),
 }
 
 #[derive(Debug)]
 pub(crate) enum AnyFile {
     Os(OsFile),
     Memory(MemFile),
+    #[cfg(all(test, rhizodb_engine))]
+    Sim(super::sim_fs::SimFile),
 }
 
 impl FileSystem for AnyFs {
@@ -33,6 +43,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.create(name, size).map(AnyFile::Os),
             AnyFs::Memory(fs) => fs.create(name, size).map(AnyFile::Memory),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.create(name, size).map(AnyFile::Sim),
         }
     }
 
@@ -40,6 +52,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.open(name, size).map(AnyFile::Os),
             AnyFs::Memory(fs) => fs.open(name, size).map(AnyFile::Memory),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.open(name, size).map(AnyFile::Sim),
         }
     }
 
@@ -47,6 +61,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.rename(from, to),
             AnyFs::Memory(fs) => fs.rename(from, to),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.rename(from, to),
         }
     }
 
@@ -54,6 +70,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.remove(name),
             AnyFs::Memory(fs) => fs.remove(name),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.remove(name),
         }
     }
 
@@ -61,6 +79,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.names(),
             AnyFs::Memory(fs) => fs.names(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.names(),
         }
     }
 
@@ -68,6 +88,17 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.sync_names(),
             AnyFs::Memory(fs) => fs.sync_names(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.sync_names(),
+        }
+    }
+
+    fn path(&self, name: &str) -> Option<PathBuf> {
+        match self {
+            AnyFs::Os(fs) => fs.path(name),
+            AnyFs::Memory(fs) => fs.path(name),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.path(name),
         }
     }
 }
@@ -77,6 +108,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.block_size(),
             AnyFile::Memory(file) => file.block_size(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.block_size(),
         }
     }
 
@@ -84,6 +117,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.read(first, buffer),
             AnyFile::Memory(file) => file.read(first, buffer),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.read(first, buffer),
         }
     }
 
@@ -91,6 +126,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.write(first, buffer),
             AnyFile::Memory(file) => file.write(first, buffer),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.write(first, buffer),
         }
     }
 
@@ -98,6 +135,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.block_count(),
             AnyFile::Memory(file) => file.block_count(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.block_count(),
         }
     }
 
@@ -105,6 +144,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.is_empty(),
             AnyFile::Memory(file) => file.is_empty(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.is_empty(),
         }
     }
 
@@ -112,6 +153,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.lock(),
             AnyFile::Memory(file) => file.lock(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.lock(),
         }
     }
 
@@ -119,6 +162,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.set_block_count(count),
             AnyFile::Memory(file) => file.set_block_count(count),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.set_block_count(count),
         }
     }
 
@@ -126,6 +171,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.sync(),
             AnyFile::Memory(file) => file.sync(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.sync(),
         }
     }
 }
@@ -152,4 +199,31 @@ pub(crate) fn in_memory(options: EngineOptions) -> Result<Engine<AnyFs>, EngineE
         MEMORY_NAME,
         options,
     )
+}
+
+/// Writes the tables `snapshot` sees into a new engine database at `path`, and closes it, which
+/// checkpoints its whole log into the file and removes the log's segments. Fails when a segment
+/// is left, since the file alone would then miss commits.
+pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result<(), StorageError> {
+    let copy = open_path(path, EngineOptions::default()).map_err(StorageError::from)?;
+    copy_tables(snapshot, &copy)?;
+    drop(copy);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}-wal-"))
+        .unwrap_or_default();
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    for entry in fs::read_dir(directory).map_err(StorageError::new)? {
+        let entry = entry.map_err(StorageError::new)?;
+        if entry.file_name().to_string_lossy().starts_with(&name) {
+            return Err(StorageError::new(io::Error::other(
+                "closing the copy left a log segment beside it",
+            )));
+        }
+    }
+    Ok(())
 }

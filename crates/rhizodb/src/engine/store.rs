@@ -13,6 +13,7 @@ use std::sync::PoisonError;
 use std::sync::TryLockError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
@@ -30,6 +31,7 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
+use super::convert;
 use super::error::EngineError;
 use super::extent::ExtentTable;
 use super::header;
@@ -37,9 +39,9 @@ use super::header::FORMAT_MINOR;
 use super::header::Header;
 use super::header::WalIdentity;
 use super::layout::BLOCK;
+use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
-use super::memtable::Bytes;
 use super::memtable::Memtable;
 use super::page::page_seed;
 use super::pages::PageSource;
@@ -58,9 +60,11 @@ use super::wal::segment_name;
 use super::wal_format::Body;
 use super::wal_format::batch_record;
 use crate::storage::Entry;
+use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
+use crate::storage::StorageStats;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
 
@@ -94,7 +98,7 @@ impl Default for EngineOptions {
             memtable_limit: 64 << 20,
             wal_limit: 256 << 20,
             checkpoint: CheckpointMode::Background,
-            cache_pages: (64 << 20) / BLOCK,
+            cache_pages: (1 << 30) / BLOCK,
         }
     }
 }
@@ -168,6 +172,7 @@ struct Shared<F: FileSystem> {
     trees: Mutex<Vec<Weak<Tree>>>,
     quarantine: Mutex<BTreeMap<u64, u64>>,
     poisoned: AtomicBool,
+    wal_bytes: AtomicU64,
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
@@ -211,7 +216,7 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn staging_name(name: &str) -> String {
+pub(crate) fn staging_name(name: &str) -> String {
     format!(".{name}.creating")
 }
 
@@ -321,13 +326,15 @@ fn replay_into(
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
-    /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
-    /// log of an unclean shutdown before it returns.
+    /// Opens the database file `name` on `fs`, creating it when there is none, converting it
+    /// when it holds a redb database, and replays the log of an unclean shutdown before it
+    /// returns.
     pub(crate) fn open(
         fs: Arc<F>,
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
+        convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         let header = read_header(&file)?;
         let pages = Arc::new(Pages::new(
@@ -346,11 +353,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 next_extent: header.next_extent,
                 ..ExtentTable::default()
             };
-            let tree = Tree {
-                generation: header.generation,
-                roots: BTreeMap::new(),
-                source: Arc::clone(&source),
-            };
+            let tree = Tree::new(header.generation, BTreeMap::new(), Arc::clone(&source));
             (tree, extents, Vec::new())
         } else {
             for open in header.open.iter().filter(|open| !open.id.is_none()) {
@@ -372,11 +375,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             for (id, entry) in &catalog.extents.entries {
                 pages.place_extent(*id, entry.slot);
             }
-            let tree = Tree {
-                generation: header.generation,
-                roots: catalog.roots,
-                source: Arc::clone(&source),
-            };
+            let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
             (tree, catalog.extents, runs)
         };
         let tree = Arc::new(tree);
@@ -439,6 +438,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 },
                 readers: BTreeMap::new(),
             }),
+            wal_bytes: AtomicU64::new(wal.size()),
             writer: Mutex::new(Writer {
                 wal: Some(wal),
                 last_lsn,
@@ -530,6 +530,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         layers.active.apply(lsn, staged.into_changes(), horizon);
         lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
+        shared.wal_bytes.store(wal_size, Ordering::Relaxed);
         let full = layers.active.bytes() > shared.options.memtable_limit
             || wal_size > shared.options.wal_limit;
         if full {
@@ -575,6 +576,27 @@ impl<F: FileSystem + 'static> Engine<F> {
             return Err(self.shared.refusal());
         }
         Ok(())
+    }
+
+    /// Writes every commit into the database file, removes the log, and closes the database,
+    /// failing unless it closed cleanly.
+    pub(crate) fn close(mut self) -> Result<(), EngineError> {
+        self.stop_checkpoints();
+        self.shared.close();
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        if !lock(&self.shared.durable).header.clean {
+            return Err(EngineError::Poisoned);
+        }
+        Ok(())
+    }
+
+    fn stop_checkpoints(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 
     /// Checks every invariant of the database file as the last durable checkpoint left it.
@@ -658,10 +680,11 @@ impl<F: FileSystem + 'static> Shared<F> {
         let Some(sequence) = lock(&self.droppable).take() else {
             return;
         };
-        if let Some(wal) = writer.wal.as_mut()
-            && wal.drop_before(sequence).is_err()
-        {
-            self.poison();
+        if let Some(wal) = writer.wal.as_mut() {
+            if wal.drop_before(sequence).is_err() {
+                self.poison();
+            }
+            self.wal_bytes.store(wal.size(), Ordering::Relaxed);
         }
     }
 
@@ -777,14 +800,15 @@ impl<F: FileSystem + 'static> Shared<F> {
                 ..durable.header.wal
             },
             clean,
+            minor: FORMAT_MINOR,
             ..durable.header
         };
         self.pages.write_header(&header)?;
-        let tree = Arc::new(Tree {
+        let tree = Arc::new(Tree::new(
             generation,
             roots,
-            source: Arc::clone(&durable.tree.source),
-        });
+            Arc::clone(&durable.tree.source),
+        ));
         lock(&self.trees).push(Arc::downgrade(&tree));
         let mut quarantine = lock(&self.quarantine);
         for slot in finished.dropped {
@@ -924,10 +948,7 @@ impl<F: FileSystem + 'static> Drop for EndCheckpointOnDrop<'_, F> {
 
 impl<F: FileSystem + 'static> Drop for Engine<F> {
     fn drop(&mut self) {
-        drop(self.jobs.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        self.stop_checkpoints();
         self.shared.close();
     }
 }
@@ -981,6 +1002,51 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
             staged: Staged::new(view),
         })
     }
+
+    fn write_copy(
+        snapshot: &EngineRead<'_, F>,
+        path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        super::any_fs::write_copy(snapshot, path)
+    }
+}
+
+impl<F: FileSystem + 'static> Maintenance for Engine<F> {
+    fn compact(&self) -> Result<(), StorageError> {
+        Ok(Engine::compact(self)?)
+    }
+
+    fn stats(&self) -> Result<StorageStats, StorageError> {
+        let shared = &*self.shared;
+        let file_bytes = shared.pages.file_bytes()?;
+        let (live_extents, live_blocks) = {
+            let durable = lock(&shared.durable);
+            let entries = &durable.extents.entries;
+            let live = entries
+                .values()
+                .map(|entry| u64::from(entry.live))
+                .sum::<u64>();
+            (entries.len() as u64, live)
+        };
+        let slots = (file_bytes / BLOCK as u64)
+            .saturating_sub(2)
+            .div_ceil(EXTENT_BLOCKS.into());
+        let (cache_hits, cache_misses) = shared.pages.cache_hits_and_misses();
+        Ok(StorageStats {
+            file_bytes,
+            live_bytes: live_blocks * BLOCK as u64,
+            live_extents,
+            free_extents: slots.saturating_sub(live_extents),
+            wal_bytes: shared.wal_bytes.load(Ordering::Relaxed),
+            cache_hits,
+            cache_misses,
+        })
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        Engine::check(self)?;
+        Ok(())
+    }
 }
 
 fn prefix_bounds(prefix: &[u8]) -> (Bound<&[u8]>, Option<Vec<u8>>) {
@@ -1006,7 +1072,12 @@ fn collect(
 }
 
 trait Reads {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError>;
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError>;
 
     fn walk<E: From<StorageError>>(
         &self,
@@ -1018,8 +1089,13 @@ trait Reads {
 }
 
 impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
-        self.view.get(table, key)
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
+        self.view.get_with(table, key, read)
     }
 
     fn walk<E: From<StorageError>>(
@@ -1034,8 +1110,13 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
 }
 
 impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
-    fn lookup(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
-        self.staged.get(table, key)
+    fn lookup<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
+        self.staged.get_with(table, key, read)
     }
 
     fn walk<E: From<StorageError>>(
@@ -1050,9 +1131,7 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
 }
 
 fn get<R: Reads>(reads: &R, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-    Ok(reads
-        .lookup(TableId::of(table), key)?
-        .map(|value| value.to_vec()))
+    Ok(reads.lookup(TableId::of(table), key, <[u8]>::to_vec)?)
 }
 
 fn scan_prefix<R: Reads>(
@@ -1089,13 +1168,10 @@ fn get_with<R: Reads, T, E: From<StorageError>>(
     key: &[u8],
     read: impl FnOnce(&[u8]) -> Result<T, E>,
 ) -> Result<Option<T>, E> {
-    match reads
-        .lookup(TableId::of(table), key)
+    reads
+        .lookup(TableId::of(table), key, read)
         .map_err(StorageError::from)?
-    {
-        Some(value) => read(&value).map(Some),
-        None => Ok(None),
-    }
+        .transpose()
 }
 
 fn visit_prefix<R: Reads, E: From<StorageError>>(

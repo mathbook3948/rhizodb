@@ -163,7 +163,8 @@ impl Checker<'_> {
         entries: &mut u64,
     ) -> Result<(), EngineError> {
         let cached = fetch(self.source, table, page, level)?;
-        if cached.0.lsn > self.header.checkpoint_lsn || cached.0.generation > self.header.generation
+        if cached.header.lsn > self.header.checkpoint_lsn
+            || cached.header.generation > self.header.generation
         {
             return Err(problem(format!(
                 "the page at {:?} is newer than the header",
@@ -172,7 +173,7 @@ impl Checker<'_> {
         }
         self.reach(page.at, 1)?;
         self.report.pages += 1;
-        let node = Node::parse(cached.0, &cached.1, table)?;
+        let node = Node::parse(&cached.header, &cached.bytes, table)?;
         let first = usize::from(!node.is_leaf());
         let mut keys = Vec::with_capacity(node.cells());
         for index in first..node.cells() {

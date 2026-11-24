@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::ops::Range;
 
 use super::blob::BlobRef;
 use super::blob::RUN_PAYLOAD_LIMIT;
@@ -31,6 +32,7 @@ pub(crate) const MAX_PREFIX: usize = 512;
 
 const VARIABLE: u8 = 1;
 const FIXED: u8 = 2;
+const FIXED_SPLIT: u8 = 3;
 
 const EXTERNAL_KEY: u16 = 0x8000;
 const BLOB_REF: usize = 36;
@@ -154,7 +156,7 @@ pub(crate) fn encode(
     match content {
         Content::Leaf(entries) => {
             if let Some(fixed) = encode_fixed(entries) {
-                return Ok((FIXED, entries.len() as u16, fixed));
+                return Ok((FIXED_SPLIT, entries.len() as u16, fixed));
             }
             let keys: Vec<&[u8]> = entries.iter().map(|entry| &*entry.key).collect();
             encode_variable(&keys, 0, &mut long_key, |out, index| {
@@ -244,6 +246,8 @@ fn encode_fixed(entries: &[LeafEntry]) -> Option<Vec<u8>> {
     put_u16(&mut out, width as u16);
     for entry in entries {
         out.extend_from_slice(&entry.key[prefix..]);
+    }
+    for entry in entries {
         if let StoredValue::Inline(value) = &entry.value {
             out.extend_from_slice(value);
         }
@@ -376,13 +380,52 @@ impl CellKey<'_> {
     }
 }
 
+fn lower_bound(
+    mut low: usize,
+    mut high: usize,
+    mut order: impl FnMut(usize) -> Result<Ordering, EngineError>,
+) -> Result<(usize, bool), EngineError> {
+    let mut exact = false;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        match order(middle)? {
+            Ordering::Less => low = middle + 1,
+            Ordering::Equal => {
+                exact = true;
+                high = middle;
+            }
+            Ordering::Greater => high = middle,
+        }
+    }
+    Ok((low, exact))
+}
+
+/// Orders byte strings as slices do, deciding most pairs from their first eight bytes without
+/// a call to `memcmp`.
+pub(crate) fn compare_bytes(left: &[u8], right: &[u8]) -> Ordering {
+    match leading_word(left).cmp(&leading_word(right)) {
+        Ordering::Equal if left.len() <= 8 || right.len() <= 8 => left.len().cmp(&right.len()),
+        Ordering::Equal => left[8..].cmp(&right[8..]),
+        order => order,
+    }
+}
+
+fn leading_word(bytes: &[u8]) -> u64 {
+    match bytes.first_chunk::<8>() {
+        Some(word) => u64::from_be_bytes(*word),
+        None => bytes.iter().enumerate().fold(0, |word, (at, byte)| {
+            word | u64::from(*byte) << (56 - 8 * at)
+        }),
+    }
+}
+
 fn compare_parts(prefix: &[u8], suffix: &[u8], target: &[u8]) -> Ordering {
     let split = prefix.len().min(target.len());
-    prefix.cmp(&target[..split]).then_with(|| {
+    compare_bytes(prefix, &target[..split]).then_with(|| {
         if target.len() < prefix.len() {
             Ordering::Greater
         } else {
-            suffix.cmp(&target[prefix.len()..])
+            compare_bytes(suffix, &target[prefix.len()..])
         }
     })
 }
@@ -397,7 +440,7 @@ pub(crate) enum CellValue<'a> {
 /// A checked page read in place: cells are decoded only when asked for.
 #[derive(Clone, Debug)]
 pub(crate) struct Node<'a> {
-    pub(crate) header: PageHeader,
+    pub(crate) header: &'a PageHeader,
     page: &'a [u8],
     prefix: &'a [u8],
     layout: Layout<'a>,
@@ -411,7 +454,10 @@ enum Layout<'a> {
     Fixed {
         suffix: usize,
         width: usize,
-        cells: &'a [u8],
+        keys: &'a [u8],
+        values: &'a [u8],
+        key_stride: usize,
+        value_stride: usize,
     },
 }
 
@@ -423,7 +469,7 @@ impl<'a> Node<'a> {
     /// Reads the layout of a page whose header was checked, and fails as corruption when the
     /// layout does not fit in it.
     pub(crate) fn parse(
-        header: PageHeader,
+        header: &'a PageHeader,
         page: &'a [u8],
         table: TableId,
     ) -> Result<Self, EngineError> {
@@ -436,35 +482,51 @@ impl<'a> Node<'a> {
         let leaf = match (header.kind, header.level) {
             (PageKind::Leaf, 0) => true,
             (PageKind::Branch, level) if level > 0 => false,
-            _ => return Err(bad(&header)),
+            _ => return Err(bad(header)),
         };
         let mut reader = Reader::new(&page[PAGE_HEADER..], "a page body");
         let prefix_length = reader.u16()? as usize;
         let cells = usize::from(header.cells);
         if prefix_length > MAX_PREFIX || cells == 0 || header.flags != 0 {
-            return Err(bad(&header));
+            return Err(bad(header));
         }
         let prefix = reader.take(prefix_length)?;
         let layout = match header.format {
             VARIABLE => Layout::Variable {
                 offsets: reader.take(2 * cells)?,
             },
-            FIXED if leaf => {
+            FIXED | FIXED_SPLIT if leaf => {
                 let suffix = reader.u16()? as usize;
                 let width = reader.u16()? as usize;
                 let total = cells
                     .checked_mul(suffix + width)
-                    .ok_or_else(|| bad(&header))?;
+                    .ok_or_else(|| bad(header))?;
                 if suffix + prefix_length > INLINE_KEY || width > INLINE_VALUE {
-                    return Err(bad(&header));
+                    return Err(bad(header));
                 }
-                Layout::Fixed {
-                    suffix,
-                    width,
-                    cells: reader.take(total)?,
+                let all = reader.take(total)?;
+                if header.format == FIXED {
+                    Layout::Fixed {
+                        suffix,
+                        width,
+                        keys: all,
+                        values: all.get(suffix..).unwrap_or_default(),
+                        key_stride: suffix + width,
+                        value_stride: suffix + width,
+                    }
+                } else {
+                    let (keys, values) = all.split_at(cells * suffix);
+                    Layout::Fixed {
+                        suffix,
+                        width,
+                        keys,
+                        values,
+                        key_stride: suffix,
+                        value_stride: width,
+                    }
                 }
             }
-            _ => return Err(bad(&header)),
+            _ => return Err(bad(header)),
         };
         Ok(Self {
             header,
@@ -484,17 +546,17 @@ impl<'a> Node<'a> {
 
     fn cell(&self, index: usize) -> Result<Reader<'a>, EngineError> {
         let Layout::Variable { offsets } = self.layout else {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         };
         let offset = offsets
             .get(2 * index..2 * index + 2)
             .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
-            .ok_or_else(|| bad(&self.header))?;
+            .ok_or_else(|| bad(self.header))?;
         let cell = self
             .page
             .get(offset..)
             .filter(|_| offset >= PAGE_HEADER)
-            .ok_or_else(|| bad(&self.header))?;
+            .ok_or_else(|| bad(self.header))?;
         Ok(Reader::new(cell, "a page cell"))
     }
 
@@ -503,7 +565,7 @@ impl<'a> Node<'a> {
         if word & EXTERNAL_KEY == 0 {
             let suffix = reader.take(usize::from(word))?;
             if self.prefix.len() + suffix.len() > INLINE_KEY {
-                return Err(bad(&self.header));
+                return Err(bad(self.header));
             }
             return Ok(CellKey::Inline {
                 prefix: self.prefix,
@@ -511,21 +573,21 @@ impl<'a> Node<'a> {
             });
         }
         if word != EXTERNAL_KEY {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         }
         let length = reader.u32()?;
         let stored = reader.take(STUB)?;
         let stub_length = (length as usize)
             .checked_sub(self.prefix.len())
             .filter(|_| length as usize > INLINE_KEY)
-            .ok_or_else(|| bad(&self.header))?
+            .ok_or_else(|| bad(self.header))?
             .min(STUB);
         if stored[stub_length..].iter().any(|byte| *byte != 0) {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         }
         let blob = read_blob(reader)?;
         if blob.length != u64::from(length) {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         }
         Ok(CellKey::Long {
             prefix: self.prefix,
@@ -540,13 +602,14 @@ impl<'a> Node<'a> {
         match self.layout {
             Layout::Fixed {
                 suffix,
-                width,
-                cells,
+                keys,
+                key_stride,
+                ..
             } => {
-                let start = index * (suffix + width);
-                let suffix = cells
+                let start = index * key_stride;
+                let suffix = keys
                     .get(start..start + suffix)
-                    .ok_or_else(|| bad(&self.header))?;
+                    .ok_or_else(|| bad(self.header))?;
                 Ok(CellKey::Inline {
                     prefix: self.prefix,
                     suffix,
@@ -554,7 +617,7 @@ impl<'a> Node<'a> {
             }
             Layout::Variable { .. } => {
                 if !self.is_leaf() && index == 0 {
-                    return Err(bad(&self.header));
+                    return Err(bad(self.header));
                 }
                 let mut reader = self.cell(index)?;
                 self.read_key(&mut reader)
@@ -566,19 +629,20 @@ impl<'a> Node<'a> {
     pub(crate) fn value(&self, index: usize) -> Result<CellValue<'a>, EngineError> {
         match self.layout {
             Layout::Fixed {
-                suffix,
                 width,
-                cells,
+                values,
+                value_stride,
+                ..
             } => {
-                let start = index * (suffix + width) + suffix;
-                cells
+                let start = index * value_stride;
+                values
                     .get(start..start + width)
                     .map(CellValue::Inline)
-                    .ok_or_else(|| bad(&self.header))
+                    .ok_or_else(|| bad(self.header))
             }
             Layout::Variable { .. } => {
                 if !self.is_leaf() {
-                    return Err(bad(&self.header));
+                    return Err(bad(self.header));
                 }
                 let mut reader = self.cell(index)?;
                 self.read_key(&mut reader)?;
@@ -586,18 +650,18 @@ impl<'a> Node<'a> {
                     0 => {
                         let length = usize::from(reader.u16()?);
                         if length > INLINE_VALUE {
-                            return Err(bad(&self.header));
+                            return Err(bad(self.header));
                         }
                         Ok(CellValue::Inline(reader.take(length)?))
                     }
                     1 => {
                         let blob = read_blob(&mut reader)?;
                         if blob.length <= INLINE_VALUE as u64 {
-                            return Err(bad(&self.header));
+                            return Err(bad(self.header));
                         }
                         Ok(CellValue::External(blob))
                     }
-                    _ => Err(bad(&self.header)),
+                    _ => Err(bad(self.header)),
                 }
             }
         }
@@ -606,16 +670,28 @@ impl<'a> Node<'a> {
     /// The child of branch cell `index`.
     pub(crate) fn child(&self, index: usize) -> Result<ChildRef, EngineError> {
         if self.is_leaf() || index >= self.cells() {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         }
-        let mut reader = self.cell(index)?;
-        if index > 0 {
-            self.read_key(&mut reader)?;
-        }
+        let inline_end = match self.layout {
+            Layout::Variable { offsets } if index > 0 => {
+                self.inline_key_range(offsets, index).map(|range| range.end)
+            }
+            _ => None,
+        };
+        let mut reader = match inline_end {
+            Some(end) => Reader::new(self.page.get(end..).unwrap_or_default(), "a page cell"),
+            None => {
+                let mut reader = self.cell(index)?;
+                if index > 0 {
+                    self.read_key(&mut reader)?;
+                }
+                reader
+            }
+        };
         let at = BlockRef::from_raw(reader.u64()?)?;
         let lsn = reader.u64()?;
         if at.is_null() {
-            return Err(bad(&self.header));
+            return Err(bad(self.header));
         }
         Ok(ChildRef { at, lsn })
     }
@@ -627,61 +703,64 @@ impl<'a> Node<'a> {
         target: &[u8],
         load: &dyn Fn(&BlobRef) -> Result<Vec<u8>, EngineError>,
     ) -> Result<usize, EngineError> {
+        self.find(target, load).map(|(index, _)| index)
+    }
+
+    /// The cell [`Node::search`] finds, and whether its key equals `target`.
+    pub(crate) fn find(
+        &self,
+        target: &[u8],
+        load: &dyn Fn(&BlobRef) -> Result<Vec<u8>, EngineError>,
+    ) -> Result<(usize, bool), EngineError> {
         let leaf = self.is_leaf();
         let cells = self.cells();
         let split = self.prefix.len().min(target.len());
         let above_all = if leaf { cells } else { cells - 1 };
-        match self.prefix[..split].cmp(&target[..split]) {
-            Ordering::Less => return Ok(above_all),
-            Ordering::Greater => return Ok(0),
-            Ordering::Equal if target.len() < self.prefix.len() => return Ok(0),
+        match compare_bytes(self.prefix, &target[..split]) {
+            Ordering::Less => return Ok((above_all, false)),
+            Ordering::Greater => return Ok((0, false)),
+            Ordering::Equal if target.len() < self.prefix.len() => return Ok((0, false)),
             Ordering::Equal => {}
         }
         let rest = &target[self.prefix.len()..];
-        let (mut low, mut high) = if leaf { (0, cells) } else { (1, cells) };
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if self.order(middle, rest, target, load)? == Ordering::Less {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        if leaf {
-            return Ok(low);
-        }
-        if low < cells && self.order(low, rest, target, load)? == Ordering::Equal {
-            return Ok(low);
-        }
-        Ok(low - 1)
+        let first = usize::from(!leaf);
+        let (low, exact) = match self.layout {
+            Layout::Fixed {
+                suffix,
+                keys,
+                key_stride,
+                ..
+            } => lower_bound(first, cells, |index| {
+                let start = index * key_stride;
+                keys.get(start..start + suffix)
+                    .map(|stored| compare_bytes(stored, rest))
+                    .ok_or_else(|| bad(self.header))
+            })?,
+            Layout::Variable { offsets } => lower_bound(first, cells, |index| {
+                match self.inline_key_range(offsets, index) {
+                    Some(range) => Ok(compare_bytes(&self.page[range], rest)),
+                    None => self.key(index)?.compare(target, load),
+                }
+            })?,
+        };
+        Ok(if leaf || exact {
+            (low, exact)
+        } else {
+            (low - 1, false)
+        })
     }
 
-    fn order(
-        &self,
-        index: usize,
-        rest: &[u8],
-        target: &[u8],
-        load: &dyn Fn(&BlobRef) -> Result<Vec<u8>, EngineError>,
-    ) -> Result<Ordering, EngineError> {
-        if let Layout::Variable { offsets } = self.layout {
-            let at = offsets
-                .get(2 * index..2 * index + 2)
-                .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
-                .ok_or_else(|| bad(&self.header))?;
-            let word = self
-                .page
-                .get(at..at + 2)
-                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-                .ok_or_else(|| bad(&self.header))?;
-            if word & EXTERNAL_KEY == 0 && at >= PAGE_HEADER {
-                let suffix = self
-                    .page
-                    .get(at + 2..at + 2 + usize::from(word))
-                    .ok_or_else(|| bad(&self.header))?;
-                return Ok(suffix.cmp(rest));
-            }
-        }
-        self.key(index)?.compare(target, load)
+    fn inline_key_range(&self, offsets: &[u8], index: usize) -> Option<Range<usize>> {
+        let at = usize::from(u16::from_le_bytes(
+            *offsets.get(2 * index..2 * index + 2)?.first_chunk()?,
+        ));
+        let word = u16::from_le_bytes(*self.page.get(at..at + 2)?.first_chunk()?);
+        let range = at + 2..at + 2 + usize::from(word);
+        (at >= PAGE_HEADER
+            && word & EXTERNAL_KEY == 0
+            && range.end <= self.page.len()
+            && self.prefix.len() + range.len() <= INLINE_KEY)
+            .then_some(range)
     }
 
     /// Every cell, with long keys loaded, and the runs of the long keys this page owns.
@@ -694,7 +773,7 @@ impl<'a> Node<'a> {
         let mut previous: Option<Vec<u8>> = None;
         let mut check_order = |key: &[u8]| -> Result<(), EngineError> {
             if previous.as_deref().is_some_and(|before| before >= key) {
-                return Err(bad(&self.header));
+                return Err(bad(self.header));
             }
             previous = Some(key.to_vec());
             Ok(())

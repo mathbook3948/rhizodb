@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(not(rhizodb_engine))]
 use std::sync::atomic::AtomicU64;
+#[cfg(not(rhizodb_engine))]
 use std::sync::atomic::Ordering;
 
 use super::*;
@@ -8,6 +10,7 @@ use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
 use crate::result::Value;
+#[cfg(not(rhizodb_engine))]
 use crate::storage::sim_backend;
 use crate::test_scale;
 
@@ -127,6 +130,7 @@ fn dump(db: &Database) -> Vec<String> {
         .collect()
 }
 
+#[cfg(not(rhizodb_engine))]
 fn on(storage: Result<RedbStorage, crate::storage::StorageError>) -> Result<Database, Error> {
     Ok(Database {
         graph: Graph::open(storage?)?,
@@ -134,8 +138,34 @@ fn on(storage: Result<RedbStorage, crate::storage::StorageError>) -> Result<Data
     })
 }
 
+#[cfg(not(rhizodb_engine))]
 fn open(fs: &SimFs) -> Result<Database, Error> {
     on(sim_backend::storage(fs))
+}
+
+#[cfg(rhizodb_engine)]
+fn open(fs: &SimFs) -> Result<Database, Error> {
+    use crate::engine::any_fs::AnyFs;
+    use crate::engine::store::CheckpointMode;
+    use crate::engine::store::Engine;
+    use crate::engine::store::EngineOptions;
+    let options = EngineOptions {
+        segment_target: 8192,
+        memtable_limit: 6_000,
+        wal_limit: 20_000,
+        checkpoint: CheckpointMode::Inline,
+        cache_pages: 64,
+    };
+    let engine = Engine::open(
+        Arc::new(AnyFs::Sim(fs.clone())),
+        "workload.rhizodb",
+        options,
+    )
+    .map_err(crate::storage::StorageError::from)?;
+    Ok(Database {
+        graph: Graph::open(engine)?,
+        statements: Statements::default(),
+    })
 }
 
 fn consistent(db: &Database) -> Result<(), String> {
@@ -377,6 +407,7 @@ fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole
 }
 
 #[test]
+#[cfg(not(rhizodb_engine))]
 fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns() {
     let fs = SimFs::new();
     let capacity = Arc::new(AtomicU64::new(u64::MAX));

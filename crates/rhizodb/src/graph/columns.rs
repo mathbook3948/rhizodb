@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::value::DecodeError;
 use crate::value::PropertyValue;
 use crate::value::Reader;
@@ -1135,17 +1137,27 @@ impl<'a> DeltaRef<'a> {
     }
 }
 
-/// A stored delta copied out of storage and checked.
+/// A stored delta copied out of storage and checked, with where each of its entries starts, so
+/// one property is found without reading the entries before it.
 #[derive(Debug)]
 pub(crate) struct Delta {
     bytes: Box<[u8]>,
+    starts: Box<[(Token<PropertyKey>, usize)]>,
 }
 
 impl Delta {
     pub(crate) fn load(key: &[u8], bytes: &[u8]) -> Result<Self, GraphError> {
-        DeltaRef::parse(key, bytes)?;
+        let body = DeltaRef::parse(key, bytes)?.body;
+        let mut reader = Reader::new(body);
+        let mut starts = Vec::new();
+        while reader.remaining() > 0 {
+            let start = body.len() - reader.remaining();
+            let (token, _) = next_entry(&mut reader, body)?;
+            starts.push((token, start));
+        }
         Ok(Self {
             bytes: bytes.into(),
+            starts: starts.into(),
         })
     }
 
@@ -1154,7 +1166,26 @@ impl Delta {
             body: &self.bytes[1..self.bytes.len() - 4],
         }
     }
+
+    /// The value of the property `token` now, as [`DeltaRef::get`] gives it.
+    pub(crate) fn get(
+        &self,
+        token: Token<PropertyKey>,
+    ) -> Result<Option<Option<Cell<'_>>>, GraphError> {
+        let Ok(index) = self.starts.binary_search_by_key(&token, |(held, _)| *held) else {
+            return Ok(None);
+        };
+        let body = self.view().body;
+        let rest = body
+            .get(self.starts[index].1..)
+            .ok_or(DecodeError::UnexpectedEnd)?;
+        let (_, value) = next_entry(&mut Reader::new(rest), rest)?;
+        Ok(Some(value.map(classify).transpose()?))
+    }
 }
+
+/// The values a transaction gave one node, by key, each with its value or none for no value.
+pub(crate) type SlotValues = BTreeMap<Token<PropertyKey>, Option<PropertyValue>>;
 
 /// Property values by key, ascending by key, each with its value or none for no value.
 pub(crate) type Changes = Vec<(Token<PropertyKey>, Option<PropertyValue>)>;
@@ -1295,6 +1326,25 @@ impl ColumnsEdit {
             return Ok(Some(cell));
         }
         Ok(edit.fresh.then_some(None))
+    }
+
+    /// Every value the transaction gave the node in `slot`, with `None` for a value it removed,
+    /// and whether the transaction created the node, so that no stored value applies to it.
+    pub(crate) fn current_all(&self, slot: usize) -> Result<(SlotValues, bool), GraphError> {
+        let Some(edit) = self.find(slot) else {
+            return Ok((BTreeMap::new(), false));
+        };
+        let mut values = BTreeMap::new();
+        if let Some(created) = edit.created(&self.heap) {
+            for entry in created.entries() {
+                let (token, cell) = entry?;
+                values.insert(token, cell.map(|cell| cell.to_value()).transpose()?);
+            }
+        }
+        for (token, value) in &edit.values {
+            values.insert(*token, value.clone());
+        }
+        Ok((values, edit.fresh))
     }
 
     /// Marks the node in `slot` as created by the transaction, holding `values`, ascending by

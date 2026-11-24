@@ -6,12 +6,53 @@ use std::sync::Arc;
 use crate::result::Value;
 
 /// What a procedure body returns: one row per result, each with a value per declared output in
-/// declaration order, or the reason it failed.
+/// declaration order, or the reason it failed, which a query reports as
+/// [`ErrorKind::ProcedureFailed`](crate::ErrorKind::ProcedureFailed).
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+/// use rhizodb::Procedure;
+/// use rhizodb::ProcedureOutput;
+///
+/// fn refuse(_: &[rhizodb::Value]) -> ProcedureOutput {
+///     Err("not today".into())
+/// }
+///
+/// let mut db = Database::in_memory()?;
+/// db.register_procedure(Procedure::new("host.refuse", refuse).output("x"))?;
+/// let error = db.execute("CALL host.refuse() YIELD x RETURN x", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::ProcedureFailed);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 pub type ProcedureOutput = Result<Vec<Vec<Value>>, Box<dyn StdError + Send + Sync>>;
 
 type Body = dyn Fn(&[Value]) -> ProcedureOutput + Send + Sync;
 
 /// The type a procedure parameter accepts. Every parameter also accepts null.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::Parameters;
+/// use rhizodb::Procedure;
+/// use rhizodb::Value;
+/// use rhizodb::ValueType;
+///
+/// let mut db = Database::in_memory()?;
+/// db.register_procedure(
+///     Procedure::new("math.half", |args| match args.first() {
+///         Some(Value::Float(x)) => Ok(vec![vec![Value::Float(x / 2.0)]]),
+///         _ => Ok(vec![vec![Value::Null]]),
+///     })
+///     .parameter("x", ValueType::Float)
+///     .output("half"),
+/// )?;
+/// let result = db.execute("CALL math.half(3) YIELD half RETURN half", &Parameters::new())?;
+/// assert_eq!(result.rows(), [vec![Value::Float(1.5)]]);
+/// assert!(db.execute("CALL math.half('3') YIELD half RETURN half", &Parameters::new()).is_err());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ValueType {

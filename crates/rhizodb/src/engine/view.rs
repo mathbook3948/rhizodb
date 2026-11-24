@@ -29,16 +29,22 @@ pub(crate) struct View {
 pub(crate) type Visit<'a, E> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<(), E>;
 
 impl View {
-    pub(crate) fn get(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
+    /// Calls `read` with the value the snapshot holds under `key`.
+    pub(crate) fn get_with<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
         let memtables = std::iter::once(&self.layers.active).chain(&self.layers.frozen);
         for memtable in memtables {
             match memtable.get(table, key, self.snapshot) {
-                Lookup::Found(value) => return Ok(Some(value)),
+                Lookup::Found(value) => return Ok(Some(read(&value))),
                 Lookup::Deleted => return Ok(None),
                 Lookup::Absent => {}
             }
         }
-        self.layers.tree.get(table, key)
+        self.layers.tree.get_with(table, key, read)
     }
 
     fn memtable_range(

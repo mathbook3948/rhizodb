@@ -83,11 +83,11 @@ impl Store {
     }
 
     fn tree(&self) -> Tree {
-        Tree {
-            generation: self.header.generation,
-            roots: self.roots.clone(),
-            source: Arc::clone(&self.pages) as Arc<dyn PageSource>,
-        }
+        Tree::new(
+            self.header.generation,
+            self.roots.clone(),
+            Arc::clone(&self.pages) as Arc<dyn PageSource>,
+        )
     }
 
     fn verify(&self, model: &Model) -> Result<(), TestCaseError> {
@@ -369,7 +369,7 @@ fn deleting_all_but_two_keys_of_a_deep_tree_leaves_no_chain_of_single_children()
         let cached =
             crate::engine::tree::fetch(&*store.pages, TABLE, root.page, root.level).unwrap();
         assert!(
-            cached.0.cells > 1,
+            cached.header.cells > 1,
             "the root {root:?} is a branch with one child"
         );
     }
