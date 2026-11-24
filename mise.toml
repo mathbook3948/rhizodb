@@ -45,7 +45,7 @@ run = [
 [tasks.engine-suite]
 description = "Run every rhizodb test with Database on RhizoDB's own engine instead of redb, skipping the tests that read redb files"
 env = { RUSTFLAGS = "--cfg rhizodb_engine" }
-run = "cargo test --package rhizodb --target-dir target/engine-suite -- --skip a_database_of_format --skip the_undamaged_format_eight_file --skip a_pattern_property_map_reads_the_index_for_its_start_node --skip a_lookup_by_a_pattern_map_entry_tests_only_the_other_conditions_on_what_it_finds"
+run = "cargo test --package rhizodb --target-dir target/engine-suite -- --skip a_database_of_format --skip the_undamaged_format_eight_file --skip the_damaged_file_fixture_of_format --skip a_pattern_property_map_reads_the_index_for_its_start_node --skip a_lookup_by_a_pattern_map_entry_tests_only_the_other_conditions_on_what_it_finds"
 
 [tasks.fuzz]
 description = "Fuzz every target for the given seconds each (default 300), and fail on any panic that escapes RhizoDB, hang, or out-of-memory, for example: mise run fuzz 600"

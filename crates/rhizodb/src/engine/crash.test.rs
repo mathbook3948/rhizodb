@@ -308,7 +308,7 @@ fn a_new_database_appears_whole_or_not_at_all() {
                     .names()
                     .unwrap()
                     .iter()
-                    .any(|name| name.ends_with("-init"))
+                    .any(|name| name.ends_with(".creating"))
             );
         }
     }

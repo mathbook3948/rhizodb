@@ -16,6 +16,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use super::blob::RunRef;
@@ -192,12 +194,7 @@ fn read_header(file: &impl BlockFile) -> Result<Header, EngineError> {
     )
 }
 
-fn create_file_whole_or_not_at_all<F: FileSystem>(
-    fs: &F,
-    name: &str,
-    init: &str,
-) -> Result<F::File, EngineError> {
-    let file = fs.create(init, block_size()?)?;
+fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
     let database_id = (u128::from(random_u64()) << 64) | u128::from(random_u64());
     let header = Header {
         minor: FORMAT_MINOR,
@@ -207,12 +204,97 @@ fn create_file_whole_or_not_at_all<F: FileSystem>(
         clean: true,
         ..Header::default()
     };
+    file.set_block_count(0)?;
     file.write(0, &vec![0; BLOCK])?;
     file.write(header.slot(), &header.encode())?;
     file.sync()?;
-    fs.rename(init, name)?;
-    fs.sync_names()?;
-    Ok(file)
+    Ok(())
+}
+
+fn staging_name(name: &str) -> String {
+    format!(".{name}.creating")
+}
+
+fn ignore_missing(outcome: io::Result<()>) -> io::Result<()> {
+    match outcome {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        outcome => outcome,
+    }
+}
+
+const CREATION_WAIT: Duration = Duration::from_secs(10);
+
+enum Existing<File> {
+    Database(File),
+    Missing,
+}
+
+fn existing_database<F: FileSystem>(fs: &F, name: &str) -> Result<Existing<F::File>, EngineError> {
+    match fs.open(name, block_size()?) {
+        Ok(file) if file.is_empty()? && segment_files(fs, name)?.is_empty() => {
+            Ok(Existing::Missing)
+        }
+        Ok(file) => Ok(Existing::Database(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Existing::Missing),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn open_or_create_staging<F: FileSystem>(
+    fs: &F,
+    staging: &str,
+) -> Result<Option<F::File>, EngineError> {
+    match fs.create(staging, block_size()?) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match fs.open(staging, block_size()?) {
+                Ok(file) => Ok(Some(file)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn open_or_create_whole_or_not_at_all<F: FileSystem>(
+    fs: &F,
+    name: &str,
+) -> Result<F::File, EngineError> {
+    let staging = staging_name(name);
+    let deadline = Instant::now() + CREATION_WAIT;
+    loop {
+        if let Existing::Database(file) = existing_database(fs, name)? {
+            file.lock()?;
+            ignore_missing(fs.remove(&staging))?;
+            return Ok(file);
+        }
+        if let Some(file) = open_or_create_staging(fs, &staging)? {
+            match file.lock() {
+                Ok(()) => {
+                    if let Existing::Database(_) = existing_database(fs, name)? {
+                        drop(file);
+                        ignore_missing(fs.remove(&staging))?;
+                        continue;
+                    }
+                    write_new_database(&file)?;
+                    fs.rename(&staging, name)?;
+                    fs.sync_names()?;
+                    return Ok(file);
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "another open kept creating the database file",
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn replay_into(
@@ -246,30 +328,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        let init = format!("{name}-init");
-        match fs.remove(&init) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-        let file = match fs.open(name, block_size()?) {
-            Ok(file) => {
-                file.lock()?;
-                if file.is_empty()? && segment_files(&*fs, name)?.is_empty() {
-                    drop(file);
-                    let file = create_file_whole_or_not_at_all(&*fs, name, &init)?;
-                    file.lock()?;
-                    file
-                } else {
-                    file
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let file = create_file_whole_or_not_at_all(&*fs, name, &init)?;
-                file.lock()?;
-                file
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         let header = read_header(&file)?;
         let pages = Arc::new(Pages::new(
             file,

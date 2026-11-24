@@ -96,7 +96,7 @@ fn segment_names_sort_by_sequence_and_ignore_other_files() {
         "graph.rhizo-wal-0000000000000zz0",
         "graph.rhizo-wal-00000000000000ff0",
         "other-wal-00000000000000ff",
-        "graph.rhizo-init",
+        ".graph.rhizo.creating",
     ] {
         assert_eq!(segment_sequence(BASE, other), None, "{other}");
     }

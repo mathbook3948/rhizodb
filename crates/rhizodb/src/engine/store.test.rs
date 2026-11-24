@@ -614,3 +614,77 @@ fn an_empty_file_without_a_log_opens_as_a_new_database_and_a_short_one_does_not(
     assert!(crate::engine::any_fs::open_path(&short, EngineOptions::default()).is_err());
     assert_eq!(std::fs::read(&short).unwrap(), [7_u8; 100]);
 }
+
+fn names_in(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_staging_file_left_by_an_interrupted_open_is_reused_or_removed_and_never_replaces_a_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph");
+    std::fs::write(directory.path().join(".graph.creating"), [9_u8; 5_000]).unwrap();
+    let engine = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+    let mut tx = engine.begin_write().unwrap();
+    tx.put(Table::Metadata, b"k", b"v").unwrap();
+    tx.commit().unwrap();
+    drop(engine);
+    assert_eq!(names_in(directory.path()), ["graph"]);
+    std::fs::write(directory.path().join(".graph.creating"), [9_u8; 5_000]).unwrap();
+    let engine = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+    assert_eq!(
+        engine
+            .begin_read()
+            .unwrap()
+            .get(Table::Metadata, b"k")
+            .unwrap(),
+        Some(b"v".to_vec())
+    );
+    drop(engine);
+    assert_eq!(names_in(directory.path()), ["graph"]);
+}
+
+#[test]
+fn opens_racing_to_create_a_database_share_one_file_and_lose_no_commit() {
+    for _ in 0..50 {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("graph");
+        let opened: Vec<_> = std::thread::scope(|scope| {
+            let openers: Vec<_> = (0..8_u8)
+                .map(|opener| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        let engine =
+                            crate::engine::any_fs::open_path(path, EngineOptions::default())
+                                .ok()?;
+                        let mut tx = engine.begin_write().unwrap();
+                        tx.put(Table::Metadata, &[opener], b"v").unwrap();
+                        tx.commit().unwrap();
+                        Some(opener)
+                    })
+                })
+                .collect();
+            openers
+                .into_iter()
+                .filter_map(|opener| opener.join().unwrap())
+                .collect()
+        });
+        assert!(!opened.is_empty());
+        let engine = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+        let read = engine.begin_read().unwrap();
+        for opener in opened {
+            assert_eq!(
+                read.get(Table::Metadata, &[opener]).unwrap(),
+                Some(b"v".to_vec())
+            );
+        }
+        drop(read);
+        drop(engine);
+        assert_eq!(names_in(directory.path()), ["graph"]);
+    }
+}
