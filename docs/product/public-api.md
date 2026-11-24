@@ -18,6 +18,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - Procedures register through a shared reference at any time, so a database inside an `Arc` can still gain them.
 - `NodeId` and `RelationshipId` convert to and from `u64`, so a host can store an ID and compare it later.
 - Functions that only the fuzz targets call exist only with the non-default `fuzzing` feature and are not part of the API.
+- A storage failure that a host handles differently from the rest, such as a file already open elsewhere or a backup target that exists, has an error kind of its own, and every other storage failure stays `ErrorKind::Storage`.
 - `Error` implements `std::error::Error` and is `Send`, `Sync`, and `'static`.
 - Every public type is `Send` and `Sync`, except that `ReadTransaction` is only `Send` and `WriteTransaction` is neither, and a test asserts it.
 - No public signature names a type that hosts cannot name.

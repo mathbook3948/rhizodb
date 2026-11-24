@@ -169,7 +169,7 @@ impl Database {
     /// let path = directory.path().join("graph.rhizodb");
     /// let db = Database::open(&path)?;
     /// db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
-    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::Storage);
+    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::DatabaseAlreadyOpen);
     /// drop(db);
     /// let reopened = Database::open(&path)?;
     /// let result = reopened.execute("MATCH (p:Person) RETURN count(p)", &Parameters::new())?;
@@ -280,8 +280,9 @@ impl Database {
     /// copy. A crash can leave the staging file behind, and removing it is safe. An in-memory
     /// database backs up to a file the same way.
     ///
-    /// It fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage) when a file or directory
-    /// already exists at `path`, which is never replaced, or when writing the copy fails.
+    /// It fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when
+    /// a file or directory already exists at `path`, which is never replaced, and with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage) when writing the copy fails.
     ///
     /// ```
     /// use rhizodb::Database;
