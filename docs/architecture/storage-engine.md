@@ -46,6 +46,9 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
 - The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
 - No backup of the redb file is kept after the conversion.
+- A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
+- A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
+- The copy is closed cleanly before the rename, so the renamed file needs no log.
 - During the transition, `OpenOptions` chooses the engine and sets the cache sizes.
 - `Database` gains `compact`, `stats`, and `check`.
 - A vector index may read its vectors from the property column instead of keeping a copy.
@@ -119,7 +122,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Each tree pins the root page of every table it holds, so no read takes the block cache or a reference count for a root.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
-- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, less the tests that read redb files.
+- Building with `--cfg rhizodb_engine` puts `Database` on the engine, so the whole test suite runs on it, and each redb fixture is converted as it is opened.
 - The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 

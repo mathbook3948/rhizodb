@@ -1,5 +1,6 @@
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::block_file::BlockFile;
@@ -68,6 +69,13 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.sync_names(),
             AnyFs::Memory(fs) => fs.sync_names(),
+        }
+    }
+
+    fn path(&self, name: &str) -> Option<PathBuf> {
+        match self {
+            AnyFs::Os(fs) => fs.path(name),
+            AnyFs::Memory(fs) => fs.path(name),
         }
     }
 }

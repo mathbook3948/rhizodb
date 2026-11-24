@@ -22,6 +22,8 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
 
+- RhizoDB's own storage engine, still built only with `--cfg rhizodb_engine`, converts a redb database file when it opens one: it checks every redb page, copies every table into a new file, and renames that file over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was.
+
 ### Changed
 
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.

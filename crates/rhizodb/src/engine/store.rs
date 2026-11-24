@@ -30,6 +30,7 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
+use super::convert;
 use super::error::EngineError;
 use super::extent::ExtentTable;
 use super::header;
@@ -210,7 +211,7 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn staging_name(name: &str) -> String {
+pub(crate) fn staging_name(name: &str) -> String {
     format!(".{name}.creating")
 }
 
@@ -320,13 +321,15 @@ fn replay_into(
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
-    /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
-    /// log of an unclean shutdown before it returns.
+    /// Opens the database file `name` on `fs`, creating it when there is none, converting it
+    /// when it holds a redb database, and replays the log of an unclean shutdown before it
+    /// returns.
     pub(crate) fn open(
         fs: Arc<F>,
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
+        convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         let header = read_header(&file)?;
         let pages = Arc::new(Pages::new(
@@ -566,6 +569,27 @@ impl<F: FileSystem + 'static> Engine<F> {
             return Err(self.shared.refusal());
         }
         Ok(())
+    }
+
+    /// Writes every commit into the database file, removes the log, and closes the database,
+    /// failing unless it closed cleanly.
+    pub(crate) fn close(mut self) -> Result<(), EngineError> {
+        self.stop_checkpoints();
+        self.shared.close();
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        if !lock(&self.shared.durable).header.clean {
+            return Err(EngineError::Poisoned);
+        }
+        Ok(())
+    }
+
+    fn stop_checkpoints(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 
     /// Checks every invariant of the database file as the last durable checkpoint left it.
@@ -915,10 +939,7 @@ impl<F: FileSystem + 'static> Drop for EndCheckpointOnDrop<'_, F> {
 
 impl<F: FileSystem + 'static> Drop for Engine<F> {
     fn drop(&mut self) {
-        drop(self.jobs.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        self.stop_checkpoints();
         self.shared.close();
     }
 }
