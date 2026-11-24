@@ -68,7 +68,10 @@ fn staging_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn publish(staging: &Path, path: &Path) -> io::Result<()> {
-    fs::File::open(staging)?.sync_all()?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(staging)?
+        .sync_all()?;
     match fs::hard_link(staging, path) {
         Ok(()) => fs::remove_file(staging)?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

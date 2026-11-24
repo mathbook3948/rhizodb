@@ -162,10 +162,25 @@ fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Res
                 offset += read as u64;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(locked_elsewhere(error)),
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+#[cfg(windows)]
+fn locked_elsewhere(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the database file is already open",
+        )
+    } else {
+        error
+    }
 }
 
 #[cfg(windows)]
@@ -178,7 +193,7 @@ fn write_all_at(file: &File, mut buffer: &[u8], mut offset: u64) -> io::Result<(
                 offset += written as u64;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+            Err(error) => return Err(locked_elsewhere(error)),
         }
     }
     Ok(())
