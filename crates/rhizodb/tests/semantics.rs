@@ -1448,3 +1448,36 @@ fn a_distinct_aggregate_counts_each_element_and_each_equal_value_once() {
         [vec![int(9)]]
     );
 }
+
+#[test]
+fn sum_and_avg_add_their_numbers_in_order_and_overflow_only_on_integers() {
+    let db = db();
+    let big = "9223372036854775807";
+    assert_eq!(
+        error_kind(&db, &format!("UNWIND [{big}, 1] AS x RETURN sum(x)")),
+        ErrorKind::IntegerOverflow
+    );
+    assert_eq!(
+        single(&db, &format!("UNWIND [{big}, 1, 0.5] AS x RETURN sum(x)")),
+        float(9_223_372_036_854_775_807.0 + 1.0 + 0.5)
+    );
+    assert_eq!(
+        single(&db, &format!("UNWIND [{big}, 1] AS x RETURN avg(x)")),
+        float((9_223_372_036_854_775_807.0 + 1.0) / 2.0)
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1.0e16, 1.0, -1.0e16, 1.0] AS x RETURN sum(x), avg(x)"
+        ),
+        [vec![float(1.0), float(0.25)]]
+    );
+    let rows = run(&db, "UNWIND [-0.0] AS x RETURN sum(x), avg(x)");
+    assert!(
+        matches!(rows.as_slice(), [row] if row.iter().all(|value| matches!(value, Value::Float(f) if f.is_sign_negative())))
+    );
+    assert_eq!(
+        run(&db, "UNWIND [] AS x RETURN sum(x), avg(x)"),
+        [vec![int(0), Value::Null]]
+    );
+}

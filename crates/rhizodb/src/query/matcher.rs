@@ -507,10 +507,10 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             return Ok(true);
         }
         set(row, start.slot, Datum::Node(id));
-        self.trails[index] = PathIds {
-            nodes: vec![id],
-            relationships: Vec::new(),
-        };
+        let trail = &mut self.trails[index];
+        trail.nodes.clear();
+        trail.nodes.push(id);
+        trail.relationships.clear();
         self.begin_step(index, 0, id, row, frames, emit)
     }
 

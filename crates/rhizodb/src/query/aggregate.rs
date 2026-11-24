@@ -64,8 +64,67 @@ struct Accumulator {
     rows: usize,
     counted: usize,
     values: Vec<Datum>,
+    total: Total,
     seen: Seen,
     percentile: Option<Datum>,
+}
+
+struct Total {
+    count: usize,
+    integer: Option<i64>,
+    floats: bool,
+    float: f64,
+}
+
+impl Default for Total {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            integer: Some(0),
+            floats: false,
+            float: -0.0,
+        }
+    }
+}
+
+impl Total {
+    fn add(&mut self, value: &Datum) -> Result<(), Error> {
+        let number = match value {
+            Datum::Integer(value) => {
+                self.integer = self.integer.and_then(|total| total.checked_add(*value));
+                *value as f64
+            }
+            Datum::Float(value) => {
+                self.floats = true;
+                *value
+            }
+            other => {
+                return Err(type_error(format!(
+                    "expected a number, got a {}",
+                    other.type_name()
+                )));
+            }
+        };
+        self.float += number;
+        self.count += 1;
+        Ok(())
+    }
+
+    fn sum(&self) -> Result<Datum, Error> {
+        if self.floats {
+            return Ok(Datum::Float(self.float));
+        }
+        self.integer
+            .map(Datum::Integer)
+            .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow, "sum overflowed"))
+    }
+
+    fn average(&self) -> Datum {
+        match self.count {
+            0 => Datum::Null,
+            count => Datum::Float(self.float / count as f64),
+        }
+    }
 }
 
 impl<'p> Groups<'p> {
@@ -214,10 +273,10 @@ impl Accumulator {
         if !value.is_null() {
             function.admit(&value)?;
             if !aggregate.distinct || self.seen.insert(&value) {
-                if function == AggregateFunction::Count {
-                    self.counted += 1;
-                } else {
-                    self.values.push(value);
+                match function {
+                    AggregateFunction::Count => self.counted += 1,
+                    AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
+                    _ => self.values.push(value),
                 }
             }
         }
@@ -256,16 +315,8 @@ impl Accumulator {
             AggregateFunction::Collect => datum::list(values),
             AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
-            AggregateFunction::Sum => sum(&values),
-            AggregateFunction::Avg => {
-                if values.is_empty() {
-                    return Ok(Datum::Null);
-                }
-                let numbers = floats(&values)?;
-                Ok(Datum::Float(
-                    numbers.iter().sum::<f64>() / numbers.len() as f64,
-                ))
-            }
+            AggregateFunction::Sum => self.total.sum(),
+            AggregateFunction::Avg => Ok(self.total.average()),
             AggregateFunction::StDev | AggregateFunction::StDevP => {
                 let numbers = floats(&values)?;
                 let sample = aggregate.function == AggregateFunction::StDev;
@@ -334,24 +385,6 @@ fn floats(values: &[Datum]) -> Result<Vec<f64>, Error> {
             ))),
         })
         .collect()
-}
-
-fn sum(values: &[Datum]) -> Result<Datum, Error> {
-    if values
-        .iter()
-        .all(|value| matches!(value, Datum::Integer(_)))
-    {
-        let mut total: i64 = 0;
-        for value in values {
-            if let Datum::Integer(value) = value {
-                total = total
-                    .checked_add(*value)
-                    .ok_or_else(|| Error::new(ErrorKind::IntegerOverflow, "sum overflowed"))?;
-            }
-        }
-        return Ok(Datum::Integer(total));
-    }
-    Ok(Datum::Float(floats(values)?.iter().sum()))
 }
 
 fn percentile_of(
