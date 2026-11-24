@@ -698,6 +698,86 @@ fn setting_or_removing_many_labels_at_once_stores_no_label_set_in_between() {
     );
 }
 
+#[test]
+fn a_label_set_a_transaction_passes_through_is_never_stored() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::open(directory.path().join("labels.rhizodb")).unwrap();
+    let labels: Vec<String> = (0..2_000).map(|i| format!("L{i}")).collect();
+    run(&db, "INSERT (:Start), (:Other)");
+    let before = directory_bytes(directory.path());
+    let sets: String = labels
+        .iter()
+        .map(|label| format!(" SET n:{label}"))
+        .collect();
+    run(&db, &format!("MATCH (n:Start){sets}"));
+    let mut tx = db.begin_write().unwrap();
+    for label in &labels {
+        tx.execute(
+            &format!("MATCH (n:Other) SET n:{label}"),
+            &Parameters::new(),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let removes: String = labels
+        .iter()
+        .map(|label| format!(" REMOVE n:{label}"))
+        .collect();
+    run(&db, &format!("MATCH (n:Other){removes}"));
+    let grown = directory_bytes(directory.path()).saturating_sub(before);
+    assert!(
+        grown < 4 << 20,
+        "adding and removing 2000 labels one clause at a time grew the files by {grown} bytes"
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n) RETURN size(labels(n)) AS count ORDER BY count"
+        ),
+        [[int(1)], [int(2_001)]]
+    );
+    db.check().unwrap_or_else(|error| {
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
+    });
+}
+
+/// How long the fastest of three runs of `query` takes, each with a new query text so none
+/// reuses the plan of another.
+fn fastest(db: &Database, query: &str) -> Duration {
+    (0..3)
+        .map(|run_index| {
+            let query = format!("{query} AS run{run_index}");
+            let started = std::time::Instant::now();
+            run(db, &query);
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn a_chain_of_let_or_with_clauses_takes_time_linear_in_its_length() {
+    let db = db();
+    let lets = |count: usize| {
+        let chain: String = (1..count)
+            .map(|i| format!(" LET x{i} = x{} + 1", i - 1))
+            .collect();
+        format!("UNWIND [0] AS x0{chain} RETURN x{}", count - 1)
+    };
+    let withs = |count: usize| {
+        let chain = " WITH x WHERE x = 0".repeat(count);
+        format!("UNWIND [0] AS x{chain} RETURN x")
+    };
+    for (name, query) in [("LET", &lets as &dyn Fn(usize) -> String), ("WITH", &withs)] {
+        let small = fastest(&db, &query(1_000));
+        let large = fastest(&db, &query(16_000));
+        assert!(
+            large < small * 64,
+            "{small:?} for 1000 {name} clauses but {large:?} for 16000"
+        );
+    }
+}
+
 /// How long one write transaction takes to run `statements` statements that each match one
 /// node by its label and insert a node of another label.
 fn label_matches_in_one_transaction(statements: i64) -> Duration {

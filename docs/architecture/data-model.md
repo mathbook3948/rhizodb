@@ -43,6 +43,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each distinct set of labels is interned once to a `u32` label set ID in two tables, one by ID and one by labels.
 - Label set ID 0 is the empty set and has no stored entry.
 - Label sets are never deleted.
+- A write transaction stores only the label sets its live nodes have at commit, so a set a node passes through between clauses or statements never reaches the file.
 - A node meta chunk lists the label sets its group uses and stores each slot's position in that list, with no positions when the group uses one label set.
 - A node meta chunk keeps the live count of its group and of each label in its group.
 - Counting the nodes of one label, or all nodes, reads only the counts of each group.

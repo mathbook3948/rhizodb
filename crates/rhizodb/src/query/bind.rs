@@ -446,22 +446,24 @@ impl Binder<'_> {
         bindings: &[(ast::Name, ast::Expr)],
         scope: &mut Scope,
     ) -> Result<Clause, Error> {
-        let mut next = scope.clone();
         let mut bound = Vec::new();
+        let mut names: Vec<(&str, Slot, Kind)> = Vec::new();
         for (variable, value) in bindings {
             let expr = self.expr(value, scope, &mut Mode::Plain)?;
-            let name = &variable.0;
-            if next.get(name).is_some() {
+            let name = variable.0.as_str();
+            if scope.get(name).is_some() || names.iter().any(|(held, ..)| *held == name) {
                 return Err(error(
                     ErrorKind::VariableAlreadyBound,
                     format!("variable `{name}` is already bound"),
                 ));
             }
             let slot = self.slot();
-            next.insert(name, slot, kind_of(value, scope));
+            names.push((name, slot, kind_of(value, scope)));
             bound.push((expr, slot));
         }
-        *scope = next;
+        for (name, slot, kind) in names {
+            scope.insert(name, slot, kind);
+        }
         Ok(Clause::Read(ReadClause::Let(bound)))
     }
 

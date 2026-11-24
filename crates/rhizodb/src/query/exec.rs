@@ -481,13 +481,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )
             });
         }
-        let empty = vec![Datum::Null; self.slots];
+        let empty = || vec![Datum::Null; self.slots];
         let skip = match &projection.skip {
-            Some(skip) => self.count(skip, &empty, "SKIP")?,
+            Some(skip) => self.count(skip, &empty(), "SKIP")?,
             None => 0,
         };
         let limit = match &projection.limit {
-            Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
+            Some(limit) => Some(self.count(limit, &empty(), "LIMIT")?),
             None => None,
         };
         if !projection.order_by.is_empty() {

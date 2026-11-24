@@ -107,13 +107,16 @@ impl Parser {
             )
         };
         let mut clauses = Vec::new();
+        let mut star = false;
         while clauses.is_empty() || self.at_clause_start() {
-            if clauses.iter().any(yields_star) {
+            if star {
                 return Err(self.unexpected());
             }
-            clauses.push(self.clause()?);
+            let clause = self.clause()?;
+            star = yields_star(&clause);
+            clauses.push(clause);
         }
-        if clauses.len() > 1 && clauses.iter().any(yields_star) {
+        if clauses.len() > 1 && star {
             let star = self
                 .pos
                 .checked_sub(1)

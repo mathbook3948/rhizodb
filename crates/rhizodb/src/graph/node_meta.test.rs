@@ -28,16 +28,17 @@ pub(super) struct Model {
 }
 
 impl Model {
-    fn intern(&mut self, labels: &Labels) {
-        if !labels.is_empty() {
-            self.label_sets.insert(labels.clone());
+    fn commit(&mut self) {
+        for (labels, _) in self.nodes.values() {
+            if !labels.is_empty() {
+                self.label_sets.insert(labels.clone());
+            }
         }
     }
 
     pub(super) fn create(&mut self, labels: Labels, value: Option<i64>) -> u64 {
         let id = self.next;
         self.next += 1;
-        self.intern(&labels);
         self.nodes.insert(id, (labels, value));
         id
     }
@@ -50,9 +51,6 @@ impl Model {
     fn relabel(&mut self, id: u64, edit: impl FnOnce(&mut Labels)) {
         let mut labels = self.nodes[&id].0.clone();
         edit(&mut labels);
-        if labels != self.nodes[&id].0 {
-            self.intern(&labels);
-        }
         self.nodes.get_mut(&id).unwrap().0 = labels;
     }
 }
@@ -386,6 +384,7 @@ fn run(ops: &[Op]) -> Result<(), TestCaseError> {
         match end.unwrap_or(Op::Commit) {
             Op::Commit => {
                 write.commit().unwrap();
+                pending.commit();
                 committed = pending;
             }
             Op::Rollback => write.rollback().unwrap(),
@@ -455,6 +454,7 @@ fn single_commits(rounds: usize, seed: u64) -> Result<(), TestCaseError> {
             )?,
         }
         write.commit().unwrap();
+        model.commit();
         let read = graph.read().unwrap();
         check(&read, &model)?;
     }

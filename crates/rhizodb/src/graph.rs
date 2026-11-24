@@ -298,6 +298,7 @@ impl<S: Storage> Graph<S> {
             own_tokens: CommittedTokens::default(),
             label_sets: Arc::clone(&self.committed_label_sets),
             own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
@@ -343,6 +344,7 @@ impl<S: Storage> Graph<S> {
             own_tokens: CommittedTokens::default(),
             label_sets: Arc::clone(&self.committed_label_sets),
             own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
@@ -366,6 +368,7 @@ pub(crate) struct GraphTx<T> {
     own_tokens: CommittedTokens,
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
+    new_label_sets: BTreeMap<LabelSetId, (Vec<u8>, usize)>,
     meta: BTreeMap<u64, GroupEdit>,
     columns: BTreeMap<u64, ColumnsEdit>,
     reader: ColumnReader,
@@ -387,6 +390,7 @@ impl<T> GraphTx<T> {
             own_tokens: CommittedTokens::default(),
             label_sets: Arc::default(),
             own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
@@ -1060,6 +1064,11 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn flush(&mut self) -> Result<(), GraphError> {
+        for (set, (key, users)) in std::mem::take(&mut self.new_label_sets) {
+            if users > 0 {
+                self.store_label_set(set, &key)?;
+            }
+        }
         for (key, next) in std::mem::take(&mut self.counters) {
             self.transaction
                 .put(Table::Metadata, &key, &next.to_be_bytes())?;
@@ -1248,15 +1257,47 @@ impl<T: WriteTransaction> GraphTx<T> {
                     id = self.next_counter(keys::NEXT_LABEL_SET_KEY)?;
                 }
                 let id = u32::try_from(id).map_err(|_| GraphError::IdSpaceExhausted)?;
-                self.transaction
-                    .put(Table::LabelSets, &id.to_be_bytes(), &key)?;
-                self.transaction
-                    .put(Table::LabelSetByTokens, &key, &id.to_be_bytes())?;
-                LabelSetId(id)
+                let set = LabelSetId(id);
+                self.new_label_sets.insert(set, (key, 0));
+                set
             }
         };
         self.own_label_sets.insert(set, labels);
         Ok(set)
+    }
+
+    fn set_node_label_set(
+        &mut self,
+        group: u64,
+        slot: usize,
+        state: Option<LabelSetId>,
+    ) -> Result<(), GraphError> {
+        let edit = self.meta_edit(group)?;
+        let was = edit.label_set(slot)?;
+        edit.set(slot, state)?;
+        if let Some(set) = state
+            && let Some((_, users)) = self.new_label_sets.get_mut(&set)
+        {
+            *users += 1;
+        }
+        if let Some(set) = was
+            && let Some((_, users)) = self.new_label_sets.get_mut(&set)
+        {
+            *users -= 1;
+            if *users == 0 {
+                self.new_label_sets.remove(&set);
+                self.own_label_sets.remove(set);
+            }
+        }
+        Ok(())
+    }
+
+    fn store_label_set(&mut self, set: LabelSetId, key: &[u8]) -> Result<(), GraphError> {
+        self.transaction
+            .put(Table::LabelSets, &set.0.to_be_bytes(), key)?;
+        self.transaction
+            .put(Table::LabelSetByTokens, key, &set.0.to_be_bytes())?;
+        Ok(())
     }
 
     fn move_labels_to_node_meta(&mut self) -> Result<(), GraphError> {
@@ -1283,6 +1324,9 @@ impl<T: WriteTransaction> GraphTx<T> {
                 }
                 self.transaction.put(Table::Nodes, &key, &record.encode())?;
                 let set = self.intern_label_set(&record.labels)?;
+                if let Some((key, _)) = self.new_label_sets.remove(&set) {
+                    self.store_label_set(set, &key)?;
+                }
                 edit.put(meta::locate(id).1, set);
             }
             if let Some(chunk) = edit.encode(group, |set| self.label_set(set))? {
@@ -1370,7 +1414,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         let id = NodeId(self.next_counter(keys::NEXT_NODE_ID_KEY)?);
         let set = self.intern_label_set(&record.labels)?;
         let (group, slot) = meta::locate(id);
-        self.meta_edit(group)?.set(slot, Some(set))?;
+        self.set_node_label_set(group, slot, Some(set))?;
         self.reindex(id.0, None, Some(Element::Node(&record)))?;
         self.create_column_node(group, slot, record.properties)?;
         Ok(id)
@@ -1534,7 +1578,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         for key in record.properties.keys() {
             self.set_column_value((group, *key), slot, None)?;
         }
-        self.meta_edit(group)?.set(slot, None)?;
+        self.set_node_label_set(group, slot, None)?;
         Ok(Some(record))
     }
 
@@ -1624,7 +1668,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         }
         let set = self.intern_label_set(&after.labels)?;
         let (group, slot) = meta::locate(id);
-        self.meta_edit(group)?.set(slot, Some(set))?;
+        self.set_node_label_set(group, slot, Some(set))?;
         if !indexed.is_empty() {
             self.reindex(
                 id.0,
