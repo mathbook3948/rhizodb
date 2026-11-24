@@ -19,7 +19,7 @@ use crate::storage::ReadTransaction;
 use super::aggregate::Groups;
 use super::aggregate::Part;
 use super::compare::equals;
-use super::compare::order;
+use super::compare::sort_order;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
@@ -548,11 +548,7 @@ fn rank_keys(
     directions: &[SortDirection],
 ) -> Ordering {
     for ((x, y), direction) in keys.iter().zip(&b.keys).zip(directions) {
-        let ordering = order(x, y);
-        let ordering = match direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        };
+        let ordering = sort_order(*direction, x, y);
         if ordering != Ordering::Equal {
             return ordering;
         }

@@ -125,7 +125,22 @@ pub(super) fn sexp(expr: &Expr) -> String {
             let branches: Vec<String> = case
                 .branches
                 .iter()
-                .map(|b| format!("(when {} {})", sexp(&b.when), sexp(&b.then)))
+                .map(|b| {
+                    let when: Vec<String> = b
+                        .when
+                        .iter()
+                        .map(|operand| match operand {
+                            super::ast::WhenOperand::Value(expr) => sexp(expr),
+                            super::ast::WhenOperand::Compare(op, expr) => {
+                                format!("({op:?} {})", sexp(expr))
+                            }
+                            super::ast::WhenOperand::IsNull { negated } => {
+                                format!("(is-null {negated})")
+                            }
+                        })
+                        .collect();
+                    format!("(when {} {})", when.join(" "), sexp(&b.then))
+                })
                 .collect();
             let otherwise = case.otherwise.as_deref().map_or(String::new(), sexp);
             format!(
@@ -157,6 +172,7 @@ pub(super) fn label_sexp(labels: &LabelExpr) -> String {
 fn binary_symbol(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Add => "+",
+        BinaryOp::Concat => "||",
         BinaryOp::Subtract => "-",
         BinaryOp::Multiply => "*",
         BinaryOp::Divide => "/",

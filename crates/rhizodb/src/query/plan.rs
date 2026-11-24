@@ -6,6 +6,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::UnionKind;
 use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
@@ -38,7 +39,7 @@ impl Plan {
 #[derive(Clone, Debug)]
 pub(crate) struct Program<C> {
     pub(crate) parts: Vec<Pipeline<C>>,
-    pub(crate) distinct: bool,
+    pub(crate) combine: UnionKind,
     pub(crate) columns: Vec<String>,
     pub(crate) slot_count: usize,
     /// The unconditionally evaluated expressions that read no row, no parameter, and match no
@@ -75,6 +76,17 @@ pub(crate) enum ReadClause {
     Filter(Expr),
     /// Extends each row with the value of each expression in its slot.
     Let(Vec<(Expr, Slot)>),
+    CallSubquery(Box<CallSubquery>),
+}
+
+/// `CALL { ... }`: runs every branch from each row and extends the row with each row the
+/// branches return, in `outputs`.
+#[derive(Clone, Debug)]
+pub(crate) struct CallSubquery {
+    pub(crate) optional: bool,
+    pub(crate) combine: UnionKind,
+    pub(crate) branches: Vec<Pipeline<ReadClause>>,
+    pub(crate) outputs: Vec<Slot>,
 }
 
 #[derive(Clone, Debug)]
@@ -328,8 +340,11 @@ pub(crate) enum Expr {
     Quantified(Box<Quantified>),
     /// A pattern used as a predicate: true when it matches at least once.
     Exists(Box<PatternQuery>),
-    /// `EXISTS { query }`: true when the clauses, run from the current row, give a row.
-    Subquery(Vec<ReadClause>),
+    /// `COUNT { pattern }`: how many times the patterns match.
+    CountMatches(Box<PatternQuery>),
+    /// `EXISTS`, `COUNT`, or `COLLECT` over the rows the clauses give from the current row.
+    Subquery(SubqueryKind, Vec<ReadClause>),
+    Reduce(Box<Reduce>),
     /// `[pattern WHERE filter | projection]`: one value per match.
     PatternComprehension(Box<PatternQuery>, Box<Expr>),
 }
@@ -339,6 +354,23 @@ pub(crate) struct Case {
     pub(crate) scrutinee: Option<Expr>,
     pub(crate) branches: Vec<(Expr, Expr)>,
     pub(crate) otherwise: Option<Expr>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SubqueryKind {
+    Exists,
+    Count,
+    /// The values of this slot, one per row.
+    Collect(Slot),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Reduce {
+    pub(crate) accumulator: Slot,
+    pub(crate) init: Expr,
+    pub(crate) slot: Slot,
+    pub(crate) source: Expr,
+    pub(crate) body: Expr,
 }
 
 #[derive(Clone, Debug)]

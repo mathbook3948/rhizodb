@@ -5,8 +5,10 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
+use super::compare::equals;
 use super::datum::Datum;
 use super::eval::Env;
+use super::eval::arithmetic;
 use super::eval::float_text;
 use super::shape::INSTANT;
 use super::shape::NUMBER;
@@ -14,6 +16,7 @@ use super::shape::Shape;
 use super::shape::admits;
 use super::temporals::Moment;
 use super::temporals::TemporalFunction;
+use crate::gql::ast::BinaryOp;
 use crate::temporal::arithmetic::Span;
 use crate::temporal::build::Kind;
 
@@ -73,6 +76,24 @@ pub(crate) enum Function {
     Left,
     Right,
     Exists,
+    CharLength,
+    ByteLength,
+    Cardinality,
+    IsEmpty,
+    IsNaN,
+    NullIf,
+    ElementId,
+    Power,
+    Mod,
+    Sinh,
+    Cosh,
+    Tanh,
+    Cot,
+    BTrim,
+    ToStringOrNull,
+    ToIntegerOrNull,
+    ToFloatOrNull,
+    ToBooleanOrNull,
     Temporal(TemporalFunction),
 }
 
@@ -90,6 +111,7 @@ const RELATIONSHIP: Accepted = &[Shape::Relationship];
 const ELEMENT: Accepted = &[Shape::Node, Shape::Relationship];
 const ENTITY: Accepted = &[Shape::Node, Shape::Relationship, Shape::Map];
 const LIST_OR_STRING: Accepted = &[Shape::List, Shape::String];
+const LIST_STRING_OR_MAP: Accepted = &[Shape::List, Shape::String, Shape::Map];
 const INTEGER_CONVERTIBLE: Accepted =
     &[Shape::Integer, Shape::Float, Shape::Boolean, Shape::String];
 const FLOAT_CONVERTIBLE: Accepted = &[Shape::Integer, Shape::Float, Shape::String];
@@ -153,7 +175,7 @@ const fn between(span: Span) -> Function {
     Function::Temporal(TemporalFunction::Between(span))
 }
 
-const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
+const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 109] = [
     ("id", Function::Id, 1, 1, &[ELEMENT]),
     ("labels", Function::Labels, 1, 1, &[NODE]),
     ("type", Function::Type, 1, 1, &[RELATIONSHIP]),
@@ -190,7 +212,8 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
     ("round", Function::Round, 1, 1, &[NUMBER]),
     ("sqrt", Function::Sqrt, 1, 1, &[NUMBER]),
     ("exp", Function::Exp, 1, 1, &[NUMBER]),
-    ("log", Function::Log, 1, 1, &[NUMBER]),
+    ("log", Function::Log, 1, 2, &[NUMBER]),
+    ("ln", Function::Log, 1, 2, &[NUMBER]),
     ("log10", Function::Log10, 1, 1, &[NUMBER]),
     ("sin", Function::Sin, 1, 1, &[NUMBER]),
     ("cos", Function::Cos, 1, 1, &[NUMBER]),
@@ -209,10 +232,33 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
     ("nodes", Function::Nodes, 1, 1, &[PATH]),
     ("relationships", Function::Relationships, 1, 1, &[PATH]),
     ("toupper", Function::ToUpper, 1, 1, &[STRING]),
+    ("upper", Function::ToUpper, 1, 1, &[STRING]),
     ("tolower", Function::ToLower, 1, 1, &[STRING]),
-    ("trim", Function::Trim, 1, 1, &[STRING]),
-    ("ltrim", Function::LTrim, 1, 1, &[STRING]),
-    ("rtrim", Function::RTrim, 1, 1, &[STRING]),
+    ("lower", Function::ToLower, 1, 1, &[STRING]),
+    ("trim", Function::Trim, 1, 2, &[STRING]),
+    ("btrim", Function::BTrim, 1, 2, &[STRING]),
+    ("ltrim", Function::LTrim, 1, 2, &[STRING]),
+    ("rtrim", Function::RTrim, 1, 2, &[STRING]),
+    ("char_length", Function::CharLength, 1, 1, &[STRING]),
+    ("character_length", Function::CharLength, 1, 1, &[STRING]),
+    ("byte_length", Function::ByteLength, 1, 1, &[STRING]),
+    ("octet_length", Function::ByteLength, 1, 1, &[STRING]),
+    ("cardinality", Function::Cardinality, 1, 1, &[LIST]),
+    ("path_length", Function::Length, 1, 1, &[PATH]),
+    ("isempty", Function::IsEmpty, 1, 1, &[LIST_STRING_OR_MAP]),
+    ("isnan", Function::IsNaN, 1, 1, &[NUMBER]),
+    ("nullif", Function::NullIf, 2, 2, &[ANY]),
+    ("elementid", Function::ElementId, 1, 1, &[ELEMENT]),
+    ("power", Function::Power, 2, 2, &[NUMBER]),
+    ("mod", Function::Mod, 2, 2, &[NUMBER]),
+    ("sinh", Function::Sinh, 1, 1, &[NUMBER]),
+    ("cosh", Function::Cosh, 1, 1, &[NUMBER]),
+    ("tanh", Function::Tanh, 1, 1, &[NUMBER]),
+    ("cot", Function::Cot, 1, 1, &[NUMBER]),
+    ("tostringornull", Function::ToStringOrNull, 1, 1, &[ANY]),
+    ("tointegerornull", Function::ToIntegerOrNull, 1, 1, &[ANY]),
+    ("tofloatornull", Function::ToFloatOrNull, 1, 1, &[ANY]),
+    ("tobooleanornull", Function::ToBooleanOrNull, 1, 1, &[ANY]),
     ("substring", Function::Substring, 2, 3, &[STRING, INTEGER]),
     ("replace", Function::Replace, 3, 3, &[STRING]),
     ("split", Function::Split, 2, 2, &[STRING]),
@@ -508,6 +554,52 @@ impl<T: ReadTransaction> Env<'_, T> {
         let invalid = |value: &Datum| invalid_value(function, value);
         match function {
             Function::Coalesce => Ok(first),
+            Function::NullIf => Ok(match second {
+                Some(other) if equals(&first, &other) == Some(true) => Datum::Null,
+                _ => first,
+            }),
+            Function::ElementId => match first {
+                Datum::Node(id) => Ok(Datum::String(format!("node:{}", id.0))),
+                Datum::Relationship(id) => Ok(Datum::String(format!("relationship:{}", id.0))),
+                other => Err(invalid(&other)),
+            },
+            Function::CharLength => Ok(integer(string_argument(function, first)?.chars().count())),
+            Function::ByteLength => Ok(integer(string_argument(function, first)?.len())),
+            Function::Cardinality => match first {
+                Datum::List(items) => Ok(integer(items.len())),
+                other => Err(invalid(&other)),
+            },
+            Function::IsEmpty => match first {
+                Datum::List(items) => Ok(Datum::Boolean(items.is_empty())),
+                Datum::String(text) => Ok(Datum::Boolean(text.is_empty())),
+                Datum::Map(entries) => Ok(Datum::Boolean(entries.is_empty())),
+                other => Err(invalid(&other)),
+            },
+            Function::IsNaN => match first {
+                Datum::Integer(_) => Ok(Datum::Boolean(false)),
+                Datum::Float(value) => Ok(Datum::Boolean(value.is_nan())),
+                other => Err(invalid(&other)),
+            },
+            Function::Power | Function::Mod => {
+                let Some(second) = second.filter(|value| !value.is_null()) else {
+                    return Ok(Datum::Null);
+                };
+                let op = if function == Function::Power {
+                    BinaryOp::Power
+                } else {
+                    BinaryOp::Modulo
+                };
+                for value in [&first, &second] {
+                    if !matches!(value, Datum::Integer(_) | Datum::Float(_)) {
+                        return Err(invalid(value));
+                    }
+                }
+                arithmetic(op, first, second)
+            }
+            Function::ToStringOrNull => Ok(to_string(first).unwrap_or(Datum::Null)),
+            Function::ToIntegerOrNull => Ok(to_integer(first).unwrap_or(Datum::Null)),
+            Function::ToFloatOrNull => Ok(to_float(first).unwrap_or(Datum::Null)),
+            Function::ToBooleanOrNull => Ok(to_boolean(first).unwrap_or(Datum::Null)),
             Function::Exists => Ok(Datum::Boolean(!first.is_null())),
             Function::Pi => Ok(Datum::Float(std::f64::consts::PI)),
             Function::E => Ok(Datum::Float(std::f64::consts::E)),
@@ -603,6 +695,10 @@ impl<T: ReadTransaction> Env<'_, T> {
             | Function::Exp
             | Function::Log
             | Function::Log10
+            | Function::Sinh
+            | Function::Cosh
+            | Function::Tanh
+            | Function::Cot
             | Function::Sin
             | Function::Cos
             | Function::Tan
@@ -612,6 +708,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             | Function::Degrees
             | Function::Radians => {
                 let value = float_argument(function, &first)?;
+                if function == Function::Log && count == 2 {
+                    return match second {
+                        Some(Datum::Null) | None => Ok(Datum::Null),
+                        Some(argument) => Ok(Datum::Float(
+                            float_argument(function, &argument)?.log(value),
+                        )),
+                    };
+                }
                 Ok(Datum::Float(match function {
                     Function::Ceil => value.ceil(),
                     Function::Floor => value.floor(),
@@ -620,6 +724,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                     Function::Exp => value.exp(),
                     Function::Log => value.ln(),
                     Function::Log10 => value.log10(),
+                    Function::Sinh => value.sinh(),
+                    Function::Cosh => value.cosh(),
+                    Function::Tanh => value.tanh(),
+                    Function::Cot => 1.0 / value.tan(),
                     Function::Sin => value.sin(),
                     Function::Cos => value.cos(),
                     Function::Tan => value.tan(),
@@ -656,20 +764,43 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )),
                 other => Err(invalid(&other)),
             },
-            Function::ToUpper
-            | Function::ToLower
-            | Function::Trim
-            | Function::LTrim
-            | Function::RTrim => match first {
-                Datum::String(text) => Ok(Datum::String(match function {
-                    Function::ToUpper => text.to_uppercase(),
-                    Function::ToLower => text.to_lowercase(),
-                    Function::Trim => text.trim().to_owned(),
-                    Function::LTrim => text.trim_start().to_owned(),
-                    _ => text.trim_end().to_owned(),
+            Function::ToUpper | Function::ToLower => match first {
+                Datum::String(text) => Ok(Datum::String(if function == Function::ToUpper {
+                    text.to_uppercase()
+                } else {
+                    text.to_lowercase()
                 })),
                 other => Err(invalid(&other)),
             },
+            Function::Trim | Function::BTrim | Function::LTrim | Function::RTrim => {
+                let text = string_argument(function, first)?;
+                let characters = match second {
+                    None => None,
+                    Some(Datum::Null) => return Ok(Datum::Null),
+                    Some(Datum::String(characters)) => Some(characters),
+                    Some(other) => return Err(invalid(&other)),
+                };
+                let trimmed = |text: &str| -> String {
+                    let start = function != Function::RTrim;
+                    let end = function != Function::LTrim;
+                    let strip = |c: char| match &characters {
+                        Some(characters) => characters.contains(c),
+                        None => c.is_whitespace(),
+                    };
+                    let text = if start {
+                        text.trim_start_matches(strip)
+                    } else {
+                        text
+                    };
+                    let text = if end {
+                        text.trim_end_matches(strip)
+                    } else {
+                        text
+                    };
+                    text.to_owned()
+                };
+                Ok(Datum::String(trimmed(&text)))
+            }
             Function::Substring => {
                 let text = string_argument(function, first)?;
                 let Some(start) = integer_argument(function, second)? else {

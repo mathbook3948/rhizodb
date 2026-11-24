@@ -361,6 +361,9 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         by_id.insert(LabelSetId::EMPTY, Arc::from([]));
+        for (set, (key, _)) in &self.new_label_sets {
+            by_id.insert(*set, meta::parse_label_set(key)?);
+        }
         Ok(by_id)
     }
 

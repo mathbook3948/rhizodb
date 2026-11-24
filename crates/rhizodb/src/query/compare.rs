@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use super::datum::Datum;
+use crate::gql::ast::SortDirection;
 
 /// `a = b` under three-valued logic. `None` is null.
 pub(crate) fn equals(a: &Datum, b: &Datum) -> Option<bool> {
@@ -143,6 +144,26 @@ fn integer_float(integer: i64, float: f64) -> Option<Ordering> {
 /// values, strings, byte strings, booleans, numbers, then null. NaN sorts above every other number.
 ///
 /// Two values are equivalent for `DISTINCT` and grouping exactly when this returns `Equal`.
+/// How `a` sorts before or after `b` in `direction`, where nulls go first or last whichever way
+/// the values sort.
+pub(crate) fn sort_order(direction: SortDirection, a: &Datum, b: &Datum) -> Ordering {
+    let (descending, nulls_first) = match direction {
+        SortDirection::Ascending => (false, false),
+        SortDirection::Descending => (true, true),
+        SortDirection::AscendingNullsFirst => (false, true),
+        SortDirection::DescendingNullsLast => (true, false),
+    };
+    match (a.is_null(), b.is_null()) {
+        (true, true) => Ordering::Equal,
+        (true, false) if nulls_first => Ordering::Less,
+        (true, false) => Ordering::Greater,
+        (false, true) if nulls_first => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) if descending => order(a, b).reverse(),
+        (false, false) => order(a, b),
+    }
+}
+
 pub(crate) fn order(a: &Datum, b: &Datum) -> Ordering {
     let rank = rank(a).cmp(&rank(b));
     if rank != Ordering::Equal {

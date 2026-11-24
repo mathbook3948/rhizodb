@@ -228,9 +228,16 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
             independent(&quantified.source, bound_later)
                 && independent(&quantified.predicate, bound_later)
         }
-        Expr::Admit(..) | Expr::Exists(_) | Expr::Subquery(_) | Expr::PatternComprehension(..) => {
-            false
+        Expr::Reduce(reduce) => {
+            independent(&reduce.init, bound_later)
+                && independent(&reduce.source, bound_later)
+                && independent(&reduce.body, bound_later)
         }
+        Expr::Admit(..)
+        | Expr::Exists(_)
+        | Expr::CountMatches(_)
+        | Expr::Subquery(..)
+        | Expr::PatternComprehension(..) => false,
     }
 }
 

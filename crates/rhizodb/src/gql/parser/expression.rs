@@ -3,7 +3,6 @@ use super::Parser;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::Case;
 use crate::gql::ast::ComparisonOp;
-use crate::gql::ast::ExistsSubquery;
 use crate::gql::ast::Expr;
 use crate::gql::ast::FunctionCall;
 use crate::gql::ast::ListComprehension;
@@ -12,7 +11,10 @@ use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::PatternComprehension;
 use crate::gql::ast::Quantifier;
+use crate::gql::ast::Reduce;
+use crate::gql::ast::Subquery;
 use crate::gql::ast::UnaryOp;
+use crate::gql::ast::WhenOperand;
 use crate::gql::ast::WhenThen;
 use crate::gql::error::SyntaxError;
 use crate::gql::error::SyntaxErrorKind;
@@ -52,7 +54,7 @@ impl Infix {
             )
             | Self::Is => PREDICATE_PRECEDENCE,
             Self::Comparison(_) => COMPARISON_PRECEDENCE,
-            Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 7,
+            Self::Binary(BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Concat, _) => 7,
             Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 8,
             Self::Binary(BinaryOp::Power, _) => 9,
         }
@@ -85,6 +87,15 @@ impl Parser {
         let parsed = parse(self);
         self.pipe_ends_filter = outer;
         parsed
+    }
+
+    fn adjacent_pipes(&self) -> bool {
+        match (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)) {
+            (Some(first), Some(second)) => {
+                second.kind == TokenKind::Punct(Punct::Pipe) && first.end == second.start
+            }
+            _ => false,
+        }
     }
 
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
@@ -190,6 +201,7 @@ impl Parser {
                 Punct::Percent => Infix::Binary(BinaryOp::Modulo, 1),
                 Punct::Caret => Infix::Binary(BinaryOp::Power, 1),
                 Punct::RegexMatch => Infix::Binary(BinaryOp::RegexMatch, 1),
+                Punct::Pipe if self.adjacent_pipes() => Infix::Binary(BinaryOp::Concat, 2),
                 Punct::Eq => Infix::Comparison(ComparisonOp::Equal),
                 Punct::Neq => Infix::Comparison(ComparisonOp::NotEqual),
                 Punct::Lt => Infix::Comparison(ComparisonOp::Less),
@@ -434,10 +446,20 @@ impl Parser {
         })))
     }
 
-    fn exists_subquery(&mut self) -> ParseResult<Expr> {
+    fn collect_subquery(&mut self) -> ParseResult<Expr> {
+        self.pos += 2;
+        if !self.at_clause_start() {
+            return Err(self.unexpected());
+        }
+        let query = self.nested(Self::single_query)?;
+        self.expect_punct(Punct::RBrace)?;
+        Ok(Expr::Collect(Box::new(query)))
+    }
+
+    fn subquery_body(&mut self) -> ParseResult<Subquery> {
         self.pos += 2;
         let body = if self.at_clause_start() {
-            ExistsSubquery::Query(self.nested(Self::single_query)?)
+            Subquery::Query(self.nested(Self::single_query)?)
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
@@ -445,10 +467,10 @@ impl Parser {
             } else {
                 None
             };
-            ExistsSubquery::Pattern { patterns, filter }
+            Subquery::Pattern { patterns, filter }
         };
         self.expect_punct(Punct::RBrace)?;
-        Ok(Expr::Exists(Box::new(body)))
+        Ok(body)
     }
 
     fn optional_predicate(&mut self) -> ParseResult<Option<Box<Expr>>> {
@@ -486,8 +508,16 @@ impl Parser {
                 self.pos += 1;
                 return self.pipe_ending(None, Self::case);
             }
-            if is("EXISTS") && self.punct_at(1, Punct::LBrace) {
-                return self.exists_subquery();
+            if self.punct_at(1, Punct::LBrace) {
+                if is("EXISTS") {
+                    return Ok(Expr::Exists(Box::new(self.subquery_body()?)));
+                }
+                if is("COUNT") {
+                    return Ok(Expr::Count(Box::new(self.subquery_body()?)));
+                }
+                if is("COLLECT") {
+                    return self.collect_subquery();
+                }
             }
         }
         if self.at_function_call() {
@@ -534,6 +564,17 @@ impl Parser {
             {
                 return self.list_predicate(quantifier);
             }
+            if name.0.eq_ignore_ascii_case("reduce")
+                && self.at_word()
+                && self.punct_at(1, Punct::Eq)
+            {
+                return self.reduce();
+            }
+            if name.0.eq_ignore_ascii_case("trim")
+                && let Some(call) = self.trim_from()?
+            {
+                return Ok(call);
+            }
             if name.0.eq_ignore_ascii_case("count")
                 && self.at_punct(Punct::Star)
                 && self.punct_at(1, Punct::RParen)
@@ -557,6 +598,64 @@ impl Parser {
         })))
     }
 
+    fn trim_from(&mut self) -> ParseResult<Option<Expr>> {
+        let start = self.pos;
+        let side = ["LEADING", "TRAILING", "BOTH"]
+            .into_iter()
+            .find(|side| self.eat_keyword(side));
+        if side.is_some() && self.at_punct(Punct::RParen) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let characters = if self.at_keyword("FROM") {
+            None
+        } else {
+            let characters = self.expression()?;
+            if side.is_none() && !self.at_keyword("FROM") {
+                self.pos = start;
+                return Ok(None);
+            }
+            Some(characters)
+        };
+        self.expect_keyword("FROM")?;
+        let source = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        let name = match side {
+            Some("LEADING") => "ltrim",
+            Some("TRAILING") => "rtrim",
+            _ => "btrim",
+        };
+        Ok(Some(Expr::Function(Box::new(FunctionCall {
+            namespace: Vec::new(),
+            name: Name::new(name),
+            distinct: false,
+            args: std::iter::once(source).chain(characters).collect(),
+        }))))
+    }
+
+    fn reduce(&mut self) -> ParseResult<Expr> {
+        let accumulator = self.name()?;
+        self.pos += 1;
+        let init = self.expression()?;
+        self.expect_punct(Punct::Comma)?;
+        if !self.at_word() || !self.keyword_at(1, "IN") {
+            return Err(self.unexpected());
+        }
+        let variable = self.name()?;
+        self.pos += 1;
+        let source = self.expression()?;
+        self.expect_punct(Punct::Pipe)?;
+        let body = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        Ok(Expr::Reduce(Box::new(Reduce {
+            accumulator,
+            init,
+            variable,
+            source,
+            body,
+        })))
+    }
+
     fn list_predicate(&mut self, quantifier: Quantifier) -> ParseResult<Expr> {
         let variable = self.name()?;
         self.pos += 1;
@@ -572,6 +671,32 @@ impl Parser {
         }))
     }
 
+    fn when_operand(&mut self) -> ParseResult<WhenOperand> {
+        let op = match self.kind_at(0) {
+            Some(TokenKind::Punct(Punct::Eq)) => Some(ComparisonOp::Equal),
+            Some(TokenKind::Punct(Punct::Neq)) => Some(ComparisonOp::NotEqual),
+            Some(TokenKind::Punct(Punct::Lt)) => Some(ComparisonOp::Less),
+            Some(TokenKind::Punct(Punct::Le)) => Some(ComparisonOp::LessEqual),
+            Some(TokenKind::Punct(Punct::Gt)) => Some(ComparisonOp::Greater),
+            Some(TokenKind::Punct(Punct::Ge)) => Some(ComparisonOp::GreaterEqual),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.pos += 1;
+            return Ok(WhenOperand::Compare(
+                op,
+                self.binary(COMPARISON_PRECEDENCE + 1)?,
+            ));
+        }
+        if self.at_keyword("IS") && (self.keyword_at(1, "NULL") || self.keyword_at(1, "NOT")) {
+            self.pos += 1;
+            let negated = self.eat_keyword("NOT");
+            self.expect_keyword("NULL")?;
+            return Ok(WhenOperand::IsNull { negated });
+        }
+        Ok(WhenOperand::Value(self.expression()?))
+    }
+
     fn case(&mut self) -> ParseResult<Expr> {
         let scrutinee = if self.at_keyword("WHEN") {
             None
@@ -580,7 +705,11 @@ impl Parser {
         };
         let mut branches = Vec::new();
         while self.eat_keyword("WHEN") {
-            let when = self.expression()?;
+            let when = if scrutinee.is_some() {
+                self.comma_separated(Self::when_operand)?
+            } else {
+                vec![WhenOperand::Value(self.expression()?)]
+            };
             self.expect_keyword("THEN")?;
             let then = self.expression()?;
             branches.push(WhenThen { when, then });
