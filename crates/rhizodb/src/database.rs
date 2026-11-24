@@ -490,7 +490,6 @@ impl Database {
 }
 
 #[cfg(test)]
-#[cfg(not(rhizodb_engine))]
 #[path = "database_crash.test.rs"]
 mod crash_tests;
 

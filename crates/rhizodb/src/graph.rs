@@ -742,8 +742,17 @@ impl<T: ReadTransaction> GraphTx<T> {
                     self.carries(delta.after, label)?,
                 )?,
                 Meta::Edited { group, edit } => {
-                    for (slot, set) in edit.live() {
+                    let mut carrying = BTreeSet::new();
+                    for (set, _) in edit.uses() {
                         if self.carries(Some(set), label)? {
+                            carrying.insert(set);
+                        }
+                    }
+                    if carrying.is_empty() {
+                        return Ok(());
+                    }
+                    for (slot, set) in edit.live() {
+                        if carrying.contains(&set) {
                             ids.push(meta::node_at(group, slot));
                         }
                     }
@@ -789,8 +798,10 @@ impl<T: ReadTransaction> GraphTx<T> {
                     ))?,
                 Meta::Edited { edit, .. } => {
                     let mut carrying = count;
-                    for (_, set) in edit.live() {
-                        carrying += u64::from(self.carries(Some(set), label)?);
+                    for (set, uses) in edit.uses() {
+                        if self.carries(Some(set), label)? {
+                            carrying += u64::from(uses);
+                        }
                     }
                     carrying
                 }
@@ -1342,20 +1353,57 @@ impl<T: WriteTransaction> GraphTx<T> {
         })
     }
 
+    /// Sets each property of `changes` on the relationship, or removes it with `None`, in one
+    /// write of its record.
+    pub(crate) fn set_relationship_properties(
+        &mut self,
+        relationship: RelationshipId,
+        changes: Vec<(Token<PropertyKey>, Option<PropertyValue>)>,
+    ) -> Result<(), GraphError> {
+        self.edit_relationship(relationship, |record| {
+            for (key, value) in changes {
+                match value {
+                    Some(value) => record.properties.insert(key, value),
+                    None => record.properties.remove(&key),
+                };
+            }
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn add_label(
         &mut self,
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        self.relabel(node, label, true)
+        self.relabel(node, &[label], true)
     }
 
+    /// Adds every label of `labels` to the node, interning only the label set it ends with.
+    pub(crate) fn add_labels(
+        &mut self,
+        node: NodeId,
+        labels: &[Token<Label>],
+    ) -> Result<(), GraphError> {
+        self.relabel(node, labels, true)
+    }
+
+    /// Removes every label of `labels` from the node, interning only the label set it ends with.
+    pub(crate) fn remove_labels(
+        &mut self,
+        node: NodeId,
+        labels: &[Token<Label>],
+    ) -> Result<(), GraphError> {
+        self.relabel(node, labels, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn remove_label(
         &mut self,
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        self.relabel(node, label, false)
+        self.relabel(node, &[label], false)
     }
 
     /// Removes the relationship and returns its record, or returns `None` when it does not exist.
@@ -1459,18 +1507,30 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.set_column_value((group, key), slot, value)
     }
 
-    fn relabel(&mut self, id: NodeId, label: Token<Label>, add: bool) -> Result<(), GraphError> {
-        let labels = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
-        if labels.binary_search(&label).is_ok() == add {
+    fn relabel(
+        &mut self,
+        id: NodeId,
+        labels: &[Token<Label>],
+        add: bool,
+    ) -> Result<(), GraphError> {
+        let current = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let changed: BTreeSet<Token<Label>> = labels
+            .iter()
+            .copied()
+            .filter(|label| current.binary_search(label).is_ok() != add)
+            .collect();
+        if changed.is_empty() {
             return Ok(());
         }
-        let indexed = self.node_index_keys(|covered, _| covered == label)?;
-        let before = self.partial_record(id, &labels, &indexed)?;
+        let indexed = self.node_index_keys(|covered, _| changed.contains(&covered))?;
+        let before = self.partial_record(id, &current, &indexed)?;
         let mut after = before.clone();
-        if add {
-            after.labels.insert(label);
-        } else {
-            after.labels.remove(&label);
+        for label in &changed {
+            if add {
+                after.labels.insert(*label);
+            } else {
+                after.labels.remove(label);
+            }
         }
         let set = self.intern_label_set(&after.labels)?;
         let (group, slot) = meta::locate(id);

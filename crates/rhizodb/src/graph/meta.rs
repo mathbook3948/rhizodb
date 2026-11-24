@@ -238,12 +238,13 @@ impl Delta {
     }
 }
 
-/// The node meta of one row group in a form a write edits: which slots hold a live node and
-/// each live node's label set.
+/// The node meta of one row group in a form a write edits: which slots hold a live node, each
+/// live node's label set, and how many live nodes use each label set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MetaEdit {
     alive: [u64; WORDS],
     sets: Vec<LabelSetId>,
+    uses: BTreeMap<LabelSetId, u32>,
 }
 
 impl Default for MetaEdit {
@@ -251,6 +252,7 @@ impl Default for MetaEdit {
         Self {
             alive: [0; WORDS],
             sets: vec![LabelSetId::EMPTY; SLOTS],
+            uses: BTreeMap::new(),
         }
     }
 }
@@ -265,13 +267,28 @@ impl MetaEdit {
 
     /// Marks the slot live with the label set `set`.
     pub(crate) fn put(&mut self, slot: usize, set: LabelSetId) {
+        self.remove(slot);
         self.alive[slot / 64] |= 1 << (slot % 64);
         self.sets[slot] = set;
+        *self.uses.entry(set).or_insert(0) += 1;
     }
 
     pub(crate) fn remove(&mut self, slot: usize) {
+        if let Some(set) = self.label_set(slot)
+            && let Some(uses) = self.uses.get_mut(&set)
+        {
+            *uses -= 1;
+            if *uses == 0 {
+                self.uses.remove(&set);
+            }
+        }
         self.alive[slot / 64] &= !(1 << (slot % 64));
         self.sets[slot] = LabelSetId::EMPTY;
+    }
+
+    /// Each label set a live node of the group has, with how many live nodes have it.
+    pub(crate) fn uses(&self) -> impl Iterator<Item = (LabelSetId, u32)> + '_ {
+        self.uses.iter().map(|(set, uses)| (*set, *uses))
     }
 
     pub(crate) fn set(&mut self, slot: usize, state: Slot) {
