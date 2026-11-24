@@ -31,11 +31,13 @@ use super::plan::Program;
 use super::plan::Projection;
 use super::plan::Quantified;
 use super::plan::ReadClause;
+use super::plan::Reduce;
 use super::plan::RelationshipPattern;
 use super::plan::RemoveAction;
 use super::plan::SetAction;
 use super::plan::Slot;
 use super::plan::Step;
+use super::plan::SubqueryKind;
 use super::plan::UpdateClause;
 use super::seek;
 use super::shape::NUMBER;
@@ -1003,7 +1005,9 @@ impl Binder<'_> {
             },
             ast::Expr::List(_)
             | ast::Expr::ListComprehension(_)
-            | ast::Expr::PatternComprehension(_) => Some(Shape::List),
+            | ast::Expr::PatternComprehension(_)
+            | ast::Expr::Collect(_) => Some(Shape::List),
+            ast::Expr::Count(_) => Some(Shape::Integer),
             ast::Expr::Map(_) => Some(Shape::Map),
             ast::Expr::Comparison { .. }
             | ast::Expr::IsNull { .. }
@@ -1344,7 +1348,10 @@ impl Binder<'_> {
             }
             ast::Expr::ListPredicate(predicate) => self.list_predicate(predicate, scope, mode),
             ast::Expr::Pattern(element) => self.pattern_predicate(element, scope, mode),
-            ast::Expr::Exists(subquery) => self.exists(subquery, scope, mode),
+            ast::Expr::Exists(subquery) => self.subquery(subquery, false, scope, mode),
+            ast::Expr::Count(subquery) => self.subquery(subquery, true, scope, mode),
+            ast::Expr::Collect(query) => self.collect(query, scope, mode),
+            ast::Expr::Reduce(reduce) => self.reduce(reduce, scope, mode),
             ast::Expr::PatternComprehension(comprehension) => {
                 self.pattern_comprehension(comprehension, scope, mode)
             }
@@ -1719,42 +1726,105 @@ impl Binder<'_> {
         )?)))
     }
 
-    fn exists(
+    fn subquery(
         &mut self,
-        subquery: &ast::ExistsSubquery,
+        subquery: &ast::Subquery,
+        count: bool,
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
         match subquery {
-            ast::ExistsSubquery::Pattern { patterns, filter } => {
+            ast::Subquery::Pattern { patterns, filter } => {
                 let names = patterns
                     .iter()
                     .flat_map(|part| pattern_variables(&part.element));
                 let scope = &self.pattern_scope(scope, names_of(names), mode)?;
-                Ok(Expr::Exists(Box::new(self.pattern_query(
-                    patterns,
-                    filter.as_ref(),
-                    scope,
-                    mode,
-                )?)))
+                let query = Box::new(self.pattern_query(patterns, filter.as_ref(), scope, mode)?);
+                Ok(if count {
+                    Expr::CountMatches(query)
+                } else {
+                    Expr::Exists(query)
+                })
             }
-            ast::ExistsSubquery::Query(query) => {
-                let mut free = Vec::new();
-                collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
-                let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
-                let (pipeline, _, _) =
-                    self.root(|binder| binder.single_query(query, scope, true))?;
-                let clauses = pipeline
-                    .clauses
-                    .into_iter()
-                    .filter_map(|clause| match clause {
-                        Clause::Read(clause) => Some(clause),
-                        Clause::Update(_) => None,
-                    })
-                    .collect();
-                Ok(Expr::Subquery(clauses))
+            ast::Subquery::Query(query) => {
+                let kind = if count {
+                    SubqueryKind::Count
+                } else {
+                    SubqueryKind::Exists
+                };
+                let (clauses, _) = self.subquery_clauses(query, scope, mode)?;
+                Ok(Expr::Subquery(kind, clauses))
             }
         }
+    }
+
+    fn collect(
+        &mut self,
+        query: &ast::SingleQuery,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let (clauses, output) = self.subquery_clauses(query, scope, mode)?;
+        match output.as_slice() {
+            [slot] => Ok(Expr::Subquery(SubqueryKind::Collect(*slot), clauses)),
+            _ => Err(error(
+                ErrorKind::InvalidClauseComposition,
+                "a COLLECT subquery must end with a RETURN of one column",
+            )),
+        }
+    }
+
+    fn subquery_clauses(
+        &mut self,
+        query: &ast::SingleQuery,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<(Vec<ReadClause>, Vec<Slot>), Error> {
+        let mut free = Vec::new();
+        collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
+        let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
+        let (pipeline, _, _) = self.root(|binder| binder.single_query(query, scope, true))?;
+        let clauses = pipeline
+            .clauses
+            .into_iter()
+            .filter_map(|clause| match clause {
+                Clause::Read(clause) => Some(clause),
+                Clause::Update(_) => None,
+            })
+            .collect();
+        Ok((clauses, pipeline.output))
+    }
+
+    fn reduce(
+        &mut self,
+        reduce: &ast::Reduce,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        if contains_aggregate(&reduce.body) {
+            return Err(per_element_aggregate());
+        }
+        if reduce.accumulator == reduce.variable {
+            return Err(error(
+                ErrorKind::VariableAlreadyBound,
+                format!("variable `{}` is already bound", reduce.variable.0),
+            ));
+        }
+        let init = self.expr(&reduce.init, scope, mode)?;
+        let source = self.expr(&reduce.source, scope, mode)?;
+        let accumulator = self.slot();
+        let slot = self.slot();
+        let mut inner = scope.clone();
+        inner.insert(&reduce.accumulator.0, accumulator, Kind::Unknown);
+        inner.insert(&reduce.variable.0, slot, Kind::Unknown);
+        let body = self.expr(&reduce.body, &inner, mode)?;
+        Ok(Expr::Reduce(Box::new(Reduce {
+            accumulator,
+            init,
+            slot,
+            source,
+            body,
+        })))
     }
 
     fn pattern_comprehension(
@@ -1961,7 +2031,7 @@ fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast
 struct Parts<'a> {
     always: Vec<&'a Expr>,
     sometimes: Vec<&'a Expr>,
-    bound: Option<Slot>,
+    bound: Vec<Slot>,
     reads_graph: bool,
 }
 
@@ -2038,17 +2108,23 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
                 .iter()
                 .chain(&comprehension.projection)
                 .collect(),
-            bound: Some(comprehension.slot),
+            bound: vec![comprehension.slot],
             ..Parts::default()
         },
         Expr::Quantified(quantified) => Parts {
             always: vec![&quantified.source],
             sometimes: vec![&quantified.predicate],
-            bound: Some(quantified.slot),
+            bound: vec![quantified.slot],
             ..Parts::default()
         },
-        Expr::Exists(query) => Parts::matching(query, None),
-        Expr::Subquery(_) => Parts {
+        Expr::Reduce(reduce) => Parts {
+            always: vec![&reduce.init, &reduce.source],
+            sometimes: vec![&reduce.body],
+            bound: vec![reduce.accumulator, reduce.slot],
+            ..Parts::default()
+        },
+        Expr::Exists(query) | Expr::CountMatches(query) => Parts::matching(query, None),
+        Expr::Subquery(..) => Parts {
             reads_graph: true,
             ..Parts::default()
         },
@@ -2078,13 +2154,12 @@ fn collect_closed<'a>(
         outermost = join(outermost, collect_closed(child, local, out));
     }
     let covered = out.len();
+    let depth = local.len();
     local.extend(parts.bound);
     for child in parts.sometimes {
         outermost = join(outermost, collect_closed(child, local, out));
     }
-    if parts.bound.is_some() {
-        local.pop();
-    }
+    local.truncate(depth);
     if outermost.is_some_and(|reach| reach >= base) {
         out.drain(mark..covered);
         out.push(expr);
@@ -2218,8 +2293,17 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             bound.pop();
         }
         ast::Expr::Pattern(element) => collect_pattern_free(element, bound, free),
-        ast::Expr::Exists(subquery) => match subquery.as_ref() {
-            ast::ExistsSubquery::Pattern { patterns, filter } => {
+        ast::Expr::Reduce(reduce) => {
+            collect_free(&reduce.init, bound, free);
+            collect_free(&reduce.source, bound, free);
+            bound.push(&reduce.accumulator.0);
+            bound.push(&reduce.variable.0);
+            collect_free(&reduce.body, bound, free);
+            bound.truncate(bound.len() - 2);
+        }
+        ast::Expr::Collect(query) => collect_clauses_free(&query.clauses, bound, free),
+        ast::Expr::Exists(subquery) | ast::Expr::Count(subquery) => match subquery.as_ref() {
+            ast::Subquery::Pattern { patterns, filter } => {
                 for part in patterns {
                     collect_pattern_free(&part.element, bound, free);
                 }
@@ -2227,7 +2311,7 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
                     collect_free(filter, bound, free);
                 }
             }
-            ast::ExistsSubquery::Query(query) => collect_clauses_free(&query.clauses, bound, free),
+            ast::Subquery::Query(query) => collect_clauses_free(&query.clauses, bound, free),
         },
         ast::Expr::PatternComprehension(comprehension) => {
             collect_pattern_free(&comprehension.element, bound, free);
@@ -2447,7 +2531,9 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
         | ast::Expr::Variable(_)
         | ast::Expr::CountStar
         | ast::Expr::Pattern(_)
-        | ast::Expr::Exists(_) => Vec::new(),
+        | ast::Expr::Exists(_)
+        | ast::Expr::Count(_)
+        | ast::Expr::Collect(_) => Vec::new(),
         ast::Expr::List(items) => items.iter().collect(),
         ast::Expr::Map(entries) => entries.iter().map(|(_, value)| value).collect(),
         ast::Expr::Property { base, .. } => vec![base],
@@ -2477,6 +2563,7 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
             .collect(),
         ast::Expr::ListComprehension(comprehension) => vec![&comprehension.source],
         ast::Expr::ListPredicate(predicate) => vec![&predicate.source],
+        ast::Expr::Reduce(reduce) => vec![&reduce.init, &reduce.source],
         ast::Expr::PatternComprehension(_) => Vec::new(),
     }
 }
@@ -2489,7 +2576,8 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         ast::Expr::Literal(ast::Literal::Null) => Kind::Unknown,
         ast::Expr::List(_)
         | ast::Expr::ListComprehension(_)
-        | ast::Expr::PatternComprehension(_) => Kind::List,
+        | ast::Expr::PatternComprehension(_)
+        | ast::Expr::Collect(_) => Kind::List,
         ast::Expr::Binary {
             op: ast::BinaryOp::Add,
             lhs,
@@ -2511,6 +2599,7 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         | ast::Expr::ListPredicate(_)
         | ast::Expr::Pattern(_)
         | ast::Expr::Exists(_)
+        | ast::Expr::Count(_)
         | ast::Expr::CountStar => Kind::Value,
         _ => Kind::Unknown,
     }

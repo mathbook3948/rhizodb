@@ -43,3 +43,14 @@ MATCH (p:Person) WHERE exists { MATCH (p)-[:KNOWS]->(:Person) } RETURN count(*) 
 MATCH (p:Person) RETURN p.id AS id, abs(p.age - 50) AS d
 MATCH (p:Person) RETURN p.id AS id, substring(p.name, 1, 2) AS s
 MATCH (p:Person) RETURN p.id AS id, coalesce(p.age, 0) + 1 AS a
+MATCH (p:Person) RETURN p.id AS id, COUNT { MATCH (p)-[:KNOWS]->(q:Person) } AS c ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, COUNT { MATCH (p)-[:KNOWS]->(q:Person) WHERE q.age > 30 } AS c ORDER BY id
+MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]-(:Person) } > 1 RETURN p.id AS id
+MATCH (c:City) RETURN c.name AS city, COUNT { MATCH (c)<-[:LIVES_IN]-(p:Person) RETURN DISTINCT p.name } AS names
+MATCH (p:Person) RETURN p.id AS id, COUNT { (p)-[:KNOWS]->() } AS c ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, COLLECT { MATCH (p)-[:KNOWS]->(q:Person) RETURN q.id ORDER BY q.id } AS l ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, reduce(acc = 0, x IN range(1, p.id) | acc + x) AS s ORDER BY id
+MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(q:Person) RETURN count(q) AS c } RETURN p.id AS id, c ORDER BY id
+MATCH (p:Person) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
+MATCH (p:Person) OPTIONAL CALL (p) { MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
+CALL { MATCH (p:Person) RETURN p.id AS id UNION MATCH (c:City) RETURN c.population AS id } RETURN count(id) AS n

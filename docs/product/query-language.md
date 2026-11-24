@@ -53,6 +53,10 @@ GQL is the reference language, but the only public conformance suite is the open
 - An integer argument to a float parameter arrives as a float.
 - A query that is a single `CALL` returns the `YIELD` items, or every output without `YIELD` or with `YIELD *`.
 - A query that is a single `CALL` may leave out the arguments, which are then read from the query parameters of the same names.
+- `COUNT { ... }` takes the same bodies as `EXISTS` under the same scope rules, and gives how many rows its query gives or how many times its patterns match.
+- `COLLECT { query }` gives, as a list in row order, the one column that its query's final `RETURN` gives, and any other query is an invalid clause composition.
+- A query inside `COUNT` or `COLLECT` cannot update the graph, and `COUNT` and `COLLECT` followed by parentheses stay the aggregates.
+- `reduce(accumulator = init, variable IN list | body)` folds the list from the left, gives `init` for an empty list and null for a null list, and its body cannot aggregate.
 - A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
 - A `CALL` inside a larger query passes the arguments of a procedure that takes any.
 - A `CALL` inside a larger query binds only its `YIELD` items.

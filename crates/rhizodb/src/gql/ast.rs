@@ -383,7 +383,22 @@ pub(crate) enum Expr {
     /// A pattern used as a boolean expression, as in `WHERE (a)-->(b)`.
     Pattern(Box<PatternElement>),
     PatternComprehension(Box<PatternComprehension>),
-    Exists(Box<ExistsSubquery>),
+    Exists(Box<Subquery>),
+    /// `COUNT { ... }`: how many rows the subquery gives.
+    Count(Box<Subquery>),
+    /// `COLLECT { query }`: the values of the single column the query returns.
+    Collect(Box<SingleQuery>),
+    Reduce(Box<Reduce>),
+}
+
+/// `reduce(accumulator = init, variable IN source | body)`
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Reduce {
+    pub accumulator: Name,
+    pub init: Expr,
+    pub variable: Name,
+    pub source: Expr,
+    pub body: Expr,
 }
 
 /// `[path = pattern WHERE filter | projection]`
@@ -395,9 +410,9 @@ pub(crate) struct PatternComprehension {
     pub projection: Box<Expr>,
 }
 
-/// The body of `EXISTS { ... }`.
+/// The body of `EXISTS { ... }` and `COUNT { ... }`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ExistsSubquery {
+pub(crate) enum Subquery {
     Pattern {
         patterns: Vec<PatternPart>,
         filter: Option<Expr>,

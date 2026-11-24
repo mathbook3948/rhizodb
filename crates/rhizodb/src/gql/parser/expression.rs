@@ -3,7 +3,6 @@ use super::Parser;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::Case;
 use crate::gql::ast::ComparisonOp;
-use crate::gql::ast::ExistsSubquery;
 use crate::gql::ast::Expr;
 use crate::gql::ast::FunctionCall;
 use crate::gql::ast::ListComprehension;
@@ -12,6 +11,8 @@ use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::PatternComprehension;
 use crate::gql::ast::Quantifier;
+use crate::gql::ast::Reduce;
+use crate::gql::ast::Subquery;
 use crate::gql::ast::UnaryOp;
 use crate::gql::ast::WhenThen;
 use crate::gql::error::SyntaxError;
@@ -434,10 +435,20 @@ impl Parser {
         })))
     }
 
-    fn exists_subquery(&mut self) -> ParseResult<Expr> {
+    fn collect_subquery(&mut self) -> ParseResult<Expr> {
+        self.pos += 2;
+        if !self.at_clause_start() {
+            return Err(self.unexpected());
+        }
+        let query = self.nested(Self::single_query)?;
+        self.expect_punct(Punct::RBrace)?;
+        Ok(Expr::Collect(Box::new(query)))
+    }
+
+    fn subquery_body(&mut self) -> ParseResult<Subquery> {
         self.pos += 2;
         let body = if self.at_clause_start() {
-            ExistsSubquery::Query(self.nested(Self::single_query)?)
+            Subquery::Query(self.nested(Self::single_query)?)
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
@@ -445,10 +456,10 @@ impl Parser {
             } else {
                 None
             };
-            ExistsSubquery::Pattern { patterns, filter }
+            Subquery::Pattern { patterns, filter }
         };
         self.expect_punct(Punct::RBrace)?;
-        Ok(Expr::Exists(Box::new(body)))
+        Ok(body)
     }
 
     fn optional_predicate(&mut self) -> ParseResult<Option<Box<Expr>>> {
@@ -486,8 +497,16 @@ impl Parser {
                 self.pos += 1;
                 return self.pipe_ending(None, Self::case);
             }
-            if is("EXISTS") && self.punct_at(1, Punct::LBrace) {
-                return self.exists_subquery();
+            if self.punct_at(1, Punct::LBrace) {
+                if is("EXISTS") {
+                    return Ok(Expr::Exists(Box::new(self.subquery_body()?)));
+                }
+                if is("COUNT") {
+                    return Ok(Expr::Count(Box::new(self.subquery_body()?)));
+                }
+                if is("COLLECT") {
+                    return self.collect_subquery();
+                }
             }
         }
         if self.at_function_call() {
@@ -534,6 +553,12 @@ impl Parser {
             {
                 return self.list_predicate(quantifier);
             }
+            if name.0.eq_ignore_ascii_case("reduce")
+                && self.at_word()
+                && self.punct_at(1, Punct::Eq)
+            {
+                return self.reduce();
+            }
             if name.0.eq_ignore_ascii_case("count")
                 && self.at_punct(Punct::Star)
                 && self.punct_at(1, Punct::RParen)
@@ -554,6 +579,29 @@ impl Parser {
             name,
             distinct,
             args,
+        })))
+    }
+
+    fn reduce(&mut self) -> ParseResult<Expr> {
+        let accumulator = self.name()?;
+        self.pos += 1;
+        let init = self.expression()?;
+        self.expect_punct(Punct::Comma)?;
+        if !self.at_word() || !self.keyword_at(1, "IN") {
+            return Err(self.unexpected());
+        }
+        let variable = self.name()?;
+        self.pos += 1;
+        let source = self.expression()?;
+        self.expect_punct(Punct::Pipe)?;
+        let body = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        Ok(Expr::Reduce(Box::new(Reduce {
+            accumulator,
+            init,
+            variable,
+            source,
+            body,
         })))
     }
 

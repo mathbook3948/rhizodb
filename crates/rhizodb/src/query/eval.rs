@@ -39,7 +39,9 @@ use super::plan::ListComprehension;
 use super::plan::PatternQuery;
 use super::plan::Quantified;
 use super::plan::ReadClause;
+use super::plan::Reduce;
 use super::plan::Slot;
+use super::plan::SubqueryKind;
 use super::regex::Patterns;
 use super::taint;
 use super::taint::Taint;
@@ -423,7 +425,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             Expr::ListComprehension(comprehension) => self.comprehension(comprehension, row),
             Expr::Quantified(quantified) => self.quantified(quantified, row),
             Expr::Exists(query) => self.exists(query, row),
-            Expr::Subquery(clauses) => self.subquery(clauses, row),
+            Expr::CountMatches(query) => self.count_matches(query, row),
+            Expr::Subquery(kind, clauses) => self.subquery(*kind, clauses, row),
+            Expr::Reduce(reduce) => self.reduce(reduce, row),
             Expr::PatternComprehension(query, projection) => {
                 self.pattern_comprehension(query, projection, row)
             }
@@ -743,12 +747,59 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((Datum::Boolean(found), Taint::Clean))
     }
 
-    fn subquery(&self, clauses: &[ReadClause], row: &Row) -> Result<(Datum, Taint), Error> {
+    fn count_matches(&self, query: &PatternQuery, row: &Row) -> Result<(Datum, Taint), Error> {
+        let mut found = 0i64;
+        self.match_query(query, row, &mut |_| {
+            found += 1;
+            Ok(true)
+        })?;
+        Ok((Datum::Integer(found), Taint::Clean))
+    }
+
+    fn subquery(
+        &self,
+        kind: SubqueryKind,
+        clauses: &[ReadClause],
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
         let mut rows = vec![row.clone()];
         for clause in clauses {
             rows = self.read_clause(clause, rows)?;
         }
-        Ok((Datum::Boolean(!rows.is_empty()), Taint::Clean))
+        let value = match kind {
+            SubqueryKind::Exists => Datum::Boolean(!rows.is_empty()),
+            SubqueryKind::Count => Datum::Integer(i64::try_from(rows.len()).unwrap_or(i64::MAX)),
+            SubqueryKind::Collect(slot) => datum::list(
+                rows.into_iter()
+                    .map(|mut row| {
+                        row.get_mut(slot)
+                            .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null))
+                    })
+                    .collect(),
+            )?,
+        };
+        Ok((value, Taint::Clean))
+    }
+
+    fn reduce(&self, reduce: &Reduce, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (mut accumulator, mut accumulator_taint) = self.tracked(&reduce.init, row)?;
+        let (source, source_taint) = self.tracked(&reduce.source, row)?;
+        if source_taint.is_whole() {
+            return Ok((Datum::Null, Taint::Whole));
+        }
+        let Some(items) = list_operand(source)? else {
+            return Ok((Datum::Null, Taint::Clean));
+        };
+        let mut local = row.clone();
+        for (item, taint) in items.into_iter().zip(source_taint.items()) {
+            set(&mut local, reduce.accumulator, accumulator);
+            set(&mut local, reduce.slot, item);
+            (accumulator, accumulator_taint) =
+                self.bound(reduce.accumulator, accumulator_taint, || {
+                    self.bound(reduce.slot, taint, || self.tracked(&reduce.body, &local))
+                })?;
+        }
+        Ok((accumulator, accumulator_taint))
     }
 
     fn pattern_comprehension(

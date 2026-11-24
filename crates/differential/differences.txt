@@ -1,9 +1,17 @@
+both-reject	corpus: CALL { MATCH (p:Person) RETURN p.id AS id UNION MATCH (c:City) RETURN c.population AS id } RETURN count(id) AS n	
 differ	corpus: MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN count(*) AS n	LadybugDB lets one pattern traverse the same relationship twice, Cypher keeps the relationships of a match distinct
 differ	corpus: MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(*) AS n	LadybugDB matches a self-loop twice in an undirected pattern, the TCK (Match2 [3]) expects it once
 differ	corpus: MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(a) RETURN a.id AS x, b.id AS y	LadybugDB lets one pattern traverse the same relationship twice, Cypher keeps the relationships of a match distinct
 differ	corpus: MATCH (a:Person)-[r1:KNOWS]->(b:Person)-[r2:KNOWS]->(c:Person) RETURN count(*) AS n	LadybugDB lets one pattern traverse the same relationship twice, Cypher keeps the relationships of a match distinct
+ladybug-rejects	corpus: MATCH (c:City) RETURN c.name AS city, COUNT { MATCH (c)<-[:LIVES_IN]-(p:Person) RETURN DISTINCT p.name } AS names	LadybugError: Query execution failed: Parser exception: Invalid input <COUNT { MATCH (c)<-[:LIVES_IN]-(p:Person) RETURN>: expected rule oC_ProjectionItem (line:
+both-reject	corpus: MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(q:Person) RETURN count(q) AS c } RETURN p.id AS id, c ORDER BY id	
+both-reject	corpus: MATCH (p:Person) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city	
+both-reject	corpus: MATCH (p:Person) OPTIONAL CALL (p) { MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city	
 differ	corpus: MATCH (p:Person) RETURN labels(p) AS l, count(*) AS n	LadybugDB labels() gives a string, Cypher gives a list
+ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, COLLECT { MATCH (p)-[:KNOWS]->(q:Person) RETURN q.id ORDER BY q.id } AS l ORDER BY id	LadybugError: Query execution failed: Parser exception: Invalid input < {>: expected rule iC_Statements (line: 1, offset: 44) "MATCH (p:Person) RETURN p.id AS i
+ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, COUNT { (p)-[:KNOWS]->() } AS c ORDER BY id	LadybugError: Query execution failed: Parser exception: Invalid input <COUNT { (>: expected rule oC_ProjectionItem (line: 1, offset: 44) "MATCH (p:Person) RETUR
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, [x IN [1, 2, 3] WHERE x > 1 | x * p.id] AS l	LadybugError: Query execution failed: Parser exception: Invalid input <[x IN [1, 2, 3] WHERE>: expected rule oC_ProjectionItem (line: 1, offset: 52) "MATCH (p:P
+ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, reduce(acc = 0, x IN range(1, p.id) | acc + x) AS s ORDER BY id	LadybugError: Query execution failed: Catalog exception: function REDUCE does not exist.
 differ	corpus: MATCH (p:Person) RETURN p.id AS id, substring(p.name, 1, 2) AS s	LadybugDB substring() counts from one, Cypher from zero
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, toFloat(p.age) / 3 AS third	LadybugError: Query execution failed: Catalog exception: function TOFLOAT does not exist.
 ladybug-rejects	corpus: MATCH (p:Person)-[k:KNOWS]->(q:Person) RETURN type(k) AS t, count(*) AS n	LadybugError: Query execution failed: Catalog exception: function TYPE does not exist.

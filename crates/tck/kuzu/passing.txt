@@ -33,6 +33,7 @@ issue/issue2.test::3055
 issue/issue3.test::BUG
 issue/issue4.test::3083
 issue/issue6.test::issue3543
+issue/issue7.test::FlatSelect
 issue/issue7.test::issue3607
 issue/issue7.test::issue4715
 issue/issue7.test::issue4783

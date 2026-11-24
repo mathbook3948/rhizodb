@@ -388,7 +388,8 @@ fn check_grouping(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> 
     let (p_text, g_text) = (render(&p, &scope), render(&g, &scope));
     let query = format!(
         "MATCH (n) WHERE {p_text} RETURN {g_text} AS g, count(*) AS c, count(n.x) AS cx, sum(n.x) AS s, \
-         min(n.y) AS mn, max(n.y) AS mx, collect(n.k) AS ks"
+         min(n.y) AS mn, max(n.y) AS mx, \
+         reduce(acc = [], k IN collect(n.k) | acc + [k]) AS ks"
     );
     let rows = runner.run(&query)?;
     let fail = |why: &str| Err(format!("{query}: {why}\n  got {rows:?}"));
@@ -574,6 +575,31 @@ fn check_pattern(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> R
             "MATCH (a), (b) WHERE EXISTS {{ MATCH (a)-[r]->(b) WHERE {text} }} RETURN a.k, b.k"
         ),
         pairs,
+    )?;
+    let mut counts: Vec<Vec<i64>> = Vec::new();
+    let mut sums: Vec<Vec<i64>> = Vec::new();
+    for a in graph.nodes.keys() {
+        for b in graph.nodes.keys() {
+            let between = all.iter().filter(|row| row[0] == *a && row[2] == *b);
+            counts.push(vec![*a, *b, between.clone().count() as i64]);
+            sums.push(vec![*a, *b, between.map(|row| row[1]).sum()]);
+        }
+    }
+    let counted = [
+        format!("MATCH (a), (b) RETURN a.k, b.k, COUNT {{ (a)-[r]->(b) WHERE {text} }}"),
+        format!("MATCH (a), (b) RETURN a.k, b.k, COUNT {{ MATCH (a)-[r]->(b) WHERE {text} }}"),
+        format!(
+            "MATCH (a), (b) RETURN a.k, b.k, COUNT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r }}"
+        ),
+    ];
+    expect_bag(runner, choices.pick(&counted), counts)?;
+    expect_bag(
+        runner,
+        &format!(
+            "MATCH (a), (b) RETURN a.k, b.k, \
+             reduce(s = 0, k IN COLLECT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r.k }} | s + k)"
+        ),
+        sums,
     )?;
     Ok(())
 }
