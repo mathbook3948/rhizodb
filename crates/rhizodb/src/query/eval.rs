@@ -1031,9 +1031,10 @@ fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
         BinaryOp::Concat => match (lhs, rhs) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::String(a), Datum::String(b)) => Ok(Datum::String(a + &b)),
-            (Datum::List(mut a), Datum::List(b)) => {
-                a.extend(b);
-                datum::list(a)
+            (Datum::List(a), Datum::List(b)) => {
+                let mut items = Arc::unwrap_or_clone(a);
+                items.extend(Arc::unwrap_or_clone(b));
+                datum::list(items)
             }
             (lhs, rhs) => Err(type_error(format!(
                 "|| cannot join a {} and a {}",
