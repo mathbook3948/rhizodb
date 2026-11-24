@@ -209,3 +209,102 @@ fn a_damaged_property_column_fails_as_corrupt_data_where_it_is_read() {
         "a read of other columns is unaffected"
     );
 }
+
+/// Flips one bit of every copy of `needle` in the file, since the storage engine may keep the
+/// bytes of a page it copied, and returns how many there were.
+fn flip_every(file: &mut [u8], needle: &[u8]) -> usize {
+    let mut found = 0;
+    let mut at = 0;
+    while let Some(offset) = file[at..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let start = at + offset;
+        file[start + needle.len() / 2] ^= 0x01;
+        found += 1;
+        at = start + needle.len();
+    }
+    found
+}
+
+fn adjacency_file(path: &Path) {
+    let db = Database::open(path).unwrap();
+    run(&db, "UNWIND range(0, 199) AS i INSERT (:Item {i: i})");
+    run(
+        &db,
+        "MATCH (a:Item {i: 0}), (b:Item) WHERE b.i >= 100 AND b.i < 120 INSERT (a)-[:T]->(b)",
+    );
+    run(
+        &db,
+        "MATCH (a:Item), (b:Item) WHERE a.i >= 1 AND a.i < 99 AND b.i = a.i + 1 INSERT (a)-[:T]->(b)",
+    );
+}
+
+#[test]
+fn a_damaged_adjacency_part_fails_as_corrupt_data_where_it_is_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("adjacency.rhizodb");
+    adjacency_file(&path);
+    let mut file = std::fs::read(&path).unwrap();
+    let needle: Vec<u8> = (101..107).flat_map(|other| [1, other]).collect();
+    assert!(
+        flip_every(&mut file, &needle) > 0,
+        "the part keeps the relationships of one node side by side"
+    );
+    std::fs::write(&path, &file).unwrap();
+    let db = Database::open(&path).unwrap();
+    for query in [
+        "MATCH (a:Item {i: 0})-[]->(b) RETURN b.i",
+        "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)",
+        "MATCH (a:Item {i: 0})-[]-(b) RETURN count(b)",
+        "MATCH (a:Item)-[:T]->(b) RETURN count(*)",
+        "MATCH (a:Item {i: 0}) DETACH DELETE a",
+    ] {
+        assert_eq!(error_kind(&db, query), ErrorKind::CorruptData, "{query}");
+    }
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (b:Item {i: 103}) MATCH (b)<-[:T]-(a) RETURN a.i"
+        ),
+        [vec![int(0)]],
+        "the incoming side is stored apart and still reads"
+    );
+}
+
+#[test]
+fn a_damaged_adjacency_delta_fails_as_corrupt_data_where_it_is_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("adjacency.rhizodb");
+    adjacency_file(&path);
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH (a:Item {i: 0}), (b:Item) WHERE b.i >= 60 AND b.i < 63 INSERT (a)-[:T]->(b)",
+        );
+        assert_eq!(
+            run(&db, "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)"),
+            [vec![int(23)]]
+        );
+    }
+    let mut file = std::fs::read(&path).unwrap();
+    assert!(
+        flip_every(&mut file, &[60, 1, 61, 1, 62]) > 0,
+        "the delta lists the relationships it adds side by side"
+    );
+    std::fs::write(&path, &file).unwrap();
+    let db = Database::open(&path).unwrap();
+    for query in [
+        "MATCH (a:Item {i: 0})-[]->(b) RETURN b.i",
+        "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)",
+        "MATCH (a:Item {i: 0})-[r]->(b) DELETE r",
+    ] {
+        assert_eq!(error_kind(&db, query), ErrorKind::CorruptData, "{query}");
+    }
+    assert_eq!(
+        run(&db, "MATCH (a:Item {i: 5})-[:T]->(b) RETURN b.i"),
+        [vec![int(6)]],
+        "a slot without the damaged delta still reads"
+    );
+}

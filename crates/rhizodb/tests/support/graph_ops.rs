@@ -167,6 +167,16 @@ enum Step {
     AddLabel(i64, &'static str),
     RemoveLabel(i64, &'static str),
     CreateRel(i64, ModelRel),
+    /// Creates a relationship between the node `center` and every node whose key is a multiple
+    /// of `stride`, keyed from `first` up in the order of the other node's key, so a node gets
+    /// more relationships than a row group has slots.
+    CreateFan {
+        first: i64,
+        center: i64,
+        stride: i64,
+        rel_type: &'static str,
+        incoming: bool,
+    },
     DeleteRel(i64),
     DeleteNode {
         key: i64,
@@ -263,6 +273,27 @@ impl Step {
                     ("w", Value::Integer(rel.w)),
                 ]),
             ),
+            Step::CreateFan {
+                first,
+                center,
+                stride,
+                rel_type,
+                incoming,
+            } => (
+                format!(
+                    "MATCH (a {{key: $center}}), (b) WHERE b.key % $stride = 0 \
+                     WITH a, b ORDER BY b.key WITH a, collect(b) AS bs \
+                     UNWIND range(0, size(bs) - 1) AS i WITH a, bs[i] AS b, i \
+                     INSERT (a){}[:{rel_type} {{rk: $first + i, w: b.key % 5}}]{}(b)",
+                    if *incoming { "<-" } else { "-" },
+                    if *incoming { "-" } else { "->" },
+                ),
+                parameters(&[
+                    ("first", Value::Integer(*first)),
+                    ("center", Value::Integer(*center)),
+                    ("stride", Value::Integer(*stride)),
+                ]),
+            ),
             Step::DeleteRel(key) => (
                 "MATCH ()-[r {rk: $key}]->() DELETE r".to_owned(),
                 parameters(&[("key", Value::Integer(*key))]),
@@ -336,6 +367,38 @@ impl Step {
             Step::CreateRel(key, rel) => {
                 if model.nodes.contains_key(&rel.start) && model.nodes.contains_key(&rel.end) {
                     model.rels.insert(*key, rel.clone());
+                }
+            }
+            Step::CreateFan {
+                first,
+                center,
+                stride,
+                rel_type,
+                incoming,
+            } => {
+                if model.nodes.contains_key(center) {
+                    let others: Vec<i64> = model
+                        .nodes
+                        .keys()
+                        .copied()
+                        .filter(|key| key % stride == 0)
+                        .collect();
+                    for (at, other) in (0..).zip(others) {
+                        let (start, end) = if *incoming {
+                            (other, *center)
+                        } else {
+                            (*center, other)
+                        };
+                        model.rels.insert(
+                            first + at,
+                            ModelRel {
+                                start,
+                                end,
+                                rel_type,
+                                w: other % 5,
+                            },
+                        );
+                    }
                 }
             }
             Step::DeleteRel(key) => {
@@ -424,7 +487,19 @@ impl Run {
     }
 
     fn step(next_key: &mut i64, model: &Model, choices: &mut dyn Choices) -> Step {
-        match choices.below(15) {
+        match choices.below(16) {
+            15 => {
+                let first = *next_key;
+                let stride = 1 + i64::try_from(choices.below(3)).unwrap_or(0);
+                *next_key += 1 + model.nodes.keys().filter(|key| *key % stride == 0).count() as i64;
+                Step::CreateFan {
+                    first,
+                    center: Self::pick_node(first, choices),
+                    stride,
+                    rel_type: TYPES[usize::try_from(choices.below(2)).unwrap_or(0)],
+                    incoming: choices.below(2) == 0,
+                }
+            }
             12 => Step::SetM(Self::pick_node(*next_key, choices), Self::mixed(choices)),
             13 => {
                 let first = *next_key;
@@ -598,6 +673,19 @@ type Execute<'a> = dyn Fn(&str, &Parameters) -> Result<Vec<Vec<Value>>, String> 
 
 const NODE_DUMP: &str = "MATCH (n) RETURN n.key, labels(n), n.p, n.q, n.m ORDER BY n.key";
 const REL_DUMP: &str = "MATCH (a)-[r]->(b) RETURN r.rk, a.key, type(r), r.w, b.key ORDER BY r.rk";
+const INCOMING_DUMP: &str =
+    "MATCH (b)<-[r]-(a) RETURN r.rk, a.key, type(r), r.w, b.key ORDER BY r.rk";
+
+/// Fails unless the relationships read from their targets are the ones read from their sources.
+fn same_from_both_ends(outgoing: &[Vec<Value>], incoming: &[Vec<Value>]) -> Result<(), String> {
+    if outgoing == incoming {
+        Ok(())
+    } else {
+        Err(format!(
+            "read from their sources the relationships are\n{outgoing:#?}\nand from their targets\n{incoming:#?}"
+        ))
+    }
+}
 
 fn dump(execute: &Execute<'_>) -> Result<Rows, String> {
     let mut nodes = execute(NODE_DUMP, &Parameters::new())?;
@@ -606,7 +694,9 @@ fn dump(execute: &Execute<'_>) -> Result<Rows, String> {
             labels.sort_by_key(|label| format!("{label:?}"));
         }
     }
-    Ok((nodes, execute(REL_DUMP, &Parameters::new())?))
+    let rels = execute(REL_DUMP, &Parameters::new())?;
+    same_from_both_ends(&rels, &execute(INCOMING_DUMP, &Parameters::new())?)?;
+    Ok((nodes, rels))
 }
 
 fn state_inside(tx: &mut rhizodb::WriteTransaction<'_>) -> Result<Rows, String> {
@@ -616,6 +706,10 @@ fn state_inside(tx: &mut rhizodb::WriteTransaction<'_>) -> Result<Rows, String> 
     let rels = tx
         .execute(REL_DUMP, &Parameters::new())
         .map_err(|error| error.to_string())?;
+    let incoming = tx
+        .execute(INCOMING_DUMP, &Parameters::new())
+        .map_err(|error| error.to_string())?;
+    same_from_both_ends(rels.rows(), incoming.rows())?;
     let mut nodes = nodes.rows().to_vec();
     for row in &mut nodes {
         if let Value::List(labels) = &mut row[1] {
@@ -727,7 +821,46 @@ fn check_query(
             .values()
             .filter(move |node| node.labels.contains(label))
     };
-    match choices.below(9) {
+    match choices.below(11) {
+        9 | 10 => {
+            let key = i64::try_from(choices.below(model.nodes.len() as u64 + 1)).unwrap_or(0);
+            let key = model
+                .nodes
+                .keys()
+                .nth(usize::try_from(key).unwrap_or(0))
+                .copied()
+                .unwrap_or(key);
+            let rel_type = match choices.below(3) {
+                2 => None,
+                index => Some(TYPES[usize::try_from(index).unwrap_or(0)]),
+            };
+            let (pattern, outgoing, incoming) = match choices.below(3) {
+                0 => ("-[r{}]->", true, false),
+                1 => ("<-[r{}]-", false, true),
+                _ => ("-[r{}]-", true, true),
+            };
+            let typed = rel_type.map_or(String::new(), |rel_type| format!(":{rel_type}"));
+            let query = format!(
+                "MATCH (a {{key: $k}}){}(b) RETURN r.rk, b.key",
+                pattern.replace("{}", &typed)
+            );
+            let want = model
+                .rels
+                .iter()
+                .filter(|(_, rel)| rel_type.is_none_or(|rel_type| rel.rel_type == rel_type))
+                .filter(|(_, rel)| (outgoing && rel.start == key) || (incoming && rel.end == key))
+                .map(|(rk, rel)| {
+                    let other = if outgoing && rel.start == key {
+                        rel.end
+                    } else {
+                        rel.start
+                    };
+                    vec![Value::Integer(*rk), Value::Integer(other)]
+                })
+                .collect();
+            let k = parameters(&[("k", Value::Integer(key))]);
+            expect_rows_in_any_order(execute(&query, &k)?, want, &query)
+        }
         5 => {
             let query = format!(
                 "MATCH (n:{label}) RETURN count(n), count(n.p), sum(n.p), min(n.p), max(n.p)"

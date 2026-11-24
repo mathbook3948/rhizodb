@@ -35,6 +35,20 @@ pub(crate) fn element_key(id: u64) -> [u8; 8] {
     id.to_be_bytes()
 }
 
+/// A key of the adjacency tables of format versions before adjacency segments.
+#[cfg(test)]
+pub(crate) fn adjacency_key(
+    node: NodeId,
+    rel_type: Token<RelationshipType>,
+    relationship: RelationshipId,
+) -> [u8; 20] {
+    let mut key = [0u8; 20];
+    key[..8].copy_from_slice(&node.0.to_be_bytes());
+    key[8..12].copy_from_slice(&rel_type.id().to_be_bytes());
+    key[12..].copy_from_slice(&relationship.0.to_be_bytes());
+    key
+}
+
 /// The node, relationship type, and relationship of a key of the adjacency tables of format
 /// versions before adjacency segments.
 pub(crate) fn parse_adjacency_key(

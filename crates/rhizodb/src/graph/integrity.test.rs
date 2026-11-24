@@ -1404,3 +1404,45 @@ fn relationship_indexes_stay_consistent_through_every_query_that_writes_relation
         1
     );
 }
+
+#[test]
+fn an_adjacency_segment_whose_deltas_remove_every_relationship_is_caught() {
+    let (id, _) = adjacency::locate(Side::Incoming, BOB, KNOWS);
+    assert_caught(
+        |write| {
+            for (node, relationship) in [(BOB, FRIENDSHIP), (CAROL, LOOP)] {
+                let (_, position) = adjacency::locate(Side::Incoming, node, KNOWS);
+                let change = adjacency::Change {
+                    removed: vec![relationship],
+                    added: Vec::new(),
+                };
+                let key = id.delta_key(position);
+                write
+                    .put(Table::Adjacency, &key, &change.encode(&key))
+                    .unwrap();
+            }
+        },
+        IntegrityViolation::NonCanonicalAdjacency(id),
+    );
+}
+
+#[test]
+fn an_adjacency_delta_that_removes_what_its_segment_does_not_hold_is_caught() {
+    let (id, position) = adjacency::locate(Side::Incoming, BOB, KNOWS);
+    let key = id.delta_key(position);
+    assert_caught(
+        |write| {
+            let change = adjacency::Change {
+                removed: vec![LOOP],
+                added: Vec::new(),
+            };
+            write
+                .put(Table::Adjacency, &key, &change.encode(&key))
+                .unwrap();
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::Adjacency,
+            key: key.to_vec(),
+        },
+    );
+}

@@ -1555,6 +1555,14 @@ mod columns_crash_tests;
 #[path = "graph/columns_corrupt.test.rs"]
 mod columns_corrupt_tests;
 
+#[cfg(test)]
+#[path = "graph/adjacency_model.test.rs"]
+mod adjacency_model_tests;
+
+#[cfg(test)]
+#[path = "graph/adjacency_crash.test.rs"]
+mod adjacency_crash_tests;
+
 fn typed(rel_type: u32, emit: &mut impl FnMut(Adjacent)) -> impl FnMut(Edge) + '_ {
     move |edge| {
         emit(Adjacent {

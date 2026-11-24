@@ -702,3 +702,21 @@ proptest! {
         prop_assert!(PartRef::parse(key, &damaged).is_err());
     }
 }
+
+#[test]
+fn a_small_commit_that_removes_the_last_relationships_deletes_the_segment() {
+    let mut stored = store(encode(&[
+        (0, vec![edge(0, 0)]),
+        (9, vec![edge(1, 0), edge(2, 0)]),
+    ]));
+    let mut edit = load(&stored);
+    edit.remove(9, RelationshipId(2)).unwrap();
+    assert!(!apply(&mut stored, edit));
+    let mut edit = load(&stored);
+    edit.remove(0, RelationshipId(0)).unwrap();
+    assert!(!apply(&mut stored, edit));
+    let mut edit = load(&stored);
+    edit.remove(9, RelationshipId(1)).unwrap();
+    assert!(apply(&mut stored, edit));
+    assert!(stored.is_empty());
+}
