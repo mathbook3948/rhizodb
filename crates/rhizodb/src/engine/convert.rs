@@ -154,7 +154,7 @@ pub(crate) fn convert_redb<F: FileSystem + 'static>(
             return Err(error);
         }
     };
-    if open_redb(&**fs, name)?.is_none() {
+    if fs.path(name).is_none() && open_redb(&**fs, name)?.is_none() {
         return Ok(());
     }
     let conversion = conversion_name(name);
