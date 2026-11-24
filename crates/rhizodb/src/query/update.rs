@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -157,7 +158,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
     fn map_operand(&self, value: Datum) -> Result<BTreeMap<String, Datum>, Error> {
         let env = self.env();
         match value {
-            Datum::Map(entries) => Ok(entries),
+            Datum::Map(entries) => Ok(Arc::unwrap_or_clone(entries)),
             Datum::Node(id) => env.property_map(&env.node(id)?.properties),
             Datum::Relationship(id) => env.property_map(&env.relationship(id)?.properties),
             Datum::Null => Ok(BTreeMap::new()),
@@ -465,7 +466,7 @@ fn collect_targets(
             relationships.extend(path.relationships);
         }
         Datum::List(items) => {
-            for item in items {
+            for item in Arc::unwrap_or_clone(items) {
                 collect_targets(item, nodes, relationships)?;
             }
         }

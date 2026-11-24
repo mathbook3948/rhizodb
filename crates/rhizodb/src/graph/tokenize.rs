@@ -1,4 +1,6 @@
+use unicode_normalization::IsNormalized;
 use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::is_nfkc_quick;
 use unicode_segmentation::UnicodeSegmentation;
 
 const VERSION: u32 = 8;
@@ -72,7 +74,7 @@ pub(crate) enum Clause {
 /// its own, and a word directly followed by `*` outside quotes is a prefix. A `*` after a
 /// paired-script run changes nothing, because such a run already matches inside longer runs.
 pub(crate) fn clauses(text: &str) -> Vec<Clause> {
-    let text: String = text.nfkc().collect();
+    let text = nfkc(text);
     let mut clauses = Vec::new();
     for (index, piece) in text.split('"').enumerate() {
         let scan = scan(piece, Purpose::Query);
@@ -113,10 +115,22 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// several letters a reader types and searches one at a time. The same text always gives the
 /// same terms, in the same order, with positions counted from zero.
 pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
-    scan(&text.nfkc().collect::<String>(), purpose).terms
+    scan(&nfkc(text), purpose).terms
+}
+
+fn nfkc(text: &str) -> std::borrow::Cow<'_, str> {
+    if is_nfkc_quick(text.chars()) == IsNormalized::Yes {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.nfkc().collect())
+    }
 }
 
 fn scan(text: &str, purpose: Purpose) -> Scan {
+    scan_by(text, purpose, str::is_ascii)
+}
+
+fn scan_by(text: &str, purpose: Purpose, ascii: impl Fn(&str) -> bool) -> Scan {
     let mut scan = Scan {
         purpose,
         terms: Vec::new(),
@@ -126,6 +140,15 @@ fn scan(text: &str, purpose: Purpose) -> Scan {
     };
     let mut segments = text.split_word_bounds().peekable();
     while let Some(segment) = segments.next() {
+        if ascii(segment) {
+            scan.flush_run();
+            if scan.push_ascii_segment(segment)
+                && segments.peek().is_some_and(|next| next.starts_with('*'))
+            {
+                scan.starred.push(scan.terms.len().saturating_sub(1));
+            }
+            continue;
+        }
         if !segment.chars().any(char::is_alphanumeric) {
             scan.flush_run();
             continue;
@@ -179,6 +202,27 @@ impl Scan {
             self.next = self.at(1);
         }
         word.clear();
+        pushed
+    }
+
+    fn push_ascii_segment(&mut self, segment: &str) -> bool {
+        let mut pushed = false;
+        for word in segment.split(char::is_whitespace) {
+            let trimmed = word.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+            pushed = !trimmed.is_empty();
+            if pushed {
+                let text = trimmed
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .map(|character| character.to_ascii_lowercase())
+                    .collect();
+                self.terms.push(Term {
+                    text,
+                    position: self.next,
+                });
+                self.next = self.at(1);
+            }
+        }
         pushed
     }
 

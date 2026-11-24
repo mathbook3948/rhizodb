@@ -561,6 +561,117 @@ fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() 
     assert_eq!(read.check_integrity().unwrap(), vec![]);
 }
 
+#[test]
+fn a_write_transaction_that_outgrows_its_held_chunks_still_reads_and_commits_its_relationships() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let rel_type = write.intern_token::<RelationshipType>("BIG").unwrap();
+    let key = write.intern_token::<PropertyKey>("text").unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let mut expected = BTreeMap::new();
+    let mut held = 0;
+    for index in 0..400usize {
+        let mut record = relationship(rel_type, a, b);
+        record.properties.insert(
+            key,
+            PropertyValue::String(format!("{index}").repeat(16 << 10)),
+        );
+        held += record.encode().len();
+        let id = write.create_relationship(&record).unwrap();
+        expected.insert(id, record);
+    }
+    assert!(held > 2 * HELD_RELATIONSHIP_BYTES);
+    let ids: Vec<RelationshipId> = expected.keys().copied().collect();
+    for (at, id) in ids.into_iter().enumerate() {
+        if at % 3 == 0 {
+            write.delete_relationship(id).unwrap();
+            expected.remove(&id);
+        }
+    }
+    for (id, record) in &expected {
+        assert_eq!(write.relationship(*id).unwrap().as_ref(), Some(record));
+    }
+    let mut visited = Vec::new();
+    write
+        .visit_relationship_records(|id, _| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited, expected.keys().copied().collect::<Vec<_>>());
+    assert_eq!(write.check_integrity().unwrap(), vec![]);
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    for (id, record) in &expected {
+        assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
+    }
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.redb");
+    let mut expected = BTreeMap::new();
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        let types = [
+            write.intern_token::<RelationshipType>("A").unwrap(),
+            write.intern_token::<RelationshipType>("B").unwrap(),
+        ];
+        let key = write.intern_token::<PropertyKey>("k").unwrap();
+        let nodes: Vec<NodeId> = (0..300)
+            .map(|_| write.create_node(node_with(&[])).unwrap())
+            .collect();
+        for index in 0..70_000usize {
+            let mut record = relationship(
+                types[index % 2],
+                nodes[index % nodes.len()],
+                nodes[index * 7 % nodes.len()],
+            );
+            if index % 5 != 0 {
+                record
+                    .properties
+                    .insert(key, PropertyValue::Integer(index as i64));
+            }
+            let id = write.create_relationship(&record).unwrap();
+            if index % 9 == 4 || (40..90).contains(&index) {
+                write.delete_relationship(id).unwrap();
+            } else {
+                expected.insert(id, record);
+            }
+        }
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_eleven(&mut previous);
+        previous.commit().unwrap();
+    }
+    assert!(expected.keys().last().unwrap().0 >= 1 << 16);
+    for _ in 0..2 {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let read = graph.read().unwrap();
+        for (id, record) in &expected {
+            assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
+        }
+        let mut count = 0;
+        read.visit_relationship_records(|_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, expected.len());
+        assert_eq!(
+            read.transaction
+                .scan_prefix(Table::Relationships, &[])
+                .unwrap(),
+            vec![]
+        );
+        assert_eq!(read.check_integrity().unwrap(), vec![]);
+    }
+}
+
 /// Deletes every property column and returns the properties they held, by node.
 pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId, Properties> {
     let mut values: BTreeMap<(NodeId, Token<PropertyKey>), PropertyValue> = BTreeMap::new();
@@ -604,9 +715,33 @@ pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId
     nodes
 }
 
+/// Rewrites a database of the current format in the layout of format 11, which kept each
+/// relationship record as its own entry under its ID, so a test can open it as an older version.
+pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
+    for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
+        let chunk = relationships::parse_key(&key).unwrap();
+        for entry in ChunkRef::parse(&value).unwrap().entries() {
+            let (slot, record) = entry.unwrap();
+            let id = relationships::relationship_at(chunk, slot);
+            write
+                .put(Table::Relationships, &keys::element_key(id.0), record)
+                .unwrap();
+        }
+        write.delete(Table::RelationshipChunks, &key).unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &11u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
 /// Rewrites a database of the current format in the layout of format 10, which kept each
 /// relationship record's type and ends at fixed width, so a test can open it as an older version.
 pub(crate) fn store_as_format_ten(write: &mut impl WriteTransaction) {
+    store_as_format_eleven(write);
     for (key, value) in write.scan_prefix(Table::Relationships, &[]).unwrap() {
         let record = RelationshipRecord::decode(&value).unwrap();
         write

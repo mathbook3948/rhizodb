@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -354,13 +355,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let mut out = Vec::new();
                 for row in rows {
                     let items = match self.eval(expr, &row)? {
-                        Datum::Null => Vec::new(),
+                        Datum::Null => Arc::default(),
                         Datum::List(items) => items,
-                        other => vec![other],
+                        other => Arc::new(vec![other]),
                     };
-                    for item in items {
+                    for item in items.iter() {
                         let mut next = row.clone();
-                        set(&mut next, *slot, item);
+                        set(&mut next, *slot, item.clone());
                         out.push(next);
                     }
                 }
@@ -705,8 +706,12 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
             Datum::Temporal(value) => Value::Temporal(value),
-            Datum::List(items) => Value::List(self.list_value(items, graveyard)?),
-            Datum::Map(entries) => Value::Map(self.map_value(entries, graveyard)?),
+            Datum::List(items) => {
+                Value::List(self.list_value(Arc::unwrap_or_clone(items), graveyard)?)
+            }
+            Datum::Map(entries) => {
+                Value::Map(self.map_value(Arc::unwrap_or_clone(entries), graveyard)?)
+            }
             Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
             Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
             Datum::Path(path) => Value::Path(self.path_value(path, graveyard)?),

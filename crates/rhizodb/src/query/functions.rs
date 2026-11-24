@@ -1,5 +1,6 @@
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -610,12 +611,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Labels => match first {
-                Datum::Node(id) => Ok(Datum::List(
+                Datum::Node(id) => Ok(Datum::List(Arc::new(
                     self.label_names(&self.node(id)?)?
                         .into_iter()
                         .map(Datum::String)
                         .collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
@@ -624,15 +625,17 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
             Function::Keys | Function::Properties => {
                 let entries = match first {
-                    Datum::Node(id) => self.property_map(&self.node(id)?.properties)?,
+                    Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?),
                     Datum::Relationship(id) => {
-                        self.property_map(&self.relationship(id)?.properties)?
+                        Arc::new(self.property_map(&self.relationship(id)?.properties)?)
                     }
                     Datum::Map(entries) => entries,
                     other => return Err(invalid(&other)),
                 };
                 Ok(if function == Function::Keys {
-                    Datum::List(entries.into_keys().map(Datum::String).collect())
+                    Datum::List(Arc::new(
+                        entries.keys().cloned().map(Datum::String).collect(),
+                    ))
                 } else {
                     Datum::Map(entries)
                 })
@@ -647,16 +650,16 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Head | Function::Last | Function::Tail => match first {
-                Datum::List(mut items) => Ok(match function {
-                    Function::Head => items.into_iter().next().unwrap_or(Datum::Null),
-                    Function::Last => items.pop().unwrap_or(Datum::Null),
-                    _ => Datum::List(items.into_iter().skip(1).collect()),
+                Datum::List(items) => Ok(match function {
+                    Function::Head => items.first().cloned().unwrap_or(Datum::Null),
+                    Function::Last => items.last().cloned().unwrap_or(Datum::Null),
+                    _ => Datum::List(Arc::new(items.iter().skip(1).cloned().collect())),
                 }),
                 other => Err(invalid(&other)),
             },
             Function::Reverse => match first {
                 Datum::List(mut items) => {
-                    items.reverse();
+                    Arc::make_mut(&mut items).reverse();
                     Ok(Datum::List(items))
                 }
                 Datum::String(text) => Ok(Datum::String(text.chars().rev().collect())),
@@ -750,18 +753,18 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Nodes => match first {
-                Datum::Path(path) => Ok(Datum::List(
+                Datum::Path(path) => Ok(Datum::List(Arc::new(
                     path.nodes.into_iter().map(Datum::Node).collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
             Function::Relationships => match first {
-                Datum::Path(path) => Ok(Datum::List(
+                Datum::Path(path) => Ok(Datum::List(Arc::new(
                     path.relationships
                         .into_iter()
                         .map(Datum::Relationship)
                         .collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
             Function::ToUpper | Function::ToLower => match first {
@@ -855,16 +858,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             Function::Split => {
                 let text = string_argument(function, first)?;
                 match second {
-                    Some(Datum::String(delimiter)) if delimiter.is_empty() => Ok(Datum::List(
-                        text.chars()
-                            .map(|char| Datum::String(char.to_string()))
-                            .collect(),
-                    )),
-                    Some(Datum::String(delimiter)) => Ok(Datum::List(
+                    Some(Datum::String(delimiter)) if delimiter.is_empty() => {
+                        Ok(Datum::List(Arc::new(
+                            text.chars()
+                                .map(|char| Datum::String(char.to_string()))
+                                .collect(),
+                        )))
+                    }
+                    Some(Datum::String(delimiter)) => Ok(Datum::List(Arc::new(
                         text.split(delimiter.as_str())
                             .map(|part| Datum::String(part.to_owned()))
                             .collect(),
-                    )),
+                    ))),
                     Some(Datum::Null) | None => Ok(Datum::Null),
                     Some(other) => Err(invalid(&other)),
                 }
@@ -954,7 +959,7 @@ fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum,
         .map_while(|index| i64::try_from(i128::from(start) + index * i128::from(step)).ok())
         .map(Datum::Integer)
         .collect();
-    Ok(Datum::List(items))
+    Ok(Datum::List(Arc::new(items)))
 }
 
 fn to_integer(value: Datum) -> Result<Datum, Error> {

@@ -11,7 +11,7 @@ pub(crate) fn equals(a: &Datum, b: &Datum) -> Option<bool> {
             if a.len() != b.len() {
                 return Some(false);
             }
-            all_equal(a.iter().zip(b))
+            all_equal(a.iter().zip(b.iter()))
         }
         (Datum::Map(a), Datum::Map(b)) => {
             if a.len() != b.len() || a.keys().ne(b.keys()) {
@@ -61,7 +61,7 @@ pub(crate) fn compare(a: &Datum, b: &Datum) -> Option<Comparison> {
         (Datum::Boolean(a), Datum::Boolean(b)) => Some(Comparison::Ordered(a.cmp(b))),
         (Datum::Temporal(a), Datum::Temporal(b)) => a.compare(b).map(Comparison::Ordered),
         (Datum::List(a), Datum::List(b)) => {
-            for (x, y) in a.iter().zip(b) {
+            for (x, y) in a.iter().zip(b.iter()) {
                 match compare(x, y)? {
                     Comparison::Ordered(Ordering::Equal) => {}
                     decided => return Some(decided),

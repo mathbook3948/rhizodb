@@ -183,7 +183,7 @@ fn reads_what_was_committed<H: Harness>(harness: &mut H) {
     assert_eq!(read.get(Table::Nodes, b"a").unwrap(), Some(b"1".to_vec()));
     assert_eq!(read.get(Table::Nodes, b"b").unwrap(), Some(b"2".to_vec()));
     assert_eq!(read.get(Table::Nodes, b"c").unwrap(), None);
-    assert_eq!(read.get(Table::Relationships, b"a").unwrap(), None);
+    assert_eq!(read.get(Table::RelationshipChunks, b"a").unwrap(), None);
     assert_eq!(copied(&read, Table::Nodes, b"a"), Some(b"1".to_vec()));
 }
 
@@ -207,7 +207,7 @@ fn a_delete_removes_its_key<H: Harness>(harness: &mut H) {
     let mut write = store.begin_write().unwrap();
     write.delete(Table::Nodes, b"a").unwrap();
     write.delete(Table::Nodes, b"missing").unwrap();
-    write.delete(Table::Relationships, b"b").unwrap();
+    write.delete(Table::RelationshipChunks, b"b").unwrap();
     write.commit().unwrap();
     assert_eq!(
         dump(&store.begin_read().unwrap(), Table::Nodes),
@@ -550,11 +550,11 @@ fn rollback_and_drop_discard_writes<H: Harness>(harness: &mut H) {
     {
         let mut write = store.begin_write().unwrap();
         write.delete(Table::Nodes, b"a").unwrap();
-        write.put(Table::Relationships, b"c", b"3").unwrap();
+        write.put(Table::RelationshipChunks, b"c", b"3").unwrap();
     }
     let read = store.begin_read().unwrap();
     assert_eq!(dump(&read, Table::Nodes), entries(&[(b"a", b"1")]));
-    assert!(dump(&read, Table::Relationships).is_empty());
+    assert!(dump(&read, Table::RelationshipChunks).is_empty());
 
     let mut write = store.begin_write().unwrap();
     assert_eq!(write.get(Table::Nodes, b"a").unwrap(), Some(b"1".to_vec()));

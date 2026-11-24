@@ -128,6 +128,7 @@ impl TableId {
             Table::LabelSetByTokens => 0x110,
             Table::NodeColumns => 0x111,
             Table::Adjacency => 0x112,
+            Table::RelationshipChunks => 0x113,
         })
     }
 

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use proptest::prelude::*;
 
@@ -128,8 +129,8 @@ fn query_value() -> impl Strategy<Value = Datum> {
     prop_oneof![
         8 => plain.clone(),
         1 => Just(Datum::Null),
-        1 => plain.clone().prop_map(|value| Datum::Map(BTreeMap::from([("k".to_owned(), value)]))),
-        1 => plain.prop_map(|value| Datum::List(vec![value, Datum::Null])),
+        1 => plain.clone().prop_map(|value| Datum::Map(Arc::new(BTreeMap::from([("k".to_owned(), value)])))),
+        1 => plain.prop_map(|value| Datum::List(Arc::new(vec![value, Datum::Null]))),
     ]
 }
 

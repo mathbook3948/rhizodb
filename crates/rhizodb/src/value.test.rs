@@ -81,7 +81,47 @@ pub(crate) fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
     }
 }
 
+fn compact(value: &PropertyValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    value.encode_compact_into(&mut out);
+    out
+}
+
+#[test]
+fn a_compact_integer_takes_its_zigzag_varint_until_that_is_as_long_as_the_fixed_width() {
+    for (value, length) in [
+        (0, 2),
+        (-1, 2),
+        (63, 2),
+        (-64, 2),
+        (64, 3),
+        (1998, 3),
+        ((1 << 55) - 1, 9),
+        (-(1 << 55), 9),
+        (1 << 55, 9),
+        (i64::MAX, 9),
+        (i64::MIN, 9),
+    ] {
+        let encoded = compact(&PropertyValue::Integer(value));
+        assert_eq!(encoded.len(), length, "{value}");
+        assert_eq!(
+            PropertyValue::decode(&encoded).unwrap(),
+            PropertyValue::Integer(value)
+        );
+    }
+}
+
 proptest! {
+    #[test]
+    fn every_value_round_trips_bit_exactly_in_its_compact_form(value in property_value()) {
+        let encoded = compact(&value);
+        prop_assert!(encoded.len() <= value.encode().len());
+        prop_assert!(same_bits(&value, &PropertyValue::decode(&encoded).unwrap()));
+        let mut reader = Reader::new(&encoded);
+        reader.skip_value().unwrap();
+        prop_assert_eq!(reader.remaining(), 0);
+    }
+
     #[test]
     fn every_value_round_trips_bit_exactly(value in property_value()) {
         let decoded = PropertyValue::decode(&value.encode()).unwrap();
