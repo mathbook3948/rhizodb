@@ -14,6 +14,7 @@ use crate::gql::ast::Quantifier;
 use crate::gql::ast::Reduce;
 use crate::gql::ast::Subquery;
 use crate::gql::ast::UnaryOp;
+use crate::gql::ast::WhenOperand;
 use crate::gql::ast::WhenThen;
 use crate::gql::error::SyntaxError;
 use crate::gql::error::SyntaxErrorKind;
@@ -559,6 +560,11 @@ impl Parser {
             {
                 return self.reduce();
             }
+            if name.0.eq_ignore_ascii_case("trim")
+                && let Some(call) = self.trim_from()?
+            {
+                return Ok(call);
+            }
             if name.0.eq_ignore_ascii_case("count")
                 && self.at_punct(Punct::Star)
                 && self.punct_at(1, Punct::RParen)
@@ -580,6 +586,41 @@ impl Parser {
             distinct,
             args,
         })))
+    }
+
+    fn trim_from(&mut self) -> ParseResult<Option<Expr>> {
+        let start = self.pos;
+        let side = ["LEADING", "TRAILING", "BOTH"]
+            .into_iter()
+            .find(|side| self.eat_keyword(side));
+        if side.is_some() && self.at_punct(Punct::RParen) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let characters = if self.at_keyword("FROM") {
+            None
+        } else {
+            let characters = self.expression()?;
+            if side.is_none() && !self.at_keyword("FROM") {
+                self.pos = start;
+                return Ok(None);
+            }
+            Some(characters)
+        };
+        self.expect_keyword("FROM")?;
+        let source = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        let name = match side {
+            Some("LEADING") => "ltrim",
+            Some("TRAILING") => "rtrim",
+            _ => "btrim",
+        };
+        Ok(Some(Expr::Function(Box::new(FunctionCall {
+            namespace: Vec::new(),
+            name: Name::new(name),
+            distinct: false,
+            args: std::iter::once(source).chain(characters).collect(),
+        }))))
     }
 
     fn reduce(&mut self) -> ParseResult<Expr> {
@@ -620,6 +661,32 @@ impl Parser {
         }))
     }
 
+    fn when_operand(&mut self) -> ParseResult<WhenOperand> {
+        let op = match self.kind_at(0) {
+            Some(TokenKind::Punct(Punct::Eq)) => Some(ComparisonOp::Equal),
+            Some(TokenKind::Punct(Punct::Neq)) => Some(ComparisonOp::NotEqual),
+            Some(TokenKind::Punct(Punct::Lt)) => Some(ComparisonOp::Less),
+            Some(TokenKind::Punct(Punct::Le)) => Some(ComparisonOp::LessEqual),
+            Some(TokenKind::Punct(Punct::Gt)) => Some(ComparisonOp::Greater),
+            Some(TokenKind::Punct(Punct::Ge)) => Some(ComparisonOp::GreaterEqual),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.pos += 1;
+            return Ok(WhenOperand::Compare(
+                op,
+                self.binary(COMPARISON_PRECEDENCE + 1)?,
+            ));
+        }
+        if self.at_keyword("IS") && (self.keyword_at(1, "NULL") || self.keyword_at(1, "NOT")) {
+            self.pos += 1;
+            let negated = self.eat_keyword("NOT");
+            self.expect_keyword("NULL")?;
+            return Ok(WhenOperand::IsNull { negated });
+        }
+        Ok(WhenOperand::Value(self.expression()?))
+    }
+
     fn case(&mut self) -> ParseResult<Expr> {
         let scrutinee = if self.at_keyword("WHEN") {
             None
@@ -628,7 +695,11 @@ impl Parser {
         };
         let mut branches = Vec::new();
         while self.eat_keyword("WHEN") {
-            let when = self.expression()?;
+            let when = if scrutinee.is_some() {
+                self.comma_separated(Self::when_operand)?
+            } else {
+                vec![WhenOperand::Value(self.expression()?)]
+            };
             self.expect_keyword("THEN")?;
             let then = self.expression()?;
             branches.push(WhenThen { when, then });

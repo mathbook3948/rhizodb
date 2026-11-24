@@ -68,6 +68,15 @@ struct Parser {
 
 impl Parser {
     fn query(&mut self) -> ParseResult<Query> {
+        let query = self.union_query()?;
+        self.eat_punct(Punct::Semicolon);
+        if self.peek().is_some() {
+            return Err(self.unexpected());
+        }
+        Ok(query)
+    }
+
+    fn union_query(&mut self) -> ParseResult<Query> {
         let first = self.single_query()?;
         let mut rest = Vec::new();
         let mut kind = None;
@@ -85,10 +94,6 @@ impl Parser {
             }
             kind = Some(this);
             rest.push(self.single_query()?);
-        }
-        self.eat_punct(Punct::Semicolon);
-        if self.peek().is_some() {
-            return Err(self.unexpected());
         }
         Ok(match kind {
             Some(kind) => Query::Union(Union { kind, first, rest }),

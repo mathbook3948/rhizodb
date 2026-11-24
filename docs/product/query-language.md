@@ -57,6 +57,15 @@ GQL is the reference language, but the only public conformance suite is the open
 - `COLLECT { query }` gives, as a list in row order, the one column that its query's final `RETURN` gives, and any other query is an invalid clause composition.
 - A query inside `COUNT` or `COLLECT` cannot update the graph, and `COUNT` and `COLLECT` followed by parentheses stay the aggregates.
 - `reduce(accumulator = init, variable IN list | body)` folds the list from the left, gives `init` for an empty list and null for a null list, and its body cannot aggregate.
+- `[OPTIONAL] CALL { query }` runs its query once per incoming row and extends the row with each row the query returns, and `OPTIONAL CALL` keeps a row whose query returns none, with nulls.
+- A `CALL` query sees the outer variables its scope clause names, `(a, b)`, `()`, or `(*)`, and without a scope clause those that the plain variable items of a leading `WITH` name, so any other name inside is a new variable.
+- A `CALL` query must end with `RETURN`, cannot update the graph, and cannot return a column named like an outer variable.
+- A `CALL` query may join single queries with `UNION` or `UNION ALL`, under the column rule of a top-level `UNION`.
+- A simple `CASE` branch takes a list of tests of the scrutinee, each a value it must equal, a comparison operator and a value, or `IS [NOT] NULL`, and the scrutinee is evaluated once.
+- `ORDER BY` takes `NULLS FIRST` and `NULLS LAST`, and without them nulls sort last ascending and first descending.
+- GQL's function names `upper`, `lower`, `char_length`, `character_length`, `byte_length`, `octet_length`, `cardinality`, `path_length`, `ln`, `power`, `mod`, `sinh`, `cosh`, `tanh`, `cot`, `nullif`, and two-argument `log(base, value)` exist next to the Cypher names.
+- `trim([LEADING | TRAILING | BOTH] [characters] FROM text)` and two-argument `ltrim`, `rtrim`, and `btrim` strip any character of `characters` rather than one character string.
+- Cypher's `isEmpty`, `isNaN`, `elementId`, and the `OrNull` conversions exist, and `elementId` gives a string that names the kind and ID of the element.
 - A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
 - A `CALL` inside a larger query passes the arguments of a procedure that takes any.
 - A `CALL` inside a larger query binds only its `YIELD` items.

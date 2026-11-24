@@ -60,6 +60,24 @@ pub(crate) enum Clause {
     Filter(Expr),
     /// `LET a = value, b = value`. Never empty.
     Let(Vec<(Name, Expr)>),
+    CallSubquery(Box<CallSubquery>),
+}
+
+/// `[OPTIONAL] CALL [(variables)] { query }`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CallSubquery {
+    pub optional: bool,
+    /// The variable scope clause, or `None` when the body imports with a leading `WITH`.
+    pub imports: Option<Imports>,
+    pub body: Query,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Imports {
+    /// `(*)`
+    All,
+    /// `(a, b)`, possibly empty.
+    Variables(Vec<Name>),
 }
 
 /// `CALL name(args) YIELD items WHERE filter`. `args` is `None` when the parentheses are left
@@ -145,9 +163,13 @@ pub(crate) struct SortItem {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum SortDirection {
+    /// Nulls last.
     #[default]
     Ascending,
+    /// Nulls first.
     Descending,
+    AscendingNullsFirst,
+    DescendingNullsLast,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -483,8 +505,29 @@ pub(crate) struct Case {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WhenThen {
-    pub when: Expr,
+    /// One condition in the searched form, and one or more tests of the scrutinee in the simple
+    /// form, any of which takes the branch.
+    pub when: Vec<WhenOperand>,
     pub then: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WhenOperand {
+    /// The condition of a searched branch, or a value the scrutinee must equal.
+    Value(Expr),
+    /// `WHEN < value` and the other comparisons.
+    Compare(ComparisonOp, Expr),
+    /// `WHEN IS NULL` and `WHEN IS NOT NULL`.
+    IsNull { negated: bool },
+}
+
+impl WhenOperand {
+    pub(crate) fn expr(&self) -> Option<&Expr> {
+        match self {
+            Self::Value(expr) | Self::Compare(_, expr) => Some(expr),
+            Self::IsNull { .. } => None,
+        }
+    }
 }
 
 /// `[variable IN source WHERE filter | projection]`

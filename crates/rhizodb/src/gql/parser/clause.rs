@@ -1,9 +1,11 @@
 use super::ParseResult;
 use super::Parser;
 use crate::gql::ast::Call;
+use crate::gql::ast::CallSubquery;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
+use crate::gql::ast::Imports;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Match;
 use crate::gql::ast::Merge;
@@ -41,7 +43,9 @@ impl Parser {
 
     pub(super) fn clause(&mut self) -> ParseResult<Clause> {
         let parse: fn(&mut Self) -> ParseResult<Clause> =
-            if self.at_keyword("MATCH") || self.at_keyword("OPTIONAL") {
+            if self.at_keyword("OPTIONAL") && self.keyword_at(1, "CALL") {
+                Self::call_subquery
+            } else if self.at_keyword("MATCH") || self.at_keyword("OPTIONAL") {
                 Self::match_clause
             } else if self.eat_keyword("INSERT") || self.eat_keyword("CREATE") {
                 Self::insert_clause
@@ -65,10 +69,11 @@ impl Parser {
                 Self::delete_clause
             } else if self.at_keyword("CALL") {
                 if self.punct_at(1, Punct::LBrace) || self.punct_at(1, Punct::LParen) {
-                    return Err(self.unsupported());
+                    Self::call_subquery
+                } else {
+                    self.pos += 1;
+                    Self::call_clause
                 }
-                self.pos += 1;
-                Self::call_clause
             } else if UNSUPPORTED_CLAUSE_KEYWORDS
                 .iter()
                 .any(|keyword| self.at_keyword(keyword))
@@ -188,6 +193,32 @@ impl Parser {
         Ok(Clause::Call(Call { name, args, yields }))
     }
 
+    fn call_subquery(&mut self) -> ParseResult<Clause> {
+        let optional = self.eat_keyword("OPTIONAL");
+        self.expect_keyword("CALL")?;
+        let imports = if self.eat_punct(Punct::LParen) {
+            let imports = if self.eat_punct(Punct::Star) {
+                Imports::All
+            } else if self.at_punct(Punct::RParen) {
+                Imports::Variables(Vec::new())
+            } else {
+                Imports::Variables(self.comma_separated(Self::name)?)
+            };
+            self.expect_punct(Punct::RParen)?;
+            Some(imports)
+        } else {
+            None
+        };
+        self.expect_punct(Punct::LBrace)?;
+        let body = self.nested(Self::union_query)?;
+        self.expect_punct(Punct::RBrace)?;
+        Ok(Clause::CallSubquery(Box::new(CallSubquery {
+            optional,
+            imports,
+            body,
+        })))
+    }
+
     fn yield_item(&mut self) -> ParseResult<YieldItem> {
         let output = self.name()?;
         let alias = if self.eat_keyword("AS") {
@@ -274,11 +305,25 @@ impl Parser {
 
     fn sort_item(&mut self) -> ParseResult<SortItem> {
         let expr = self.expression()?;
-        let direction = if self.eat_any_keyword(&["DESC", "DESCENDING"]) {
-            SortDirection::Descending
-        } else {
+        let descending = self.eat_any_keyword(&["DESC", "DESCENDING"]);
+        if !descending {
             self.eat_any_keyword(&["ASC", "ASCENDING"]);
-            SortDirection::Ascending
+        }
+        let nulls_first = if self.eat_keyword("NULLS") {
+            if self.eat_keyword("FIRST") {
+                true
+            } else {
+                self.expect_keyword("LAST")?;
+                false
+            }
+        } else {
+            descending
+        };
+        let direction = match (descending, nulls_first) {
+            (false, false) => SortDirection::Ascending,
+            (true, true) => SortDirection::Descending,
+            (false, true) => SortDirection::AscendingNullsFirst,
+            (true, false) => SortDirection::DescendingNullsLast,
         };
         Ok(SortItem { expr, direction })
     }

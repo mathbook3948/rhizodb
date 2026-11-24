@@ -274,6 +274,11 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
     let p = expr(Ty::Bool, 2, &scope, choices);
     let key = expr(Ty::Any, 2, &scope, choices);
     let descending = choices.chance(1, 2);
+    let nulls_first = match choices.below(3) {
+        0 => None,
+        1 => Some(true),
+        _ => Some(false),
+    };
     let skip = choices.below(4) as usize;
     let limit = choices.below(6) as usize;
     let mut rows: Vec<(V, i64)> = graph
@@ -302,8 +307,25 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
         })
         .collect();
     rows.sort_by(|a, b| {
-        let by_key = order(&a.0, &b.0);
-        let by_key = if descending { by_key.reverse() } else { by_key };
+        let null = |value: &V| matches!(value, V::Null);
+        let by_key = match (nulls_first, null(&a.0), null(&b.0)) {
+            (Some(first), true, false) => {
+                if first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (Some(first), false, true) => {
+                if first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            _ if descending => order(&a.0, &b.0).reverse(),
+            _ => order(&a.0, &b.0),
+        };
         by_key.then(a.1.cmp(&b.1))
     });
     let want: Vec<i64> = rows
@@ -313,7 +335,14 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
         .map(|row| row.1)
         .collect();
     let (p, key) = (render(&p, &scope), render(&key, &scope));
-    let direction = if descending { "DESC" } else { "ASC" };
+    let direction = match (descending, nulls_first) {
+        (false, None) => "ASC",
+        (true, None) => "DESC",
+        (false, Some(true)) => "NULLS FIRST",
+        (true, Some(true)) => "DESC NULLS FIRST",
+        (false, Some(false)) => "ASC NULLS LAST",
+        (true, Some(false)) => "DESCENDING NULLS LAST",
+    };
     let queries = [
         format!(
             "MATCH (n) WHERE {p} RETURN n.k ORDER BY {key} {direction}, n.k SKIP {skip} LIMIT {limit}"
@@ -591,16 +620,23 @@ fn check_pattern(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> R
         format!(
             "MATCH (a), (b) RETURN a.k, b.k, COUNT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r }}"
         ),
+        format!(
+            "MATCH (a), (b) CALL (a, b) {{ MATCH (a)-[r]->(b) WHERE {text} RETURN count(r) AS c }} \
+             RETURN a.k, b.k, c"
+        ),
     ];
     expect_bag(runner, choices.pick(&counted), counts)?;
-    expect_bag(
-        runner,
-        &format!(
+    let summed = [
+        format!(
             "MATCH (a), (b) RETURN a.k, b.k, \
              reduce(s = 0, k IN COLLECT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r.k }} | s + k)"
         ),
-        sums,
-    )?;
+        format!(
+            "MATCH (a), (b) OPTIONAL CALL {{ WITH a, b MATCH (a)-[r]->(b) WHERE {text} \
+             RETURN r.k AS rk UNION ALL RETURN 0 AS rk }} RETURN a.k, b.k, sum(rk)"
+        ),
+    ];
+    expect_bag(runner, choices.pick(&summed), sums)?;
     Ok(())
 }
 

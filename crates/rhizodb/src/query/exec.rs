@@ -16,7 +16,7 @@ use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
 use super::aggregate::Groups;
-use super::compare::order;
+use super::compare::sort_order;
 use super::datum::Datum;
 use super::datum::PathIds;
 use super::datum::dismantle;
@@ -28,6 +28,7 @@ use super::eval::set;
 use super::keys::KeySet;
 use super::matcher::counted_nodes;
 use super::plan::CallClause;
+use super::plan::CallSubquery;
 use super::plan::Callee;
 use super::plan::Clause;
 use super::plan::Expr;
@@ -317,6 +318,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
                 Ok(kept)
             }
+            ReadClause::CallSubquery(call) => self.call_subquery(call, rows),
             ReadClause::Let(bindings) => rows
                 .into_iter()
                 .map(|mut row| {
@@ -328,6 +330,39 @@ impl<T: ReadTransaction> Env<'_, T> {
                 })
                 .collect(),
         }
+    }
+
+    fn call_subquery(&self, call: &CallSubquery, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+        let mut out = Vec::new();
+        for row in rows {
+            let mut seen = KeySet::default();
+            let before = out.len();
+            for branch in &call.branches {
+                let mut inner = vec![row.clone()];
+                for clause in &branch.clauses {
+                    inner = self.read_clause(clause, inner)?;
+                }
+                for result in inner {
+                    let values: Vec<Datum> = branch
+                        .output
+                        .iter()
+                        .map(|slot| result.get(*slot).cloned().unwrap_or(Datum::Null))
+                        .collect();
+                    if call.distinct && !seen.insert(&values) {
+                        continue;
+                    }
+                    let mut next = row.clone();
+                    for (slot, value) in call.outputs.iter().zip(values) {
+                        set(&mut next, *slot, value);
+                    }
+                    out.push(next);
+                }
+            }
+            if call.optional && out.len() == before {
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
@@ -573,11 +608,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let compare = |(a, a_position, _): &(Vec<Datum>, usize, Row),
                        (b, b_position, _): &(Vec<Datum>, usize, Row)| {
             for ((x, y), (_, direction)) in a.iter().zip(b).zip(order_by) {
-                let ordering = order(x, y);
-                let ordering = match direction {
-                    SortDirection::Ascending => ordering,
-                    SortDirection::Descending => ordering.reverse(),
-                };
+                let ordering = sort_order(*direction, x, y);
                 if ordering != Ordering::Equal {
                     return ordering;
                 }

@@ -54,3 +54,14 @@ MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(q:Person) RETURN count(q) AS c 
 MATCH (p:Person) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
 MATCH (p:Person) OPTIONAL CALL (p) { MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
 CALL { MATCH (p:Person) RETURN p.id AS id UNION MATCH (c:City) RETURN c.population AS id } RETURN count(id) AS n
+MATCH (p:Person) RETURN p.id AS id, upper(p.name) AS u, lower(p.name) AS l ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, char_length(p.name) AS n ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, ltrim(p.name) AS l, rtrim(p.name) AS r, trim(p.name) AS t ORDER BY id
+MATCH (c:City) RETURN c.name AS city, ln(c.population) AS l, power(c.population, 2) AS p ORDER BY city
+MATCH (p:Person) RETURN p.id AS id, nullif(p.age, 30) AS a ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, CASE p.age WHEN 20, 30 THEN 'round' WHEN > 50 THEN 'old' ELSE 'other' END AS band ORDER BY id
+MATCH (p:Person) RETURN p.age AS age ORDER BY age NULLS FIRST
+MATCH (p:Person) RETURN p.age AS age ORDER BY age DESC NULLS LAST
+MATCH (p:Person) RETURN p.id AS id, isEmpty(p.name) AS e ORDER BY id
+RETURN mod(7, 3) AS m, cot(1.0) AS c, sinh(1.0) AS s
+MATCH (c:City) RETURN c.name AS city, ln(c.population) AS l, cot(1.0) AS c ORDER BY city

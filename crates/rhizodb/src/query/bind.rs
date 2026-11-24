@@ -13,6 +13,7 @@ use super::functions::Function;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
 use super::plan::CallClause;
+use super::plan::CallSubquery;
 use super::plan::Callee;
 use super::plan::Case;
 use super::plan::Clause;
@@ -70,13 +71,7 @@ pub(crate) fn bind(
         parameter_names: Vec::new(),
         type_error: None,
     };
-    let (singles, distinct) = match query {
-        ast::Query::Single(single) => (vec![single], false),
-        ast::Query::Union(union) => (
-            std::iter::once(&union.first).chain(&union.rest).collect(),
-            union.kind == ast::UnionKind::Distinct,
-        ),
-    };
+    let (singles, distinct) = union_parts(query);
     let mut parts = Vec::new();
     let mut columns: Option<Vec<String>> = None;
     let mut results_read_variables = false;
@@ -146,6 +141,55 @@ pub(crate) fn bind(
         closed,
         parameters,
     }))
+}
+
+fn union_parts(query: &ast::Query) -> (Vec<&ast::SingleQuery>, bool) {
+    match query {
+        ast::Query::Single(single) => (vec![single], false),
+        ast::Query::Union(union) => (
+            std::iter::once(&union.first).chain(&union.rest).collect(),
+            union.kind == ast::UnionKind::Distinct,
+        ),
+    }
+}
+
+fn imported_scope(
+    imports: Option<&ast::Imports>,
+    body: &ast::SingleQuery,
+    outer: &Scope,
+) -> Result<Scope, Error> {
+    let mut inner = Scope::default();
+    match imports {
+        Some(ast::Imports::All) => return Ok(outer.clone()),
+        Some(ast::Imports::Variables(names)) => {
+            for name in names {
+                let Some(variable) = outer.get(&name.0) else {
+                    return Err(error(
+                        ErrorKind::UndefinedVariable,
+                        format!("variable `{}` is not defined", name.0),
+                    ));
+                };
+                inner.variables.insert(name.0.clone(), variable);
+            }
+        }
+        None => {
+            if let Some(ast::Clause::With(with)) = body.clauses.first() {
+                match &with.projection.items {
+                    ast::ProjectionItems::Star(_) => return Ok(outer.clone()),
+                    ast::ProjectionItems::Items(items) => {
+                        for item in items {
+                            if let ast::Expr::Variable(name) = &item.expr
+                                && let Some(variable) = outer.get(&name.0)
+                            {
+                                inner.variables.insert(name.0.clone(), variable);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(inner)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,7 +314,10 @@ impl Binder<'_> {
             if follows_update
                 && matches!(
                     clause,
-                    ast::Clause::Match(_) | ast::Clause::Unwind(_) | ast::Clause::Call(_)
+                    ast::Clause::Match(_)
+                        | ast::Clause::Unwind(_)
+                        | ast::Clause::Call(_)
+                        | ast::Clause::CallSubquery(_)
                 )
             {
                 return Err(error(
@@ -290,7 +337,7 @@ impl Binder<'_> {
             if subquery && follows_update {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
-                    "an EXISTS subquery cannot update the graph",
+                    "a subquery cannot update the graph",
                 ));
             }
             clauses.push(self.clause(
@@ -309,6 +356,7 @@ impl Binder<'_> {
                         | ast::Clause::With(_)
                         | ast::Clause::Unwind(_)
                         | ast::Clause::Call(_)
+                        | ast::Clause::CallSubquery(_)
                         | ast::Clause::Filter(_)
                         | ast::Clause::Let(_)
                 )
@@ -342,6 +390,7 @@ impl Binder<'_> {
             ast::Clause::Call(call) => self.call_clause(call, scope, standalone, output, reads),
             ast::Clause::Filter(condition) => self.filter_clause(condition, scope),
             ast::Clause::Let(bindings) => self.let_clause(bindings, scope),
+            ast::Clause::CallSubquery(call) => self.call_subquery(call, scope),
             ast::Clause::With(with) => self.with_clause(with, scope),
             ast::Clause::Return(returned) => self.return_clause(returned, scope, output, reads),
             ast::Clause::Insert(parts) => self.insert_clause(parts, scope),
@@ -467,6 +516,64 @@ impl Binder<'_> {
             scope.insert(name, slot, kind);
         }
         Ok(Clause::Read(ReadClause::Let(bound)))
+    }
+
+    fn call_subquery(
+        &mut self,
+        call: &ast::CallSubquery,
+        scope: &mut Scope,
+    ) -> Result<Clause, Error> {
+        let (singles, distinct) = union_parts(&call.body);
+        let mut branches = Vec::new();
+        let mut columns: Option<Vec<String>> = None;
+        for single in singles {
+            if !matches!(single.clauses.last(), Some(ast::Clause::Return(_))) {
+                return Err(error(
+                    ErrorKind::InvalidClauseComposition,
+                    "a CALL subquery must end with RETURN",
+                ));
+            }
+            let inner = imported_scope(call.imports.as_ref(), single, scope)?;
+            let (pipeline, part_columns, _) = self.single_query(single, inner, true)?;
+            if columns.as_ref().is_some_and(|first| *first != part_columns) {
+                return Err(error(
+                    ErrorKind::DifferentColumnsInUnion,
+                    "all parts of a UNION must return the same columns",
+                ));
+            }
+            columns = Some(part_columns);
+            branches.push(Pipeline {
+                clauses: pipeline
+                    .clauses
+                    .into_iter()
+                    .filter_map(|clause| match clause {
+                        Clause::Read(clause) => Some(clause),
+                        Clause::Update(_) => None,
+                    })
+                    .collect(),
+                output: pipeline.output,
+            });
+        }
+        let mut outputs = Vec::new();
+        for name in columns.unwrap_or_default() {
+            if scope.get(&name).is_some() {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("variable `{name}` is already bound"),
+                ));
+            }
+            let slot = self.slot();
+            scope.insert(&name, slot, Kind::Unknown);
+            outputs.push(slot);
+        }
+        Ok(Clause::Read(ReadClause::CallSubquery(Box::new(
+            CallSubquery {
+                optional: call.optional,
+                distinct,
+                branches,
+                outputs,
+            },
+        ))))
     }
 
     fn with_clause(&mut self, with: &ast::With, scope: &mut Scope) -> Result<Clause, Error> {
@@ -1619,15 +1726,25 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
+        let plain = case
+            .branches
+            .iter()
+            .all(|branch| matches!(branch.when.as_slice(), [ast::WhenOperand::Value(_)]));
+        if !plain && let Some(scrutinee) = &case.scrutinee {
+            return self.tested_case(scrutinee, case, scope, mode);
+        }
         let scrutinee = match &case.scrutinee {
             Some(scrutinee) => Some(self.expr(scrutinee, scope, mode)?),
             None => None,
         };
         let mut branches = Vec::new();
         for branch in &case.branches {
-            let when = self.expr(&branch.when, scope, mode)?;
+            let [ast::WhenOperand::Value(condition)] = branch.when.as_slice() else {
+                continue;
+            };
+            let when = self.expr(condition, scope, mode)?;
             if case.scrutinee.is_none() {
-                self.expect_shape(&branch.when, scope, &[Shape::Boolean]);
+                self.expect_shape(condition, scope, &[Shape::Boolean]);
             }
             branches.push((when, self.expr(&branch.then, scope, mode)?));
         }
@@ -1640,6 +1757,64 @@ impl Binder<'_> {
             branches,
             otherwise,
         })))
+    }
+
+    fn tested_case(
+        &mut self,
+        scrutinee: &ast::Expr,
+        case: &ast::Case,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let source = self.expr(scrutinee, scope, mode)?;
+        let slot = self.slot();
+        let held = || Box::new(Expr::Slot(slot));
+        let mut branches = Vec::new();
+        for branch in &case.branches {
+            let mut condition: Option<Expr> = None;
+            for operand in &branch.when {
+                let test = match operand {
+                    ast::WhenOperand::Value(value) => Expr::Comparison(
+                        held(),
+                        vec![(ast::ComparisonOp::Equal, self.expr(value, scope, mode)?)],
+                    ),
+                    ast::WhenOperand::Compare(op, value) => {
+                        Expr::Comparison(held(), vec![(*op, self.expr(value, scope, mode)?)])
+                    }
+                    ast::WhenOperand::IsNull { negated } => Expr::IsNull {
+                        operand: held(),
+                        negated: *negated,
+                    },
+                };
+                condition = Some(match condition {
+                    Some(earlier) => {
+                        Expr::Binary(ast::BinaryOp::Or, Box::new(earlier), Box::new(test))
+                    }
+                    None => test,
+                });
+            }
+            if let Some(condition) = condition {
+                branches.push((condition, self.expr(&branch.then, scope, mode)?));
+            }
+        }
+        let otherwise = match &case.otherwise {
+            Some(otherwise) => Some(self.expr(otherwise, scope, mode)?),
+            None => None,
+        };
+        let projection = Expr::Case(Box::new(Case {
+            scrutinee: None,
+            branches,
+            otherwise,
+        }));
+        Ok(Expr::Index(
+            Box::new(Expr::ListComprehension(Box::new(ListComprehension {
+                slot,
+                source: Expr::List(vec![source]),
+                filter: None,
+                projection: Some(projection),
+            }))),
+            Box::new(Expr::Constant(Datum::Integer(0))),
+        ))
     }
 
     fn list_comprehension(
@@ -2381,6 +2556,34 @@ fn collect_clauses_free<'a>(
                 bound.push(&unwind.variable.0);
             }
             ast::Clause::Filter(condition) => collect_free(condition, bound, free),
+            ast::Clause::CallSubquery(call) => {
+                let (singles, _) = union_parts(&call.body);
+                for single in &singles {
+                    match &call.imports {
+                        Some(ast::Imports::Variables(names)) => {
+                            for name in names {
+                                collect_free_name(name, bound, free);
+                            }
+                        }
+                        _ => collect_clauses_free(&single.clauses, bound, free),
+                    }
+                }
+                if let Some(ast::Clause::Return(projection)) =
+                    singles.first().and_then(|single| single.clauses.last())
+                    && let ast::ProjectionItems::Items(items) = &projection.items
+                {
+                    bound.extend(
+                        items
+                            .iter()
+                            .filter_map(|item| match (&item.alias, &item.expr) {
+                                (Some(alias), _) | (None, ast::Expr::Variable(alias)) => {
+                                    Some(alias.0.as_str())
+                                }
+                                _ => None,
+                            }),
+                    );
+                }
+            }
             ast::Clause::Let(bindings) => {
                 for (_, value) in bindings {
                     collect_free(value, bound, free);
@@ -2554,11 +2757,13 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
             .scrutinee
             .as_deref()
             .into_iter()
-            .chain(
-                case.branches
+            .chain(case.branches.iter().flat_map(|branch| {
+                branch
+                    .when
                     .iter()
-                    .flat_map(|branch| [&branch.when, &branch.then]),
-            )
+                    .filter_map(ast::WhenOperand::expr)
+                    .chain(std::iter::once(&branch.then))
+            }))
             .chain(case.otherwise.as_deref())
             .collect(),
         ast::Expr::ListComprehension(comprehension) => vec![&comprehension.source],

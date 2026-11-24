@@ -1122,7 +1122,7 @@ fn with_fraction(text: String) -> String {
     }
 }
 
-fn arithmetic(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+pub(crate) fn arithmetic(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     if let Some(result) = temporals::arithmetic(op, &lhs, &rhs) {
         return result;
     }

@@ -207,6 +207,9 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
         format!("RETURN 1{}", " + 1".repeat(depth)),
         format!("MATCH (n) WHERE {}true RETURN n", "NOT ".repeat(depth)),
         format!("RETURN {}", "exists { MATCH (a) WHERE ".repeat(depth)),
+        format!("RETURN {}", "COUNT { MATCH (a) WHERE ".repeat(depth)),
+        "CALL { ".repeat(depth),
+        format!("RETURN {}", "reduce(a = ".repeat(depth)),
         format!(
             "MATCH (n:{}A{}) RETURN n",
             "(".repeat(depth),
@@ -283,6 +286,31 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     "MATCH (a) WHERE {}true{} RETURN a",
                     "exists { (a)--() WHERE ".repeat(depth),
                     " }".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}1{}",
+                    "COUNT { MATCH (a) WHERE ".repeat(depth),
+                    " = 0 }".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}1{}",
+                    "size(COLLECT { RETURN ".repeat(depth),
+                    " }) ".repeat(depth)
+                ),
+                format!(
+                    "{}RETURN 1 AS x{}",
+                    "CALL { ".repeat(depth),
+                    " } RETURN x".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}0{}",
+                    "reduce(a = ".repeat(depth),
+                    ", x IN [1] | a + x)".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}1{}",
+                    "CASE 1 WHEN > 0, 2 THEN ".repeat(depth),
+                    " END".repeat(depth)
                 ),
                 format!(
                     "MATCH (a) RETURN {}1{}",
