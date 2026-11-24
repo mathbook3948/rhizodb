@@ -25,6 +25,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 
 ### Fixed

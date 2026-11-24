@@ -10,6 +10,10 @@ readme = "../../README.md"
 keywords = ["graph", "database", "gql", "cypher", "embedded"]
 categories = ["database-implementations"]
 
+[features]
+# Exposes the decoders and the parser to the fuzz targets in `fuzz/`. Not part of the public API.
+fuzzing = []
+
 [lints]
 workspace = true
 
