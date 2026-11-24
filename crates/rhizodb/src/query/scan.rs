@@ -95,6 +95,12 @@ enum Value {
 #[derive(Clone, Debug)]
 enum Pred {
     Fixed(Option<bool>),
+    Against {
+        column: usize,
+        op: ComparisonOp,
+        fixed: Datum,
+        mirrored: bool,
+    },
     Compare(Value, Vec<(ComparisonOp, Value)>),
     IsNull(Value, bool),
     Text(BinaryOp, Value, Value),
@@ -182,23 +188,50 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
         Ok(Some(values))
     }
 
+    #[inline(never)]
+    fn comparison(
+        &mut self,
+        first: &Expr,
+        rest: &[(ComparisonOp, Expr)],
+    ) -> Result<Option<Pred>, Error> {
+        let Some(first) = self.value(first)? else {
+            return Ok(None);
+        };
+        if let [(op, operand)] = rest {
+            let Some(operand) = self.value(operand)? else {
+                return Ok(None);
+            };
+            return Ok(Some(match (first, operand) {
+                (Value::Column(column), Value::Fixed(fixed)) => Pred::Against {
+                    column,
+                    op: *op,
+                    fixed,
+                    mirrored: false,
+                },
+                (Value::Fixed(fixed), Value::Column(column)) => Pred::Against {
+                    column,
+                    op: *op,
+                    fixed,
+                    mirrored: true,
+                },
+                (first, operand) => Pred::Compare(first, vec![(*op, operand)]),
+            }));
+        }
+        let mut operands = Vec::with_capacity(rest.len());
+        for (op, operand) in rest {
+            let Some(operand) = self.value(operand)? else {
+                return Ok(None);
+            };
+            operands.push((*op, operand));
+        }
+        Ok(Some(Pred::Compare(first, operands)))
+    }
+
     fn pred(&mut self, expr: &Expr) -> Result<Option<Pred>, Error> {
         Ok(Some(match expr {
             Expr::Constant(Datum::Boolean(value)) => Pred::Fixed(Some(*value)),
             Expr::Constant(Datum::Null) => Pred::Fixed(None),
-            Expr::Comparison(first, rest) => {
-                let Some(first) = self.value(first)? else {
-                    return Ok(None);
-                };
-                let mut operands = Vec::with_capacity(rest.len());
-                for (op, operand) in rest {
-                    let Some(operand) = self.value(operand)? else {
-                        return Ok(None);
-                    };
-                    operands.push((*op, operand));
-                }
-                Pred::Compare(first, operands)
-            }
+            Expr::Comparison(first, rest) => return self.comparison(first, rest),
             Expr::IsNull { operand, negated } => match self.value(operand)? {
                 Some(operand) => Pred::IsNull(operand, *negated),
                 None => return Ok(None),
@@ -397,6 +430,12 @@ impl At<'_, '_> {
     }
 
     fn datum(&self, value: &Value) -> Result<Datum, Error> {
+        if let Value::Column(column) = value {
+            return match self.group.cell(self.node, *column)? {
+                Some(cell) => cell_datum(cell),
+                None => Ok(Datum::Null),
+            };
+        }
         Ok(match self.arg(value)? {
             Arg::Cell(cell) => cell_datum(cell)?,
             Arg::Datum(datum) => datum.into_owned(),
@@ -406,6 +445,12 @@ impl At<'_, '_> {
     fn holds(&self, pred: &Pred) -> Result<Option<bool>, Error> {
         Ok(match pred {
             Pred::Fixed(value) => *value,
+            Pred::Against {
+                column,
+                op,
+                fixed,
+                mirrored,
+            } => self.against(*column, *op, fixed, *mirrored)?,
             Pred::Compare(first, rest) => {
                 let mut left = self.arg(first)?;
                 let mut result = Some(true);
@@ -415,6 +460,9 @@ impl At<'_, '_> {
                     left = right;
                 }
                 result
+            }
+            Pred::IsNull(Value::Column(column), negated) => {
+                Some(self.group.cell(self.node, *column)?.is_none() != *negated)
             }
             Pred::IsNull(operand, negated) => Some(self.arg(operand)?.is_null() != *negated),
             Pred::Text(op, lhs, rhs) => {
@@ -441,6 +489,38 @@ impl At<'_, '_> {
         })
     }
 
+    #[inline(never)]
+    fn against(
+        &self,
+        column: usize,
+        op: ComparisonOp,
+        fixed: &Datum,
+        mirrored: bool,
+    ) -> Result<Option<bool>, Error> {
+        Ok(match (self.group.cell(self.node, column)?, fixed) {
+            (Some(Cell::Int(value)), Datum::Integer(fixed)) => Some(ordered(
+                op,
+                if mirrored {
+                    fixed.cmp(&value)
+                } else {
+                    value.cmp(fixed)
+                },
+            )),
+            (cell, fixed) => {
+                let stored = match cell {
+                    Some(cell) => Arg::Cell(cell),
+                    None => Arg::Datum(Cow::Owned(Datum::Null)),
+                };
+                let fixed = Arg::Datum(Cow::Borrowed(fixed));
+                if mirrored {
+                    compare_args(op, &fixed, &stored)?
+                } else {
+                    compare_args(op, &stored, &fixed)?
+                }
+            }
+        })
+    }
+
     fn keeps(&self, filter: Option<&Pred>) -> Result<bool, Error> {
         match filter {
             Some(filter) => Ok(self.holds(filter)? == Some(true)),
@@ -458,7 +538,16 @@ struct Ranked {
 }
 
 fn rank(a: &Ranked, b: &Ranked, directions: &[SortDirection]) -> Ordering {
-    for ((x, y), direction) in a.keys.iter().zip(&b.keys).zip(directions) {
+    rank_keys(&a.keys, a.position, b, directions)
+}
+
+fn rank_keys(
+    keys: &[Datum],
+    position: usize,
+    b: &Ranked,
+    directions: &[SortDirection],
+) -> Ordering {
+    for ((x, y), direction) in keys.iter().zip(&b.keys).zip(directions) {
         let ordering = order(x, y);
         let ordering = match direction {
             SortDirection::Ascending => ordering,
@@ -468,7 +557,7 @@ fn rank(a: &Ranked, b: &Ranked, directions: &[SortDirection]) -> Ordering {
             return ordering;
         }
     }
-    a.position.cmp(&b.position)
+    position.cmp(&b.position)
 }
 
 struct Heaped<'d>(Ranked, &'d [SortDirection]);
@@ -506,19 +595,37 @@ impl<'d> Chosen<'d> {
         }
     }
 
-    fn offer(&mut self, ranked: Ranked, directions: &'d [SortDirection]) {
+    fn offer(
+        &mut self,
+        keys: &mut Vec<Datum>,
+        (position, node, input): (usize, NodeId, usize),
+        items: Option<Vec<Datum>>,
+        directions: &'d [SortDirection],
+    ) {
+        let ranked = |keys: &mut Vec<Datum>, items| Ranked {
+            keys: std::mem::take(keys),
+            position,
+            node,
+            input,
+            items,
+        };
         match self {
-            Chosen::All(all) => all.push(ranked),
+            Chosen::All(all) => all.push(ranked(keys, items)),
             Chosen::Top(heap, kept) => {
                 if heap.len() < *kept {
-                    heap.push(Heaped(ranked, directions));
+                    heap.push(Heaped(ranked(keys, items), directions));
                 } else if let Some(mut worst) = heap.peek_mut()
-                    && rank(&ranked, &worst.0, directions) == Ordering::Less
+                    && rank_keys(keys, position, &worst.0, directions) == Ordering::Less
                 {
-                    worst.0 = ranked;
+                    std::mem::swap(&mut worst.0.keys, keys);
+                    worst.0.position = position;
+                    worst.0.node = node;
+                    worst.0.input = input;
+                    worst.0.items = items;
                 }
             }
         }
+        keys.clear();
     }
 
     fn len(&self) -> usize {
@@ -845,6 +952,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             .eq(items.iter().map(|(_, slot)| slot));
         let mut seen = KeySet::default();
         let mut chosen = Chosen::new(kept, ordered);
+        let mut keys = Vec::with_capacity(sort_values.len());
         let mut position = 0usize;
         self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, input| {
             let mut values = None;
@@ -868,20 +976,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                         .collect::<Result<Vec<_>, _>>()?,
                 );
             }
-            let keys = sort_values
-                .iter()
-                .map(|value| at.datum(value))
-                .collect::<Result<Vec<_>, _>>()?;
-            chosen.offer(
-                Ranked {
-                    keys,
-                    position,
-                    node: at.node,
-                    input,
-                    items: values,
-                },
-                &directions,
-            );
+            for value in &sort_values {
+                keys.push(at.datum(value)?);
+            }
+            chosen.offer(&mut keys, (position, at.node, input), values, &directions);
             position += 1;
             Ok(ordered || kept.is_none_or(|kept| chosen.len() < kept))
         })?;
@@ -944,6 +1042,7 @@ fn pred_reads(pred: &Pred, column: usize) -> bool {
     let reads = |value: &Value| reads(value, column);
     match pred {
         Pred::Fixed(_) => false,
+        Pred::Against { column: held, .. } => *held == column,
         Pred::Compare(first, rest) => reads(first) || rest.iter().any(|(_, value)| reads(value)),
         Pred::IsNull(value, _) | Pred::In(value, _) => reads(value),
         Pred::Text(_, lhs, rhs) => reads(lhs) || reads(rhs),
