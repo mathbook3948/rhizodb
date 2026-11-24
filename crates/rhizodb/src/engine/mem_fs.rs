@@ -145,6 +145,14 @@ impl BlockFile for MemFile {
         Ok((lock(&self.bytes).len() / self.size.bytes()) as u64)
     }
 
+    fn is_empty(&self) -> io::Result<bool> {
+        Ok(lock(&self.bytes).is_empty())
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         resize_blocks(&mut lock(&self.bytes), self.size, count)
     }

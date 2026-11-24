@@ -459,6 +459,16 @@ impl BlockFile for SimFile {
         Ok((state.inode(self.inode).live.len() / self.size.bytes()) as u64)
     }
 
+    fn is_empty(&self) -> io::Result<bool> {
+        let mut state = lock(&self.state);
+        state.operate(Some(self.inode))?;
+        Ok(state.inode(self.inode).live.is_empty())
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode))?;

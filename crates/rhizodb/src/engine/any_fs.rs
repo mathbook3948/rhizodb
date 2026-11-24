@@ -101,6 +101,20 @@ impl BlockFile for AnyFile {
         }
     }
 
+    fn is_empty(&self) -> io::Result<bool> {
+        match self {
+            AnyFile::Os(file) => file.is_empty(),
+            AnyFile::Memory(file) => file.is_empty(),
+        }
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.lock(),
+            AnyFile::Memory(file) => file.lock(),
+        }
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         match self {
             AnyFile::Os(file) => file.set_block_count(count),

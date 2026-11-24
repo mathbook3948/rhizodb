@@ -10,6 +10,7 @@ use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::TryLockError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -251,9 +252,21 @@ impl<F: FileSystem + 'static> Engine<F> {
             _ => {}
         }
         let file = match fs.open(name, block_size()?) {
-            Ok(file) => file,
+            Ok(file) => {
+                file.lock()?;
+                if file.is_empty()? && segment_files(&*fs, name)?.is_empty() {
+                    drop(file);
+                    let file = create_file_whole_or_not_at_all(&*fs, name, &init)?;
+                    file.lock()?;
+                    file
+                } else {
+                    file
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_file_whole_or_not_at_all(&*fs, name, &init)?
+                let file = create_file_whole_or_not_at_all(&*fs, name, &init)?;
+                file.lock()?;
+                file
             }
             Err(error) => return Err(error.into()),
         };
@@ -808,7 +821,11 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn close(&self) {
-        let mut writer = lock(&self.writer);
+        let mut writer = match self.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return self.leave_the_log_to_a_leaked_writer(),
+        };
         self.wait_for_checkpoint();
         if self.is_poisoned() {
             return;
@@ -825,6 +842,10 @@ impl<F: FileSystem + 'static> Shared<F> {
         }
         lock(&self.droppable).take();
     }
+}
+
+impl<F: FileSystem + 'static> Shared<F> {
+    fn leave_the_log_to_a_leaked_writer(&self) {}
 }
 
 struct EndCheckpointOnDrop<'a, F: FileSystem + 'static> {
@@ -1028,6 +1049,24 @@ fn visit_prefix<R: Reads, E: From<StorageError>>(
     reads.walk(TableId::of(table), start, end_bound(&end), &mut visit)
 }
 
+fn visit_range<R: Reads, E: From<StorageError>>(
+    reads: &R,
+    table: Table,
+    start: &[u8],
+    end: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    if start >= end {
+        return Ok(());
+    }
+    reads.walk(
+        TableId::of(table),
+        Bound::Included(start),
+        Bound::Excluded(end),
+        &mut visit,
+    )
+}
+
 macro_rules! read_transaction {
     ($type:ident) => {
         impl<F: FileSystem + 'static> ReadTransaction for $type<'_, F> {
@@ -1064,6 +1103,16 @@ macro_rules! read_transaction {
                 visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
             ) -> Result<(), E> {
                 visit_prefix(self, table, prefix, visit)
+            }
+
+            fn visit_range<E: From<StorageError>>(
+                &self,
+                table: Table,
+                start: &[u8],
+                end: &[u8],
+                visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+            ) -> Result<(), E> {
+                visit_range(self, table, start, end, visit)
             }
         }
     };

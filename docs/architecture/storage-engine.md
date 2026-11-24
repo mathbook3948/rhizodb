@@ -14,6 +14,9 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The engine implements the same storage trait as the redb backend, and the swap changes no graph-layer behavior.
 - The redb backend stays as the reference for differential tests and as the reader of redb files.
 - A database at rest is one file.
+- The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
+- On a file system without locks the engine opens a database unlocked.
+- Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.
 - A range delete of the storage trait is logged as one operation of its batch.

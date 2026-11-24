@@ -56,6 +56,13 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
     /// The number of whole blocks in the file.
     fn block_count(&self) -> io::Result<u64>;
 
+    /// Whether the file holds no byte at all, not even part of a block.
+    fn is_empty(&self) -> io::Result<bool>;
+
+    /// Takes an exclusive lock on the file until this handle closes, and fails while another
+    /// handle holds one.
+    fn lock(&self) -> io::Result<()>;
+
     /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
     fn set_block_count(&self, count: u64) -> io::Result<()>;
 

@@ -1,5 +1,6 @@
 use std::fs;
 use std::fs::File;
+use std::fs::TryLockError;
 use std::io;
 use std::path::PathBuf;
 
@@ -25,6 +26,18 @@ impl OsFs {
 pub(crate) struct OsFile {
     file: File,
     size: BlockSize,
+}
+
+fn lock_or_skip_where_unsupported(file: &File) -> io::Result<()> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "the database file is already open",
+        )),
+        Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
 impl FileSystem for OsFs {
@@ -101,6 +114,14 @@ impl BlockFile for OsFile {
 
     fn block_count(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len() / self.size.bytes() as u64)
+    }
+
+    fn is_empty(&self) -> io::Result<bool> {
+        Ok(self.file.metadata()?.len() == 0)
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(&self.file)
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {

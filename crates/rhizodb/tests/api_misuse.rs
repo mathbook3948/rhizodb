@@ -141,6 +141,8 @@ fn a_forgotten_read_transaction_lets_the_file_close_and_reopen() {
     }
 }
 
+// The engine's write transaction holds its writer lock guard, so it is not Send there yet.
+#[cfg(not(rhizodb_engine))]
 #[test]
 #[ignore = "bug: WriteTransaction is Send, but the writer slot remembers the thread that began \
             it, so after the transaction moves to another thread that thread's begin_write waits \

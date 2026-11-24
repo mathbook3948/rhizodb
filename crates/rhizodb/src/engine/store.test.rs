@@ -575,3 +575,42 @@ fn overwriting_the_same_keys_keeps_the_file_bounded() {
     );
     engine.check().unwrap();
 }
+
+#[test]
+fn a_database_file_open_on_disk_refuses_a_second_open_until_it_closes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph");
+    let first = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+    let error = crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap_err();
+    assert!(
+        matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock),
+        "{error:?}"
+    );
+    drop(first);
+    crate::engine::any_fs::open_path(&path, EngineOptions::default()).unwrap();
+}
+
+#[test]
+fn an_empty_file_without_a_log_opens_as_a_new_database_and_a_short_one_does_not() {
+    let directory = tempfile::tempdir().unwrap();
+    let empty = directory.path().join("empty");
+    std::fs::write(&empty, b"").unwrap();
+    let engine = crate::engine::any_fs::open_path(&empty, EngineOptions::default()).unwrap();
+    let mut tx = engine.begin_write().unwrap();
+    tx.put(Table::Metadata, b"k", b"v").unwrap();
+    tx.commit().unwrap();
+    drop(engine);
+    let engine = crate::engine::any_fs::open_path(&empty, EngineOptions::default()).unwrap();
+    assert_eq!(
+        engine
+            .begin_read()
+            .unwrap()
+            .get(Table::Metadata, b"k")
+            .unwrap(),
+        Some(b"v".to_vec())
+    );
+    let short = directory.path().join("short");
+    std::fs::write(&short, [7_u8; 100]).unwrap();
+    assert!(crate::engine::any_fs::open_path(&short, EngineOptions::default()).is_err());
+    assert_eq!(std::fs::read(&short).unwrap(), [7_u8; 100]);
+}
