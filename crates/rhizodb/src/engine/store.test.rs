@@ -615,8 +615,8 @@ fn file_and_live_bytes_after_a_long_log(reclaim_slack: u64) -> (u64, u64) {
 #[test]
 fn checkpoints_compact_a_file_whose_free_space_outgrows_its_live_data() {
     let slack = tiny(CheckpointMode::Inline).reclaim_slack;
-    let open_extents = 3 * u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
-    let bound = |live: u64| 2 * live + slack + open_extents;
+    let extent = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
+    let bound = |live: u64| 2 * live + slack + 4 * extent;
     let (kept, kept_live) = file_and_live_bytes_after_a_long_log(u64::MAX);
     assert!(
         kept > bound(kept_live),

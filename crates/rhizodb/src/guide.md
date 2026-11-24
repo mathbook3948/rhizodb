@@ -289,7 +289,7 @@ copying its file.
 
 Writes go to new places in the file, never over the data they replace, and the space they free
 is reused by later checkpoints. When the file holds more than twice its live data and another
-64 MiB, a checkpoint also compacts it: it moves the live data to the start of the file and
+76 MiB, a checkpoint also compacts it: it moves the live data to the start of the file and
 shortens the file. Reads and writes go on meanwhile, and a writer waits only when its commits
 outrun the compaction. [`Database::compact`] compacts at once, [`Database::stats`] reports the
 file's size, its live bytes, and its log's size, and [`Database::check`] reads every page and
