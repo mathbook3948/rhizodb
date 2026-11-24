@@ -1027,6 +1027,19 @@ fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
             _ => Datum::Null,
         }),
         BinaryOp::Add => add(lhs, rhs),
+        BinaryOp::Concat => match (lhs, rhs) {
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            (Datum::String(a), Datum::String(b)) => Ok(Datum::String(a + &b)),
+            (Datum::List(mut a), Datum::List(b)) => {
+                a.extend(b);
+                datum::list(a)
+            }
+            (lhs, rhs) => Err(type_error(format!(
+                "|| cannot join a {} and a {}",
+                lhs.type_name(),
+                rhs.type_name()
+            ))),
+        },
         BinaryOp::Subtract
         | BinaryOp::Multiply
         | BinaryOp::Divide

@@ -1135,6 +1135,11 @@ impl Binder<'_> {
                 | ast::BinaryOp::EndsWith
                 | ast::BinaryOp::Contains
                 | ast::BinaryOp::RegexMatch => Some(Shape::Boolean),
+                ast::BinaryOp::Concat => {
+                    let lhs = self.shape(lhs, scope)?;
+                    let rhs = self.shape(rhs, scope)?;
+                    (lhs == rhs && matches!(lhs, Shape::String | Shape::List)).then_some(lhs)
+                }
                 ast::BinaryOp::Add
                 | ast::BinaryOp::Subtract
                 | ast::BinaryOp::Multiply

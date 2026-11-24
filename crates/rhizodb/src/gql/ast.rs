@@ -485,6 +485,8 @@ pub(crate) enum BinaryOp {
     EndsWith,
     Contains,
     RegexMatch,
+    /// GQL's `||`, on two strings or two lists.
+    Concat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

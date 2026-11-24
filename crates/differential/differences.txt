@@ -17,6 +17,7 @@ ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, COUNT { (p)-[:KNOWS]
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, [x IN [1, 2, 3] WHERE x > 1 | x * p.id] AS l	LadybugError: Query execution failed: Parser exception: Invalid input <[x IN [1, 2, 3] WHERE>: expected rule oC_ProjectionItem (line: 1, offset: 52) "MATCH (p:P
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, char_length(p.name) AS n ORDER BY id	LadybugError: Query execution failed: Catalog exception: function CHAR_LENGTH does not exist.
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, isEmpty(p.name) AS e ORDER BY id	LadybugError: Query execution failed: Catalog exception: function ISEMPTY does not exist.
+ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, p.name || '!' AS n ORDER BY id	LadybugError: Query execution failed: Parser exception: Invalid input <p.name ||>: expected rule oC_ProjectionItem (line: 1, offset: 44) "MATCH (p:Person) RETUR
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, reduce(acc = 0, x IN range(1, p.id) | acc + x) AS s ORDER BY id	LadybugError: Query execution failed: Catalog exception: function REDUCE does not exist.
 differ	corpus: MATCH (p:Person) RETURN p.id AS id, substring(p.name, 1, 2) AS s	LadybugDB substring() counts from one, Cypher from zero
 ladybug-rejects	corpus: MATCH (p:Person) RETURN p.id AS id, toFloat(p.age) / 3 AS third	LadybugError: Query execution failed: Catalog exception: function TOFLOAT does not exist.

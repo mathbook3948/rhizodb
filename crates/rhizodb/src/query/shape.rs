@@ -111,6 +111,7 @@ pub(crate) fn binary_error(op: BinaryOp, lhs: Shape, rhs: Shape) -> Option<Error
         }
         BinaryOp::Divide => (number(lhs) || duration(lhs)) && number(rhs),
         BinaryOp::Modulo | BinaryOp::Power => number(lhs) && number(rhs),
+        BinaryOp::Concat => lhs == rhs && matches!(lhs, Shape::String | Shape::List),
     };
     (!takes).then_some(ErrorKind::TypeMismatch)
 }

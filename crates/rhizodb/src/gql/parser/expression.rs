@@ -54,7 +54,7 @@ impl Infix {
             )
             | Self::Is => PREDICATE_PRECEDENCE,
             Self::Comparison(_) => COMPARISON_PRECEDENCE,
-            Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 7,
+            Self::Binary(BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Concat, _) => 7,
             Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 8,
             Self::Binary(BinaryOp::Power, _) => 9,
         }
@@ -87,6 +87,15 @@ impl Parser {
         let parsed = parse(self);
         self.pipe_ends_filter = outer;
         parsed
+    }
+
+    fn adjacent_pipes(&self) -> bool {
+        match (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)) {
+            (Some(first), Some(second)) => {
+                second.kind == TokenKind::Punct(Punct::Pipe) && first.end == second.start
+            }
+            _ => false,
+        }
     }
 
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
@@ -192,6 +201,7 @@ impl Parser {
                 Punct::Percent => Infix::Binary(BinaryOp::Modulo, 1),
                 Punct::Caret => Infix::Binary(BinaryOp::Power, 1),
                 Punct::RegexMatch => Infix::Binary(BinaryOp::RegexMatch, 1),
+                Punct::Pipe if self.adjacent_pipes() => Infix::Binary(BinaryOp::Concat, 2),
                 Punct::Eq => Infix::Comparison(ComparisonOp::Equal),
                 Punct::Neq => Infix::Comparison(ComparisonOp::NotEqual),
                 Punct::Lt => Infix::Comparison(ComparisonOp::Less),

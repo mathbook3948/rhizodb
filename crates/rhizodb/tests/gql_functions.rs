@@ -243,3 +243,44 @@ fn nulls_order_applies_to_a_column_scan_too() {
     );
     assert_eq!(rows, [[int(3)], [int(1)], [Value::Null]]);
 }
+
+#[test]
+fn concatenation_joins_two_strings_or_two_lists() {
+    let db = db();
+    assert_eq!(
+        row(&db, "RETURN 'a' || 'b' || 'c', [1] || [2, 3], 'a' || null"),
+        [string("abc"), list([int(1), int(2), int(3)]), Value::Null]
+    );
+}
+
+#[test]
+fn concatenation_rejects_other_types_before_reading_data() {
+    let db = db();
+    for query in [
+        "RETURN 'a' || 1 AS v",
+        "RETURN [1] || 'a' AS v",
+        "RETURN 1 || 2 AS v",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidArgumentType,
+            "{query}"
+        );
+    }
+    let parameter = rhizodb::Parameters::from([("p".to_owned(), int(1))]);
+    let kind = |query: &str| db.execute(query, &parameter).unwrap_err().kind();
+    assert_eq!(kind("RETURN 'a' || $p AS v"), kind("RETURN 'a' - $p AS v"));
+}
+
+#[test]
+fn a_single_pipe_still_ends_a_comprehension() {
+    let db = db();
+    assert_eq!(
+        single(&db, "RETURN [x IN ['a'] | x || 'b'] AS l"),
+        list([string("ab")])
+    );
+    assert_eq!(
+        single(&db, "RETURN [x IN ['a'] WHERE x || 'b' = 'ab' | x] AS l"),
+        list([string("a")])
+    );
+}

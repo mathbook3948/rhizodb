@@ -172,6 +172,7 @@ pub(super) fn label_sexp(labels: &LabelExpr) -> String {
 fn binary_symbol(op: BinaryOp) -> &'static str {
     match op {
         BinaryOp::Add => "+",
+        BinaryOp::Concat => "||",
         BinaryOp::Subtract => "-",
         BinaryOp::Multiply => "*",
         BinaryOp::Divide => "/",

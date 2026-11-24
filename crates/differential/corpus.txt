@@ -65,3 +65,4 @@ MATCH (p:Person) RETURN p.age AS age ORDER BY age DESC NULLS LAST
 MATCH (p:Person) RETURN p.id AS id, isEmpty(p.name) AS e ORDER BY id
 RETURN mod(7, 3) AS m, cot(1.0) AS c, sinh(1.0) AS s
 MATCH (c:City) RETURN c.name AS city, ln(c.population) AS l, cot(1.0) AS c ORDER BY city
+MATCH (p:Person) RETURN p.id AS id, p.name || '!' AS n ORDER BY id
