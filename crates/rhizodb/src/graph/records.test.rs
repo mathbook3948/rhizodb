@@ -103,9 +103,7 @@ fn a_small_relationship_record_takes_a_byte_for_each_small_number() {
         target: NodeId(20_000),
         properties: Properties::from([(Token::new(2), PropertyValue::Integer(7))]),
     };
-    let mut value = Vec::new();
-    PropertyValue::Integer(7).encode_into(&mut value);
-    assert_eq!(record.encode().len(), 1 + 1 + 3 + 1 + 1 + value.len());
+    assert_eq!(record.encode().len(), 1 + 1 + 3 + 1 + 1 + 2);
 }
 
 #[test]

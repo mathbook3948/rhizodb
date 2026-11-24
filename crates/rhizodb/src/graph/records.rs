@@ -108,7 +108,7 @@ impl RelationshipRecord {
     }
 
     /// The record with its type, its ends, its property count, and each property key as
-    /// varints.
+    /// varints, and each integer property as a zigzag varint when that is shorter.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_varint_u64(&mut out, u64::from(self.rel_type.id()));
@@ -117,7 +117,7 @@ impl RelationshipRecord {
         put_varint(&mut out, self.properties.len());
         for (key, value) in &self.properties {
             put_varint_u64(&mut out, u64::from(key.id()));
-            value.encode_into(&mut out);
+            value.encode_compact_into(&mut out);
         }
         out
     }

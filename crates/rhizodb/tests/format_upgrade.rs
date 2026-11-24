@@ -487,6 +487,7 @@ fn a_database_of_format_nine_takes_relationship_writes_after_the_upgrade() {
 
 const FORMAT_TEN: &str = "tests/fixtures/format-10.redb";
 const FORMAT_ELEVEN: &str = "tests/fixtures/format-11.redb";
+const FORMAT_TWELVE: &str = "tests/fixtures/format-12.redb";
 
 fn assert_relationship_fixture_answers(db: &Database, answers: &str) {
     let answers = answers_in(answers);
@@ -513,6 +514,14 @@ fn a_database_of_format_eleven_answers_after_the_upgrade_as_it_did_before() {
 }
 
 #[test]
+fn a_database_of_format_twelve_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_TWELVE, directory.path());
+    assert_relationship_fixture_answers(&Database::open(&path).unwrap(), "format-12.answers");
+    assert_relationship_fixture_answers(&Database::open(&path).unwrap(), "format-12.answers");
+}
+
+#[test]
 fn a_database_of_format_ten_takes_relationship_writes_after_the_upgrade() {
     assert_takes_relationship_writes_after_the_upgrade(FORMAT_TEN);
 }
@@ -520,6 +529,11 @@ fn a_database_of_format_ten_takes_relationship_writes_after_the_upgrade() {
 #[test]
 fn a_database_of_format_eleven_takes_relationship_writes_after_the_upgrade() {
     assert_takes_relationship_writes_after_the_upgrade(FORMAT_ELEVEN);
+}
+
+#[test]
+fn a_database_of_format_twelve_takes_relationship_writes_after_the_upgrade() {
+    assert_takes_relationship_writes_after_the_upgrade(FORMAT_TWELVE);
 }
 
 fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {

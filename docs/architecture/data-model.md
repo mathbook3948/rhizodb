@@ -18,6 +18,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
 - An adjacency entry holds the relationship ID and the node at the other end, so a traversal reads no relationship record.
 - A relationship record holds its type, its source and target node IDs, its property count, and each property key as varints, each key followed by its tagged value.
+- An integer property of a relationship takes a tag of its own and a zigzag varint when that fits in eight bytes, and a record written before still reads its fixed-width integers as they are.
 - Relationship records are stored in chunks of 32 consecutive IDs, one entry per chunk under the chunk's number, so a load writes one entry per 32 relationships.
 - A chunk holds a layout byte, a bitmap of the slots that hold a relationship, and each of those records in slot order after its length as a varint.
 - A chunk without relationships is not stored.
