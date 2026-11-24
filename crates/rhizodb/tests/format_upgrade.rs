@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use rhizodb::Database;
+use rhizodb::Value;
 use support::*;
 
 const FORMAT_SEVEN: &str = "tests/fixtures/format-7.redb";
@@ -480,6 +481,82 @@ fn a_database_of_format_nine_takes_relationship_writes_after_the_upgrade() {
     );
     assert_eq!(
         single(&db, "MATCH (x:Item) WHERE x.i % 1000 = 500 RETURN count(*)"),
+        int(0)
+    );
+}
+
+const FORMAT_TEN: &str = "tests/fixtures/format-10.redb";
+
+fn assert_format_ten_answers(db: &Database) {
+    let answers = answers_in("format-10.answers");
+    assert_eq!(answers.len(), 15);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn a_database_of_format_ten_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_TEN, directory.path());
+    assert_format_ten_answers(&Database::open(&path).unwrap());
+    assert_format_ten_answers(&Database::open(&path).unwrap());
+}
+
+#[test]
+fn a_database_of_format_ten_takes_relationship_writes_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_TEN, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH ()-[r:EVERY]->() SET r.i = r.i + 10, r.added = [true]",
+        );
+        run(&db, "MATCH ()-[r:MANY]->() REMOVE r.p128");
+        run(&db, "MATCH ()-[r:T7]->() DELETE r");
+        run(
+            &db,
+            "MATCH (a:Item {i: 16998}), (b:Item {i: 3}) CREATE (a)-[:NEW {w: -1}]->(b)",
+        );
+        run(&db, "MATCH (x:Item {i: 128}) DETACH DELETE x");
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r:EVERY]->() RETURN r.i, r.added, r.s ORDER BY r.i"
+        ),
+        [
+            vec![
+                int(11),
+                Value::List(vec![Value::Boolean(true)]),
+                string("text")
+            ],
+            vec![
+                int(12),
+                Value::List(vec![Value::Boolean(true)]),
+                string("한국어")
+            ],
+        ]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r:MANY]->() RETURN size(keys(r)), r.p128, r.p209"
+        ),
+        [vec![int(209), Value::Null, int(209)]]
+    );
+    assert_eq!(single(&db, "MATCH ()-[r:T7]->() RETURN count(*)"), int(0));
+    assert_eq!(
+        run(&db, "MATCH (a)-[r:NEW]->(b) RETURN a.i, r.w, b.i"),
+        [vec![int(16998), int(-1), int(3)]]
+    );
+    assert_eq!(
+        single(
+            &db,
+            "MATCH (a:Item)-[:NEXT*1..3]->(b:Item {i: 129}) RETURN count(*)"
+        ),
         int(0)
     );
 }

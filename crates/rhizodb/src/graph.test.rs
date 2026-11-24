@@ -604,10 +604,29 @@ pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId
     nodes
 }
 
+/// Rewrites a database of the current format in the layout of format 10, which kept each
+/// relationship record's type and ends at fixed width, so a test can open it as an older version.
+pub(crate) fn store_as_format_ten(write: &mut impl WriteTransaction) {
+    for (key, value) in write.scan_prefix(Table::Relationships, &[]).unwrap() {
+        let record = RelationshipRecord::decode(&value).unwrap();
+        write
+            .put(Table::Relationships, &key, &record.encode_fixed())
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &10u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
 /// Rewrites a database of the current format in the layout of format 9, which kept each
 /// relationship as one entry under its source in the outgoing table and one under its target in
 /// the incoming table, so a test can open it as an older version.
 pub(crate) fn store_as_format_nine(write: &mut impl WriteTransaction) {
+    store_as_format_ten(write);
     let mut segments: BTreeMap<SegmentId, Vec<adjacency::Stored>> = BTreeMap::new();
     for (key, value) in write.scan_prefix(Table::Adjacency, &[]).unwrap() {
         let (id, _) = adjacency::parse_key(&key).unwrap();

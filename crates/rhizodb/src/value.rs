@@ -199,7 +199,11 @@ fn fixed_width(tag: u8) -> Option<usize> {
 }
 
 pub(crate) fn put_varint(out: &mut Vec<u8>, value: usize) {
-    let mut rest = value as u64;
+    put_varint_u64(out, value as u64);
+}
+
+pub(crate) fn put_varint_u64(out: &mut Vec<u8>, value: u64) {
+    let mut rest = value;
     while rest >= 0x80 {
         out.push((rest & 0x7f) as u8 | 0x80);
         rest >>= 7;
@@ -276,6 +280,10 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn varint(&mut self) -> Result<usize, DecodeError> {
+        usize::try_from(self.varint_u64()?).map_err(|_| DecodeError::LengthOverflow)
+    }
+
+    pub(crate) fn varint_u64(&mut self) -> Result<u64, DecodeError> {
         let mut result: u64 = 0;
         for shift in (0..64).step_by(7) {
             let byte = self.u8()?;
@@ -286,7 +294,7 @@ impl<'a> Reader<'a> {
             }
             result |= shifted;
             if byte & 0x80 == 0 {
-                return usize::try_from(result).map_err(|_| DecodeError::LengthOverflow);
+                return Ok(result);
             }
         }
         Err(DecodeError::LengthOverflow)

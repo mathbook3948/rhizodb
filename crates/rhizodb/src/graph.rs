@@ -80,13 +80,14 @@ use meta::MetaHead;
 use meta::Part;
 use meta::Slot;
 
-const FORMAT_VERSION: u32 = 10;
+const FORMAT_VERSION: u32 = 11;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
 const NODE_META_FORMAT_VERSION: u32 = 8;
 const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
 const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
+const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -234,6 +235,9 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
+            if found.is_some_and(|found| found < VARINT_RELATIONSHIPS_FORMAT_VERSION) {
+                tx.reencode_relationships()?;
+            }
             if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
                 tx.tag_index_targets()?;
             }
@@ -1126,6 +1130,32 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.adjacency
             .get_mut(&id)
             .ok_or(GraphError::Corrupt("an adjacency edit vanished"))
+    }
+
+    fn reencode_relationships(&mut self) -> Result<(), GraphError> {
+        const BATCH_SHIFT: u32 = 16;
+        let mut batches = BTreeSet::new();
+        self.transaction
+            .visit_prefix(Table::Relationships, &[], |key, _| {
+                batches.insert(decode_u64(key)? >> BATCH_SHIFT);
+                Ok::<(), GraphError>(())
+            })?;
+        for batch in batches {
+            let start = keys::element_key(batch << BATCH_SHIFT);
+            let end = batch
+                .checked_add(1)
+                .and_then(|next| next.checked_mul(1 << BATCH_SHIFT))
+                .map_or([0xff; 9].to_vec(), |next| keys::element_key(next).to_vec());
+            for (key, value) in self
+                .transaction
+                .scan_range(Table::Relationships, &start, &end)?
+            {
+                let record = RelationshipRecord::decode_fixed(&value)?;
+                self.transaction
+                    .put(Table::Relationships, &key, &record.encode())?;
+            }
+        }
+        Ok(())
     }
 
     fn move_adjacency_to_segments(&mut self) -> Result<(), GraphError> {

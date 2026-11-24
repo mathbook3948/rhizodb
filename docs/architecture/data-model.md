@@ -17,6 +17,8 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Keys of the relationship and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
 - Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
 - An adjacency entry holds the relationship ID and the node at the other end, so a traversal reads no relationship record.
+- A relationship record holds its type, its source and target node IDs, its property count, and each property key as varints, each key followed by its tagged value.
+- Opening a database written before varint relationship records rewrites every relationship record, in the opening write transaction.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
 - An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.
 - A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.
