@@ -183,6 +183,39 @@ fn check_filter(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Re
     ];
     let variant = choices.pick(&variants);
     expect_bag(runner, variant, yes.clone())?;
+    let every: Vec<Vec<i64>> = graph.nodes.values().map(|node| vec![node.k]).collect();
+    let not_yes: Vec<Vec<i64>> = every
+        .iter()
+        .filter(|row| !yes.contains(row))
+        .cloned()
+        .collect();
+    let set_operations = [
+        (
+            format!("MATCH (n) RETURN n.k EXCEPT MATCH (n) WHERE {text} RETURN n.k"),
+            not_yes.clone(),
+        ),
+        (
+            format!("MATCH (n) RETURN n.k INTERSECT ALL MATCH (n) WHERE {text} RETURN n.k"),
+            yes.clone(),
+        ),
+        (
+            format!(
+                "MATCH (n) RETURN n.k EXCEPT ALL \
+                 MATCH (n) WHERE NOT coalesce({text}, false) RETURN n.k"
+            ),
+            yes.clone(),
+        ),
+        (
+            format!("MATCH (n) WHERE {text} RETURN n.k OTHERWISE MATCH (n) RETURN n.k"),
+            if yes.is_empty() {
+                every.clone()
+            } else {
+                yes.clone()
+            },
+        ),
+    ];
+    let (query, want) = choices.pick(&set_operations);
+    expect_bag(runner, query, want.clone())?;
     expect_bag(
         runner,
         &format!("MATCH (n) WHERE NOT {text} RETURN n.k"),

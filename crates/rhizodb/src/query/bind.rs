@@ -71,7 +71,7 @@ pub(crate) fn bind(
         parameter_names: Vec::new(),
         type_error: None,
     };
-    let (singles, distinct) = union_parts(query);
+    let (singles, combine) = union_parts(query);
     let mut parts = Vec::new();
     let mut columns: Option<Vec<String>> = None;
     let mut results_read_variables = false;
@@ -83,7 +83,7 @@ pub(crate) fn bind(
             Some(first) if *first != part_columns => {
                 return Err(Error::new(
                     ErrorKind::DifferentColumnsInUnion,
-                    "all parts of a UNION must return the same columns",
+                    "all parts of a UNION, EXCEPT, INTERSECT, or OTHERWISE must return the same columns",
                 ));
             }
             _ => columns = Some(part_columns),
@@ -112,7 +112,7 @@ pub(crate) fn bind(
     if updating {
         return Ok(Plan::Updating(Program {
             parts,
-            distinct,
+            combine,
             columns,
             slot_count,
             closed,
@@ -135,7 +135,7 @@ pub(crate) fn bind(
         .collect();
     Ok(Plan::ReadOnly(Program {
         parts,
-        distinct,
+        combine,
         columns,
         slot_count,
         closed,
@@ -143,12 +143,12 @@ pub(crate) fn bind(
     }))
 }
 
-fn union_parts(query: &ast::Query) -> (Vec<&ast::SingleQuery>, bool) {
+fn union_parts(query: &ast::Query) -> (Vec<&ast::SingleQuery>, ast::UnionKind) {
     match query {
-        ast::Query::Single(single) => (vec![single], false),
+        ast::Query::Single(single) => (vec![single], ast::UnionKind::All),
         ast::Query::Union(union) => (
             std::iter::once(&union.first).chain(&union.rest).collect(),
-            union.kind == ast::UnionKind::Distinct,
+            union.kind,
         ),
     }
 }
@@ -523,7 +523,7 @@ impl Binder<'_> {
         call: &ast::CallSubquery,
         scope: &mut Scope,
     ) -> Result<Clause, Error> {
-        let (singles, distinct) = union_parts(&call.body);
+        let (singles, combine) = union_parts(&call.body);
         let mut branches = Vec::new();
         let mut columns: Option<Vec<String>> = None;
         for single in singles {
@@ -538,7 +538,7 @@ impl Binder<'_> {
             if columns.as_ref().is_some_and(|first| *first != part_columns) {
                 return Err(error(
                     ErrorKind::DifferentColumnsInUnion,
-                    "all parts of a UNION must return the same columns",
+                    "all parts of a UNION, EXCEPT, INTERSECT, or OTHERWISE must return the same columns",
                 ));
             }
             columns = Some(part_columns);
@@ -569,7 +569,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::CallSubquery(Box::new(
             CallSubquery {
                 optional: call.optional,
-                distinct,
+                combine,
                 branches,
                 outputs,
             },

@@ -80,14 +80,26 @@ impl Parser {
         let first = self.single_query()?;
         let mut rest = Vec::new();
         let mut kind = None;
-        while self.at_keyword("UNION") {
+        while ["UNION", "EXCEPT", "INTERSECT", "OTHERWISE"]
+            .iter()
+            .any(|keyword| self.at_keyword(keyword))
+        {
             let union_offset = self.offset();
-            self.pos += 1;
-            let this = if self.eat_keyword("ALL") {
-                UnionKind::All
-            } else {
+            let operator = self.eat_keyword("UNION").then_some("UNION").or_else(|| {
+                ["EXCEPT", "INTERSECT", "OTHERWISE"]
+                    .into_iter()
+                    .find(|keyword| self.eat_keyword(keyword))
+            });
+            let all = operator != Some("OTHERWISE") && self.eat_keyword("ALL");
+            if !all && operator != Some("OTHERWISE") {
                 self.eat_keyword("DISTINCT");
-                UnionKind::Distinct
+            }
+            let this = match operator {
+                Some("UNION") if all => UnionKind::All,
+                Some("UNION") => UnionKind::Distinct,
+                Some("EXCEPT") => UnionKind::Except { all },
+                Some("INTERSECT") => UnionKind::Intersect { all },
+                _ => UnionKind::Otherwise,
             };
             if kind.is_some_and(|earlier| earlier != this) {
                 return Err(SyntaxError::new(union_offset, SyntaxErrorKind::MixedUnion));

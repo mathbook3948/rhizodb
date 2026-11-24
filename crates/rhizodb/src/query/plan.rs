@@ -6,6 +6,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::UnionKind;
 use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
@@ -38,7 +39,7 @@ impl Plan {
 #[derive(Clone, Debug)]
 pub(crate) struct Program<C> {
     pub(crate) parts: Vec<Pipeline<C>>,
-    pub(crate) distinct: bool,
+    pub(crate) combine: UnionKind,
     pub(crate) columns: Vec<String>,
     pub(crate) slot_count: usize,
     /// The unconditionally evaluated expressions that read no row, no parameter, and match no
@@ -83,7 +84,7 @@ pub(crate) enum ReadClause {
 #[derive(Clone, Debug)]
 pub(crate) struct CallSubquery {
     pub(crate) optional: bool,
-    pub(crate) distinct: bool,
+    pub(crate) combine: UnionKind,
     pub(crate) branches: Vec<Pipeline<ReadClause>>,
     pub(crate) outputs: Vec<Slot>,
 }

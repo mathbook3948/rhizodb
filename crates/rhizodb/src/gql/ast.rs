@@ -21,9 +21,9 @@ pub(crate) enum Query {
     Union(Union),
 }
 
-/// Two or more single queries joined by one kind of `UNION`.
+/// Two or more single queries joined by one set operator.
 ///
-/// `rest` is never empty. Mixing `UNION` and `UNION ALL` is a syntax error.
+/// `rest` is never empty. Mixing operators, or `UNION` and `UNION ALL`, is a syntax error.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Union {
     pub kind: UnionKind,
@@ -35,6 +35,16 @@ pub(crate) struct Union {
 pub(crate) enum UnionKind {
     Distinct,
     All,
+    /// The rows of the first operand that the second lacks, as a multiset with `ALL`.
+    Except {
+        all: bool,
+    },
+    /// The rows in both operands, as a multiset with `ALL`.
+    Intersect {
+        all: bool,
+    },
+    /// The first operand's rows, or the second's when the first gives none.
+    Otherwise,
 }
 
 /// Clauses in source order. Never empty.

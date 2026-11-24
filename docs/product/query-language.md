@@ -66,6 +66,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - GQL's function names `upper`, `lower`, `char_length`, `character_length`, `byte_length`, `octet_length`, `cardinality`, `path_length`, `ln`, `power`, `mod`, `sinh`, `cosh`, `tanh`, `cot`, `nullif`, and two-argument `log(base, value)` exist next to the Cypher names.
 - `trim([LEADING | TRAILING | BOTH] [characters] FROM text)` and two-argument `ltrim`, `rtrim`, and `btrim` strip any character of `characters` rather than one character string.
 - Cypher's `isEmpty`, `isNaN`, `elementId`, and the `OrNull` conversions exist, and `elementId` gives a string that names the kind and ID of the element.
+- Single queries join with GQL's `EXCEPT`, `INTERSECT`, and `OTHERWISE` as well as `UNION`, from left to right, and one query uses only one operator.
+- `EXCEPT` and `INTERSECT` compare rows as `DISTINCT` does, give distinct rows by default, and treat the rows as multisets with `ALL`.
+- `OTHERWISE` gives the rows of its left operand, or of its right operand when the left gives none.
 - A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
 - A `CALL` inside a larger query passes the arguments of a procedure that takes any.
 - A `CALL` inside a larger query binds only its `YIELD` items.
