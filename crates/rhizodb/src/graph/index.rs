@@ -19,7 +19,6 @@ use super::NodeRecord;
 use super::Properties;
 use super::RelationshipId;
 use super::RelationshipRecord;
-use super::decode_u64;
 use super::ids::Label;
 use super::ids::PropertyKey;
 use super::ids::RelationshipType;
@@ -1021,11 +1020,12 @@ impl<T: ReadTransaction> GraphTx<T> {
                 .collect()),
             Target::RelationshipType(covered) => {
                 let mut ids = Vec::new();
-                for (key, value) in self.transaction.scan_prefix(Table::Relationships, &[])? {
-                    if RelationshipRecord::decode(&value)?.rel_type == covered {
-                        ids.push(decode_u64(&key)?);
+                self.visit_relationship_records(|id, record| {
+                    if RelationshipRecord::decode(record)?.rel_type == covered {
+                        ids.push(id.0);
                     }
-                }
+                    Ok(())
+                })?;
                 Ok(ids)
             }
         }

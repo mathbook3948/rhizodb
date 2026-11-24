@@ -90,13 +90,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         mut visit: impl FnMut(RelationshipId, RelationshipRecord) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
-        self.transaction
-            .visit_prefix(Table::Relationships, &[], |key, value| {
-                visit(
-                    RelationshipId(decode_u64(key)?),
-                    RelationshipRecord::decode(value)?,
-                )
-            })
+        self.visit_relationship_records(|id, record| visit(id, RelationshipRecord::decode(record)?))
     }
 }
 

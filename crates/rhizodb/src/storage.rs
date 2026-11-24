@@ -22,6 +22,8 @@ pub(crate) enum Table {
     /// The node records of format versions before property columns, which only their upgrade
     /// reads.
     Nodes,
+    /// The relationship records of format versions before relationship chunks, one entry per
+    /// relationship, which only their upgrade reads.
     Relationships,
     /// The outgoing adjacency of format versions before adjacency segments, which only their
     /// upgrade reads.
@@ -42,10 +44,11 @@ pub(crate) enum Table {
     LabelSetByTokens,
     NodeColumns,
     Adjacency,
+    RelationshipChunks,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 19] = [
+    pub(crate) const ALL: [Table; 20] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -65,6 +68,7 @@ impl Table {
         Table::LabelSetByTokens,
         Table::NodeColumns,
         Table::Adjacency,
+        Table::RelationshipChunks,
     ];
 
     /// Whether only the upgrade of an older format version reads the table, so a new database
@@ -72,7 +76,11 @@ impl Table {
     pub(crate) const fn is_legacy(self) -> bool {
         matches!(
             self,
-            Table::LabelIndex | Table::Nodes | Table::Outgoing | Table::Incoming
+            Table::LabelIndex
+                | Table::Nodes
+                | Table::Relationships
+                | Table::Outgoing
+                | Table::Incoming
         )
     }
 
@@ -97,6 +105,7 @@ impl Table {
             Table::LabelSetByTokens => "label_set_by_tokens",
             Table::NodeColumns => "node_columns",
             Table::Adjacency => "adjacency",
+            Table::RelationshipChunks => "relationship_chunks",
         }
     }
 }

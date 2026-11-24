@@ -947,13 +947,18 @@ fn a_token_counter_that_is_not_above_the_highest_token_is_caught() {
 fn an_unreadable_relationship_record_is_caught() {
     assert_caught(
         |write| {
+            let (chunk, _) = relationships::locate(LOOP);
             write
-                .put(Table::Relationships, &keys::element_key(LOOP.0), &[1])
+                .put(
+                    Table::RelationshipChunks,
+                    &relationships::chunk_key(chunk),
+                    &[1],
+                )
                 .unwrap();
         },
         IntegrityViolation::Undecodable {
-            table: Table::Relationships,
-            key: keys::element_key(LOOP.0).to_vec(),
+            table: Table::RelationshipChunks,
+            key: relationships::chunk_key(relationships::locate(LOOP).0).to_vec(),
         },
     );
 }
