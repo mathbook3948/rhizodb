@@ -644,7 +644,7 @@ fn expectation(template: &Template, keyword: &str) -> Expectation {
 }
 
 fn graph(identifier: &str) -> Database {
-    let mut db = db();
+    let db = db();
     for name in [
         "test.out".to_owned(),
         format!("{identifier}.p"),
@@ -652,7 +652,7 @@ fn graph(identifier: &str) -> Database {
         format!("{identifier}.{identifier}"),
     ] {
         db.register_procedure(
-            Procedure::new(name, |_| Ok(vec![vec![int(5), int(6)]]))
+            Procedure::new(name, |_| Ok(vec![vec![int(5), int(6)]].into()))
                 .output("out")
                 .output(identifier),
         )

@@ -6,6 +6,7 @@ use rhizodb::ErrorKind;
 use rhizodb::IndexTarget;
 use rhizodb::Parameters;
 use rhizodb::Procedure;
+use rhizodb::ProcedureOutput;
 use rhizodb::Value;
 use rhizodb::VectorMetric;
 use support::*;
@@ -555,20 +556,20 @@ fn a_standalone_search_returns_every_output() {
 
 #[test]
 fn the_db_namespace_is_reserved_for_built_in_procedures() {
-    let mut db = db();
+    let db = db();
     let error = db
         .register_procedure(Procedure::new("db.index.keyword.queryNodes", |_| {
-            Ok(Vec::new())
+            Ok(ProcedureOutput::new())
         }))
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::ReservedProcedureName);
     assert_eq!(
-        db.register_procedure(Procedure::new("db", |_| Ok(Vec::new())))
+        db.register_procedure(Procedure::new("db", |_| Ok(ProcedureOutput::new())))
             .unwrap_err()
             .kind(),
         ErrorKind::ReservedProcedureName
     );
-    db.register_procedure(Procedure::new("dbx.tool", |_| Ok(Vec::new())))
+    db.register_procedure(Procedure::new("dbx.tool", |_| Ok(ProcedureOutput::new())))
         .unwrap();
     assert_eq!(
         error_kind(&db, "CALL db.index.unknown()"),

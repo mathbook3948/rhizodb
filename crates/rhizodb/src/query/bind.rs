@@ -1048,7 +1048,7 @@ impl Binder<'_> {
 
     fn parameter(&mut self, name: &str) -> Result<usize, Error> {
         self.parameter_reads += 1;
-        if !self.parameters.contains_key(name) {
+        if self.parameters.get(name).is_none() {
             return Err(missing_parameter(name));
         }
         Ok(
