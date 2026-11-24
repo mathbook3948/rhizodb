@@ -26,6 +26,7 @@ description = "Fast checks first, then lint and test"
 depends = ["check-fast"]
 run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo clippy --package rhizodb --features fuzzing -- -D warnings",
   "cargo test --workspace",
 ]
 
