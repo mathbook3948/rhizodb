@@ -33,9 +33,9 @@ impl StorageLock {
 
 #[derive(Clone, Copy)]
 enum Clear {
-    /// What `WriterClaim::drop` does: always empty the slot.
+    /// What `WriterClaim::drop` did before the fix: always empty the slot.
     Always,
-    /// Empty the slot only while it still names the dropping thread.
+    /// What `WriterClaim::drop` does: empty the slot only while it still names its own thread.
     IfOwn,
 }
 
@@ -118,9 +118,8 @@ fn two_writers(clear: Clear) {
 }
 
 #[test]
-#[ignore = "bug: the slot is cleared after the storage lock is released, so a thread that \
-            takes the lock in between loses its claim and its own second write waits forever"]
-fn the_writer_slot_names_the_holder_for_as_long_as_it_holds_the_write_lock() {
+#[should_panic]
+fn a_claim_that_always_empties_the_slot_loses_the_next_holder() {
     shuttle::check_random(|| two_writers(Clear::Always), schedules());
 }
 

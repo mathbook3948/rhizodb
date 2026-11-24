@@ -282,7 +282,10 @@ impl<S: Storage> Graph<S> {
         let definitions = Arc::clone(&lock(&self.committed_index_definitions));
         Ok(GraphTx {
             transaction,
-            _writer: Some(WriterClaim(Arc::clone(&self.writer))),
+            _writer: Some(WriterClaim {
+                slot: Arc::clone(&self.writer),
+                owner: current,
+            }),
             index_definitions: OnceLock::from(definitions),
             catalog: Some(Catalog {
                 shared: Arc::clone(&self.committed_index_definitions),
@@ -346,11 +349,17 @@ struct Catalog {
 }
 
 #[derive(Debug)]
-struct WriterClaim(Arc<Mutex<Option<ThreadId>>>);
+struct WriterClaim {
+    slot: Arc<Mutex<Option<ThreadId>>>,
+    owner: ThreadId,
+}
 
 impl Drop for WriterClaim {
     fn drop(&mut self) {
-        *lock(&self.0) = None;
+        let mut slot = lock(&self.slot);
+        if *slot == Some(self.owner) {
+            *slot = None;
+        }
     }
 }
 

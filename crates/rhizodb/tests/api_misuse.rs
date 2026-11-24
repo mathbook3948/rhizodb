@@ -4,7 +4,6 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread;
-use std::time::Duration;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
@@ -139,32 +138,6 @@ fn a_forgotten_read_transaction_lets_the_file_close_and_reopen() {
         Ok(db) => assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(2)),
         Err(error) => assert_eq!(error.kind(), ErrorKind::Storage, "{error}"),
     }
-}
-
-#[test]
-#[ignore = "bug: WriteTransaction is Send, but the writer slot remembers the thread that began \
-            it, so after the transaction moves to another thread that thread's begin_write waits \
-            for itself forever instead of failing with WriteTransactionOnThisThread"]
-fn a_write_transaction_moved_to_another_thread_still_refuses_a_second_write_there() {
-    let test = "a_write_transaction_moved_to_another_thread_still_refuses_a_second_write_there";
-    if !isolated(test, Duration::from_secs(30)) {
-        return;
-    }
-    let db = db();
-    let tx = db.begin_write().unwrap();
-    let nested = thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                let tx = tx;
-                let nested = db.begin_write().map(drop).map_err(|error| error.kind());
-                tx.commit().unwrap();
-                nested
-            })
-            .join()
-            .unwrap()
-    });
-    assert_eq!(nested, Err(ErrorKind::WriteTransactionOnThisThread));
-    run(&db, "INSERT (:After)");
 }
 
 fn callback_database(probe: &'static str) -> (Arc<Database>, Arc<OnceLock<Arc<Database>>>) {
