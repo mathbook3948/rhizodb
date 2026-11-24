@@ -97,7 +97,12 @@ impl<'p> Groups<'p> {
             .enumerate()
             .map(|(index, (expr, _))| eval(Part::Key(index), expr))
             .collect::<Result<Vec<_>, _>>()?;
-        let position = match self.index.get(&values) {
+        let found = if self.keys.is_empty() {
+            (!self.groups.is_empty()).then_some(0)
+        } else {
+            self.index.get(&values)
+        };
+        let position = match found {
             Some(position) => position,
             None => {
                 let position = self.groups.len();
