@@ -19,6 +19,8 @@ mod temporals;
 mod update;
 
 use std::sync::Arc;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -42,19 +44,24 @@ use self::datum::from_parameter;
 use self::plan::Plan;
 
 /// The procedures that `CALL` reaches and the plans of the queries bound against them, which a
-/// database shares with its transactions.
+/// database shares with its transactions. A plan is looked up, or bound and cached, while the
+/// procedures are locked for reading, so a registration, which locks them for writing, never
+/// leaves a plan bound against the procedures it replaced.
 #[derive(Debug, Default)]
 pub(crate) struct Statements {
-    procedures: Procedures,
+    procedures: RwLock<Procedures>,
     plans: PlanCache,
 }
 
 impl Statements {
     /// Makes `procedure` callable by its name, replacing any procedure of that name, and forgets
     /// every bound plan.
-    pub(crate) fn register(&mut self, procedure: Procedure) {
-        self.procedures
-            .insert(procedure.signature.name.clone(), Arc::new(procedure));
+    pub(crate) fn register(&self, procedure: Procedure) {
+        let mut procedures = self
+            .procedures
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        procedures.insert(procedure.signature.name.clone(), Arc::new(procedure));
         self.plans.clear();
     }
 
@@ -63,19 +70,19 @@ impl Statements {
         query: &str,
         parameters: &Parameters,
     ) -> Result<(Arc<Plan>, Vec<Datum>), Error> {
+        let procedures = self
+            .procedures
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         let plan = match self.plans.get(query) {
             Some(plan) => plan,
             None => {
-                let plan = Arc::new(bind::bind(
-                    &parse(query)?,
-                    query,
-                    parameters,
-                    &self.procedures,
-                )?);
+                let plan = Arc::new(bind::bind(&parse(query)?, query, parameters, &procedures)?);
                 self.plans.insert(query, Arc::clone(&plan));
                 plan
             }
         };
+        drop(procedures);
         let values = plan
             .parameters()
             .iter()

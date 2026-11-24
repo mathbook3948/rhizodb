@@ -55,7 +55,7 @@ fn properties(db: &Database, id: i64) -> BTreeMap<String, Value> {
         .to_vec();
     match rows.as_slice() {
         [row] => match row.as_slice() {
-            [Value::Node(node)] => node.properties.clone(),
+            [Value::Node(node)] => node.properties().clone(),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),

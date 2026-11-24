@@ -135,21 +135,21 @@ fn a_backup_never_replaces_what_is_at_its_path() {
     let file = directory.path().join("file");
     std::fs::write(&file, b"keep me").unwrap();
     let error = db.backup_to(&file).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Storage);
+    assert_eq!(error.kind(), ErrorKind::BackupTargetExists);
     assert_eq!(std::fs::read(&file).unwrap(), b"keep me");
     std::fs::write(directory.path().join("empty"), b"").unwrap();
     assert_eq!(
         db.backup_to(directory.path().join("empty"))
             .unwrap_err()
             .kind(),
-        ErrorKind::Storage
+        ErrorKind::BackupTargetExists
     );
     std::fs::create_dir(directory.path().join("dir")).unwrap();
     assert_eq!(
         db.backup_to(directory.path().join("dir"))
             .unwrap_err()
             .kind(),
-        ErrorKind::Storage
+        ErrorKind::BackupTargetExists
     );
     assert_eq!(
         db.backup_to(directory.path().join("missing").join("copy"))

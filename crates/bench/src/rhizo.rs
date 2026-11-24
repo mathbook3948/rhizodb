@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
 use rhizodb::Database;
 use rhizodb::IndexTarget;
-use rhizodb::Node;
 use rhizodb::Parameters;
 use rhizodb::Value;
 use rhizodb::VectorMetric;
@@ -27,11 +25,11 @@ const NODE_BATCH: usize = 5_000;
 const EDGE_BATCH: usize = 20_000;
 const FILE_NAME: &str = "rhizodb.redb";
 
-const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN p";
-const CREATE_CITIES: &str = "UNWIND $rows AS r CREATE (c:City {id: r.id, name: r.name}) RETURN c";
-const CREATE_KNOWS: &str = "UNWIND $rows AS r WITH r.a AS a, r.b AS b, r.since AS since CREATE (a)-[:KNOWS {since: since}]->(b)";
-const CREATE_LIVES_IN: &str =
-    "UNWIND $rows AS r WITH r.a AS a, r.b AS b CREATE (a)-[:LIVES_IN]->(b)";
+const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN id(p)";
+const CREATE_CITIES: &str =
+    "UNWIND $rows AS r CREATE (c:City {id: r.id, name: r.name}) RETURN id(c)";
+const CREATE_KNOWS: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH (b) WHERE id(b) = r.b CREATE (a)-[:KNOWS {since: r.since}]->(b)";
+const CREATE_LIVES_IN: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH (b) WHERE id(b) = r.b CREATE (a)-[:LIVES_IN]->(b)";
 
 /// RhizoDB, opened as a file.
 #[derive(Clone, Copy, Debug)]
@@ -335,7 +333,7 @@ fn rows_parameter(rows: Vec<Vec<(&'static str, Value)>>) -> Parameters {
             )
         })
         .collect();
-    BTreeMap::from([("rows".to_owned(), Value::List(rows))])
+    Parameters::from([("rows", Value::List(rows))])
 }
 
 fn create_nodes(
@@ -347,12 +345,8 @@ fn create_nodes(
     for batch in batches {
         let result = transaction.execute(statement, batch).map_err(failed)?;
         for row in result.rows() {
-            if let Some(Value::Node(node)) = row.first() {
-                handles.push(Value::Node(Node {
-                    id: node.id,
-                    labels: node.labels.clone(),
-                    properties: BTreeMap::new(),
-                }));
+            if let Some(id @ Value::Integer(_)) = row.first() {
+                handles.push(id.clone());
             }
         }
     }

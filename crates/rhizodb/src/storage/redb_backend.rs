@@ -27,6 +27,8 @@ use redb::TableDefinition;
 use redb::backends::InMemoryBackend;
 use self_cell::self_cell;
 
+use crate::error::ErrorKind;
+
 use super::Entry;
 use super::Maintenance;
 use super::ReadTransaction;
@@ -54,6 +56,9 @@ const fn definition(table: Table) -> RedbTable {
 fn redb_error(error: impl Into<redb::Error>) -> StorageError {
     match error.into() {
         error @ redb::Error::Corrupted(_) => StorageError::corrupt(error),
+        error @ redb::Error::DatabaseAlreadyOpen => {
+            StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
+        }
         error => StorageError::new(error),
     }
 }

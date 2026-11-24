@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
+use crate::error::ErrorKind;
 use crate::storage::StorageError;
 
 /// A failure of the engine. Corruption and an unsupported format are told apart from I/O so the
@@ -85,6 +86,8 @@ impl From<EngineError> for StorageError {
         }
         if error.is_corrupt() {
             StorageError::corrupt(error)
+        } else if matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock) {
+            StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
         } else {
             StorageError::new(error)
         }
