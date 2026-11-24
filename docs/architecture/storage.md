@@ -12,6 +12,10 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - The storage layer sits behind a trait so it can be swapped.
 - Values are stored as bytes in a format RhizoDB defines, and the format carries a version.
 - Each format version can hold everything the older versions hold.
+- Opening a path with no file, or an empty one, writes the new database under a staging name in the same directory, syncs it, and links it into place, so a power loss during creation leaves either no database or a whole empty one.
+- The staging file's own lock decides which of several concurrent opens creates the database, and the others wait for it instead of replacing it.
+- A staging file that an interrupted creation left behind is reused when redb can open it and removed when it cannot.
+- Opening an existing file that redb cannot read never rewrites it, since it may be a damaged database.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
