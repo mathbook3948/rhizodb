@@ -165,6 +165,22 @@ fn a_truncated_file_fails_to_open_or_reads_without_a_panic() {
     assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }
 
+/// Opens the file whose stored entries were damaged. redb checks every page against its
+/// checksum as it opens a file, so there the open fails as corrupt data and returns `None`, and
+/// only the own engine reaches the reads.
+fn open_damaged(path: &Path) -> Option<Database> {
+    let opened = Database::open(path);
+    if cfg!(rhizodb_engine) {
+        return Some(opened.unwrap());
+    }
+    assert_eq!(
+        opened.err().map(|error| error.kind()),
+        Some(ErrorKind::CorruptData),
+        "redb refuses a damaged page as it opens the file"
+    );
+    None
+}
+
 /// Flips one bit of the first copy of `needle` in the file and returns whether there was one.
 fn flip_inside(file: &mut [u8], needle: &[u8]) -> bool {
     let Some(at) = file
@@ -194,7 +210,9 @@ fn a_damaged_property_column_fails_as_corrupt_data_where_it_is_read() {
         "the string column keeps its values side by side"
     );
     std::fs::write(&path, &file).unwrap();
-    let db = Database::open(&path).unwrap();
+    let Some(db) = open_damaged(&path) else {
+        return;
+    };
     for query in [
         "MATCH (n:Item) RETURN n.text",
         "MATCH (n:Item) WHERE n.text = 'word 301' RETURN n.i",
@@ -252,7 +270,9 @@ fn a_damaged_adjacency_part_fails_as_corrupt_data_where_it_is_read() {
         "the part keeps the relationships of one node side by side"
     );
     std::fs::write(&path, &file).unwrap();
-    let db = Database::open(&path).unwrap();
+    let Some(db) = open_damaged(&path) else {
+        return;
+    };
     for query in [
         "MATCH (a:Item {i: 0})-[]->(b) RETURN b.i",
         "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)",
@@ -294,7 +314,9 @@ fn a_damaged_adjacency_delta_fails_as_corrupt_data_where_it_is_read() {
         "the delta lists the relationships it adds side by side"
     );
     std::fs::write(&path, &file).unwrap();
-    let db = Database::open(&path).unwrap();
+    let Some(db) = open_damaged(&path) else {
+        return;
+    };
     for query in [
         "MATCH (a:Item {i: 0})-[]->(b) RETURN b.i",
         "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)",

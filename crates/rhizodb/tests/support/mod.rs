@@ -4,6 +4,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
@@ -91,16 +92,24 @@ pub fn cases(fast: u64) -> u64 {
 }
 
 /// The seed a randomized test runs with: `RHIZODB_TEST_SEED` when set, so a failure replays,
-/// and otherwise one drawn from the clock.
+/// and otherwise one drawn from the clock. It is written to stderr before the test uses it, past
+/// the test harness's capture, so a test that hangs or aborts still names its seed.
 pub fn seed() -> u64 {
-    std::env::var("RHIZODB_TEST_SEED")
+    let seed = std::env::var("RHIZODB_TEST_SEED")
         .ok()
         .and_then(|seed| seed.parse().ok())
         .unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos() as u64)
-        })
+        });
+    let thread = std::thread::current();
+    let _ = writeln!(
+        std::io::stderr(),
+        "{} runs with RHIZODB_TEST_SEED={seed}",
+        thread.name().unwrap_or("a test")
+    );
+    seed
 }
 
 /// SplitMix64, a small seeded generator, so randomized tests need no extra crate.

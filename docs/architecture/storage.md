@@ -16,6 +16,7 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - The staging file's own lock decides which of several concurrent opens creates the database, and the others wait for it instead of replacing it.
 - A staging file that an interrupted creation left behind is reused when redb can open it and removed when it cannot.
 - Opening an existing file that redb cannot read never rewrites it, since it may be a damaged database.
+- Opening an existing redb file runs redb's integrity check, which verifies every page's checksum, so a damaged page fails the open as corrupt data instead of sending redb into an unbounded recursion or a panic inside a drop, which abort the process.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
