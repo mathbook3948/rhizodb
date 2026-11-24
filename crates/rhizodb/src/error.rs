@@ -162,6 +162,15 @@ pub enum ErrorKind {
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
+    /// [`OpenOptions::open`](crate::OpenOptions::open) found no database file at the path, and
+    /// its settings do not create one.
+    DatabaseNotFound,
+    /// The database file is already open, in this process or another, so it cannot be opened
+    /// again until that `Database` is dropped.
+    DatabaseAlreadyOpen,
+    /// [`Database::backup_to`](crate::Database::backup_to) found a file or directory at the
+    /// path, which a backup never replaces.
+    BackupTargetExists,
     /// The reader or writer the host passed to [`Database::import`] or [`Database::export`]
     /// failed.
     ///
@@ -290,13 +299,7 @@ impl From<SyntaxError> for Error {
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         Self {
-            kind: if error.is_corrupt() {
-                ErrorKind::CorruptData
-            } else if error.is_unsupported() {
-                ErrorKind::Unsupported
-            } else {
-                ErrorKind::Storage
-            },
+            kind: error.kind(),
             message: error.to_string(),
             source: Some(Box::new(error)),
             rejects_type: false,
@@ -307,9 +310,7 @@ impl From<StorageError> for Error {
 impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
         let kind = match &error {
-            GraphError::Storage(error) if error.is_corrupt() => ErrorKind::CorruptData,
-            GraphError::Storage(error) if error.is_unsupported() => ErrorKind::Unsupported,
-            GraphError::Storage(_) => ErrorKind::Storage,
+            GraphError::Storage(error) => error.kind(),
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,
             GraphError::IdSpaceExhausted => ErrorKind::IdSpaceExhausted,

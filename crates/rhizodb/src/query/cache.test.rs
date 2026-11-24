@@ -38,7 +38,7 @@ fn a_full_cache_replaces_the_query_used_longest_ago() {
 
 #[test]
 fn clearing_forgets_every_plan() {
-    let mut cache = PlanCache::default();
+    let cache = PlanCache::default();
     cache.insert("RETURN 1", plan());
     cache.clear();
     assert!(cache.get("RETURN 1").is_none());

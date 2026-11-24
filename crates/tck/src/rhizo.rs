@@ -98,20 +98,20 @@ impl Graph for RhizoGraph {
         let mut labels = BTreeSet::new();
         for value in self.read_all("MATCH (n) RETURN n")? {
             if let rhizodb::Value::Node(node) = value {
-                let id = node.id.as_u64();
+                let id = node.id().as_u64();
                 snapshot.nodes.push(id);
-                labels.extend(node.labels.iter().cloned());
-                record_properties(&mut snapshot, Entity::Node(id), &node.properties)?;
+                labels.extend(node.labels().iter().cloned());
+                record_properties(&mut snapshot, Entity::Node(id), node.properties())?;
             }
         }
         for value in self.read_all("MATCH ()-[r]->() RETURN r")? {
             if let rhizodb::Value::Relationship(relationship) = value {
-                let id = relationship.id.as_u64();
+                let id = relationship.id().as_u64();
                 snapshot.relationships.push(id);
                 record_properties(
                     &mut snapshot,
                     Entity::Relationship(id),
-                    &relationship.properties,
+                    relationship.properties(),
                 )?;
             }
         }
@@ -148,7 +148,7 @@ fn table_procedure(procedure: &Procedure) -> Result<rhizodb::Procedure, String> 
                 );
             }
         }
-        Ok(out)
+        Ok(out.into())
     });
     for (name, kind) in signature.parameters {
         registered = registered.parameter(name, value_type(&kind));
@@ -313,24 +313,24 @@ fn properties(entries: &BTreeMap<String, rhizodb::Value>) -> Result<Properties, 
 
 fn from_node(node: &rhizodb::Node) -> Result<Node, QueryError> {
     Ok(Node {
-        labels: node.labels.clone(),
-        properties: properties(&node.properties)?,
+        labels: node.labels().clone(),
+        properties: properties(node.properties())?,
     })
 }
 
 fn from_relationship(relationship: &rhizodb::Relationship) -> Result<Relationship, QueryError> {
     Ok(Relationship {
-        rel_type: relationship.rel_type.clone(),
-        properties: properties(&relationship.properties)?,
+        rel_type: relationship.relationship_type().to_owned(),
+        properties: properties(relationship.properties())?,
     })
 }
 
 fn from_path(path: &rhizodb::Path) -> Result<Path, QueryError> {
     let (start, rest) = path.nodes().split_first().ok_or(QueryError::Unsupported)?;
-    let mut previous = start.id;
+    let mut previous = start.id();
     let mut steps = Vec::new();
     for (relationship, node) in path.relationships().iter().zip(rest) {
-        let direction = if relationship.start == previous {
+        let direction = if relationship.start() == previous {
             Direction::Forward
         } else {
             Direction::Backward
@@ -340,7 +340,7 @@ fn from_path(path: &rhizodb::Path) -> Result<Path, QueryError> {
             direction,
             node: from_node(node)?,
         });
-        previous = node.id;
+        previous = node.id();
     }
     Ok(Path {
         start: from_node(start)?,

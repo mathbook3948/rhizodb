@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 
 use super::Storage;
 use super::StorageError;
+use crate::error::ErrorKind;
 
 static STAGED: AtomicU64 = AtomicU64::new(0);
 
@@ -19,13 +20,18 @@ static STAGED: AtomicU64 = AtomicU64::new(0);
 /// `path` is never replaced.
 pub(crate) fn write<S: Storage>(storage: &S, path: &Path) -> Result<(), StorageError> {
     if exists(path).map_err(StorageError::new)? {
-        return Err(StorageError::new(already_exists(path)));
+        return Err(target_exists(path));
     }
     let staging = staging_path(path).map_err(StorageError::new)?;
     let copied = storage
         .begin_read()
         .and_then(|snapshot| S::write_copy(&snapshot, &staging));
-    let published = copied.and_then(|()| publish(&staging, path).map_err(StorageError::new));
+    let published = copied.and_then(|()| {
+        publish(&staging, path).map_err(|error| match error.kind() {
+            io::ErrorKind::AlreadyExists => target_exists(path),
+            _ => StorageError::new(error),
+        })
+    });
     if published.is_err() {
         let _ = fs::remove_file(&staging);
     }
@@ -38,6 +44,10 @@ fn exists(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+fn target_exists(path: &Path) -> StorageError {
+    StorageError::of_kind(ErrorKind::BackupTargetExists, already_exists(path))
 }
 
 fn already_exists(path: &Path) -> io::Error {

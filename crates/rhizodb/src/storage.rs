@@ -2,6 +2,8 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
+use crate::error::ErrorKind;
+
 pub(crate) mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
@@ -105,41 +107,39 @@ pub(crate) type Entry = (Vec<u8>, Vec<u8>);
 #[derive(Debug)]
 pub(crate) struct StorageError {
     source: Box<dyn Error + Send + Sync>,
-    corrupt: bool,
-    unsupported: bool,
+    kind: ErrorKind,
 }
 
 impl StorageError {
     pub(crate) fn new(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::of_kind(ErrorKind::Storage, source)
+    }
+
+    /// A failure that hosts tell apart from other storage failures by `kind`.
+    pub(crate) fn of_kind(kind: ErrorKind, source: impl Error + Send + Sync + 'static) -> Self {
         Self {
             source: Box::new(source),
-            corrupt: false,
-            unsupported: false,
+            kind,
         }
     }
 
     /// A failure the engine raised on damaged stored data, which is reported as corrupt data.
     pub(crate) fn corrupt(source: impl Error + Send + Sync + 'static) -> Self {
-        Self {
-            corrupt: true,
-            ..Self::new(source)
-        }
-    }
-
-    pub(crate) fn is_corrupt(&self) -> bool {
-        self.corrupt
+        Self::of_kind(ErrorKind::CorruptData, source)
     }
 
     /// An operation this backend does not offer.
     pub(crate) fn unsupported(source: impl Error + Send + Sync + 'static) -> Self {
-        Self {
-            unsupported: true,
-            ..Self::new(source)
-        }
+        Self::of_kind(ErrorKind::Unsupported, source)
     }
 
-    pub(crate) fn is_unsupported(&self) -> bool {
-        self.unsupported
+    pub(crate) fn is_corrupt(&self) -> bool {
+        self.kind == ErrorKind::CorruptData
+    }
+
+    /// The kind the public error reports for this failure.
+    pub(crate) fn kind(&self) -> ErrorKind {
+        self.kind
     }
 }
 
