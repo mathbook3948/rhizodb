@@ -253,6 +253,17 @@ impl<S: Storage> Graph<S> {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    /// Copies the committed graph, as one read snapshot sees it, into a new database file at
+    /// `path`, which opens as this graph.
+    pub(crate) fn backup_to(&self, path: &std::path::Path) -> Result<(), GraphError> {
+        Ok(crate::storage::backup::write(&self.storage, path)?)
+    }
+
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
         let catalog = lock(&self.committed_index_definitions);
         let transaction = self.storage.begin_read()?;

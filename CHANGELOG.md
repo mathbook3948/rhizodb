@@ -21,6 +21,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword and vector indexes over the properties of relationships of one type, created by passing `IndexTarget::RelationshipType` to `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryRelationships` and `CALL db.index.vector.queryRelationships`, which yield `relationship` and `score`.
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
+- Online backups with `Database::backup_to`, which copies one snapshot of the committed database into a new file while readers and writers carry on, and never leaves a partial file at its path. Restoring a backup is opening it.
 
 ### Changed
 

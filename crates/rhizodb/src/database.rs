@@ -106,6 +106,41 @@ impl Database {
         Ok(WriteTransaction::new(self.graph.write()?, &self.statements))
     }
 
+    /// Writes a copy of the committed database to a new file at `path`, which
+    /// [`Database::open`] then opens as this database, so restoring a backup is opening it.
+    ///
+    /// The copy holds exactly the commits that finished before the backup began, read from one
+    /// snapshot as a [`ReadTransaction`] reads it. Readers and writers carry on while it runs,
+    /// and commits made meanwhile stay out of the copy. The copy is written under a staging name
+    /// that starts with `.` and the file name of `path`, in the same directory, synced, and then
+    /// linked to `path`, so after a crash or a failure `path` holds either nothing or the whole
+    /// copy. A crash can leave the staging file behind, and removing it is safe. An in-memory
+    /// database backs up to a file the same way.
+    ///
+    /// It fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage) when a file or directory
+    /// already exists at `path`, which is never replaced, or when writing the copy fails.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let db = Database::in_memory()?;
+    /// db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+    ///
+    /// let backup = directory.path().join("backup.rhizodb");
+    /// db.backup_to(&backup)?;
+    ///
+    /// let restored = Database::open(&backup)?;
+    /// let result = restored.execute("MATCH (p:Person) RETURN p.name", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Ada".to_owned())]]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        Ok(self.graph.backup_to(path.as_ref())?)
+    }
+
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
     /// under the same name. Registration lasts as long as this `Database` value.
     ///
@@ -271,3 +306,7 @@ impl Database {
 #[cfg(not(rhizodb_engine))]
 #[path = "database_crash.test.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+#[path = "database_backup.test.rs"]
+mod backup_tests;

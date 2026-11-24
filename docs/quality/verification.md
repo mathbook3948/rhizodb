@@ -62,6 +62,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Inputs at and past each resource limit run on a 1 MiB stack, the most a query may use, in debug and release builds, and in a child process where a stack overflow would end the run, so it fails one test instead.
 - Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
 - Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
+- Backups are tested by killing a child process that writes and backs up in turn, and every backup file it left must open and hold one commit whole.
 - Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.
 - Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
 - The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
