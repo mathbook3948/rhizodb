@@ -217,3 +217,17 @@ fn redb_point_reads_for_profiling() {
     load(&store, keys);
     profile_point_reads(&store, keys);
 }
+
+#[test]
+#[ignore = "a profiling target, run under callgrind or in release with --nocapture"]
+fn memtable_point_reads_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
+    let store = open_path(
+        &directory.path().join("graph.rhizo"),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    load(&store, keys);
+    profile_point_reads(&store, keys);
+}

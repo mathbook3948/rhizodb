@@ -93,7 +93,7 @@ impl Default for EngineOptions {
             memtable_limit: 64 << 20,
             wal_limit: 256 << 20,
             checkpoint: CheckpointMode::Background,
-            cache_pages: (64 << 20) / BLOCK,
+            cache_pages: (1 << 30) / BLOCK,
         }
     }
 }
@@ -345,11 +345,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 next_extent: header.next_extent,
                 ..ExtentTable::default()
             };
-            let tree = Tree {
-                generation: header.generation,
-                roots: BTreeMap::new(),
-                source: Arc::clone(&source),
-            };
+            let tree = Tree::new(header.generation, BTreeMap::new(), Arc::clone(&source));
             (tree, extents, Vec::new())
         } else {
             for open in header.open.iter().filter(|open| !open.id.is_none()) {
@@ -371,11 +367,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             for (id, entry) in &catalog.extents.entries {
                 pages.place_extent(*id, entry.slot);
             }
-            let tree = Tree {
-                generation: header.generation,
-                roots: catalog.roots,
-                source: Arc::clone(&source),
-            };
+            let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
             (tree, catalog.extents, runs)
         };
         let tree = Arc::new(tree);
@@ -779,11 +771,11 @@ impl<F: FileSystem + 'static> Shared<F> {
             ..durable.header
         };
         self.pages.write_header(&header)?;
-        let tree = Arc::new(Tree {
+        let tree = Arc::new(Tree::new(
             generation,
             roots,
-            source: Arc::clone(&durable.tree.source),
-        });
+            Arc::clone(&durable.tree.source),
+        ));
         lock(&self.trees).push(Arc::downgrade(&tree));
         let mut quarantine = lock(&self.quarantine);
         for slot in finished.dropped {

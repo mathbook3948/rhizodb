@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use super::blob::BlobRef;
 use super::blob::Role;
@@ -31,6 +32,7 @@ pub(crate) struct Tree {
     pub(crate) generation: u64,
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) source: Arc<dyn PageSource>,
+    root_pages: BTreeMap<TableId, OnceLock<CachedPage>>,
 }
 
 fn lift<E: From<StorageError>>(error: EngineError) -> E {
@@ -73,6 +75,34 @@ pub(crate) fn fetch(
 }
 
 impl Tree {
+    pub(crate) fn new(
+        generation: u64,
+        roots: BTreeMap<TableId, Root>,
+        source: Arc<dyn PageSource>,
+    ) -> Self {
+        let root_pages = roots
+            .keys()
+            .map(|table| (*table, OnceLock::new()))
+            .collect();
+        Self {
+            generation,
+            roots,
+            source,
+            root_pages,
+        }
+    }
+
+    fn root_page(&self, table: TableId, root: &Root) -> Result<Option<&CachedPage>, EngineError> {
+        let Some(pinned) = self.root_pages.get(&table) else {
+            return Ok(None);
+        };
+        if pinned.get().is_none() {
+            let page = fetch(&*self.source, table, root.page, root.level)?;
+            let _ = pinned.set(page);
+        }
+        Ok(pinned.get())
+    }
+
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
         |blob| load_blob(&*self.source, blob, Role::Key)
     }
@@ -95,8 +125,16 @@ impl Tree {
         let load = self.load_key();
         let mut page = root.page;
         let mut level = root.level;
+        let mut pinned = self.root_page(table, root)?;
         loop {
-            let cached = fetch(&*self.source, table, page, level)?;
+            let fetched;
+            let cached = match pinned.take() {
+                Some(cached) => cached,
+                None => {
+                    fetched = fetch(&*self.source, table, page, level)?;
+                    &fetched
+                }
+            };
             let node = Node::parse(&cached.header, &cached.bytes, table)?;
             let (index, exact) = node.find(key, &load)?;
             if node.is_leaf() {

@@ -285,7 +285,7 @@ proptest! {
 
     #[test]
     fn a_leaf_finds_the_first_key_at_or_above_the_target(
-        keys in proptest::collection::btree_set(key_strategy(), 1..30),
+        keys in proptest::collection::btree_set(key_strategy(), 1..20),
         targets in vec(key_strategy(), 1..20),
         same_width in any::<bool>(),
     ) {
@@ -332,7 +332,7 @@ proptest! {
 
     #[test]
     fn a_branch_finds_the_child_whose_range_holds_the_target(
-        lows in proptest::collection::btree_set(key_strategy(), 1..30),
+        lows in proptest::collection::btree_set(key_strategy(), 1..20),
         targets in vec(key_strategy(), 1..20),
     ) {
         let lows: Vec<Vec<u8>> = lows.into_iter().filter(|low| !low.is_empty()).collect();

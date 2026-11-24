@@ -83,11 +83,11 @@ impl Store {
     }
 
     fn tree(&self) -> Tree {
-        Tree {
-            generation: self.header.generation,
-            roots: self.roots.clone(),
-            source: Arc::clone(&self.pages) as Arc<dyn PageSource>,
-        }
+        Tree::new(
+            self.header.generation,
+            self.roots.clone(),
+            Arc::clone(&self.pages) as Arc<dyn PageSource>,
+        )
     }
 
     fn verify(&self, model: &Model) -> Result<(), TestCaseError> {

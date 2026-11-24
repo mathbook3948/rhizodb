@@ -24,7 +24,6 @@ const SHARDS: usize = 64;
 
 #[derive(Debug)]
 struct Entry {
-    at: BlockRef,
     page: CachedPage,
     used: AtomicBool,
 }
@@ -54,8 +53,8 @@ impl Hasher for BlockHasher {
 
 #[derive(Debug, Default)]
 struct Shard {
-    index: HashMap<BlockRef, usize, BuildHasherDefault<BlockHasher>>,
-    entries: Vec<Entry>,
+    entries: HashMap<BlockRef, Entry, BuildHasherDefault<BlockHasher>>,
+    clock: Vec<BlockRef>,
     hand: usize,
 }
 
@@ -86,7 +85,7 @@ impl Cache {
             .shard(at)
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        let entry = &shard.entries[*shard.index.get(&at)?];
+        let entry = shard.entries.get(&at)?;
         if !entry.used.load(Ordering::Relaxed) {
             entry.used.store(true, Ordering::Relaxed);
         }
@@ -99,35 +98,35 @@ impl Cache {
             .shard(at)
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        if shard.index.contains_key(&at) {
+        let shard = &mut *shard;
+        if shard.entries.contains_key(&at) {
             return;
         }
-        if shard.entries.len() < per_shard {
-            let index = shard.entries.len();
-            shard.entries.push(Entry {
-                at,
-                page,
-                used: AtomicBool::new(false),
-            });
-            shard.index.insert(at, index);
+        let entry = Entry {
+            page,
+            used: AtomicBool::new(false),
+        };
+        if shard.clock.len() < per_shard {
+            shard.clock.push(at);
+            shard.entries.insert(at, entry);
             return;
         }
         loop {
             let hand = shard.hand;
-            shard.hand = (hand + 1) % shard.entries.len();
-            let entry = &mut shard.entries[hand];
-            if *entry.used.get_mut() {
-                *entry.used.get_mut() = false;
+            shard.hand = (hand + 1) % shard.clock.len();
+            let held = shard.clock[hand];
+            if let Some(used) = shard
+                .entries
+                .get_mut(&held)
+                .map(|entry| entry.used.get_mut())
+                && *used
+            {
+                *used = false;
                 continue;
             }
-            let evicted = entry.at;
-            *entry = Entry {
-                at,
-                page,
-                used: AtomicBool::new(false),
-            };
-            shard.index.remove(&evicted);
-            shard.index.insert(at, hand);
+            shard.entries.remove(&held);
+            shard.clock[hand] = at;
+            shard.entries.insert(at, entry);
             return;
         }
     }
