@@ -183,6 +183,39 @@ fn check_filter(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Re
     ];
     let variant = choices.pick(&variants);
     expect_bag(runner, variant, yes.clone())?;
+    let every: Vec<Vec<i64>> = graph.nodes.values().map(|node| vec![node.k]).collect();
+    let not_yes: Vec<Vec<i64>> = every
+        .iter()
+        .filter(|row| !yes.contains(row))
+        .cloned()
+        .collect();
+    let set_operations = [
+        (
+            format!("MATCH (n) RETURN n.k EXCEPT MATCH (n) WHERE {text} RETURN n.k"),
+            not_yes.clone(),
+        ),
+        (
+            format!("MATCH (n) RETURN n.k INTERSECT ALL MATCH (n) WHERE {text} RETURN n.k"),
+            yes.clone(),
+        ),
+        (
+            format!(
+                "MATCH (n) RETURN n.k EXCEPT ALL \
+                 MATCH (n) WHERE NOT coalesce({text}, false) RETURN n.k"
+            ),
+            yes.clone(),
+        ),
+        (
+            format!("MATCH (n) WHERE {text} RETURN n.k OTHERWISE MATCH (n) RETURN n.k"),
+            if yes.is_empty() {
+                every.clone()
+            } else {
+                yes.clone()
+            },
+        ),
+    ];
+    let (query, want) = choices.pick(&set_operations);
+    expect_bag(runner, query, want.clone())?;
     expect_bag(
         runner,
         &format!("MATCH (n) WHERE NOT {text} RETURN n.k"),
@@ -274,6 +307,11 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
     let p = expr(Ty::Bool, 2, &scope, choices);
     let key = expr(Ty::Any, 2, &scope, choices);
     let descending = choices.chance(1, 2);
+    let nulls_first = match choices.below(3) {
+        0 => None,
+        1 => Some(true),
+        _ => Some(false),
+    };
     let skip = choices.below(4) as usize;
     let limit = choices.below(6) as usize;
     let mut rows: Vec<(V, i64)> = graph
@@ -302,8 +340,25 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
         })
         .collect();
     rows.sort_by(|a, b| {
-        let by_key = order(&a.0, &b.0);
-        let by_key = if descending { by_key.reverse() } else { by_key };
+        let null = |value: &V| matches!(value, V::Null);
+        let by_key = match (nulls_first, null(&a.0), null(&b.0)) {
+            (Some(first), true, false) => {
+                if first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (Some(first), false, true) => {
+                if first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            _ if descending => order(&a.0, &b.0).reverse(),
+            _ => order(&a.0, &b.0),
+        };
         by_key.then(a.1.cmp(&b.1))
     });
     let want: Vec<i64> = rows
@@ -313,7 +368,14 @@ fn check_order(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
         .map(|row| row.1)
         .collect();
     let (p, key) = (render(&p, &scope), render(&key, &scope));
-    let direction = if descending { "DESC" } else { "ASC" };
+    let direction = match (descending, nulls_first) {
+        (false, None) => "ASC",
+        (true, None) => "DESC",
+        (false, Some(true)) => "NULLS FIRST",
+        (true, Some(true)) => "DESC NULLS FIRST",
+        (false, Some(false)) => "ASC NULLS LAST",
+        (true, Some(false)) => "DESCENDING NULLS LAST",
+    };
     let queries = [
         format!(
             "MATCH (n) WHERE {p} RETURN n.k ORDER BY {key} {direction}, n.k SKIP {skip} LIMIT {limit}"
@@ -388,7 +450,8 @@ fn check_grouping(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> 
     let (p_text, g_text) = (render(&p, &scope), render(&g, &scope));
     let query = format!(
         "MATCH (n) WHERE {p_text} RETURN {g_text} AS g, count(*) AS c, count(n.x) AS cx, sum(n.x) AS s, \
-         min(n.y) AS mn, max(n.y) AS mx, collect(n.k) AS ks"
+         min(n.y) AS mn, max(n.y) AS mx, \
+         reduce(acc = [], k IN collect(n.k) | acc + [k]) AS ks"
     );
     let rows = runner.run(&query)?;
     let fail = |why: &str| Err(format!("{query}: {why}\n  got {rows:?}"));
@@ -575,6 +638,38 @@ fn check_pattern(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> R
         ),
         pairs,
     )?;
+    let mut counts: Vec<Vec<i64>> = Vec::new();
+    let mut sums: Vec<Vec<i64>> = Vec::new();
+    for a in graph.nodes.keys() {
+        for b in graph.nodes.keys() {
+            let between = all.iter().filter(|row| row[0] == *a && row[2] == *b);
+            counts.push(vec![*a, *b, between.clone().count() as i64]);
+            sums.push(vec![*a, *b, between.map(|row| row[1]).sum()]);
+        }
+    }
+    let counted = [
+        format!("MATCH (a), (b) RETURN a.k, b.k, COUNT {{ (a)-[r]->(b) WHERE {text} }}"),
+        format!("MATCH (a), (b) RETURN a.k, b.k, COUNT {{ MATCH (a)-[r]->(b) WHERE {text} }}"),
+        format!(
+            "MATCH (a), (b) RETURN a.k, b.k, COUNT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r }}"
+        ),
+        format!(
+            "MATCH (a), (b) CALL (a, b) {{ MATCH (a)-[r]->(b) WHERE {text} RETURN count(r) AS c }} \
+             RETURN a.k, b.k, c"
+        ),
+    ];
+    expect_bag(runner, choices.pick(&counted), counts)?;
+    let summed = [
+        format!(
+            "MATCH (a), (b) RETURN a.k, b.k, \
+             reduce(s = 0, k IN COLLECT {{ MATCH (a)-[r]->(b) WHERE {text} RETURN r.k }} | s + k)"
+        ),
+        format!(
+            "MATCH (a), (b) OPTIONAL CALL {{ WITH a, b MATCH (a)-[r]->(b) WHERE {text} \
+             RETURN r.k AS rk UNION ALL RETURN 0 AS rk }} RETURN a.k, b.k, sum(rk)"
+        ),
+    ];
+    expect_bag(runner, choices.pick(&summed), sums)?;
     Ok(())
 }
 

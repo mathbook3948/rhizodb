@@ -164,6 +164,20 @@ impl LabelSetCache {
         by_key.get(key).copied().map(LabelSetId)
     }
 
+    pub(crate) fn remove(&self, set: LabelSetId) {
+        let removed = self
+            .by_id
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&set.0);
+        if let Some(labels) = removed {
+            self.by_key
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&label_set_key(&labels));
+        }
+    }
+
     pub(crate) fn insert(&self, set: LabelSetId, labels: Arc<[Token<Label>]>) {
         let key = label_set_key(&labels);
         self.by_id
