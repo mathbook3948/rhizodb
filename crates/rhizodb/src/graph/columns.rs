@@ -940,6 +940,56 @@ impl Column {
     }
 }
 
+const NO_VALUE: u32 = u32::MAX;
+
+/// A [`Column`] with where each slot's value lies, for a scan that reads the value of many slots.
+#[derive(Debug)]
+pub(crate) struct IndexedColumn {
+    column: Column,
+    at: Vec<u32>,
+}
+
+impl IndexedColumn {
+    pub(crate) fn new(column: Column) -> Self {
+        let mut at = vec![NO_VALUE; SLOTS];
+        for (segment, parts) in column.segments.iter().enumerate() {
+            let Some(first) = parts.first() else {
+                continue;
+            };
+            let span = first.layout.span;
+            for (held, part) in parts.iter().enumerate() {
+                for (index, position) in ones(part.layout.bitmap).enumerate() {
+                    if position / span == part.part {
+                        at[segment * SEGMENT_SLOTS + position] =
+                            (segment as u32) << 16 | (held as u32) << 8 | index as u32;
+                    }
+                }
+            }
+        }
+        Self { column, at }
+    }
+
+    /// The value in `slot` of the group, as [`Column::cell_at`] reads it.
+    pub(crate) fn cell_at(&self, slot: usize) -> Result<Option<Cell<'_>>, GraphError> {
+        let Some(&at) = self.at.get(slot) else {
+            return Ok(None);
+        };
+        if at == NO_VALUE {
+            return Ok(None);
+        }
+        let at = at as usize;
+        match self
+            .column
+            .segments
+            .get(at >> 16)
+            .and_then(|parts| parts.get(at >> 8 & 0xff))
+        {
+            Some(part) => part.view().cell(at & 0xff).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 /// The delta stored for one node under `key`: its properties that differ from the segments of
 /// its group, each with its value now or none when it holds none. The properties ascend by key.
 pub(crate) fn encode_delta<'a>(

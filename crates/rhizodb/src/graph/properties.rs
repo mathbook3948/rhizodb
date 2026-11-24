@@ -23,6 +23,7 @@ use super::columns::ColumnsEdit;
 use super::columns::Delta;
 use super::columns::DeltaRef;
 use super::columns::Deltas;
+use super::columns::IndexedColumn;
 use super::columns::SEGMENT_SLOTS;
 use super::columns::Segment;
 use super::columns::SegmentRef;
@@ -99,7 +100,7 @@ pub(crate) struct ScanGroup<'t> {
     group: u64,
     edit: Option<&'t ColumnsEdit>,
     deltas: Deltas,
-    columns: Vec<Option<(Token<PropertyKey>, Column)>>,
+    columns: Vec<Option<(Token<PropertyKey>, IndexedColumn)>>,
 }
 
 impl ScanGroup<'_> {
@@ -316,7 +317,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .iter()
             .map(|token| {
                 token
-                    .map(|token| Ok((token, self.load_column((group, token))?)))
+                    .map(|token| Ok((token, IndexedColumn::new(self.load_column((group, token))?))))
                     .transpose()
             })
             .collect::<Result<_, GraphError>>()?;
