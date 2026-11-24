@@ -1,6 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashSet;
 
 use crate::error::Error;
@@ -9,7 +7,6 @@ use crate::graph::NodeId;
 use crate::graph::RelationshipId;
 use crate::storage::ReadTransaction;
 
-use super::compare::Key;
 use super::compare::order;
 use super::datum;
 use super::datum::Datum;
@@ -17,6 +14,8 @@ use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
 use super::eval::type_error;
+use super::keys::KeyIndex;
+use super::keys::KeySet;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
 use super::plan::Expr;
@@ -29,7 +28,7 @@ use super::shape::admits;
 struct Seen {
     nodes: HashSet<NodeId>,
     relationships: HashSet<RelationshipId>,
-    others: BTreeSet<Key>,
+    others: KeySet,
 }
 
 impl Seen {
@@ -37,7 +36,7 @@ impl Seen {
         match value {
             Datum::Node(id) => self.nodes.insert(*id),
             Datum::Relationship(id) => self.relationships.insert(*id),
-            other => self.others.insert(Key(vec![other.clone()])),
+            other => self.others.insert(std::slice::from_ref(other)),
         }
     }
 }
@@ -47,7 +46,7 @@ impl Seen {
 pub(crate) struct Groups<'p> {
     keys: &'p [(Expr, Slot)],
     aggregates: &'p [(Aggregate, Slot)],
-    index: BTreeMap<Key, usize>,
+    index: KeyIndex,
     groups: Vec<(Vec<Datum>, Vec<Accumulator>)>,
 }
 
@@ -65,7 +64,7 @@ impl<'p> Groups<'p> {
         Self {
             keys,
             aggregates,
-            index: BTreeMap::new(),
+            index: KeyIndex::default(),
             groups: Vec::new(),
         }
     }
@@ -80,9 +79,8 @@ impl<'p> Groups<'p> {
             .iter()
             .map(|(expr, _)| env.eval(expr, row))
             .collect::<Result<Vec<_>, _>>()?;
-        let key = Key(values);
-        let position = match self.index.get(&key) {
-            Some(position) => *position,
+        let position = match self.index.get(&values) {
+            Some(position) => position,
             None => {
                 let position = self.groups.len();
                 let accumulators = self
@@ -90,8 +88,8 @@ impl<'p> Groups<'p> {
                     .iter()
                     .map(|_| Accumulator::default())
                     .collect();
-                self.groups.push((key.0.clone(), accumulators));
-                self.index.insert(key, position);
+                self.index.insert(values.clone(), position);
+                self.groups.push((values, accumulators));
                 position
             }
         };

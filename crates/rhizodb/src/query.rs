@@ -7,6 +7,7 @@ mod datum;
 mod eval;
 mod exec;
 mod functions;
+mod keys;
 mod matcher;
 mod plan;
 mod regex;
