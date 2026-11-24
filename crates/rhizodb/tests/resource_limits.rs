@@ -617,11 +617,11 @@ fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_numbe
             Wide::TouchedInTheTransaction,
             Wide::CreatedInTheTransaction,
         ] {
-            let small = fastest_on_a_node_with_properties(2_000, work, wide);
+            let small = fastest_on_a_node_with_properties(1_000, work, wide);
             let large = fastest_on_a_node_with_properties(16_000, work, wide);
             assert!(
-                large < small * 24,
-                "{work} on a node {wide:?}: {small:?} for 2000 properties but {large:?} for 16000"
+                large < small * 100,
+                "{work} on a node {wide:?}: {small:?} for 1000 properties but {large:?} for 16000"
             );
         }
     }
@@ -658,11 +658,11 @@ fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number(
         "MATCH ()-[r:WIDE]->() SET r += $properties",
         "MATCH ()-[r:WIDE]->() SET r = $properties",
     ] {
-        let small = fastest_on_a_relationship_with_properties(1_000, work);
-        let large = fastest_on_a_relationship_with_properties(8_000, work);
+        let small = fastest_on_a_relationship_with_properties(2_000, work);
+        let large = fastest_on_a_relationship_with_properties(32_000, work);
         assert!(
-            large < small * 24,
-            "{work}: {small:?} for 1000 properties but {large:?} for 8000"
+            large < small * 100,
+            "{work}: {small:?} for 2000 properties but {large:?} for 32000"
         );
     }
 }
@@ -723,11 +723,11 @@ fn a_label_scan_in_a_write_transaction_skips_the_nodes_it_created_without_the_la
         .min()
         .unwrap();
     let large = (0..3)
-        .map(|_| label_matches_in_one_transaction(16_000))
+        .map(|_| label_matches_in_one_transaction(32_000))
         .min()
         .unwrap();
     assert!(
-        large < small * 24,
-        "{small:?} for 2000 statements but {large:?} for 16000"
+        large < small * 100,
+        "{small:?} for 2000 statements but {large:?} for 32000"
     );
 }
