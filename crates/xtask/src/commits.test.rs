@@ -66,6 +66,48 @@ fn requires_the_changelog_with_a_breaking_commit_of_any_type() {
 }
 
 #[test]
+fn lets_a_feat_commit_to_unpublished_tools_docs_and_ci_leave_the_changelog_alone() {
+    assert!(
+        commit_problems(
+            "feat(bench): measure against LadybugDB",
+            &[
+                "crates/bench/src/main.rs",
+                "crates/tck/src/lib.rs",
+                "crates/xtask/src/main.rs",
+                "crates/differential/src/lib.rs",
+                "crates/interleavings/src/lib.rs",
+                "fuzz/fuzz_targets/parse.rs",
+                "docs/quality/performance.md",
+                ".github/workflows/check.yml",
+                "mise.toml",
+            ]
+        )
+        .is_empty()
+    );
+    assert!(commit_problems("feat!: drop a bench flag", &["crates/bench/src/main.rs"]).is_empty());
+}
+
+#[test]
+fn requires_the_changelog_once_a_feat_commit_also_touches_the_published_crate() {
+    for published in [
+        "crates/rhizodb/src/lib.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "README.md",
+    ] {
+        assert_eq!(
+            commit_problems(
+                "feat(bench): measure against LadybugDB",
+                &["crates/bench/src/main.rs", published]
+            )
+            .len(),
+            1,
+            "{published}"
+        );
+    }
+}
+
+#[test]
 fn lets_other_types_leave_the_changelog_alone() {
     assert!(commit_problems("fix(query): keep a taint", &["src/bind.rs"]).is_empty());
 }

@@ -8,6 +8,30 @@ const TYPES: [&str; 11] = [
 ];
 const UNCHECKED_PREFIXES: [&str; 3] = ["Merge ", "fixup! ", "squash! "];
 const CHANGELOG: &str = "CHANGELOG.md";
+const UNPUBLISHED: [&str; 9] = [
+    "crates/bench/",
+    "crates/differential/",
+    "crates/interleavings/",
+    "crates/tck/",
+    "crates/xtask/",
+    "fuzz/",
+    "docs/",
+    ".github/",
+    "mise.toml",
+];
+
+const PUBLISHED_WITHOUT_A_CHANGELOG_LINE: [&str; 2] = [
+    "295c75351fcb517869c44d28ff1efe6482009380",
+    "eebeac1d321d7c1fddc5a08df4fa1b478224fc01",
+];
+
+fn changes_the_published_crate(changed_files: &[&str]) -> bool {
+    changed_files.iter().any(|file| {
+        !UNPUBLISHED
+            .iter()
+            .any(|unpublished| file.starts_with(unpublished))
+    })
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Subject<'a> {
@@ -51,7 +75,10 @@ pub fn commit_problems(subject: &str, changed_files: &[&str]) -> Vec<String> {
             TYPES.join(" ")
         )];
     };
-    if (parsed.kind == "feat" || parsed.breaking) && !changed_files.contains(&CHANGELOG) {
+    if (parsed.kind == "feat" || parsed.breaking)
+        && changes_the_published_crate(changed_files)
+        && !changed_files.contains(&CHANGELOG)
+    {
         return vec![format!(
             "a feat or breaking commit records its change under Unreleased in {CHANGELOG}, `{subject}` does not touch it"
         )];
@@ -100,7 +127,10 @@ pub fn check_range(
         &["rev-list", "--no-merges", "--reverse", &range],
     )?;
     let mut violations = Vec::new();
-    for commit in commits.lines() {
+    for commit in commits
+        .lines()
+        .filter(|commit| !PUBLISHED_WITHOUT_A_CHANGELOG_LINE.contains(commit))
+    {
         let subject = git(workspace_root, &["log", "-1", "--format=%s", commit])?;
         let changed = git(
             workspace_root,
