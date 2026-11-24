@@ -637,16 +637,19 @@ fn rank_keys(
     directions: &[SortDirection],
 ) -> Ordering {
     for ((x, y), direction) in keys.iter().zip(&b.keys).zip(directions) {
-        let ordering = order(x, y);
-        let ordering = match direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
-        };
+        let ordering = directed(order(x, y), *direction);
         if ordering != Ordering::Equal {
             return ordering;
         }
     }
     position.cmp(&b.position)
+}
+
+fn directed(ordering: Ordering, direction: SortDirection) -> Ordering {
+    match direction {
+        SortDirection::Ascending => ordering,
+        SortDirection::Descending => ordering.reverse(),
+    }
 }
 
 struct Heaped<'d>(Ranked, &'d [SortDirection]);
@@ -715,6 +718,13 @@ impl<'d> Chosen<'d> {
             }
         }
         keys.clear();
+    }
+
+    fn worst(&self) -> Option<&Ranked> {
+        match self {
+            Chosen::Top(heap, kept) if heap.len() >= *kept => heap.peek().map(|worst| &worst.0),
+            _ => None,
+        }
     }
 
     fn len(&self) -> usize {
@@ -1220,7 +1230,26 @@ impl<T: ReadTransaction> Env<'_, T> {
                         .collect::<Result<Vec<_>, _>>()?,
                 );
             }
-            for value in &sort_values {
+            if let Some(worst) = chosen.worst() {
+                let mut ahead = false;
+                for ((value, held), direction) in
+                    sort_values.iter().zip(&worst.keys).zip(&directions)
+                {
+                    let key = at.datum(value)?;
+                    let ordering = directed(order(&key, held), *direction);
+                    keys.push(key);
+                    if ordering != Ordering::Equal {
+                        ahead = ordering == Ordering::Less;
+                        break;
+                    }
+                }
+                if !ahead {
+                    keys.clear();
+                    position += 1;
+                    return Ok(true);
+                }
+            }
+            for value in &sort_values[keys.len()..] {
                 keys.push(at.datum(value)?);
             }
             chosen.offer(&mut keys, (position, at.node, input), values, &directions);
