@@ -75,6 +75,7 @@ mod transaction;
 mod value;
 
 pub use database::Database;
+pub use database::OpenOptions;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
@@ -86,6 +87,7 @@ pub use graph::NodeId;
 pub use graph::RelationshipId;
 pub use graph::VectorMetric;
 pub use procedure::Procedure;
+pub use procedure::ProcedureError;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
 pub use result::Node;

@@ -21,7 +21,10 @@ use self::zone::NamedZone;
 use self::zone::is_valid_offset;
 
 /// A date, time, or duration value of openCypher.
+///
+/// New variants may be added in any release, so a match needs a catch-all arm.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Temporal {
     /// A calendar date.
     Date(Date),

@@ -142,6 +142,9 @@ pub enum ErrorKind {
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
+    /// [`OpenOptions::open`](crate::OpenOptions::open) found no database file at the path, and
+    /// its settings do not create one.
+    DatabaseNotFound,
 }
 
 impl ErrorKind {

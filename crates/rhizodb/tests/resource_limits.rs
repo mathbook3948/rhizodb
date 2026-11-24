@@ -149,14 +149,14 @@ fn a_query_that_builds_a_value_past_the_nesting_limit_fails() {
 
 #[test]
 fn a_procedure_result_nested_past_the_value_limit_fails() {
-    let mut db = db();
+    let db = db();
     db.register_procedure(
         Procedure::new("test.deep", |args| {
             let depth = match args.first() {
                 Some(Value::Integer(depth)) => *depth as usize,
                 _ => 0,
             };
-            Ok(vec![vec![nested_list(depth)]])
+            Ok(vec![vec![nested_list(depth)]].into())
         })
         .parameter("depth", ValueType::Integer)
         .output("value"),

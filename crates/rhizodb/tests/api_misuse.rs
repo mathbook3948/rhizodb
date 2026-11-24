@@ -142,13 +142,13 @@ fn a_forgotten_read_transaction_lets_the_file_close_and_reopen() {
 
 fn callback_database(probe: &'static str) -> (Arc<Database>, Arc<OnceLock<Arc<Database>>>) {
     let target: Arc<OnceLock<Arc<Database>>> = Arc::default();
-    let mut db = db();
+    let db = db();
     let reached = Arc::clone(&target);
     db.register_procedure(
         Procedure::new("test.reenter", move |_| {
             let db = reached.get().ok_or("no database yet")?;
             let result = db.execute(probe, &Parameters::new())?;
-            Ok(vec![vec![Value::Integer(result.rows().len() as i64)]])
+            Ok(vec![vec![Value::Integer(result.rows().len() as i64)]].into())
         })
         .output("rows"),
     )
@@ -189,7 +189,7 @@ fn a_procedure_that_calls_back_into_its_database_reads_but_cannot_write_from_a_w
 
 #[test]
 fn a_panicking_procedure_unwinds_out_and_leaves_the_database_usable() {
-    let mut db = db();
+    let db = db();
     db.register_procedure(
         Procedure::new("test.boom", |_| panic!("the host's procedure panicked")).output("x"),
     )

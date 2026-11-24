@@ -46,6 +46,74 @@ fn in_memory_backend() -> Result<Backend, Error> {
     Ok(crate::engine::any_fs::in_memory(options).map_err(crate::storage::StorageError::from)?)
 }
 
+/// How to open a database file, for settings beyond what [`Database::open`] chooses. Settings
+/// start at what [`Database::open`] uses, and later releases may add more.
+///
+/// ```
+/// use rhizodb::ErrorKind;
+/// use rhizodb::OpenOptions;
+///
+/// let dir = tempfile::tempdir()?;
+/// let path = dir.path().join("graph.redb");
+/// let missing = OpenOptions::new().create(false).open(&path).unwrap_err();
+/// assert_eq!(missing.kind(), ErrorKind::DatabaseNotFound);
+/// let created = OpenOptions::new().open(&path)?;
+/// drop(created);
+/// OpenOptions::new().create(false).open(&path)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug)]
+#[must_use]
+pub struct OpenOptions {
+    create: bool,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self { create: true }
+    }
+}
+
+impl OpenOptions {
+    /// The settings [`Database::open`] uses.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether [`OpenOptions::open`] creates the file when there is none, which it does unless
+    /// this is set to `false`. Without it, a path with no file fails with
+    /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
+    pub fn create(mut self, create: bool) -> Self {
+        self.create = create;
+        self
+    }
+
+    /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
+    pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
+        let path = path.as_ref();
+        if !self.create && !exists(path)? {
+            return Err(Error::new(
+                ErrorKind::DatabaseNotFound,
+                format!("there is no database file at {}", path.display()),
+            ));
+        }
+        Ok(Database {
+            graph: Graph::open(open_backend(path)?)?,
+            statements: Statements::default(),
+        })
+    }
+}
+
+fn exists(path: &Path) -> Result<bool, Error> {
+    path.try_exists().map_err(|error| {
+        Error::caused_by(
+            ErrorKind::Storage,
+            format!("cannot read whether {} exists: {error}", path.display()),
+            Box::new(error),
+        )
+    })
+}
+
 /// An embedded graph database. Share one `Database` across threads: reads run concurrently, and
 /// writing queries run one at a time.
 #[derive(Debug)]
@@ -64,11 +132,10 @@ impl Database {
     /// with `panic = "unwind"`, the default, and with `panic = "abort"` the process still ends.
     /// RhizoDB installs no panic hook, so the host's hook still reports the caught panic, by
     /// default on standard error.
+    ///
+    /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Ok(Self {
-            graph: Graph::open(open_backend(path.as_ref())?)?,
-            statements: Statements::default(),
-        })
+        OpenOptions::new().open(path)
     }
 
     /// Creates a database that lives in memory and is gone when dropped.
@@ -107,11 +174,12 @@ impl Database {
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
-    /// under the same name. Registration lasts as long as this `Database` value.
+    /// under the same name. Registration lasts as long as this `Database` value. Queries that
+    /// already started keep the procedures they began with.
     ///
     /// Fails with [`ErrorKind::ReservedProcedureName`](crate::ErrorKind::ReservedProcedureName)
     /// for a name in the `db` namespace, which the built-in procedures reserve.
-    pub fn register_procedure(&mut self, procedure: Procedure) -> Result<(), Error> {
+    pub fn register_procedure(&self, procedure: Procedure) -> Result<(), Error> {
         let name = &procedure.signature.name;
         if query::is_reserved(name) {
             return Err(Error::new(

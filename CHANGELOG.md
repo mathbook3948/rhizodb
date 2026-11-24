@@ -22,9 +22,16 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword and vector indexes over the properties of relationships of one type, created by passing `IndexTarget::RelationshipType` to `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryRelationships` and `CALL db.index.vector.queryRelationships`, which yield `relationship` and `score`.
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
+- `OpenOptions`, whose `create(false)` fails with the new `ErrorKind::DatabaseNotFound` instead of creating a missing file, and where later settings will go.
+- `NodeId::from_u64` and `RelationshipId::from_u64`, for a host that stored an ID as a number.
 
 ### Changed
 
+- `Value` and `Temporal` are `#[non_exhaustive]`, so a match on them needs a catch-all arm.
+- `Node` and `Relationship` keep their fields private. Read them with `id()`, `labels()`, `has_label()`, `relationship_type()` (formerly the field `rel_type`), `start()`, `end()`, `properties()`, and `property()`.
+- `Parameters` is a type of its own instead of an alias of `BTreeMap`. Build it with `new`, `insert`, `with`, `from` an array of pairs, or `collect`, and read it with `get`.
+- A procedure body returns `Result<ProcedureOutput, ProcedureError>`, where `ProcedureOutput` is a type of its own built from a `Vec` of rows, by `collect`, or with `push_row`, and `ProcedureError` is `Box<dyn Error + Send + Sync>`.
+- `Database::register_procedure` takes `&self`, so a database shared through an `Arc` can register procedures.
 - The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 

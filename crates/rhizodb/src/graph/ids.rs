@@ -9,6 +9,12 @@ impl NodeId {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// The ID whose number is `id`, as [`NodeId::as_u64`] returned it, for a host that stored
+    /// the number. An ID that names no node compares unequal to every node's ID.
+    pub fn from_u64(id: u64) -> Self {
+        Self(id)
+    }
 }
 
 /// Identifies a relationship. Relationship IDs only grow and are never reused after a delete.
@@ -19,6 +25,12 @@ impl RelationshipId {
     /// The ID as a number, stable for the life of the database.
     pub fn as_u64(self) -> u64 {
         self.0
+    }
+
+    /// The ID whose number is `id`, as [`RelationshipId::as_u64`] returned it, for a host that stored
+    /// the number. An ID that names no relationship compares unequal to every relationship's ID.
+    pub fn from_u64(id: u64) -> Self {
+        Self(id)
     }
 }
 
