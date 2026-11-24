@@ -666,3 +666,34 @@ fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number(
         );
     }
 }
+
+fn directory_bytes(directory: &std::path::Path) -> u64 {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum()
+}
+
+#[test]
+fn setting_or_removing_many_labels_at_once_stores_no_label_set_in_between() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Database::open(directory.path().join("labels.rhizodb")).unwrap();
+    let labels: String = (0..3_000).map(|i| format!(":L{i}")).collect();
+    run(&db, &format!("INSERT (n:Start{labels})"));
+    run(&db, "INSERT (:Other)");
+    let before = directory_bytes(directory.path());
+    run(&db, &format!("MATCH (n:Start) REMOVE n{labels}"));
+    run(&db, &format!("MATCH (n:Other) SET n{labels}"));
+    let grown = directory_bytes(directory.path()).saturating_sub(before);
+    assert!(
+        grown < 4 << 20,
+        "setting and removing 3000 labels grew the files by {grown} bytes"
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (n) RETURN size(labels(n)) AS count ORDER BY count"
+        ),
+        [[int(1)], [int(3_001)]]
+    );
+}

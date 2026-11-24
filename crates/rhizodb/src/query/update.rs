@@ -294,10 +294,11 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
             SetAction::Labels { target, labels } => match row.get(*target) {
                 Some(Datum::Node(id)) => {
+                    let mut tokens = Vec::new();
                     for label in labels {
-                        let token = self.tx.intern_token::<Label>(label)?;
-                        self.tx.add_label(*id, token)?;
+                        tokens.push(self.tx.intern_token::<Label>(label)?);
                     }
+                    self.tx.add_labels(*id, &tokens)?;
                     Ok(())
                 }
                 Some(Datum::Null) | None => Ok(()),
@@ -387,11 +388,13 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
             RemoveAction::Labels { target, labels } => match row.get(*target) {
                 Some(Datum::Node(id)) => {
+                    let mut tokens = Vec::new();
                     for label in labels {
                         if let Some(token) = self.tx.lookup_token::<Label>(label)? {
-                            self.tx.remove_label(*id, token)?;
+                            tokens.push(token);
                         }
                     }
+                    self.tx.remove_labels(*id, &tokens)?;
                     Ok(())
                 }
                 Some(Datum::Null) | None => Ok(()),
