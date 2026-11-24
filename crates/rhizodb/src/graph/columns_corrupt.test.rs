@@ -287,7 +287,7 @@ fn a_changed_byte_of_a_column_in_the_database_file_fails_reads_or_answers_as_bef
                 let mut file = pristine.clone();
                 file[start + at] ^= 0x5a;
                 std::fs::write(&path, &file).unwrap();
-                let Ok(storage) = RedbStorage::open(&path) else {
+                let Ok(storage) = RedbStorage::open_unchecked(&path) else {
                     continue;
                 };
                 let Ok(graph) = Graph::open(storage) else {

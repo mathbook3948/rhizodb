@@ -30,7 +30,11 @@ impl RedbStorage {
         if needs_creating(path).map_err(StorageError::new)? {
             Self::create_staged(path)?;
         }
-        Self::create(|| Database::create(path))
+        Self::create(|| {
+            Database::builder()
+                .set_check_integrity_on_open(true)
+                .create(path)
+        })
     }
 
     fn create_staged(path: &Path) -> Result<(), StorageError> {
@@ -71,6 +75,12 @@ impl RedbStorage {
 
     pub(crate) fn in_memory() -> Result<Self, StorageError> {
         Self::create(|| Database::builder().create_with_backend(InMemoryBackend::new()))
+    }
+
+    /// Opens the existing file at `path` without redb's integrity check, so a test of a damaged
+    /// entry reaches RhizoDB's own checksums instead of a redb page checksum.
+    pub(crate) fn open_unchecked(path: &Path) -> Result<Self, StorageError> {
+        Self::create(|| Database::create(path))
     }
 
     pub(crate) fn with_backend(backend: impl redb::StorageBackend) -> Result<Self, StorageError> {

@@ -302,7 +302,7 @@ fn file_with_graph(dir: &std::path::Path) -> (std::path::PathBuf, Model, Entries
 }
 
 fn open_answers_or_fails(path: &std::path::Path, model: &Model) {
-    let Ok(storage) = RedbStorage::open(path) else {
+    let Ok(storage) = RedbStorage::open_unchecked(path) else {
         return;
     };
     let Ok(graph) = Graph::open(storage) else {

@@ -15,6 +15,7 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - Opening a path with no file, or an empty one, writes the new database under a staging name in the same directory, syncs it, and links it into place, so a power loss during creation leaves either no database or a whole empty one.
 - The staging file's own lock decides which of several concurrent opens creates the database, and the others wait for it instead of replacing it.
 - Opening an existing file that the engine cannot read never rewrites it, since it may be a damaged database.
+- Converting a redb file runs redb's integrity check, which verifies every page's checksum, so a damaged page fails the conversion as corrupt data instead of sending redb into an unbounded recursion or a panic inside a drop, which abort the process.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
