@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use super::layout::BlockRef;
@@ -56,6 +57,8 @@ struct Shard {
     entries: HashMap<BlockRef, Entry, BuildHasherDefault<BlockHasher>>,
     clock: Vec<BlockRef>,
     hand: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 /// A sharded CLOCK cache of checked pages keyed by block reference. Pages are immutable, so an
@@ -85,7 +88,11 @@ impl Cache {
             .shard(at)
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        let entry = shard.entries.get(&at)?;
+        let Some(entry) = shard.entries.get(&at) else {
+            shard.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        shard.hits.fetch_add(1, Ordering::Relaxed);
         if !entry.used.load(Ordering::Relaxed) {
             entry.used.store(true, Ordering::Relaxed);
         }
@@ -131,6 +138,18 @@ impl Cache {
         }
     }
 
+    /// The lookups that found their page and those that did not, since the cache was made.
+    pub(crate) fn hits_and_misses(&self) -> (u64, u64) {
+        self.shards.iter().fold((0, 0), |(hits, misses), shard| {
+            let shard = shard.read().unwrap_or_else(PoisonError::into_inner);
+            (
+                hits + shard.hits.load(Ordering::Relaxed),
+                misses + shard.misses.load(Ordering::Relaxed),
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shards
             .iter()

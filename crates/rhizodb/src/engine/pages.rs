@@ -151,6 +151,15 @@ impl<B: BlockFile> Pages<B> {
         Ok(())
     }
 
+    /// The bytes of the database file.
+    pub(crate) fn file_bytes(&self) -> Result<u64, EngineError> {
+        Ok(self.file.block_count()? * BLOCK as u64)
+    }
+
+    pub(crate) fn cache_hits_and_misses(&self) -> (u64, u64) {
+        self.cache.hits_and_misses()
+    }
+
     pub(crate) fn sync(&self) -> Result<(), EngineError> {
         self.file.sync()?;
         Ok(())

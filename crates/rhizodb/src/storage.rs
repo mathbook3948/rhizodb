@@ -94,6 +94,7 @@ pub(crate) type Entry = (Vec<u8>, Vec<u8>);
 pub(crate) struct StorageError {
     source: Box<dyn Error + Send + Sync>,
     corrupt: bool,
+    unsupported: bool,
 }
 
 impl StorageError {
@@ -101,6 +102,7 @@ impl StorageError {
         Self {
             source: Box::new(source),
             corrupt: false,
+            unsupported: false,
         }
     }
 
@@ -114,6 +116,18 @@ impl StorageError {
 
     pub(crate) fn is_corrupt(&self) -> bool {
         self.corrupt
+    }
+
+    /// An operation this backend does not offer.
+    pub(crate) fn unsupported(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            unsupported: true,
+            ..Self::new(source)
+        }
+    }
+
+    pub(crate) fn is_unsupported(&self) -> bool {
+        self.unsupported
     }
 }
 
@@ -184,6 +198,32 @@ pub(crate) trait ReadTransaction {
         end: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
+}
+
+/// The size of a database on disk and how its cache serves reads, as a backend reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StorageStats {
+    pub(crate) file_bytes: u64,
+    pub(crate) live_bytes: u64,
+    pub(crate) live_extents: u64,
+    pub(crate) free_extents: u64,
+    pub(crate) wal_bytes: u64,
+    pub(crate) cache_hits: u64,
+    pub(crate) cache_misses: u64,
+}
+
+/// Upkeep of a database file that no transaction does: compaction, statistics, and a check of
+/// every stored invariant.
+pub(crate) trait Maintenance {
+    /// Writes every commit into the file and moves the live data into as little of it as it
+    /// needs, then shortens the file.
+    fn compact(&self) -> Result<(), StorageError>;
+
+    fn stats(&self) -> Result<StorageStats, StorageError>;
+
+    /// Reads every page the file's last durable state reaches and fails as corrupt data on the
+    /// first broken invariant.
+    fn check(&self) -> Result<(), StorageError>;
 }
 
 /// A write transaction sees its own writes. Dropping it without commit discards them.

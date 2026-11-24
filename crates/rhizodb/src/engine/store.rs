@@ -13,6 +13,7 @@ use std::sync::PoisonError;
 use std::sync::TryLockError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
@@ -38,6 +39,7 @@ use super::header::FORMAT_MINOR;
 use super::header::Header;
 use super::header::WalIdentity;
 use super::layout::BLOCK;
+use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
 use super::memtable::Memtable;
@@ -58,9 +60,11 @@ use super::wal::segment_name;
 use super::wal_format::Body;
 use super::wal_format::batch_record;
 use crate::storage::Entry;
+use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
+use crate::storage::StorageStats;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
 
@@ -168,6 +172,7 @@ struct Shared<F: FileSystem> {
     trees: Mutex<Vec<Weak<Tree>>>,
     quarantine: Mutex<BTreeMap<u64, u64>>,
     poisoned: AtomicBool,
+    wal_bytes: AtomicU64,
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
@@ -433,6 +438,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 },
                 readers: BTreeMap::new(),
             }),
+            wal_bytes: AtomicU64::new(wal.size()),
             writer: Mutex::new(Writer {
                 wal: Some(wal),
                 last_lsn,
@@ -524,6 +530,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         layers.active.apply(lsn, staged.into_changes(), horizon);
         lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
+        shared.wal_bytes.store(wal_size, Ordering::Relaxed);
         let full = layers.active.bytes() > shared.options.memtable_limit
             || wal_size > shared.options.wal_limit;
         if full {
@@ -673,10 +680,11 @@ impl<F: FileSystem + 'static> Shared<F> {
         let Some(sequence) = lock(&self.droppable).take() else {
             return;
         };
-        if let Some(wal) = writer.wal.as_mut()
-            && wal.drop_before(sequence).is_err()
-        {
-            self.poison();
+        if let Some(wal) = writer.wal.as_mut() {
+            if wal.drop_before(sequence).is_err() {
+                self.poison();
+            }
+            self.wal_bytes.store(wal.size(), Ordering::Relaxed);
         }
     }
 
@@ -992,6 +1000,44 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
             writer,
             staged: Staged::new(view),
         })
+    }
+}
+
+impl<F: FileSystem + 'static> Maintenance for Engine<F> {
+    fn compact(&self) -> Result<(), StorageError> {
+        Ok(Engine::compact(self)?)
+    }
+
+    fn stats(&self) -> Result<StorageStats, StorageError> {
+        let shared = &*self.shared;
+        let file_bytes = shared.pages.file_bytes()?;
+        let (live_extents, live_blocks) = {
+            let durable = lock(&shared.durable);
+            let entries = &durable.extents.entries;
+            let live = entries
+                .values()
+                .map(|entry| u64::from(entry.live))
+                .sum::<u64>();
+            (entries.len() as u64, live)
+        };
+        let slots = (file_bytes / BLOCK as u64)
+            .saturating_sub(2)
+            .div_ceil(EXTENT_BLOCKS.into());
+        let (cache_hits, cache_misses) = shared.pages.cache_hits_and_misses();
+        Ok(StorageStats {
+            file_bytes,
+            live_bytes: live_blocks * BLOCK as u64,
+            live_extents,
+            free_extents: slots.saturating_sub(live_extents),
+            wal_bytes: shared.wal_bytes.load(Ordering::Relaxed),
+            cache_hits,
+            cache_misses,
+        })
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        Engine::check(self)?;
+        Ok(())
     }
 }
 

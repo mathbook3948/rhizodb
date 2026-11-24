@@ -277,6 +277,15 @@ impl<S: Storage> Graph<S> {
 
     /// Opens the one write transaction, waiting for another thread's to end. Fails instead of
     /// waiting forever when the calling thread already holds it.
+    /// Runs `work` on the storage, which may take the storage's writer itself, and fails when
+    /// this thread holds the write transaction that work would wait for.
+    pub(crate) fn maintain<R>(&self, work: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
+        if *lock(&self.writer) == Some(thread::current().id()) {
+            return Err(GraphError::WriterOnThisThread);
+        }
+        Ok(work(&self.storage))
+    }
+
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
         let current = thread::current().id();
         if *lock(&self.writer) == Some(current) {

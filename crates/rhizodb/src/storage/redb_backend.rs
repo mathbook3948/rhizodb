@@ -28,9 +28,11 @@ use redb::backends::InMemoryBackend;
 use self_cell::self_cell;
 
 use super::Entry;
+use super::Maintenance;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
+use super::StorageStats;
 use super::Table;
 use super::WriteTransaction;
 use crate::engine::block_file::BlockFile;
@@ -659,6 +661,39 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[derive(Debug)]
+struct EngineOnlyError(&'static str);
+
+impl fmt::Display for EngineOnlyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} needs RhizoDB's own storage engine, and this database is stored by redb",
+            self.0
+        )
+    }
+}
+
+impl Error for EngineOnlyError {}
+
+impl Maintenance for RedbStorage {
+    fn compact(&self) -> Result<(), StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError("compaction")))
+    }
+
+    fn stats(&self) -> Result<StorageStats, StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError(
+            "storage statistics",
+        )))
+    }
+
+    fn check(&self) -> Result<(), StorageError> {
+        Err(StorageError::unsupported(EngineOnlyError(
+            "an integrity check",
+        )))
+    }
 }
 
 impl Storage for RedbStorage {

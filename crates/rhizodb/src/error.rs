@@ -244,6 +244,8 @@ impl From<StorageError> for Error {
         Self {
             kind: if error.is_corrupt() {
                 ErrorKind::CorruptData
+            } else if error.is_unsupported() {
+                ErrorKind::Unsupported
             } else {
                 ErrorKind::Storage
             },
@@ -258,6 +260,7 @@ impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
         let kind = match &error {
             GraphError::Storage(error) if error.is_corrupt() => ErrorKind::CorruptData,
+            GraphError::Storage(error) if error.is_unsupported() => ErrorKind::Unsupported,
             GraphError::Storage(_) => ErrorKind::Storage,
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,

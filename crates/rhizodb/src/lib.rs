@@ -75,6 +75,7 @@ mod transaction;
 mod value;
 
 pub use database::Database;
+pub use database::DatabaseStats;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;

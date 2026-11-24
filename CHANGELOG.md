@@ -22,6 +22,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
 
+- `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant. On a database stored by redb they fail with `ErrorKind::Unsupported`.
 - RhizoDB's own storage engine, still built only with `--cfg rhizodb_engine`, converts a redb database file when it opens one: it checks every redb page, copies every table into a new file, and renames that file over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was.
 
 ### Changed

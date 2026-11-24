@@ -50,7 +50,12 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
 - During the transition, `OpenOptions` chooses the engine and sets the cache sizes.
-- `Database` gains `compact`, `stats`, and `check`.
+- `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
+- On a database stored by redb the three fail as unsupported, since redb compacts and checks only a database no thread shares.
+- Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
+- `stats` reports the file's bytes and live bytes, its live and free extents, the log's bytes, and the block cache's hits and misses since the open.
+- `check` checks the file as its last checkpoint left it, and the commits after that checkpoint are checked as the log replays them.
+- Each block cache shard counts its hits and misses beside its lock, so counting adds no shared cache line to a read.
 - A vector index may read its vectors from the property column instead of keeping a copy.
 - The concurrency core of the engine is checked with loom.
 - Every engine checksum is a 64-bit xxh3 hash, from the MIT-licensed twox-hash crate.
