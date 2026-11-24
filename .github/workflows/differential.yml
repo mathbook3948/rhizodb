@@ -15,6 +15,7 @@ concurrency:
 jobs:
   ladybug:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
