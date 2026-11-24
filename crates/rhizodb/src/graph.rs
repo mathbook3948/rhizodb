@@ -89,6 +89,8 @@ const NODE_META_FORMAT_VERSION: u32 = 8;
 const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
 const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
 const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
+const ENTRIES_OUT_OF_ORDER: GraphError =
+    GraphError::Corrupt("the adjacency entries of a segment are out of order");
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -897,6 +899,12 @@ impl<T: ReadTransaction> GraphTx<T> {
             let mut held = Vec::new();
             self.transaction
                 .visit_prefix(Table::Adjacency, prefix, |key, value| {
+                    if held
+                        .last()
+                        .is_some_and(|(last, _, _): &adjacency::Verified| **last >= *key)
+                    {
+                        return Err(ENTRIES_OUT_OF_ORDER);
+                    }
                     held.push((key.into(), value.into(), false));
                     Ok::<(), GraphError>(())
                 })?;
