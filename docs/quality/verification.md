@@ -63,6 +63,10 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
 - Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
 - Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.
+- Random well-typed queries over a random graph are compared with a reference evaluator of the model, and with rewrites of the same query that must give the same answer.
+- Those queries also run inside a write transaction with uncommitted edits, with property indexes added and dropped, and on a reopened file.
+- Live heap bytes, counted by a global allocator, must level off over long loops of work that keeps no new data.
+- A nightly soak kills a child process that writes large values, so the own engine checkpoints in the background, at random points for twenty minutes on each backend, and checks every reopened file against what the child reported.
 - Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
 - The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
 - Code and tests taken from other projects keep their source and license.
