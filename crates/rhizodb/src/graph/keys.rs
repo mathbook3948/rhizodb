@@ -35,36 +35,17 @@ pub(crate) fn element_key(id: u64) -> [u8; 8] {
     id.to_be_bytes()
 }
 
-pub(crate) fn adjacency_prefix(node: NodeId, rel_type: Option<Token<RelationshipType>>) -> Vec<u8> {
-    let mut key = Vec::with_capacity(12);
-    key.extend_from_slice(&node.0.to_be_bytes());
-    if let Some(rel_type) = rel_type {
-        key.extend_from_slice(&rel_type.id().to_be_bytes());
-    }
-    key
-}
-
-pub(crate) fn adjacency_key(
-    node: NodeId,
-    rel_type: Token<RelationshipType>,
-    relationship: RelationshipId,
-) -> [u8; 20] {
-    let mut key = [0u8; 20];
-    key[..8].copy_from_slice(&node.0.to_be_bytes());
-    key[8..12].copy_from_slice(&rel_type.id().to_be_bytes());
-    key[12..].copy_from_slice(&relationship.0.to_be_bytes());
-    key
-}
-
+/// The node, relationship type, and relationship of a key of the adjacency tables of format
+/// versions before adjacency segments.
 pub(crate) fn parse_adjacency_key(
     key: &[u8],
-) -> Result<(Token<RelationshipType>, RelationshipId), DecodeError> {
+) -> Result<(NodeId, Token<RelationshipType>, RelationshipId), DecodeError> {
     let mut reader = Reader::new(key);
-    reader.u64()?;
+    let node = NodeId(reader.u64()?);
     let rel_type = Token::new(reader.u32()?);
     let relationship = RelationshipId(reader.u64()?);
     reader.finish()?;
-    Ok((rel_type, relationship))
+    Ok((node, rel_type, relationship))
 }
 
 pub(crate) fn label_key(label: Token<Label>, node: NodeId) -> [u8; 12] {

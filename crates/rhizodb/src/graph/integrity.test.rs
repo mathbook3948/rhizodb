@@ -74,10 +74,6 @@ fn assert_caught(edit: impl FnOnce(&mut Write<'_>), expected: IntegrityViolation
     );
 }
 
-fn adjacency_key(node: NodeId, relationship: RelationshipId) -> [u8; 20] {
-    keys::adjacency_key(node, Token::new(KNOWS), relationship)
-}
-
 fn remove_token(write: &mut Write<'_>, tag: u8, id: u32, name: &str) {
     write
         .delete(Table::TokenById, &keys::token_id_key(tag, id))
@@ -183,16 +179,38 @@ fn a_relationship_with_a_missing_target_is_caught() {
     );
 }
 
+fn put_slot(write: &mut Write<'_>, side: Side, node: NodeId, rel_type: u32, edges: &[Edge]) {
+    let (id, position) = adjacency::locate(side, node, rel_type);
+    let (start, end) = id.range();
+    let mut slots = BTreeMap::new();
+    for (key, value) in write.scan_range(Table::Adjacency, &start, &end).unwrap() {
+        slots.extend(PartRef::parse(&key, &value).unwrap().slots().unwrap());
+    }
+    slots.insert(position, edges.to_vec());
+    slots.retain(|_, edges| !edges.is_empty());
+    let held: Vec<(usize, &[Edge])> = slots
+        .iter()
+        .map(|(position, edges)| (*position, edges.as_slice()))
+        .collect();
+    write.delete_range(Table::Adjacency, &start, &end).unwrap();
+    for (key, bytes) in adjacency::encode_segment(&id, &held).unwrap() {
+        write.put(Table::Adjacency, &key, &bytes).unwrap();
+    }
+}
+
+fn edge(relationship: RelationshipId, other: NodeId) -> Edge {
+    Edge {
+        relationship,
+        other,
+    }
+}
+
 #[test]
 fn a_relationship_missing_its_outgoing_entry_is_caught() {
     assert_caught(
-        |write| {
-            write
-                .delete(Table::Outgoing, &adjacency_key(ALICE, FRIENDSHIP))
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Outgoing, ALICE, KNOWS, &[]),
         IntegrityViolation::MissingAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             relationship: FRIENDSHIP,
         },
     );
@@ -201,13 +219,9 @@ fn a_relationship_missing_its_outgoing_entry_is_caught() {
 #[test]
 fn a_relationship_missing_its_incoming_entry_is_caught() {
     assert_caught(
-        |write| {
-            write
-                .delete(Table::Incoming, &adjacency_key(BOB, FRIENDSHIP))
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Incoming, BOB, KNOWS, &[]),
         IntegrityViolation::MissingAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             relationship: FRIENDSHIP,
         },
     );
@@ -218,16 +232,16 @@ fn an_outgoing_entry_without_a_relationship_record_is_caught() {
     let ghost = RelationshipId(7);
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Outgoing,
-                    &adjacency_key(ALICE, ghost),
-                    &BOB.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Outgoing,
+                ALICE,
+                KNOWS,
+                &[edge(FRIENDSHIP, BOB), edge(ghost, BOB)],
+            );
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             node: ALICE,
             relationship: ghost,
         },
@@ -239,16 +253,16 @@ fn an_incoming_entry_without_a_relationship_record_is_caught() {
     let ghost = RelationshipId(7);
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Incoming,
-                    &adjacency_key(BOB, ghost),
-                    &ALICE.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Incoming,
+                BOB,
+                KNOWS,
+                &[edge(FRIENDSHIP, ALICE), edge(ghost, ALICE)],
+            );
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             node: BOB,
             relationship: ghost,
         },
@@ -259,16 +273,16 @@ fn an_incoming_entry_without_a_relationship_record_is_caught() {
 fn an_adjacency_entry_with_the_wrong_far_node_is_caught() {
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Outgoing,
-                    &adjacency_key(ALICE, FRIENDSHIP),
-                    &CAROL.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Outgoing,
+                ALICE,
+                KNOWS,
+                &[edge(FRIENDSHIP, CAROL)],
+            )
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             node: ALICE,
             relationship: FRIENDSHIP,
         },
@@ -277,22 +291,56 @@ fn an_adjacency_entry_with_the_wrong_far_node_is_caught() {
 
 #[test]
 fn an_adjacency_entry_under_the_wrong_type_is_caught() {
-    let other_type = Token::<RelationshipType>::new(5);
     assert_caught(
-        |write| {
-            write
-                .put(
-                    Table::Incoming,
-                    &keys::adjacency_key(BOB, other_type, FRIENDSHIP),
-                    &ALICE.0.to_be_bytes(),
-                )
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Incoming, BOB, 5, &[edge(FRIENDSHIP, ALICE)]),
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             node: BOB,
             relationship: FRIENDSHIP,
         },
+    );
+}
+
+#[test]
+fn an_adjacency_entry_under_the_wrong_node_is_caught() {
+    assert_caught(
+        |write| {
+            put_slot(
+                write,
+                Side::Outgoing,
+                CAROL,
+                KNOWS,
+                &[edge(FRIENDSHIP, BOB), edge(LOOP, CAROL)],
+            )
+        },
+        IntegrityViolation::OrphanAdjacency {
+            side: Side::Outgoing,
+            node: CAROL,
+            relationship: FRIENDSHIP,
+        },
+    );
+}
+
+#[test]
+fn an_adjacency_segment_not_split_by_the_longest_span_is_caught() {
+    let (id, _) = adjacency::locate(Side::Outgoing, ALICE, KNOWS);
+    assert_caught(
+        |write| {
+            let (start, end) = id.range();
+            let mut slots = BTreeMap::new();
+            for (key, value) in write.scan_range(Table::Adjacency, &start, &end).unwrap() {
+                slots.extend(PartRef::parse(&key, &value).unwrap().slots().unwrap());
+            }
+            let held: Vec<(usize, &[Edge])> = slots
+                .iter()
+                .map(|(position, edges)| (*position, edges.as_slice()))
+                .collect();
+            write.delete_range(Table::Adjacency, &start, &end).unwrap();
+            for (key, bytes) in adjacency::encode_segment_by(&id, &held, 1) {
+                write.put(Table::Adjacency, &key, &bytes).unwrap();
+            }
+        },
+        IntegrityViolation::NonCanonicalAdjacency(id),
     );
 }
 
@@ -917,14 +965,12 @@ fn every_violation_is_reported_not_just_the_first() {
         write
             .delete(Table::Metadata, keys::FORMAT_VERSION_KEY)
             .unwrap();
-        write
-            .delete(Table::Outgoing, &adjacency_key(ALICE, FRIENDSHIP))
-            .unwrap();
+        put_slot(write, Side::Outgoing, ALICE, KNOWS, &[]);
     });
     let violations = violations_of(&graph);
     assert!(violations.contains(&IntegrityViolation::FormatVersionMissing));
     assert!(violations.contains(&IntegrityViolation::MissingAdjacency {
-        table: Table::Outgoing,
+        side: Side::Outgoing,
         relationship: FRIENDSHIP,
     }));
 }

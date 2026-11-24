@@ -13,6 +13,13 @@ use super::NodeId;
 use super::NodeRecord;
 use super::RelationshipId;
 use super::RelationshipRecord;
+use super::adjacency;
+use super::adjacency::Amended;
+use super::adjacency::Change;
+use super::adjacency::Edge;
+use super::adjacency::PartRef;
+use super::adjacency::SegmentId;
+use super::adjacency::Side;
 use super::columns;
 use super::decode_u32;
 use super::decode_u64;
@@ -81,14 +88,15 @@ pub(crate) enum IntegrityViolation {
         node: NodeId,
     },
     MissingAdjacency {
-        table: Table,
+        side: Side,
         relationship: RelationshipId,
     },
     OrphanAdjacency {
-        table: Table,
+        side: Side,
         node: NodeId,
         relationship: RelationshipId,
     },
+    NonCanonicalAdjacency(SegmentId),
     LabelSetTablesDisagree(u32),
     UnknownLabelSet {
         node: NodeId,
@@ -123,7 +131,7 @@ pub(crate) enum IntegrityViolation {
 
 type LabelSets = BTreeMap<LabelSetId, Arc<[Token<Label>]>>;
 
-type Adjacency = BTreeMap<(NodeId, u32, RelationshipId), NodeId>;
+type Adjacency = BTreeMap<(Side, NodeId, u32, RelationshipId), NodeId>;
 
 impl<T: ReadTransaction> GraphTx<T> {
     /// Checks every invariant the key layout implies and returns all violations found. An empty list means the graph is consistent.
@@ -134,8 +142,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         let label_sets = self.load_label_sets(&mut violations)?;
         let nodes = self.load_nodes(&label_sets, &mut violations)?;
         let relationships = self.load_relationships(&mut violations)?;
-        let outgoing = self.load_adjacency(Table::Outgoing, &mut violations)?;
-        let incoming = self.load_adjacency(Table::Incoming, &mut violations)?;
+        let adjacency = self.load_adjacency(&mut violations)?;
         let indexes = self.load_indexes(&mut violations)?;
 
         let mut check_named = |tag: u8, id: u32| {
@@ -180,35 +187,32 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }
             }
             let expected = [
-                (Table::Outgoing, &outgoing, record.source, record.target),
-                (Table::Incoming, &incoming, record.target, record.source),
+                (Side::Outgoing, record.source, record.target),
+                (Side::Incoming, record.target, record.source),
             ];
-            for (table, entries, owner, other) in expected {
-                if entries.get(&(owner, record.rel_type.id(), *id)) != Some(&other) {
+            for (side, owner, other) in expected {
+                if adjacency.get(&(side, owner, record.rel_type.id(), *id)) != Some(&other) {
                     violations.push(IntegrityViolation::MissingAdjacency {
-                        table,
+                        side,
                         relationship: *id,
                     });
                 }
             }
         }
-        for (table, entries) in [(Table::Outgoing, &outgoing), (Table::Incoming, &incoming)] {
-            for ((node, rel_type, relationship), other) in entries {
-                let matches = relationships.get(relationship).is_some_and(|record| {
-                    let (owner, far) = if table == Table::Outgoing {
-                        (record.source, record.target)
-                    } else {
-                        (record.target, record.source)
-                    };
-                    owner == *node && far == *other && record.rel_type.id() == *rel_type
+        for ((side, node, rel_type, relationship), other) in &adjacency {
+            let matches = relationships.get(relationship).is_some_and(|record| {
+                let (owner, far) = match side {
+                    Side::Outgoing => (record.source, record.target),
+                    Side::Incoming => (record.target, record.source),
+                };
+                owner == *node && far == *other && record.rel_type.id() == *rel_type
+            });
+            if !matches {
+                violations.push(IntegrityViolation::OrphanAdjacency {
+                    side: *side,
+                    node: *node,
+                    relationship: *relationship,
                 });
-                if !matches {
-                    violations.push(IntegrityViolation::OrphanAdjacency {
-                        table,
-                        node: *node,
-                        relationship: *relationship,
-                    });
-                }
             }
         }
 
@@ -609,17 +613,54 @@ impl<T: ReadTransaction> GraphTx<T> {
 
     fn load_adjacency(
         &self,
-        table: Table,
         violations: &mut Vec<IntegrityViolation>,
     ) -> Result<Adjacency, GraphError> {
+        let mut segments: BTreeMap<SegmentId, Vec<adjacency::Stored>> = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::Adjacency, &[])? {
+            match adjacency::parse_key(&key) {
+                Ok((id, _)) => segments.entry(id).or_default().push((key, value)),
+                Err(_) => violations.push(IntegrityViolation::Undecodable {
+                    table: Table::Adjacency,
+                    key,
+                }),
+            }
+        }
         let mut entries = Adjacency::new();
-        for (key, value) in self.transaction.scan_prefix(table, &[])? {
-            match (keys::parse_adjacency_key(&key), decode_u64(&value)) {
-                (Ok((rel_type, relationship)), Ok(other)) => {
-                    let node = NodeId(decode_u64(&key[..8])?);
-                    entries.insert((node, rel_type.id(), relationship), NodeId(other));
+        for (id, stored) in segments {
+            let checked = check_segment(&id, &stored, violations)?;
+            if self.adjacency.contains_key(&id) {
+                continue;
+            }
+            let Some(slots) = checked else {
+                continue;
+            };
+            for (position, edges) in slots {
+                for edge in edges {
+                    entries.insert(
+                        (
+                            id.side,
+                            id.node_at(position),
+                            id.rel_type,
+                            edge.relationship,
+                        ),
+                        edge.other,
+                    );
                 }
-                _ => violations.push(IntegrityViolation::Undecodable { table, key }),
+            }
+        }
+        for (id, edit) in &self.adjacency {
+            for (position, edges) in edit.slots()? {
+                for edge in edges {
+                    entries.insert(
+                        (
+                            id.side,
+                            id.node_at(position),
+                            id.rel_type,
+                            edge.relationship,
+                        ),
+                        edge.other,
+                    );
+                }
             }
         }
         Ok(entries)
@@ -885,6 +926,85 @@ fn encode(
             "a node has a label set that does not exist",
         ))
     })
+}
+
+fn check_segment(
+    id: &SegmentId,
+    stored: &[adjacency::Stored],
+    violations: &mut Vec<IntegrityViolation>,
+) -> Result<Option<adjacency::Slots>, GraphError> {
+    let undecodable = |key: &[u8]| IntegrityViolation::Undecodable {
+        table: Table::Adjacency,
+        key: key.to_vec(),
+    };
+    let mut parts = BTreeMap::new();
+    let mut changes = BTreeMap::new();
+    let mut readable = true;
+    for (key, value) in stored {
+        match adjacency::parse_key(key)? {
+            (_, adjacency::Entry::Delta(position)) => match Change::parse(key, value) {
+                Ok(change) => {
+                    changes.insert(position, (change, value));
+                }
+                Err(_) => {
+                    violations.push(undecodable(key));
+                    readable = false;
+                }
+            },
+            (_, adjacency::Entry::Part { .. }) => {
+                match PartRef::parse(key, value).and_then(|part| part.slots()) {
+                    Ok(slots) => parts.extend(slots),
+                    Err(_) => {
+                        violations.push(undecodable(key));
+                        readable = false;
+                    }
+                }
+            }
+        }
+    }
+    if !readable {
+        return Ok(None);
+    }
+    let held: Vec<(usize, &[Edge])> = parts
+        .iter()
+        .map(|(position, edges)| (*position, edges.as_slice()))
+        .collect();
+    let encoded = adjacency::encode_segment(id, &held)?;
+    let stored_parts: Vec<adjacency::Stored> = stored
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                adjacency::parse_key(key),
+                Ok((_, adjacency::Entry::Part { .. }))
+            )
+        })
+        .cloned()
+        .collect();
+    let mut canonical = encoded == stored_parts && changes.len() <= adjacency::MAX_DELTAS;
+    canonical &= changes.is_empty() || !stored_parts.is_empty();
+    let mut slots = parts;
+    for (position, (change, bytes)) in changes {
+        canonical &= change.encode(&id.delta_key(position)) == *bytes;
+        let stored = slots.remove(&position).unwrap_or_default();
+        let mut amended = Amended::new(Some(&change));
+        let mut edges = Vec::new();
+        let mut agrees = true;
+        for edge in stored {
+            agrees &= amended.stored(edge, &mut |edge| edges.push(edge)).is_ok();
+        }
+        agrees &= amended.finish(&mut |edge| edges.push(edge)).is_ok();
+        if !agrees {
+            violations.push(undecodable(&id.delta_key(position)));
+            return Ok(None);
+        }
+        if !edges.is_empty() {
+            slots.insert(position, edges);
+        }
+    }
+    if !canonical {
+        violations.push(IntegrityViolation::NonCanonicalAdjacency(*id));
+    }
+    Ok(Some(slots.into_iter().collect()))
 }
 
 fn check_properties(properties: &Properties, check_named: &mut impl FnMut(u8, u32)) {

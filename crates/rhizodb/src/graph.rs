@@ -20,6 +20,7 @@ use crate::value::DecodeError;
 use crate::value::PropertyValue;
 use crate::value::Reader;
 
+mod adjacency;
 mod columns;
 mod ids;
 mod index;
@@ -53,6 +54,11 @@ pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
+use adjacency::Edge;
+use adjacency::SegmentEdit;
+use adjacency::SegmentId;
+use adjacency::Side;
+use adjacency::SlotRead;
 use columns::ColumnsEdit;
 use index::Element;
 use meta::Delta;
@@ -67,12 +73,13 @@ use meta::MetaHead;
 use meta::Part;
 use meta::Slot;
 
-const FORMAT_VERSION: u32 = 9;
+const FORMAT_VERSION: u32 = 10;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
 const NODE_META_FORMAT_VERSION: u32 = 8;
 const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
+const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -229,6 +236,9 @@ impl<S: Storage> Graph<S> {
             if found.is_some_and(|found| found < NODE_COLUMNS_FORMAT_VERSION) {
                 tx.move_properties_to_columns()?;
             }
+            if found.is_some_and(|found| found < ADJACENCY_SEGMENTS_FORMAT_VERSION) {
+                tx.move_adjacency_to_segments()?;
+            }
             if upgrade {
                 tx.transaction.put(
                     Table::Metadata,
@@ -271,6 +281,7 @@ impl<S: Storage> Graph<S> {
             reader: ColumnReader::default(),
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
             counters: Vec::new(),
         })
     }
@@ -303,6 +314,7 @@ impl<S: Storage> Graph<S> {
             reader: ColumnReader::default(),
             column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
             own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
             counters: Vec::new(),
         })
     }
@@ -325,6 +337,7 @@ pub(crate) struct GraphTx<T> {
     reader: ColumnReader,
     column_deltas: Option<Arc<ColumnDeltas>>,
     own_column_deltas: BTreeMap<u64, usize>,
+    adjacency: BTreeMap<SegmentId, SegmentEdit>,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -345,6 +358,7 @@ impl<T> GraphTx<T> {
             reader: ColumnReader::default(),
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
             counters: Vec::new(),
         }
     }
@@ -770,7 +784,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
     }
 
-    /// The relationships touching `node`, optionally of one type. A self-loop is reported once under `Both`.
+    /// The relationships touching `node`, optionally of one type, outgoing ones first, each
+    /// side by type and then by ID. A self-loop is reported once under `Both`.
     pub(crate) fn adjacent(
         &self,
         node: NodeId,
@@ -779,41 +794,103 @@ impl<T: ReadTransaction> GraphTx<T> {
     ) -> Result<Vec<Adjacent>, GraphError> {
         let mut found = Vec::new();
         if direction != Direction::Incoming {
-            found.extend(self.adjacency_entries(Table::Outgoing, node, rel_type)?);
+            self.visit_adjacency(Side::Outgoing, node, rel_type, &mut |adjacent| {
+                found.push(adjacent);
+            })?;
         }
         if direction != Direction::Outgoing {
-            let incoming = self.adjacency_entries(Table::Incoming, node, rel_type)?;
             let skip_self_loops = direction == Direction::Both;
-            found.extend(
-                incoming
-                    .into_iter()
-                    .filter(|adjacent| !(skip_self_loops && adjacent.other == node)),
-            );
+            self.visit_adjacency(Side::Incoming, node, rel_type, &mut |adjacent| {
+                if !(skip_self_loops && adjacent.other == node) {
+                    found.push(adjacent);
+                }
+            })?;
         }
         Ok(found)
     }
 
-    fn adjacency_entries(
+    fn visit_adjacency(
         &self,
-        table: Table,
+        side: Side,
         node: NodeId,
         rel_type: Option<Token<RelationshipType>>,
-    ) -> Result<Vec<Adjacent>, GraphError> {
-        let mut found = Vec::new();
+        emit: &mut impl FnMut(Adjacent),
+    ) -> Result<(), GraphError> {
+        let (first, position) = adjacency::locate(side, node, 0);
+        if let Some(rel_type) = rel_type {
+            let id = SegmentId {
+                rel_type: rel_type.id(),
+                ..first
+            };
+            return self.visit_typed_adjacency(&id, position, emit);
+        }
+        let last = SegmentId {
+            rel_type: u32::MAX,
+            ..first
+        };
+        let mut edits = self.adjacency.range(first..=last).peekable();
+        let mut current: Option<(u32, SlotRead)> = None;
+        let mut edited = None;
         self.transaction.visit_prefix(
-            table,
-            &keys::adjacency_prefix(node, rel_type),
+            Table::Adjacency,
+            &adjacency::segment_prefix(side, first.group, first.segment),
             |key, value| {
-                let (rel_type, relationship) = keys::parse_adjacency_key(key)?;
-                found.push(Adjacent {
-                    relationship,
-                    rel_type,
-                    other: NodeId(decode_u64(value)?),
-                });
-                Ok::<(), GraphError>(())
+                let (id, entry) = adjacency::parse_key(key)?;
+                if edited == Some(id.rel_type) {
+                    return Ok(());
+                }
+                if current
+                    .as_ref()
+                    .is_none_or(|(held, _)| *held != id.rel_type)
+                {
+                    if let Some((held, read)) = current.take() {
+                        read.finish(&mut typed(held, emit))?;
+                    }
+                    while let Some((edit_id, edit)) =
+                        edits.next_if(|(edit_id, _)| edit_id.rel_type <= id.rel_type)
+                    {
+                        edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+                        if edit_id.rel_type == id.rel_type {
+                            edited = Some(id.rel_type);
+                            return Ok(());
+                        }
+                    }
+                    current = Some((id.rel_type, SlotRead::default()));
+                }
+                match &mut current {
+                    Some((held, read)) => {
+                        read.visit(entry, position, key, value, &mut typed(*held, emit))
+                    }
+                    None => Ok(()),
+                }
             },
         )?;
-        Ok(found)
+        if let Some((held, read)) = current {
+            read.finish(&mut typed(held, emit))?;
+        }
+        for (edit_id, edit) in edits {
+            edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+        }
+        Ok(())
+    }
+
+    fn visit_typed_adjacency(
+        &self,
+        id: &SegmentId,
+        position: usize,
+        emit: &mut impl FnMut(Adjacent),
+    ) -> Result<(), GraphError> {
+        let mut emit = typed(id.rel_type, emit);
+        if let Some(edit) = self.adjacency.get(id) {
+            return edit.visit(position, &mut emit);
+        }
+        let mut read = SlotRead::default();
+        self.transaction
+            .visit_prefix(Table::Adjacency, &id.prefix(), |key, value| {
+                let (_, entry) = adjacency::parse_key(key)?;
+                read.visit(entry, position, key, value, &mut emit)
+            })?;
+        read.finish(&mut emit)
     }
 
     /// Looks a name up without creating it, so a read never writes.
@@ -888,6 +965,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                 .put(Table::Metadata, &key, &next.to_be_bytes())?;
         }
         self.flush_columns()?;
+        self.flush_adjacency()?;
         for (group, edit) in std::mem::take(&mut self.meta) {
             match edit.flush()? {
                 Flush::Rewrite { view, stale } => {
@@ -914,6 +992,102 @@ impl<T: WriteTransaction> GraphTx<T> {
                             .delete(Table::NodeChunks, &meta::delta_key(group, slot))?;
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_adjacency(&mut self) -> Result<(), GraphError> {
+        for (id, edit) in std::mem::take(&mut self.adjacency) {
+            match edit.flush(&id)? {
+                adjacency::Flush::Deltas { put, delete } => {
+                    for (key, bytes) in put {
+                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
+                    }
+                    for key in delete {
+                        self.transaction.delete(Table::Adjacency, &key)?;
+                    }
+                }
+                adjacency::Flush::Rewrite { stored, parts } => {
+                    if stored {
+                        let (start, end) = id.range();
+                        self.transaction
+                            .delete_range(Table::Adjacency, &start, &end)?;
+                    }
+                    for (key, bytes) in parts {
+                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
+        if !self.adjacency.contains_key(&id) {
+            let (start, end) = id.range();
+            let mut entries = Vec::new();
+            self.transaction
+                .visit_range(Table::Adjacency, &start, &end, |key, value| {
+                    entries.push((key.to_vec(), value.to_vec()));
+                    Ok::<(), GraphError>(())
+                })?;
+            let edit = SegmentEdit::load(
+                &id,
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.as_slice(), value.as_slice())),
+            )?;
+            self.adjacency.insert(id, edit);
+        }
+        self.adjacency
+            .get_mut(&id)
+            .ok_or(GraphError::Corrupt("an adjacency edit vanished"))
+    }
+
+    fn move_adjacency_to_segments(&mut self) -> Result<(), GraphError> {
+        for (side, table) in [
+            (Side::Outgoing, Table::Outgoing),
+            (Side::Incoming, Table::Incoming),
+        ] {
+            let mut groups = BTreeSet::new();
+            self.transaction.visit_prefix(table, &[], |key, _| {
+                let (node, _, _) = keys::parse_adjacency_key(key)?;
+                groups.insert(meta::locate(node).0);
+                Ok::<(), GraphError>(())
+            })?;
+            for group in groups {
+                let start = keys::element_key(meta::node_at(group, 0).0);
+                let end = group
+                    .checked_add(1)
+                    .and_then(|after| after.checked_mul(meta::SLOTS as u64))
+                    .map_or([0xff; 9].to_vec(), |after| {
+                        keys::element_key(after).to_vec()
+                    });
+                let mut segments: BTreeMap<SegmentId, Vec<(usize, Vec<Edge>)>> = BTreeMap::new();
+                for (key, value) in self.transaction.scan_range(table, &start, &end)? {
+                    let (node, rel_type, relationship) = keys::parse_adjacency_key(&key)?;
+                    let edge = Edge {
+                        relationship,
+                        other: NodeId(decode_u64(&value)?),
+                    };
+                    let (id, position) = adjacency::locate(side, node, rel_type.id());
+                    let slots = segments.entry(id).or_default();
+                    match slots.last_mut() {
+                        Some((held, edges)) if *held == position => edges.push(edge),
+                        _ => slots.push((position, vec![edge])),
+                    }
+                }
+                for (id, slots) in segments {
+                    let borrowed: Vec<(usize, &[Edge])> = slots
+                        .iter()
+                        .map(|(position, edges)| (*position, edges.as_slice()))
+                        .collect();
+                    for (key, bytes) in adjacency::encode_segment(&id, &borrowed)? {
+                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
+                    }
+                }
+                self.transaction.delete_range(table, &start, &end)?;
             }
         }
         Ok(())
@@ -1101,16 +1275,19 @@ impl<T: WriteTransaction> GraphTx<T> {
             &keys::element_key(id.0),
             &record.encode(),
         )?;
-        self.transaction.put(
-            Table::Outgoing,
-            &keys::adjacency_key(record.source, record.rel_type, id),
-            &record.target.0.to_be_bytes(),
-        )?;
-        self.transaction.put(
-            Table::Incoming,
-            &keys::adjacency_key(record.target, record.rel_type, id),
-            &record.source.0.to_be_bytes(),
-        )?;
+        for (side, node, other) in [
+            (Side::Outgoing, record.source, record.target),
+            (Side::Incoming, record.target, record.source),
+        ] {
+            let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
+            self.adjacency_edit(segment)?.add(
+                position,
+                Edge {
+                    relationship: id,
+                    other,
+                },
+            );
+        }
         self.reindex(id.0, None, Some(Element::Relationship(record)))?;
         Ok(id)
     }
@@ -1179,14 +1356,13 @@ impl<T: WriteTransaction> GraphTx<T> {
         };
         self.transaction
             .delete(Table::Relationships, &keys::element_key(id.0))?;
-        self.transaction.delete(
-            Table::Outgoing,
-            &keys::adjacency_key(record.source, record.rel_type, id),
-        )?;
-        self.transaction.delete(
-            Table::Incoming,
-            &keys::adjacency_key(record.target, record.rel_type, id),
-        )?;
+        for (side, node) in [
+            (Side::Outgoing, record.source),
+            (Side::Incoming, record.target),
+        ] {
+            let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
+            self.adjacency_edit(segment)?.remove(position, id)?;
+        }
         self.reindex(id.0, Some(Element::Relationship(&record)), None)?;
         Ok(Some(record))
     }
@@ -1378,6 +1554,16 @@ mod columns_crash_tests;
 #[cfg(test)]
 #[path = "graph/columns_corrupt.test.rs"]
 mod columns_corrupt_tests;
+
+fn typed(rel_type: u32, emit: &mut impl FnMut(Adjacent)) -> impl FnMut(Edge) + '_ {
+    move |edge| {
+        emit(Adjacent {
+            relationship: edge.relationship,
+            rel_type: Token::new(rel_type),
+            other: edge.other,
+        });
+    }
+}
 
 fn amend(ids: &mut Vec<NodeId>, node: NodeId, was: bool, is: bool) -> Result<(), GraphError> {
     match (ids.binary_search(&node), was, is) {
