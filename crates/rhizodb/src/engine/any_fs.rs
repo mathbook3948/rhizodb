@@ -1,6 +1,11 @@
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+
+use crate::storage::ReadTransaction;
+use crate::storage::StorageError;
+use crate::storage::copy_tables;
 
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
@@ -152,4 +157,31 @@ pub(crate) fn in_memory(options: EngineOptions) -> Result<Engine<AnyFs>, EngineE
         MEMORY_NAME,
         options,
     )
+}
+
+/// Writes the tables `snapshot` sees into a new engine database at `path`, and closes it, which
+/// checkpoints its whole log into the file and removes the log's segments. Fails when a segment
+/// is left, since the file alone would then miss commits.
+pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result<(), StorageError> {
+    let copy = open_path(path, EngineOptions::default()).map_err(StorageError::from)?;
+    copy_tables(snapshot, &copy)?;
+    drop(copy);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}-wal-"))
+        .unwrap_or_default();
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    for entry in fs::read_dir(directory).map_err(StorageError::new)? {
+        let entry = entry.map_err(StorageError::new)?;
+        if entry.file_name().to_string_lossy().starts_with(&name) {
+            return Err(StorageError::new(io::Error::other(
+                "closing the copy left a log segment beside it",
+            )));
+        }
+    }
+    Ok(())
 }

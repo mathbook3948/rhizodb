@@ -64,6 +64,24 @@ pub(crate) const ENTRY_TABLES: [Table; 5] = [
 /// How a vector index measures closeness. Every metric gives a score that is higher for closer
 /// vectors, so results always come in descending score order. A vector so long that a score
 /// could overflow is not indexed and cannot be searched for, under every metric.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::IndexTarget;
+/// use rhizodb::Parameters;
+/// use rhizodb::Value;
+/// use rhizodb::VectorMetric;
+///
+/// let db = Database::in_memory()?;
+/// db.create_vector_index("v", IndexTarget::Label("P"), "v", 2, VectorMetric::DotProduct)?;
+/// db.execute("INSERT (:P {v: [1.0, 2.0]})", &Parameters::new())?;
+/// let result = db.execute(
+///     "CALL db.index.vector.queryNodes('v', [3.0, 4.0], 1) YIELD score RETURN score",
+///     &Parameters::new(),
+/// )?;
+/// assert_eq!(result.rows(), [vec![Value::Float(11.0)]]);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VectorMetric {
@@ -193,6 +211,16 @@ fn norm(vector: &[f64]) -> f64 {
 }
 
 /// What an index covers: the nodes that carry a label, or the relationships of a type.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::IndexTarget;
+///
+/// let db = Database::in_memory()?;
+/// db.create_property_index("person_email", IndexTarget::Label("Person"), "email")?;
+/// db.create_property_index("follow_since", IndexTarget::RelationshipType("FOLLOWS"), "since")?;
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum IndexTarget<'a> {

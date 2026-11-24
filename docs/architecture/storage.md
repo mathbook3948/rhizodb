@@ -32,6 +32,15 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - A poisoned database drops its redb values while an unwind is in progress, so redb writes nothing more and the next open recovers the file from its last commit.
 - The guard relies on `panic = "unwind"`, and a host built with `panic = "abort"` still dies on a damaged file.
 - RhizoDB installs no panic hook, so the host's hook still reports each caught panic.
+- `Database::backup_to` copies every table of one read snapshot into a new database file of the same backend, so restoring a backup is opening it.
+- A backup copies through the storage trait, and each backend writes the new file itself and returns once that one file holds the copy durably.
+- A backup leaves out the legacy tables, which only the upgrade of an older format reads.
+- A backup commits its copy in write transactions of a bounded size, so its memory does not grow with the database.
+- A backup takes no write lock, so writers carry on while it runs and their commits stay out of the copy.
+- A backup is written under a staging name that holds the target's file name, the process, and a counter, in the target's directory, synced, and hard-linked into place, so the target holds nothing or the whole copy.
+- A backup never replaces an existing file or directory, and fails as a storage error instead.
+- A failed backup removes its staging file, and a crashed one leaves it behind for the host to delete.
+- The own engine closes its copy before linking it, which checkpoints the whole log into the file, and fails the backup when a log segment is left.
 
 ## Open
 

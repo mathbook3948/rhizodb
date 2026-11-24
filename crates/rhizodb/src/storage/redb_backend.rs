@@ -390,6 +390,11 @@ impl Storage for RedbStorage {
             }),
         })
     }
+
+    fn write_copy(snapshot: &RedbRead, path: &Path) -> Result<(), StorageError> {
+        let copy = Self::create(|| Database::create(path))?;
+        super::copy_tables(snapshot, &copy)
+    }
 }
 
 /// A read transaction that opens each table once, on its first use.

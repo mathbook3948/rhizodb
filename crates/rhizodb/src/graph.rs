@@ -22,6 +22,7 @@ use crate::value::Reader;
 
 mod adjacency;
 mod columns;
+mod dump;
 mod ids;
 mod index;
 #[cfg(test)]
@@ -43,6 +44,8 @@ pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
+pub(crate) use index::IndexDefinition;
+pub(crate) use index::IndexKind;
 pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
@@ -263,6 +266,17 @@ impl<S: Storage> Graph<S> {
             committed_label_sets: Arc::default(),
             committed_column_deltas: Arc::default(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    /// Copies the committed graph, as one read snapshot sees it, into a new database file at
+    /// `path`, which opens as this graph.
+    pub(crate) fn backup_to(&self, path: &std::path::Path) -> Result<(), GraphError> {
+        Ok(crate::storage::backup::write(&self.storage, path)?)
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {

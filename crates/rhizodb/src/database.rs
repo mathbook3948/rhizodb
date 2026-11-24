@@ -64,6 +64,23 @@ impl Database {
     /// with `panic = "unwind"`, the default, and with `panic = "abort"` the process still ends.
     /// RhizoDB installs no panic hook, so the host's hook still reports the caught panic, by
     /// default on standard error.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::Parameters;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("graph.rhizodb");
+    /// let db = Database::open(&path)?;
+    /// db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::Storage);
+    /// drop(db);
+    /// let reopened = Database::open(&path)?;
+    /// let result = reopened.execute("MATCH (p:Person) RETURN count(p)", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![rhizodb::Value::Integer(1)]]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(open_backend(path.as_ref())?)?,
@@ -71,7 +88,18 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn graph(&self) -> &Graph<Backend> {
+        &self.graph
+    }
+
     /// Creates a database that lives in memory and is gone when dropped.
+    ///
+    /// ```
+    /// let db = rhizodb::Database::in_memory()?;
+    /// db.execute("INSERT ()", &rhizodb::Parameters::new())?;
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
             graph: Graph::open(in_memory_backend()?)?,
@@ -87,12 +115,41 @@ impl Database {
     /// transaction on another thread, and fails with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// when the calling thread holds one.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// let created = db.execute("INSERT (n:Task {done: false}) RETURN id(n)", &Parameters::new())?;
+    /// assert_eq!(created.rows(), [vec![Value::Integer(0)]]);
+    /// let error = db.execute("INSERT (:Task {done: 1 / 0})", &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::DivisionByZero);
+    /// let count = db.execute("MATCH (t:Task) RETURN count(t)", &Parameters::new())?;
+    /// assert_eq!(count.rows(), [vec![Value::Integer(1)]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         query::execute(&self.graph, &self.statements, query, parameters)
     }
 
     /// Begins a read transaction, which sees the graph as it was committed at this moment for as
     /// long as it lives. Read transactions run alongside each other and alongside a writer.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// let snapshot = db.begin_read()?;
+    /// db.execute("INSERT (:Late)", &Parameters::new())?;
+    /// let seen = snapshot.execute("MATCH (n:Late) RETURN count(n)", &Parameters::new())?;
+    /// assert_eq!(seen.rows(), [vec![Value::Integer(0)]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn begin_read(&self) -> Result<ReadTransaction<'_>, Error> {
         Ok(ReadTransaction::new(self.graph.read()?, &self.statements))
     }
@@ -102,8 +159,140 @@ impl Database {
     /// thread that already holds the open write transaction it fails with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// instead of waiting for itself.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::Parameters;
+    ///
+    /// let db = Database::in_memory()?;
+    /// let mut tx = db.begin_write()?;
+    /// tx.execute("INSERT (:Draft)", &Parameters::new())?;
+    /// assert_eq!(db.begin_write().unwrap_err().kind(), ErrorKind::WriteTransactionOnThisThread);
+    /// tx.commit()?;
+    /// db.begin_write()?.rollback()?;
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, Error> {
         Ok(WriteTransaction::new(self.graph.write()?, &self.statements))
+    }
+
+    /// Writes a copy of the committed database to a new file at `path`, which
+    /// [`Database::open`] then opens as this database, so restoring a backup is opening it.
+    ///
+    /// The copy holds exactly the commits that finished before the backup began, read from one
+    /// snapshot as a [`ReadTransaction`] reads it. Readers and writers carry on while it runs,
+    /// and commits made meanwhile stay out of the copy. The copy is written under a staging name
+    /// that starts with `.` and the file name of `path`, in the same directory, synced, and then
+    /// linked to `path`, so after a crash or a failure `path` holds either nothing or the whole
+    /// copy. A crash can leave the staging file behind, and removing it is safe. An in-memory
+    /// database backs up to a file the same way.
+    ///
+    /// It fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage) when a file or directory
+    /// already exists at `path`, which is never replaced, or when writing the copy fails.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let db = Database::in_memory()?;
+    /// db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+    ///
+    /// let backup = directory.path().join("backup.rhizodb");
+    /// db.backup_to(&backup)?;
+    ///
+    /// let restored = Database::open(&backup)?;
+    /// let result = restored.execute("MATCH (p:Person) RETURN p.name", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Ada".to_owned())]]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<(), Error> {
+        Ok(self.graph.backup_to(path.as_ref())?)
+    }
+
+    /// Writes every index definition, node, and relationship of the committed database to `out`
+    /// as a dump: UTF-8 text with one JSON object per line, read back by [`Database::import`].
+    ///
+    /// The dump holds exactly the commits that finished before the export began, read from one
+    /// snapshot as a [`ReadTransaction`] reads it, while readers and writers carry on. It keeps
+    /// node and relationship IDs, and the next ID of each, so references a host keeps by ID
+    /// stay valid after an import. It keeps every value's exact type: an integer apart from a
+    /// float of the same number, `-0.0` apart from `0.0`, NaN and the infinities by their bits,
+    /// and each temporal value with its offset or zone. The crate's guide describes the format
+    /// and how its versions stay compatible.
+    ///
+    /// It fails with [`ErrorKind::Io`](crate::ErrorKind::Io) when writing to `out` fails, and
+    /// `out` may then hold part of a dump, which [`Database::import`] refuses because its end
+    /// line is missing.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.execute("INSERT (:Person {name: 'Ada', born: 1815})", &Parameters::new())?;
+    /// let mut dump = Vec::new();
+    /// db.export(&mut dump)?;
+    ///
+    /// let copy = Database::in_memory()?;
+    /// copy.import(dump.as_slice())?;
+    /// let result = copy.execute("MATCH (p:Person) RETURN p.name, p.born", &Parameters::new())?;
+    /// assert_eq!(
+    ///     result.rows(),
+    ///     [vec![Value::String("Ada".to_owned()), Value::Integer(1815)]]
+    /// );
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn export(&self, out: impl std::io::Write) -> Result<(), Error> {
+        crate::dump::export(&self.graph.read()?, out)
+    }
+
+    /// Reads a dump that [`Database::export`] wrote into this database, which must be new: it
+    /// must hold no index and never have held a node or a relationship, or the import fails with
+    /// [`ErrorKind::DatabaseNotEmpty`](crate::ErrorKind::DatabaseNotEmpty).
+    ///
+    /// Nodes and relationships keep their IDs, and the next IDs are those of the exported
+    /// database, so an ID deleted before the export is not given again. Indexes are created
+    /// first and filled as the elements arrive.
+    ///
+    /// The import commits a batch of lines at a time, so its memory stays bounded by the batch
+    /// and the longest line, however large the dump. A failed import therefore leaves the
+    /// batches before the failure committed. Import into a new file and delete it when the
+    /// import fails, rather than into a database other code uses.
+    ///
+    /// It fails with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump) for a malformed
+    /// or truncated dump, with
+    /// [`ErrorKind::UnsupportedDumpVersion`](crate::ErrorKind::UnsupportedDumpVersion) for one
+    /// written in a newer format version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when
+    /// reading `input` fails.
+    ///
+    /// ```
+    /// use std::io::BufReader;
+    ///
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("graph.jsonl");
+    /// let db = Database::in_memory()?;
+    /// db.execute("INSERT (:A)-[:R]->(:B)", &Parameters::new())?;
+    /// db.export(std::fs::File::create(&path)?)?;
+    ///
+    /// let restored = Database::in_memory()?;
+    /// restored.import(BufReader::new(std::fs::File::open(&path)?))?;
+    /// let result = restored.execute("MATCH (a:A)-[r:R]->(b:B) RETURN id(a), id(r), id(b)", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::Integer(0), Value::Integer(0), Value::Integer(1)]]);
+    /// let again = restored.import(BufReader::new(std::fs::File::open(&path)?)).unwrap_err();
+    /// assert_eq!(again.kind(), ErrorKind::DatabaseNotEmpty);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn import(&self, input: impl std::io::BufRead) -> Result<(), Error> {
+        crate::dump::import(&self.graph, input)
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered
@@ -199,6 +388,28 @@ impl Database {
     /// another definition holds the name, and with
     /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
     /// empty name or a dimension of zero.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::IndexTarget;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    /// use rhizodb::VectorMetric;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.create_vector_index("embedding", IndexTarget::Label("Doc"), "vec", 3, VectorMetric::Euclidean)?;
+    /// db.execute(
+    ///     "INSERT (:Doc {title: 'near', vec: [1.0, 1.0, 1.0]}), (:Doc {title: 'far', vec: [9, 9, 9]})",
+    ///     &Parameters::new(),
+    /// )?;
+    /// let result = db.execute(
+    ///     "CALL db.index.vector.queryNodes('embedding', [1.0, 1.0, 0.0], 1) YIELD node, score \
+    ///      RETURN node.title, score",
+    ///     &Parameters::new(),
+    /// )?;
+    /// assert_eq!(result.rows(), [vec![Value::String("near".to_owned()), Value::Float(-1.0)]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn create_vector_index(
         &self,
         name: &str,
@@ -259,6 +470,17 @@ impl Database {
 
     /// Drops the index `name` and all its entries in one write transaction. Returns whether an
     /// index of that name existed.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::IndexTarget;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.create_property_index("by_id", IndexTarget::Label("Item"), "id")?;
+    /// assert!(db.drop_index("by_id")?);
+    /// assert!(!db.drop_index("by_id")?);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
     pub fn drop_index(&self, name: &str) -> Result<bool, Error> {
         let mut tx = self.graph.write()?;
         let dropped = tx.drop_index(name)?;
@@ -271,3 +493,7 @@ impl Database {
 #[cfg(not(rhizodb_engine))]
 #[path = "database_crash.test.rs"]
 mod crash_tests;
+
+#[cfg(test)]
+#[path = "database_backup.test.rs"]
+mod backup_tests;

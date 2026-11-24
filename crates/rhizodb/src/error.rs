@@ -7,6 +7,26 @@ use crate::graph::GraphError;
 use crate::storage::StorageError;
 
 /// The condition that made a query fail. Callers branch on this, never on the message.
+///
+/// New kinds may be added in any release, so a match needs a catch-all arm. The crate's guide
+/// lists the kinds a host may retry.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+/// use rhizodb::SyntaxErrorKind;
+///
+/// let db = Database::in_memory()?;
+/// let kind = db.execute("MATCH (n RETURN n", &Parameters::new()).unwrap_err().kind();
+/// assert!(matches!(kind, ErrorKind::Syntax(SyntaxErrorKind::UnexpectedToken)));
+/// let retry = match kind {
+///     ErrorKind::Storage | ErrorKind::TransactionAborted | ErrorKind::Io => true,
+///     _ => false,
+/// };
+/// assert!(!retry);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -142,6 +162,21 @@ pub enum ErrorKind {
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
+    /// The reader or writer the host passed to [`Database::import`] or [`Database::export`]
+    /// failed.
+    ///
+    /// [`Database::import`]: crate::Database::import
+    /// [`Database::export`]: crate::Database::export
+    Io,
+    /// A dump given to [`Database::import`](crate::Database::import) is malformed: a line that
+    /// is not the JSON the format defines, lines out of order, an ID out of order, a
+    /// relationship to a node the dump has not created, or a dump cut short before its end line.
+    InvalidDump,
+    /// A dump was written in a format version newer than this build reads.
+    UnsupportedDumpVersion,
+    /// A dump was imported into a database that holds an index or has ever held a node or a
+    /// relationship.
+    DatabaseNotEmpty,
 }
 
 impl ErrorKind {
@@ -162,7 +197,20 @@ impl ErrorKind {
     }
 }
 
-/// A failed query or database operation.
+/// A failed query or database operation. Its `Display` is a message for people, and
+/// [`Error::kind`] is what code branches on.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let error = db.execute("RETURN $missing", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::MissingParameter);
+/// assert!(!error.to_string().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,

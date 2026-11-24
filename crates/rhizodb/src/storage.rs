@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
+pub(crate) mod backup;
 #[cfg(test)]
 pub(crate) mod conformance;
 #[cfg(test)]
@@ -152,6 +154,45 @@ pub(crate) trait Storage {
     fn begin_read(&self) -> Result<Self::Read<'_>, StorageError>;
 
     fn begin_write(&self) -> Result<Self::Write<'_>, StorageError>;
+
+    /// Writes every table that `snapshot` sees into a new database of this backend at `path`,
+    /// where no file exists, and returns once that one file holds the copy durably and whole.
+    fn write_copy(snapshot: &Self::Read<'_>, path: &Path) -> Result<(), StorageError>
+    where
+        Self: Sized;
+}
+
+const COPY_BATCH_BYTES: usize = 64 << 20;
+
+/// Copies every table but the legacy ones from `snapshot` into the empty database `target`, in
+/// write transactions that each commit once they hold [`COPY_BATCH_BYTES`].
+pub(crate) fn copy_tables<S: Storage>(
+    snapshot: &impl ReadTransaction,
+    target: &S,
+) -> Result<(), StorageError> {
+    let mut write: Option<S::Write<'_>> = None;
+    let mut pending = 0usize;
+    for table in Table::ALL.into_iter().filter(|table| !table.is_legacy()) {
+        snapshot.visit_prefix(table, &[], |key, value| {
+            let open = match &mut write {
+                Some(open) => open,
+                None => write.insert(target.begin_write()?),
+            };
+            open.put(table, key, value)?;
+            pending = pending.saturating_add(key.len() + value.len());
+            if pending >= COPY_BATCH_BYTES {
+                pending = 0;
+                if let Some(full) = write.take() {
+                    full.commit()?;
+                }
+            }
+            Ok::<(), StorageError>(())
+        })?;
+    }
+    match write {
+        Some(last) => last.commit(),
+        None => Ok(()),
+    }
 }
 
 pub(crate) trait ReadTransaction {

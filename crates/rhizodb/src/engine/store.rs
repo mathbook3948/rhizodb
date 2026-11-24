@@ -981,6 +981,13 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
             staged: Staged::new(view),
         })
     }
+
+    fn write_copy(
+        snapshot: &EngineRead<'_, F>,
+        path: &std::path::Path,
+    ) -> Result<(), StorageError> {
+        super::any_fs::write_copy(snapshot, path)
+    }
 }
 
 fn prefix_bounds(prefix: &[u8]) -> (Bound<&[u8]>, Option<Vec<u8>>) {

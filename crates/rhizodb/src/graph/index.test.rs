@@ -680,6 +680,10 @@ impl Storage for CountingStorage {
             entry_writes: Rc::clone(&self.entry_writes),
         })
     }
+
+    fn write_copy(snapshot: &RedbRead, path: &std::path::Path) -> Result<(), StorageError> {
+        RedbStorage::write_copy(snapshot, path)
+    }
 }
 
 impl ReadTransaction for CountingWrite {
