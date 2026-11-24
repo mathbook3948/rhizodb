@@ -399,13 +399,15 @@ impl<T: ReadTransaction> Env<'_, T> {
             .into_iter()
             .map(|arg| self.value(arg, self.graveyard))
             .collect::<Result<Vec<_>, _>>()?;
-        let results = (procedure.body)(&args).map_err(|source| {
-            Error::caused_by(
-                ErrorKind::ProcedureFailed,
-                format!("procedure `{}` failed: {source}", procedure.signature.name),
-                source,
-            )
-        })?;
+        let results = (procedure.body)(&args)
+            .map_err(|source| {
+                Error::caused_by(
+                    ErrorKind::ProcedureFailed,
+                    format!("procedure `{}` failed: {source}", procedure.signature.name),
+                    source,
+                )
+            })?
+            .into_rows();
         let rows: Result<Vec<Vec<Datum>>, Error> = results
             .iter()
             .map(|result| result.iter().map(from_parameter).collect())
@@ -676,7 +678,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Relationship {
             id,
-            rel_type: self.tx.token_name(record.rel_type)?,
+            relationship_type: self.tx.token_name(record.rel_type)?,
             start: record.source,
             end: record.target,
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,

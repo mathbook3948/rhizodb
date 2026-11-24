@@ -103,20 +103,20 @@ fn results_carry_element_ids_labels_and_properties() {
     let Value::Node(node) = value else {
         panic!("expected a node, got {value:?}");
     };
-    assert_eq!(node.id.as_u64(), 0);
+    assert_eq!(node.id().as_u64(), 0);
     assert_eq!(
-        node.labels.iter().map(String::as_str).collect::<Vec<_>>(),
+        node.labels().iter().map(String::as_str).collect::<Vec<_>>(),
         ["A", "B"]
     );
-    assert_eq!(node.properties["x"], int(1));
+    assert_eq!(node.properties()["x"], int(1));
     let value = single(&db, "MATCH (n:A) CREATE (n)-[r:R {w: 2}]->(m) RETURN r");
     let Value::Relationship(relationship) = value else {
         panic!("expected a relationship, got {value:?}");
     };
-    assert_eq!(relationship.rel_type, "R");
-    assert_eq!(relationship.start, node.id);
-    assert_ne!(relationship.end, node.id);
-    assert_eq!(relationship.properties["w"], int(2));
+    assert_eq!(relationship.relationship_type(), "R");
+    assert_eq!(relationship.start(), node.id());
+    assert_ne!(relationship.end(), node.id());
+    assert_eq!(relationship.properties()["w"], int(2));
 }
 
 #[test]

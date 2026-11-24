@@ -8,22 +8,90 @@ use crate::temporal::Temporal;
 /// Named query parameters, referred to as `$name` in the query text.
 ///
 /// ```
-/// use rhizodb::Database;
 /// use rhizodb::Parameters;
 /// use rhizodb::Value;
 ///
-/// let db = Database::in_memory()?;
-/// let parameters = Parameters::from([("name".to_owned(), Value::String("Ada".to_owned()))]);
-/// db.execute("INSERT (:Person {name: $name})", &parameters)?;
-/// assert_eq!(db.execute("MATCH (p:Person {name: $name}) RETURN p", &parameters)?.rows().len(), 1);
-/// # Ok::<(), rhizodb::Error>(())
+/// let mut parameters = Parameters::new().with("name", "Ada");
+/// parameters.insert("born", 1815);
+/// assert_eq!(parameters.get("born"), Some(&Value::Integer(1815)));
+/// assert_eq!(parameters.len(), 2);
+///
+/// let tags = Parameters::from([("a", 1), ("b", 2)]);
+/// assert_eq!(tags.iter().map(|(name, _)| name).collect::<Vec<_>>(), ["a", "b"]);
 /// ```
-pub type Parameters = BTreeMap<String, Value>;
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Parameters {
+    values: BTreeMap<String, Value>,
+}
+
+impl Parameters {
+    /// No parameters.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the parameter `name`, returning the value it replaced.
+    pub fn insert(&mut self, name: impl Into<String>, value: impl Into<Value>) -> Option<Value> {
+        self.values.insert(name.into(), value.into())
+    }
+
+    /// These parameters with `name` set to `value`.
+    #[must_use]
+    pub fn with(mut self, name: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.insert(name, value);
+        self
+    }
+
+    /// The value of the parameter `name`.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.values.get(name)
+    }
+
+    /// The parameters in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+    }
+
+    /// How many parameters are set.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether no parameter is set.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+impl<K: Into<String>, V: Into<Value>> FromIterator<(K, V)> for Parameters {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut parameters = Self::new();
+        parameters.extend(iter);
+        parameters
+    }
+}
+
+impl<K: Into<String>, V: Into<Value>> Extend<(K, V)> for Parameters {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (name, value) in iter {
+            self.insert(name, value);
+        }
+    }
+}
+
+impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Parameters {
+    fn from(entries: [(K, V); N]) -> Self {
+        entries.into_iter().collect()
+    }
+}
 
 /// A value passed into or returned from a query.
 ///
 /// A node, relationship, or path passed as a parameter refers to the stored element by its ID.
-/// An integer and a float are different values even when they are equal numbers.
+/// An integer and a float are different values even when they are equal numbers. New variants
+/// may be added in any release, so a match needs a catch-all arm.
 ///
 /// ```
 /// use rhizodb::Database;
@@ -32,8 +100,8 @@ pub type Parameters = BTreeMap<String, Value>;
 ///
 /// let db = Database::in_memory()?;
 /// let parameters = Parameters::from([
-///     ("tags".to_owned(), Value::List(vec![Value::String("a".to_owned())])),
-///     ("raw".to_owned(), Value::Bytes(vec![0, 255])),
+///     ("tags", Value::List(vec![Value::String("a".to_owned())])),
+///     ("raw", Value::Bytes(vec![0, 255])),
 /// ]);
 /// let result = db.execute(
 ///     "RETURN 1 AS i, 1.0 AS f, null AS n, {k: true} AS m, $tags AS tags, $raw AS raw",
@@ -44,11 +112,12 @@ pub type Parameters = BTreeMap<String, Value>;
 /// assert_eq!(row[1], Value::Float(1.0));
 /// assert_eq!(row[2], Value::Null);
 /// assert_eq!(row[3], Value::Map([("k".to_owned(), Value::Boolean(true))].into()));
-/// assert_eq!(row[4], parameters["tags"]);
+/// assert_eq!(Some(&row[4]), parameters.get("tags"));
 /// assert_eq!(row[5], Value::Bytes(vec![0, 255]));
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     /// The absence of a value.
     Null,
@@ -76,6 +145,36 @@ pub enum Value {
     Temporal(Temporal),
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
 /// A node as it was when the query finished.
 ///
 /// ```
@@ -86,23 +185,47 @@ pub enum Value {
 /// let db = Database::in_memory()?;
 /// let result = db.execute("INSERT (n:Person:Admin {name: 'Ada'}) RETURN n", &Parameters::new())?;
 /// let Value::Node(node) = &result.rows()[0][0] else { panic!("not a node") };
-/// assert!(node.labels.contains("Admin"));
-/// assert_eq!(node.properties["name"], Value::String("Ada".to_owned()));
+/// assert!(node.has_label("Admin"));
+/// assert_eq!(node.property("name").unwrap(), &Value::String("Ada".to_owned()));
 /// let found = db.execute(
 ///     "MATCH (n) WHERE id(n) = $id RETURN n.name",
-///     &Parameters::from([("id".to_owned(), Value::Integer(node.id.as_u64() as i64))]),
+///     &Parameters::from([("id".to_owned(), Value::Integer(node.id().as_u64() as i64))]),
 /// )?;
 /// assert_eq!(found.rows().len(), 1);
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
+    pub(crate) id: NodeId,
+    pub(crate) labels: BTreeSet<String>,
+    pub(crate) properties: BTreeMap<String, Value>,
+}
+
+impl Node {
     /// The node's ID.
-    pub id: NodeId,
+    pub fn id(&self) -> NodeId {
+        self.id
+    }
+
     /// The node's labels.
-    pub labels: BTreeSet<String>,
+    pub fn labels(&self) -> &BTreeSet<String> {
+        &self.labels
+    }
+
+    /// Whether the node carries `label`.
+    pub fn has_label(&self, label: &str) -> bool {
+        self.labels.contains(label)
+    }
+
     /// The node's properties.
-    pub properties: BTreeMap<String, Value>,
+    pub fn properties(&self) -> &BTreeMap<String, Value> {
+        &self.properties
+    }
+
+    /// The value of the property `key`, or `None` when the node has no such property.
+    pub fn property(&self, key: &str) -> Option<&Value> {
+        self.properties.get(key)
+    }
 }
 
 /// A relationship as it was when the query finished.
@@ -118,23 +241,50 @@ pub struct Node {
 ///     &Parameters::new(),
 /// )?;
 /// let [Value::Node(a), Value::Relationship(r)] = result.rows()[0].as_slice() else { panic!() };
-/// assert_eq!(r.rel_type, "KNOWS");
-/// assert_eq!(r.start, a.id);
-/// assert_eq!(r.properties["since"], Value::Integer(2020));
+/// assert_eq!(r.relationship_type(), "KNOWS");
+/// assert_eq!(r.start(), a.id());
+/// assert_eq!(r.property("since").unwrap(), &Value::Integer(2020));
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Relationship {
+    pub(crate) id: RelationshipId,
+    pub(crate) relationship_type: String,
+    pub(crate) start: NodeId,
+    pub(crate) end: NodeId,
+    pub(crate) properties: BTreeMap<String, Value>,
+}
+
+impl Relationship {
     /// The relationship's ID.
-    pub id: RelationshipId,
+    pub fn id(&self) -> RelationshipId {
+        self.id
+    }
+
     /// The relationship's type.
-    pub rel_type: String,
+    pub fn relationship_type(&self) -> &str {
+        &self.relationship_type
+    }
+
     /// The node the relationship leaves.
-    pub start: NodeId,
+    pub fn start(&self) -> NodeId {
+        self.start
+    }
+
     /// The node the relationship enters.
-    pub end: NodeId,
+    pub fn end(&self) -> NodeId {
+        self.end
+    }
+
     /// The relationship's properties.
-    pub properties: BTreeMap<String, Value>,
+    pub fn properties(&self) -> &BTreeMap<String, Value> {
+        &self.properties
+    }
+
+    /// The value of the property `key`, or `None` when the relationship has no such property.
+    pub fn property(&self, key: &str) -> Option<&Value> {
+        self.properties.get(key)
+    }
 }
 
 /// A walk through the graph: nodes alternating with the relationships between them.
@@ -156,7 +306,7 @@ pub struct Relationship {
 /// let Value::Path(path) = &result.rows()[0][0] else { panic!("not a path") };
 /// assert_eq!(path.nodes().len(), 3);
 /// assert_eq!(path.relationships().len(), 2);
-/// assert_eq!(path.relationships()[1].start, path.nodes()[2].id);
+/// assert_eq!(path.relationships()[1].start(), path.nodes()[2].id());
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]

@@ -14,7 +14,7 @@ mod dump;
 )]
 mod engine;
 mod error;
-pub mod gql;
+mod gql;
 mod graph;
 mod procedure;
 mod query;
@@ -28,14 +28,19 @@ mod value;
 
 pub use database::Database;
 pub use database::DatabaseStats;
+pub use database::OpenOptions;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use gql::parse_for_fuzzing;
 pub use graph::IndexTarget;
 pub use graph::NodeId;
 pub use graph::RelationshipId;
 pub use graph::VectorMetric;
 pub use procedure::Procedure;
+pub use procedure::ProcedureError;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
 pub use result::Node;
@@ -53,11 +58,13 @@ pub use temporal::Temporal;
 pub use temporal::Time;
 pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
+#[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use value::read_value_for_fuzzing;
 
 /// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value
 /// encodes to other bytes.
+#[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::decode_formats(bytes)
@@ -65,6 +72,7 @@ pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
 
 /// Damages a database file of RhizoDB's own engine by `bytes`, opens it, and reads every entry,
 /// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::open_damaged_file(bytes)

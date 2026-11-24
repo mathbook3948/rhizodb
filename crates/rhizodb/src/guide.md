@@ -31,7 +31,9 @@ assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
 [`Database::open`] opens a file and creates it when there is none. A new file is written under a
 staging name beside it, synced, and linked into place, so a power loss during creation leaves
 either no file or a whole empty database. A file that is already open, in this process or
-another, fails to open with [`ErrorKind::Storage`], so two processes never write one file.
+another, fails to open with [`ErrorKind::DatabaseAlreadyOpen`], so two processes never write one
+file. [`OpenOptions`] opens with other settings, such as failing with
+[`ErrorKind::DatabaseNotFound`] instead of creating a missing file.
 [`Database::in_memory`] makes a database that is gone when dropped.
 
 A damaged file fails with [`ErrorKind::CorruptData`] when it is opened or when an operation
@@ -125,14 +127,16 @@ errors, value errors such as [`ErrorKind::IntegerOverflow`], and misuse such as
 
 The kinds a host may retry are these.
 
-- [`ErrorKind::Storage`]: the file system failed, such as a full disk or an I/O error, or the
-  file is already open elsewhere. Once the cause is gone, retry the whole transaction. A
-  failed commit may or may not have taken effect, so retry only a transaction that is safe to
-  run twice, such as one built with `MERGE`, or read the graph first to find out.
+- [`ErrorKind::Storage`]: the file system failed, such as a full disk or an I/O error. Once
+  the cause is gone, retry the whole transaction. A failed commit may or may not have taken
+  effect, so retry only a transaction that is safe to run twice, such as one built with
+  `MERGE`, or read the graph first to find out.
 - [`ErrorKind::TransactionAborted`]: a query failed earlier in the same write transaction. Begin
   a new transaction and run all of its queries again, after fixing what made the first query
   fail.
 - [`ErrorKind::Io`]: the reader or writer of an export or import failed.
+- [`ErrorKind::DatabaseAlreadyOpen`]: another `Database` holds the file. Open it again once
+  that one is dropped.
 
 [`ErrorKind::CorruptData`] means the file is damaged or the storage engine panicked on it. Open
 the file again to recover from a panic, and restore from a backup when the damage stays.

@@ -26,13 +26,13 @@ fn opening_a_file_that_is_already_open_fails_and_leaves_the_open_database_workin
     let first = Database::open(&path).unwrap();
     run(&first, "INSERT (:A {n: 1})");
     let error = Database::open(&path).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
     let mut tx = first.begin_write().unwrap();
     tx.execute("INSERT (:A {n: 2})", &Parameters::new())
         .unwrap();
     assert_eq!(
         Database::open(&path).unwrap_err().kind(),
-        ErrorKind::Storage
+        ErrorKind::DatabaseAlreadyOpen
     );
     tx.commit().unwrap();
     assert_eq!(single(&first, "MATCH (a:A) RETURN sum(a.n)"), int(3));
@@ -46,7 +46,7 @@ fn opening_a_file_another_process_holds_open_fails_and_corrupts_nothing() {
     let test = "opening_a_file_another_process_holds_open_fails_and_corrupts_nothing";
     if let Ok(path) = std::env::var("RHIZODB_HELD_FILE") {
         let error = Database::open(&path).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+        assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
         return;
     }
     let (_directory, path) = graph_file();
@@ -122,7 +122,7 @@ fn a_forgotten_write_transaction_commits_nothing_and_its_thread_cannot_wait_for_
         );
     }
     let error = Database::open(&path).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
 }
 
 #[test]
@@ -136,19 +136,19 @@ fn a_forgotten_read_transaction_lets_the_file_close_and_reopen() {
     }
     match Database::open(&path) {
         Ok(db) => assert_eq!(single(&db, "MATCH (n) RETURN count(*)"), int(2)),
-        Err(error) => assert_eq!(error.kind(), ErrorKind::Storage, "{error}"),
+        Err(error) => assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}"),
     }
 }
 
 fn callback_database(probe: &'static str) -> (Arc<Database>, Arc<OnceLock<Arc<Database>>>) {
     let target: Arc<OnceLock<Arc<Database>>> = Arc::default();
-    let mut db = db();
+    let db = db();
     let reached = Arc::clone(&target);
     db.register_procedure(
         Procedure::new("test.reenter", move |_| {
             let db = reached.get().ok_or("no database yet")?;
             let result = db.execute(probe, &Parameters::new())?;
-            Ok(vec![vec![Value::Integer(result.rows().len() as i64)]])
+            Ok(vec![vec![Value::Integer(result.rows().len() as i64)]].into())
         })
         .output("rows"),
     )
@@ -189,7 +189,7 @@ fn a_procedure_that_calls_back_into_its_database_reads_but_cannot_write_from_a_w
 
 #[test]
 fn a_panicking_procedure_unwinds_out_and_leaves_the_database_usable() {
-    let mut db = db();
+    let db = db();
     db.register_procedure(
         Procedure::new("test.boom", |_| panic!("the host's procedure panicked")).output("x"),
     )
@@ -451,7 +451,7 @@ fn threads_racing_to_create_one_file_end_with_one_database_that_keeps_every_writ
                             1
                         }
                         Err(error) => {
-                            assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+                            assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
                             0
                         }
                     })
