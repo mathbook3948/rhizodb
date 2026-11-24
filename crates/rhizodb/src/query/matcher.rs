@@ -8,7 +8,6 @@ use crate::graph::Adjacent;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
-use crate::graph::RelationshipType;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::value::PropertyValue;
@@ -269,10 +268,22 @@ impl<T: ReadTransaction> Env<'_, T> {
             Direction::Undirected => return Ok(Vec::new()),
         };
         let labels = match &pattern.labels {
-            None => return Ok(self.tx.adjacent(node, direction, None)?),
+            None => {
+                return Ok(self.tx.adjacent_with(
+                    &mut self.adjacency.borrow_mut(),
+                    node,
+                    direction,
+                    None,
+                )?);
+            }
             Some(LabelExpr::Name(only)) => {
-                return match self.tx.lookup_token::<RelationshipType>(&only.0)? {
-                    Some(token) => Ok(self.tx.adjacent(node, direction, Some(token))?),
+                return match self.rel_type_token(&only.0)? {
+                    Some(token) => Ok(self.tx.adjacent_with(
+                        &mut self.adjacency.borrow_mut(),
+                        node,
+                        direction,
+                        Some(token),
+                    )?),
                     None => Ok(Vec::new()),
                 };
             }
@@ -280,13 +291,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let mut tokens = Vec::new();
         for name in labels.names() {
-            tokens.push((
-                name.0.as_str(),
-                self.tx.lookup_token::<RelationshipType>(&name.0)?,
-            ));
+            tokens.push((name.0.as_str(), self.rel_type_token(&name.0)?));
         }
         let mut kept = Vec::new();
-        for adjacent in self.tx.adjacent(node, direction, None)? {
+        let adjacent =
+            self.tx
+                .adjacent_with(&mut self.adjacency.borrow_mut(), node, direction, None)?;
+        for adjacent in adjacent {
             let Ok(found) = labels.matches::<Infallible>(true, &mut |name| {
                 Ok(tokens
                     .iter()

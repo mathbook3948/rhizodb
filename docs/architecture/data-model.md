@@ -24,6 +24,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A part's key holds its run of slots and its index, so a reader finds the part that holds a slot from the keys of one prefix scan.
 - A part holds the end offset of each of its slots but the last, two bytes each, or four when its relationships take more than 64 KiB.
 - Reading a node's adjacency of one type is one prefix scan of the segment, and of every type one prefix scan of the run of slots.
+- A query that reads the same adjacency prefix twice in a row keeps its entries for its next reads on that side, and still checks each entry only where a read meets it.
 - A slot's relationships come out by type and then by ID, outgoing ones before incoming ones.
 - A commit that changes a few slots of a segment with stored parts writes one delta per changed slot, which lists the relationships it removes from the parts and the ones it adds.
 - Deltas sort before the parts of their segment, so a read of one slot meets its delta before its part and merges them in one pass.

@@ -10,6 +10,7 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Quantifier;
+use crate::graph::AdjacencyReader;
 use crate::graph::ColumnReader;
 use crate::graph::GraphTx;
 use crate::graph::Label;
@@ -19,6 +20,7 @@ use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
+use crate::graph::RelationshipType;
 use crate::graph::Target;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
@@ -76,6 +78,10 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
     /// The property indexes looked up so far, each with its ID or none.
     pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
+    /// The adjacency segments read last.
+    pub(crate) adjacency: RefCell<AdjacencyReader>,
+    /// The relationship types looked up so far that have a token.
+    pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step
@@ -152,6 +158,27 @@ impl<T: ReadTransaction> Env<'_, T> {
         let token = self.tx.lookup_token::<Label>(name)?;
         if let Some(token) = token {
             self.label_tokens
+                .borrow_mut()
+                .push((name.to_owned(), token));
+        }
+        Ok(token)
+    }
+
+    pub(crate) fn rel_type_token(
+        &self,
+        name: &str,
+    ) -> Result<Option<Token<RelationshipType>>, Error> {
+        if let Some((_, token)) = self
+            .rel_type_tokens
+            .borrow()
+            .iter()
+            .find(|(held, _)| held == name)
+        {
+            return Ok(Some(*token));
+        }
+        let token = self.tx.lookup_token::<RelationshipType>(name)?;
+        if let Some(token) = token {
+            self.rel_type_tokens
                 .borrow_mut()
                 .push((name.to_owned(), token));
         }

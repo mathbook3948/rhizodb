@@ -33,6 +33,7 @@ mod records;
 mod tokenize;
 mod value_key;
 
+pub(crate) use adjacency::AdjacencyReader;
 pub(crate) use columns::Cell;
 pub(crate) use columns::ColumnReader;
 pub(crate) use ids::Label;
@@ -57,6 +58,7 @@ pub(crate) use value_key::KeyRange;
 pub(crate) use value_key::compared;
 
 use adjacency::Edge;
+use adjacency::Entries;
 use adjacency::SegmentEdit;
 use adjacency::SegmentId;
 use adjacency::Side;
@@ -803,15 +805,27 @@ impl<T: ReadTransaction> GraphTx<T> {
         direction: Direction,
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
+        self.adjacent_with(&mut AdjacencyReader::default(), node, direction, rel_type)
+    }
+
+    /// [`adjacent`](Self::adjacent) through `reader`, which holds the segments a scan of
+    /// consecutive nodes reads again.
+    pub(crate) fn adjacent_with(
+        &self,
+        reader: &mut AdjacencyReader,
+        node: NodeId,
+        direction: Direction,
+        rel_type: Option<Token<RelationshipType>>,
+    ) -> Result<Vec<Adjacent>, GraphError> {
         let mut found = Vec::new();
         if direction != Direction::Incoming {
-            self.visit_adjacency(Side::Outgoing, node, rel_type, &mut |adjacent| {
+            self.visit_adjacency(reader, Side::Outgoing, node, rel_type, &mut |adjacent| {
                 found.push(adjacent);
             })?;
         }
         if direction != Direction::Outgoing {
             let skip_self_loops = direction == Direction::Both;
-            self.visit_adjacency(Side::Incoming, node, rel_type, &mut |adjacent| {
+            self.visit_adjacency(reader, Side::Incoming, node, rel_type, &mut |adjacent| {
                 if !(skip_self_loops && adjacent.other == node) {
                     found.push(adjacent);
                 }
@@ -820,8 +834,41 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(found)
     }
 
+    fn visit_adjacency_prefix(
+        &self,
+        reader: &mut AdjacencyReader,
+        side: Side,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8], &mut bool) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let entries = reader.entries(side, prefix, || {
+            let mut held = Vec::new();
+            self.transaction
+                .visit_prefix(Table::Adjacency, prefix, |key, value| {
+                    held.push((key.into(), value.into(), false));
+                    Ok::<(), GraphError>(())
+                })?;
+            Ok::<_, GraphError>(held)
+        })?;
+        match entries {
+            Entries::Held(entries) => {
+                for (key, value, verified) in entries {
+                    visit(key, value, verified)?;
+                }
+                Ok(())
+            }
+            Entries::Stored => {
+                self.transaction
+                    .visit_prefix(Table::Adjacency, prefix, |key, value| {
+                        visit(key, value, &mut false)
+                    })
+            }
+        }
+    }
+
     fn visit_adjacency(
         &self,
+        reader: &mut AdjacencyReader,
         side: Side,
         node: NodeId,
         rel_type: Option<Token<RelationshipType>>,
@@ -833,7 +880,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                 rel_type: rel_type.id(),
                 ..first
             };
-            return self.visit_typed_adjacency(&id, position, emit);
+            return self.visit_typed_adjacency(reader, &id, position, emit);
         }
         let last = SegmentId {
             rel_type: u32::MAX,
@@ -842,10 +889,11 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut edits = self.adjacency.range(first..=last).peekable();
         let mut current: Option<(u32, SlotRead)> = None;
         let mut edited = None;
-        self.transaction.visit_prefix(
-            Table::Adjacency,
+        self.visit_adjacency_prefix(
+            reader,
+            side,
             &adjacency::segment_prefix(side, first.group, first.segment),
-            |key, value| {
+            |key, value, verified| {
                 let (id, entry) = adjacency::parse_key(key)?;
                 if edited == Some(id.rel_type) {
                     return Ok(());
@@ -869,9 +917,12 @@ impl<T: ReadTransaction> GraphTx<T> {
                     current = Some((id.rel_type, SlotRead::default()));
                 }
                 match &mut current {
-                    Some((held, read)) => {
-                        read.visit(entry, position, key, value, &mut typed(*held, emit))
-                    }
+                    Some((held, read)) => read.visit(
+                        entry,
+                        position,
+                        (key, value, verified),
+                        &mut typed(*held, emit),
+                    ),
                     None => Ok(()),
                 }
             },
@@ -887,6 +938,7 @@ impl<T: ReadTransaction> GraphTx<T> {
 
     fn visit_typed_adjacency(
         &self,
+        reader: &mut AdjacencyReader,
         id: &SegmentId,
         position: usize,
         emit: &mut impl FnMut(Adjacent),
@@ -896,11 +948,10 @@ impl<T: ReadTransaction> GraphTx<T> {
             return edit.visit(position, &mut emit);
         }
         let mut read = SlotRead::default();
-        self.transaction
-            .visit_prefix(Table::Adjacency, &id.prefix(), |key, value| {
-                let (_, entry) = adjacency::parse_key(key)?;
-                read.visit(entry, position, key, value, &mut emit)
-            })?;
+        self.visit_adjacency_prefix(reader, id.side, &id.prefix(), |key, value, verified| {
+            let (_, entry) = adjacency::parse_key(key)?;
+            read.visit(entry, position, (key, value, verified), &mut emit)
+        })?;
         read.finish(&mut emit)
     }
 

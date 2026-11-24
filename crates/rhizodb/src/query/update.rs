@@ -118,6 +118,8 @@ impl<W: WriteTransaction> Writer<'_, W> {
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
             property_indexes: RefCell::default(),
+            adjacency: RefCell::default(),
+            rel_type_tokens: RefCell::default(),
         }
     }
 

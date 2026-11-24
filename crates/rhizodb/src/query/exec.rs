@@ -65,6 +65,8 @@ pub(crate) fn run_read<T: ReadTransaction>(
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
         property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -97,6 +99,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
         property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     }
     .check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -113,6 +117,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
             property_indexes: RefCell::default(),
+            adjacency: RefCell::default(),
+            rel_type_tokens: RefCell::default(),
         }
         .read_clauses(
             clause,
@@ -150,6 +156,8 @@ pub(crate) fn run_write<W: WriteTransaction>(
         labels: RefCell::default(),
         label_tokens: RefCell::default(),
         property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -517,6 +525,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
             property_indexes: RefCell::default(),
+            adjacency: RefCell::default(),
+            rel_type_tokens: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {

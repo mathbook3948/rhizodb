@@ -532,6 +532,23 @@ impl<'a> PartRef<'a> {
 
     /// A part whose checksum was already checked, read without checking it again.
     pub(crate) fn trusted(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
+        let part = Self::laid_out(key, bytes)?;
+        let mut end = 0;
+        for at in 0..run_of(part.span, part.index) - 1 {
+            let next = part.offset(at);
+            if next < end || next > bytes.len() - part.data {
+                return Err(DecodeError::UnexpectedEnd.into());
+            }
+            end = next;
+        }
+        Ok(part)
+    }
+
+    fn verified(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
+        Self::laid_out(key, bytes)
+    }
+
+    fn laid_out(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
         let (_, Entry::Part { span, index }) = parse_key(key)? else {
             return Err(BAD_KEY);
         };
@@ -551,22 +568,13 @@ impl<'a> PartRef<'a> {
         if offset_width(bytes.len() - data) != width {
             return Err(NOT_CANONICAL);
         }
-        let part = Self {
+        Ok(Self {
             bytes,
             span,
             index,
             width,
             data,
-        };
-        let mut end = 0;
-        for at in 0..run - 1 {
-            let next = part.offset(at);
-            if next < end || next > bytes.len() - data {
-                return Err(DecodeError::UnexpectedEnd.into());
-            }
-            end = next;
-        }
-        Ok(part)
+        })
     }
 
     fn offset(&self, at: usize) -> usize {
@@ -781,12 +789,13 @@ pub(crate) struct SlotRead {
 impl SlotRead {
     /// Reads the entry under `key` if it holds `position`, emitting the slot's relationships
     /// once its part is read.
+    /// `verified` says whether the entry's checksum was checked before, and is set once this
+    /// read checks it.
     pub(crate) fn visit(
         &mut self,
         entry: Entry,
         position: usize,
-        key: &[u8],
-        value: &[u8],
+        (key, value, verified): (&[u8], &[u8], &mut bool),
         emit: &mut impl FnMut(Edge),
     ) -> Result<(), GraphError> {
         match entry {
@@ -806,7 +815,13 @@ impl SlotRead {
                         return Err(SPANS_DISAGREE);
                     }
                     self.covered = true;
-                    let part = PartRef::parse(key, value)?;
+                    let part = if *verified {
+                        PartRef::verified(key, value)?
+                    } else {
+                        let part = PartRef::parse(key, value)?;
+                        *verified = true;
+                        part
+                    };
                     match &self.change {
                         None => part.visit_slot(position, |edge| {
                             emit(edge);
@@ -1098,6 +1113,56 @@ impl SegmentEdit {
             }
         }
         flush
+    }
+}
+
+/// The stored entries of the adjacency segments a query read last, one per side, so a scan that
+/// expands consecutive nodes reads each segment from storage once instead of once per node.
+#[derive(Debug, Default)]
+pub(crate) struct AdjacencyReader {
+    sides: [Recent; 2],
+}
+
+#[derive(Debug, Default)]
+struct Recent {
+    prefix: Vec<u8>,
+    entries: Option<Vec<Verified>>,
+}
+
+/// A stored entry a reader holds, and whether a read checked its checksum.
+pub(crate) type Verified = (Box<[u8]>, Box<[u8]>, bool);
+
+/// What [`AdjacencyReader::entries`] gives for one read of a prefix.
+pub(crate) enum Entries<'r> {
+    /// The prefix was read before, so its entries are held.
+    Held(&'r mut [Verified]),
+    /// The prefix was not read just before, so it is read from storage in place.
+    Stored,
+}
+
+impl AdjacencyReader {
+    /// The entries of `prefix` on `side`, held once the prefix is read twice in a row. `load`
+    /// reads them from storage.
+    pub(crate) fn entries<E>(
+        &mut self,
+        side: Side,
+        prefix: &[u8],
+        load: impl FnOnce() -> Result<Vec<Verified>, E>,
+    ) -> Result<Entries<'_>, E> {
+        let recent = &mut self.sides[usize::from(side.byte())];
+        if recent.prefix != prefix {
+            recent.prefix.clear();
+            recent.prefix.extend_from_slice(prefix);
+            recent.entries = None;
+            return Ok(Entries::Stored);
+        }
+        if recent.entries.is_none() {
+            recent.entries = Some(load()?);
+        }
+        Ok(match &mut recent.entries {
+            Some(entries) => Entries::Held(entries),
+            None => Entries::Stored,
+        })
     }
 }
 

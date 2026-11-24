@@ -65,7 +65,9 @@ fn read_slot(
     let mut edges = Vec::new();
     for (key, value) in stored {
         let (_, entry) = parse_key(key)?;
-        read.visit(entry, position, key, value, &mut |edge| edges.push(edge))?;
+        read.visit(entry, position, (key, value, &mut false), &mut |edge| {
+            edges.push(edge)
+        })?;
     }
     read.finish(&mut |edge| edges.push(edge))?;
     Ok(edges)
