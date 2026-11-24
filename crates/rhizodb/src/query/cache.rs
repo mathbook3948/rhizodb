@@ -51,9 +51,9 @@ impl PlanCache {
     }
 
     /// Forgets every plan.
-    pub(crate) fn clear(&mut self) {
+    pub(crate) fn clear(&self) {
         self.entries
-            .get_mut()
+            .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .plans
             .clear();

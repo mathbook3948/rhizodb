@@ -1,5 +1,3 @@
-#![doc(hidden)]
-
 pub(crate) mod ast;
 pub(crate) mod error;
 pub(crate) mod lexer;
@@ -12,6 +10,7 @@ mod testing;
 #[path = "gql/corpus.test.rs"]
 mod corpus_tests;
 
+#[cfg(feature = "fuzzing")]
 pub fn parse_for_fuzzing(input: &str) -> bool {
     parser::parse(input).is_ok()
 }

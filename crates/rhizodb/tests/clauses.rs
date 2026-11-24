@@ -139,11 +139,11 @@ fn named_paths_alternate_nodes_and_relationships() {
     let names: Vec<_> = path
         .nodes()
         .iter()
-        .map(|node| node.properties["name"].clone())
+        .map(|node| node.properties()["name"].clone())
         .collect();
     assert_eq!(names, [string("Ada"), string("Bob"), string("Cy")]);
     assert_eq!(path.relationships().len(), 2);
-    assert_eq!(path.relationships()[0].start, path.nodes()[0].id);
+    assert_eq!(path.relationships()[0].start(), path.nodes()[0].id());
     assert_eq!(
         single(
             &db,
@@ -374,8 +374,8 @@ fn returning_a_deleted_element_commits_the_delete() {
     let [Value::Node(node)] = row.as_slice() else {
         panic!("expected one node, got {row:?}");
     };
-    assert_eq!(node.labels, ["A".to_owned()].into());
-    assert_eq!(node.properties.get("x"), Some(&int(1)));
+    assert_eq!(node.labels(), &["A".to_owned()].into());
+    assert_eq!(node.properties().get("x"), Some(&int(1)));
     assert_eq!(single(&db, "MATCH (n:A) RETURN count(n)"), int(0));
     assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
     assert_eq!(single(&db, "MATCH (n:B) RETURN count(n)"), int(1));
@@ -392,8 +392,8 @@ fn returning_a_deleted_relationship_commits_the_delete() {
     let [Value::Relationship(relationship)] = row.as_slice() else {
         panic!("expected one relationship, got {row:?}");
     };
-    assert_eq!(relationship.rel_type, "R");
-    assert_eq!(relationship.properties.get("w"), Some(&int(2)));
+    assert_eq!(relationship.relationship_type(), "R");
+    assert_eq!(relationship.properties().get("w"), Some(&int(2)));
     assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
 }
 

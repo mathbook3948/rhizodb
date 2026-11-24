@@ -9,6 +9,7 @@ pub(crate) mod codec;
 pub(crate) mod convert;
 pub(crate) mod error;
 pub(crate) mod extent;
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) mod fuzz;
 pub(crate) mod header;
 pub(crate) mod layout;
