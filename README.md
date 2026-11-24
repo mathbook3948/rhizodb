@@ -6,13 +6,13 @@
 
 An embedded, schemaless property graph database for Rust, queried with GQL.
 
-RhizoDB runs inside your program, with no separate server. It keeps nodes, relationships, and their properties in one [redb](https://github.com/cberner/redb) file, answers GQL queries, and updates its keyword and vector indexes in the same transaction as the data they index.
+RhizoDB runs inside your program, with no separate server. It keeps nodes, relationships, and their properties in one file of its own storage engine, with a write-ahead log beside it, answers GQL queries, and updates its keyword and vector indexes in the same transaction as the data they index.
 
 ```rust
 use rhizodb::Database;
 use rhizodb::Parameters;
 
-let db = Database::open("graph.redb")?;
+let db = Database::open("graph.rhizodb")?;
 db.execute(
     "INSERT (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Grace'})",
     &Parameters::new(),
@@ -29,7 +29,8 @@ RhizoDB is in early development, below 1.0, and is not on crates.io yet. A break
 
 ## Features
 
-* Embedded. The database is one file that your program opens, with no server to run.
+* Embedded. The database is one file, and a write-ahead log beside it, that your program opens, with no server to run.
+* Its own storage engine, which checksums every page, checkpoints in the background, and gives back free space by compacting the file. A file of an earlier build, stored with redb, is converted when it is opened.
 * Schemaless property graph. Nodes carry labels, relationships carry a type, and both carry any properties.
 * GQL queries. The part that overlaps with Cypher is checked against the openCypher TCK, and Cypher `CREATE` is accepted as GQL `INSERT`.
 * GQL pattern syntax, including label expressions, every edge orientation, `FILTER`, `LET`, and `EXISTS { ... }` subqueries.

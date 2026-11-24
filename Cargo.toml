@@ -15,7 +15,6 @@ allow_attributes_without_reason = "deny"
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(rhizodb_engine)"] }
 
 [profile.dev]
 debug = "line-tables-only"

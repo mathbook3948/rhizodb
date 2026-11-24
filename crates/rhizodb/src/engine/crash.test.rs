@@ -134,6 +134,7 @@ fn options() -> EngineOptions {
         wal_limit: 20_000,
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
+        reclaim_slack: 64 << 10,
     }
 }
 

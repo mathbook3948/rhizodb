@@ -1,17 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-#[cfg(not(rhizodb_engine))]
-use std::sync::atomic::AtomicU64;
-#[cfg(not(rhizodb_engine))]
-use std::sync::atomic::Ordering;
 
 use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
 use crate::result::Value;
-#[cfg(not(rhizodb_engine))]
-use crate::storage::sim_backend;
 use crate::test_scale;
 
 #[derive(Clone, Copy, Debug)]
@@ -130,20 +124,6 @@ fn dump(db: &Database) -> Vec<String> {
         .collect()
 }
 
-#[cfg(not(rhizodb_engine))]
-fn on(storage: Result<RedbStorage, crate::storage::StorageError>) -> Result<Database, Error> {
-    Ok(Database {
-        graph: Graph::open(storage?)?,
-        statements: Statements::default(),
-    })
-}
-
-#[cfg(not(rhizodb_engine))]
-fn open(fs: &SimFs) -> Result<Database, Error> {
-    on(sim_backend::storage(fs))
-}
-
-#[cfg(rhizodb_engine)]
 fn open(fs: &SimFs) -> Result<Database, Error> {
     use crate::engine::any_fs::AnyFs;
     use crate::engine::store::CheckpointMode;
@@ -155,6 +135,7 @@ fn open(fs: &SimFs) -> Result<Database, Error> {
         wal_limit: 20_000,
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
+        reclaim_slack: 64 << 10,
     };
     let engine = Engine::open(
         Arc::new(AnyFs::Sim(fs.clone())),
@@ -407,20 +388,14 @@ fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole
 }
 
 #[test]
-#[cfg(not(rhizodb_engine))]
 fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns() {
     let fs = SimFs::new();
-    let capacity = Arc::new(AtomicU64::new(u64::MAX));
-    let db = on(sim_backend::storage_with_capacity(
-        &fs,
-        Arc::clone(&capacity),
-    ))
-    .unwrap();
+    let db = open(&fs).unwrap();
     for step in &WORKLOAD[..4] {
         apply(&db, *step).unwrap();
     }
-    let used = sim_backend::length(&fs).unwrap();
-    capacity.store(used, Ordering::Relaxed);
+    let used = fs.used();
+    fs.set_capacity(Some(used));
     let before = dump(&db);
     let mut refused = 0;
     for round in 0..200 {
@@ -448,31 +423,24 @@ fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns(
     let on_full = dump(&db);
     assert_eq!(on_full[2..], before[2..]);
     assert_eq!(consistent(&db), Ok(()));
-    capacity.store(u64::MAX, Ordering::Relaxed);
+    fs.set_capacity(None);
     assert_eq!(
         apply(&db, WORKLOAD[4]).map_err(|error| error.kind()),
         Err(ErrorKind::Storage),
-        "redb refuses writes after an I/O error until the file is opened again"
+        "the engine refuses writes after an I/O error until the file is opened again"
     );
     assert_eq!(dump(&db)[2..], before[2..]);
     drop(db);
-    capacity.store(used, Ordering::Relaxed);
-    match on(sim_backend::storage_with_capacity(
-        &fs,
-        Arc::clone(&capacity),
-    )) {
+    fs.set_capacity(Some(used));
+    match open(&fs) {
         Ok(db) => {
             assert_eq!(dump(&db)[2..], before[2..]);
             assert_eq!(consistent(&db), Ok(()));
         }
         Err(error) => assert_eq!(error.kind(), ErrorKind::Storage, "{error}"),
     }
-    capacity.store(u64::MAX, Ordering::Relaxed);
-    let db = on(sim_backend::storage_with_capacity(
-        &fs,
-        Arc::clone(&capacity),
-    ))
-    .unwrap();
+    fs.set_capacity(None);
+    let db = open(&fs).unwrap();
     assert_eq!(
         db.execute("MATCH (n:Fill) RETURN count(*)", &Parameters::new())
             .unwrap()

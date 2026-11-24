@@ -764,9 +764,7 @@ fn a_label_set_a_transaction_passes_through_is_never_stored() {
         ),
         [[int(1)], [int(2_001)]]
     );
-    db.check().unwrap_or_else(|error| {
-        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error}");
-    });
+    db.check().unwrap();
 }
 
 /// How long the fastest of three runs of `query` takes, each with a new query text so none

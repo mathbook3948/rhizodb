@@ -148,8 +148,6 @@ pub enum ErrorKind {
     InvalidIndexDefinition,
     /// A host procedure was registered in the `db` namespace, which built-in procedures reserve.
     ReservedProcedureName,
-    /// A feature this version does not support.
-    Unsupported,
     /// The storage engine failed.
     Storage,
     /// Stored data does not decode, breaks an invariant, or makes the storage engine fail. Once

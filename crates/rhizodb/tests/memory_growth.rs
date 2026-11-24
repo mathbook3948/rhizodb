@@ -80,10 +80,7 @@ fn levels_off(name: &str, steps: u64, slack: isize, mut step: impl FnMut(u64)) -
 
 /// RhizoDB's own engine keeps an in-memory database's log in memory until a checkpoint, which
 /// starts once the log passes 256 MiB or the memtable 64 MiB, so commits grow the heap up to that.
-#[cfg(rhizodb_engine)]
 const ENGINE_LOG_AND_MEMTABLE: isize = 320 << 20;
-#[cfg(not(rhizodb_engine))]
-const ENGINE_LOG_AND_MEMTABLE: isize = 0;
 
 #[test]
 fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {

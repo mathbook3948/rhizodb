@@ -6,7 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Added
 
-- Embedded property graph storage on redb, with a versioned on-disk format that upgrades older databases on open.
+- Embedded property graph storage in one database file of RhizoDB's own storage engine, beside a write-ahead log that a clean close empties, with a versioned on-disk format that upgrades older databases on open. Every page carries a checksum, so damage fails as corrupt data where it is read.
 - Node labels kept as interned label sets in one node meta chunk per 4096 node IDs, so label tests read no node record and `MATCH (n:Label) RETURN count(*)` reads one chunk per 4096 nodes.
 - `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
 - Node meta carries checksums, so a damaged chunk or delta fails the read as corrupt data instead of answering wrongly.
@@ -31,11 +31,12 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `ErrorKind::DatabaseAlreadyOpen` and `ErrorKind::BackupTargetExists`, which opening a file that another `Database` holds and a backup to a path that already holds something report instead of `ErrorKind::Storage`.
 - Online backups with `Database::backup_to`, which copies one snapshot of the committed database into a new file while readers and writers carry on, and never leaves a partial file at its path. Restoring a backup is opening it.
 - Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
-- `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant. On a database stored by redb they fail with `ErrorKind::Unsupported`.
-- RhizoDB's own storage engine, still built only with `--cfg rhizodb_engine`, converts a redb database file when it opens one: it checks every redb page, copies every table into a new file, and renames that file over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was.
+- `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
+- Automatic space reclaim: after a checkpoint, a file that holds more than twice its live data plus 76 MiB, and has grown by its live data since the last compaction, is compacted in the background, so a long-running host's file does not grow without bound.
 
 ### Changed
 
+- **Breaking:** `Database::open` and `Database::in_memory` store data with RhizoDB's own storage engine instead of redb, so the database file has a new format. Opening a file that an earlier build stored with redb converts it: every redb page is checked, every table is copied into a new file, and that file is renamed over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was. A converted file cannot be opened by an earlier build.
 - `Value` and `Temporal` are `#[non_exhaustive]`, so a match on them needs a catch-all arm.
 - `Node` and `Relationship` keep their fields private. Read them with `id()`, `labels()`, `has_label()`, `relationship_type()` (formerly the field `rel_type`), `start()`, `end()`, `properties()`, and `property()`.
 - `Parameters` is a type of its own instead of an alias of `BTreeMap`. Build it with `new`, `insert`, `with`, `from` an array of pairs, or `collect`, and read it with `get`.
@@ -46,7 +47,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
-- A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Opening a redb file now verifies every page's checksum first and fails as corrupt data, which makes opening a redb file read the whole file.
+- A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
 - A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.
 - `SET r = {...}` and `SET r += {...}` on a relationship rewrote its whole record once per property, so replacing the properties of a relationship with thousands of them took seconds. They now write the record once.
 - `SET n:A:B:...` and `REMOVE n:A:B:...` stored a label set for every label in between, which is never deleted, so removing 3,000 labels from one node grew the file by over 100 MB. They now store only the label set the node ends with.
@@ -57,6 +58,6 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A deeply nested parameter or procedure result, and query text nested close to the parser's limit in a debug build, no longer overflow the stack and abort the host process. A query now fits in 1 MiB of thread stack in debug and release builds, and a value that nests lists and maps deeper than 128 levels fails with the new `ErrorKind::NestingTooDeep`.
 - A regular expression nested deeper than 64 groups fails with `ErrorKind::InvalidRegex`.
 - A variable-length relationship over a long path, or a pattern of many steps, no longer overflows the stack and aborts the host process, because matching keeps its search on the heap.
-- A power loss while `Database::open` created a new file could leave a file that every later open refused as not a redb database. The file is now written under a staging name, synced, and linked into place.
+- A power loss while `Database::open` created a new file could leave a file that every later open refused. The file is now written under a staging name, synced, and linked into place.
 - A thread holding a write transaction that began another write, or ran a writing query, could wait for itself forever instead of failing with `ErrorKind::WriteTransactionOnThisThread`, when another thread had committed just before it took the write lock.
-- A damaged database file on which redb panics fails with `ErrorKind::CorruptData` instead of ending the host process, and every later operation on that `Database` fails the same way until the file is opened again. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.
+- A damaged redb file on which redb panics while it is converted fails with `ErrorKind::CorruptData` instead of ending the host process. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.

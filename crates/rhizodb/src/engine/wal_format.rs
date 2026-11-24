@@ -245,6 +245,7 @@ pub(crate) enum OpRef<'a> {
 }
 
 impl Op {
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn borrowed(&self) -> OpRef<'_> {
         match self {
             Op::Put { table, key, value } => OpRef::Put {
@@ -316,6 +317,7 @@ pub(crate) fn batch_record<'a>(
     Ok(record)
 }
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn checkpoint_record(
     lsn: u64,
     hlc: u64,

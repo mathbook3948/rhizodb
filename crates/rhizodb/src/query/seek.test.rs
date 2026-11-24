@@ -8,6 +8,8 @@ use crate::Database;
 use crate::IndexTarget as PublicTarget;
 use crate::Parameters;
 use crate::Value;
+use crate::engine::any_fs::open_path;
+use crate::engine::store::EngineOptions;
 use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::graph::NodeRecord;
@@ -250,7 +252,7 @@ proptest! {
 #[test]
 fn a_pattern_property_map_reads_the_index_for_its_start_node() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let queries = [
         "MATCH (n:P {k: 1}) RETURN n",
         "MATCH (a)-[r:T {k: 2}]->(b) RETURN r",
@@ -276,7 +278,7 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
         assert_eq!(queries.map(|query| count(&db, query)), [1; 10]);
     }
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = open_path(&path, EngineOptions::default()).unwrap();
         let mut write = storage.begin_write().unwrap();
         for (key, _) in write.scan_prefix(Table::PropertyEntries, &[]).unwrap() {
             write.delete(Table::PropertyEntries, &key).unwrap();
@@ -295,7 +297,7 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
 #[test]
 fn a_lookup_by_a_pattern_map_entry_tests_only_the_other_conditions_on_what_it_finds() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         db.execute(
@@ -307,7 +309,7 @@ fn a_lookup_by_a_pattern_map_entry_tests_only_the_other_conditions_on_what_it_fi
             .unwrap();
     }
     {
-        let storage = RedbStorage::open(&path).unwrap();
+        let storage = open_path(&path, EngineOptions::default()).unwrap();
         let mut write = storage.begin_write().unwrap();
         let entries = write.scan_prefix(Table::PropertyEntries, &[]).unwrap();
         let (first, value) = entries.first().unwrap().clone();

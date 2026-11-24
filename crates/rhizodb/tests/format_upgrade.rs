@@ -303,7 +303,6 @@ fn assert_format_nine_typed_answers(db: &Database) {
     }
 }
 
-#[cfg(rhizodb_engine)]
 fn assert_converted(directory: &Path, path: &Path) {
     let bytes = std::fs::read(path).unwrap();
     assert!(
@@ -318,9 +317,6 @@ fn assert_converted(directory: &Path, path: &Path) {
         );
     }
 }
-
-#[cfg(not(rhizodb_engine))]
-fn assert_converted(_directory: &Path, _path: &Path) {}
 
 #[test]
 fn a_database_of_format_nine_answers_after_reopening_as_it_did_before() {

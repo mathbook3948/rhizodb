@@ -237,6 +237,7 @@ impl Memtable {
         self.bytes.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.read().values().all(BTreeMap::is_empty)
     }

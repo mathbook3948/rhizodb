@@ -137,11 +137,6 @@ impl StorageError {
         Self::of_kind(ErrorKind::CorruptData, source)
     }
 
-    /// An operation this backend does not offer.
-    pub(crate) fn unsupported(source: impl Error + Send + Sync + 'static) -> Self {
-        Self::of_kind(ErrorKind::Unsupported, source)
-    }
-
     pub(crate) fn is_corrupt(&self) -> bool {
         self.kind == ErrorKind::CorruptData
     }

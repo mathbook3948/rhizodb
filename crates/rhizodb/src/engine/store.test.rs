@@ -19,6 +19,7 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         wal_limit: 16_384,
         checkpoint,
         cache_pages: 32,
+        reclaim_slack: 64 << 10,
     }
 }
 
@@ -574,6 +575,58 @@ fn overwriting_the_same_keys_keeps_the_file_bounded() {
         "the file grew from {early} to {late} bytes rewriting the same keys"
     );
     engine.check().unwrap();
+}
+
+fn log_with_survivors(engine: &impl Storage, rounds: u32) {
+    let key = |round: u32, item: u32| (round * 200 + item).to_be_bytes();
+    for round in 0..rounds {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..200 {
+            write
+                .put(Table::Nodes, &key(round, item), &[round as u8; 300])
+                .unwrap();
+        }
+        if round > 0 {
+            for item in (0..200).filter(|item| item % 50 != 0) {
+                write.delete(Table::Nodes, &key(round - 1, item)).unwrap();
+            }
+        }
+        write.commit().unwrap();
+    }
+}
+
+fn file_and_live_bytes_after_a_long_log(reclaim_slack: u64) -> (u64, u64) {
+    let fs = SimFs::new();
+    let options = EngineOptions {
+        reclaim_slack,
+        ..tiny(CheckpointMode::Inline)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    log_with_survivors(&engine, 400);
+    let live = engine.check().unwrap().live_blocks * BLOCK as u64;
+    assert_eq!(
+        everything(&engine).unwrap().len(),
+        399 * 4 + 200,
+        "every survivor and the last round"
+    );
+    (file_bytes(&fs), live)
+}
+
+#[test]
+fn checkpoints_compact_a_file_whose_free_space_outgrows_its_live_data() {
+    let slack = tiny(CheckpointMode::Inline).reclaim_slack;
+    let extent = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
+    let bound = |live: u64| 2 * live + slack + 4 * extent;
+    let (kept, kept_live) = file_and_live_bytes_after_a_long_log(u64::MAX);
+    assert!(
+        kept > bound(kept_live),
+        "without reclaiming, the log leaves {kept} bytes for {kept_live} live"
+    );
+    let (reclaimed, live) = file_and_live_bytes_after_a_long_log(slack);
+    assert!(
+        reclaimed <= bound(live),
+        "the file holds {reclaimed} bytes for {live} live bytes"
+    );
 }
 
 #[test]
