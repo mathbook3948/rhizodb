@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use super::blob::BlobRef;
 use super::blob::Role;
@@ -9,6 +10,7 @@ use super::cache::CachedPage;
 use super::catalog::Root;
 use super::error::EngineError;
 use super::layout::TableId;
+#[cfg(test)]
 use super::memtable::Bytes;
 use super::node::CellKey;
 use super::node::CellValue;
@@ -30,6 +32,13 @@ pub(crate) struct Tree {
     pub(crate) generation: u64,
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) source: Arc<dyn PageSource>,
+    pinned: BTreeMap<TableId, OnceLock<Pinned>>,
+}
+
+#[derive(Debug)]
+struct Pinned {
+    root: CachedPage,
+    children: Box<[OnceLock<CachedPage>]>,
 }
 
 fn lift<E: From<StorageError>>(error: EngineError) -> E {
@@ -61,48 +70,123 @@ pub(crate) fn fetch(
     } else {
         PageKind::Branch
     };
-    cached.0.expect(kind, page.lsn)?;
-    if cached.0.level != level || cached.0.table != table {
+    cached.header.expect(kind, page.lsn)?;
+    if cached.header.level != level || cached.header.table != table {
         return Err(EngineError::corrupt(format!(
             "the page at {:?} is at level {} of table {:#x} where level {level} of {:#x} was expected",
-            page.at, cached.0.level, cached.0.table.0, table.0
+            page.at, cached.header.level, cached.header.table.0, table.0
         )));
     }
     Ok(cached)
 }
 
 impl Tree {
+    pub(crate) fn new(
+        generation: u64,
+        roots: BTreeMap<TableId, Root>,
+        source: Arc<dyn PageSource>,
+    ) -> Self {
+        let pinned = roots
+            .keys()
+            .map(|table| (*table, OnceLock::new()))
+            .collect();
+        Self {
+            generation,
+            roots,
+            source,
+            pinned,
+        }
+    }
+
+    fn pinned(&self, table: TableId, root: &Root) -> Result<Option<&Pinned>, EngineError> {
+        let Some(slot) = self.pinned.get(&table) else {
+            return Ok(None);
+        };
+        if slot.get().is_none() {
+            let page = fetch(&*self.source, table, root.page, root.level)?;
+            let children = if root.level > 0 {
+                Node::parse(&page.header, &page.bytes, table)?.cells()
+            } else {
+                0
+            };
+            let _ = slot.set(Pinned {
+                root: page,
+                children: (0..children).map(|_| OnceLock::new()).collect(),
+            });
+        }
+        Ok(slot.get())
+    }
+
+    fn pinned_child<'p>(
+        &self,
+        pinned: &'p Pinned,
+        table: TableId,
+        index: usize,
+        child: ChildRef,
+        level: u8,
+    ) -> Result<Option<&'p CachedPage>, EngineError> {
+        let Some(slot) = pinned.children.get(index) else {
+            return Ok(None);
+        };
+        if slot.get().is_none() {
+            let _ = slot.set(fetch(&*self.source, table, child, level)?);
+        }
+        Ok(slot.get())
+    }
+
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
         |blob| load_blob(&*self.source, blob, Role::Key)
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, table: TableId, key: &[u8]) -> Result<Option<Bytes>, EngineError> {
+        self.get_with(table, key, |value| Bytes::from(value))
+    }
+
+    /// Calls `read` with the value stored under `key`, borrowed from its page when it is inline.
+    pub(crate) fn get_with<T>(
+        &self,
+        table: TableId,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Result<Option<T>, EngineError> {
         let Some(root) = self.roots.get(&table) else {
             return Ok(None);
         };
         let load = self.load_key();
         let mut page = root.page;
         let mut level = root.level;
+        let pinned = self.pinned(table, root)?;
+        let mut held = pinned.map(|pinned| &pinned.root);
+        let mut at_root = true;
         loop {
-            let cached = fetch(&*self.source, table, page, level)?;
-            let node = Node::parse(cached.0, &cached.1, table)?;
-            let index = node.search(key, &load)?;
+            let fetched;
+            let cached = match held.take() {
+                Some(cached) => cached,
+                None => {
+                    fetched = fetch(&*self.source, table, page, level)?;
+                    &fetched
+                }
+            };
+            let node = Node::parse(&cached.header, &cached.bytes, table)?;
+            let (index, exact) = node.find(key, &load)?;
             if node.is_leaf() {
-                if index >= node.cells() || node.key(index)?.compare(key, &load)? != Ordering::Equal
-                {
+                if !exact {
                     return Ok(None);
                 }
                 return match node.value(index)? {
-                    CellValue::Inline(value) => Ok(Some(Bytes::from(value))),
-                    CellValue::External(blob) => Ok(Some(Bytes::from(load_blob(
-                        &*self.source,
-                        &blob,
-                        Role::Value,
-                    )?))),
+                    CellValue::Inline(value) => Ok(Some(read(value))),
+                    CellValue::External(blob) => {
+                        Ok(Some(read(&load_blob(&*self.source, &blob, Role::Value)?)))
+                    }
                 };
             }
             page = node.child(index)?;
             level -= 1;
+            if let Some(pinned) = pinned.filter(|_| at_root) {
+                held = self.pinned_child(pinned, table, index, page, level)?;
+            }
+            at_root = false;
         }
     }
 
@@ -147,7 +231,7 @@ impl Tree {
     ) -> Result<Flow, E> {
         let load = self.load_key();
         let cached = fetch(&*self.source, table, page, level).map_err(lift)?;
-        let node = Node::parse(cached.0, &cached.1, table).map_err(lift)?;
+        let node = Node::parse(&cached.header, &cached.bytes, table).map_err(lift)?;
         let first = match start {
             Bound::Unbounded => 0,
             Bound::Included(start) | Bound::Excluded(start) => {

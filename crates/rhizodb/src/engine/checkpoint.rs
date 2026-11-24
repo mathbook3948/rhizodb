@@ -397,7 +397,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         low: &Bytes,
     ) -> Result<Content, EngineError> {
         let cached = fetch(self.source(), table, page, level)?;
-        let node = Node::parse(cached.0, &cached.1, table)?;
+        let node = Node::parse(&cached.header, &cached.bytes, table)?;
         let load = |blob: &BlobRef| load_blob(self.source(), blob, Role::Key);
         let (content, owned) = node.content(&load, low)?;
         self.extents.free(page.at, 1)?;
@@ -676,7 +676,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
     ) -> Result<(ChildRef, u8), EngineError> {
         while level > 0 {
             let cached = fetch(self.source(), table, page, level)?;
-            let node = Node::parse(cached.0, &cached.1, table)?;
+            let node = Node::parse(&cached.header, &cached.bytes, table)?;
             if node.cells() > 1 {
                 break;
             }

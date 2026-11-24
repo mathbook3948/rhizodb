@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
@@ -89,6 +90,13 @@ impl FileSystem for AnyFs {
             AnyFs::Memory(fs) => fs.sync_names(),
             #[cfg(all(test, rhizodb_engine))]
             AnyFs::Sim(fs) => fs.sync_names(),
+        }
+    }
+
+    fn path(&self, name: &str) -> Option<PathBuf> {
+        match self {
+            AnyFs::Os(fs) => fs.path(name),
+            AnyFs::Memory(fs) => fs.path(name),
         }
     }
 }

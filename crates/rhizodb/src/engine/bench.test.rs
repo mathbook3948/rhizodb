@@ -39,7 +39,7 @@ fn timed(label: &str, results: &mut Vec<(String, Duration)>, work: impl FnOnce()
     results.push((label.to_owned(), start.elapsed()));
 }
 
-fn workload<S: Storage>(store: &S, results: &mut Vec<(String, Duration)>) {
+fn workload<S: Storage + Sync>(store: &S, results: &mut Vec<(String, Duration)>) {
     timed("bulk load 1M keys in commits of 10k", results, || {
         for batch in 0..KEYS / BATCH {
             let mut write = store.begin_write().unwrap();
@@ -72,6 +72,9 @@ fn workload<S: Storage>(store: &S, results: &mut Vec<(String, Duration)>) {
             let id = index * 7_919 % KEYS;
             assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
         }
+    });
+    timed("200k random point reads on 4 threads", results, || {
+        read_points_concurrently(store, KEYS, 4, READS / 4);
     });
     timed("full scan of 1M keys", results, || {
         let read = store.begin_read().unwrap();
@@ -142,24 +145,115 @@ fn read_points(store: &impl Storage, keys: u64, reads: u64) {
     }
 }
 
+fn read_points_concurrently<S: Storage + Sync>(store: &S, keys: u64, threads: u64, reads: u64) {
+    std::thread::scope(|scope| {
+        for thread in 0..threads {
+            scope.spawn(move || {
+                let read = store.begin_read().unwrap();
+                for index in 0..reads {
+                    let id = (index * 7_919 + thread * 104_729) % keys;
+                    assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
+                }
+            });
+        }
+    });
+}
+
+fn profile_keys() -> u64 {
+    std::env::var("BENCH_KEYS")
+        .ok()
+        .and_then(|keys| keys.parse().ok())
+        .unwrap_or(100_000)
+}
+
+fn load(store: &impl Storage, keys: u64) {
+    for batch in 0..keys.div_ceil(BATCH) {
+        let mut write = store.begin_write().unwrap();
+        for id in batch * BATCH..((batch + 1) * BATCH).min(keys) {
+            write.put(Table::Nodes, &key(id), &value(id)).unwrap();
+        }
+        write.commit().unwrap();
+    }
+}
+
+fn profile_point_reads<S: Storage + Sync>(store: &S, keys: u64) {
+    read_points(store, keys, 20_000);
+    let reads = 100_000;
+    let start = Instant::now();
+    read_points(store, keys, reads);
+    let single = start.elapsed();
+    let threads = 4;
+    let start = Instant::now();
+    read_points_concurrently(store, keys, threads, reads);
+    let concurrent = start.elapsed();
+    eprintln!(
+        "{keys} keys: {:.0} ns per point read, {:.0} ns per point read on {threads} threads",
+        single.as_nanos() as f64 / reads as f64,
+        concurrent.as_nanos() as f64 / (threads * reads) as f64
+    );
+}
+
 #[test]
-#[ignore = "a profiling target, run under callgrind"]
+#[ignore = "a profiling target, run under callgrind or in release with --nocapture"]
 fn point_reads_for_profiling() {
     let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
     let store = open_path(
         &directory.path().join("graph.rhizo"),
         EngineOptions::default(),
     )
     .unwrap();
-    let keys = 100_000;
-    for batch in 0..keys / BATCH {
+    load(&store, keys);
+    store.checkpoint().unwrap();
+    profile_point_reads(&store, keys);
+}
+
+#[test]
+#[ignore = "a profiling target, run under callgrind or in release with --nocapture"]
+fn redb_point_reads_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
+    let store = RedbStorage::open(directory.path().join("graph.redb")).unwrap();
+    load(&store, keys);
+    profile_point_reads(&store, keys);
+}
+
+#[test]
+#[ignore = "a profiling target, run under callgrind or in release with --nocapture"]
+fn memtable_point_reads_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
+    let store = open_path(
+        &directory.path().join("graph.rhizo"),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    load(&store, keys);
+    profile_point_reads(&store, keys);
+}
+
+fn commit_small_batches(store: &impl Storage, keys: u64) {
+    for commit in 0..SMALL_COMMITS {
         let mut write = store.begin_write().unwrap();
-        for id in batch * BATCH..(batch + 1) * BATCH {
-            write.put(Table::Nodes, &key(id), &value(id)).unwrap();
+        for item in 0..5 {
+            let id = (commit * 5 + item) * 997 % keys;
+            write.put(Table::Nodes, &key(id), &value(id + 1)).unwrap();
         }
         write.commit().unwrap();
     }
+}
+
+#[test]
+#[ignore = "a profiling target, run under callgrind"]
+fn commits_for_profiling() {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = profile_keys();
+    let options = EngineOptions {
+        checkpoint: crate::engine::store::CheckpointMode::Inline,
+        ..EngineOptions::default()
+    };
+    let store = open_path(&directory.path().join("graph.rhizo"), options).unwrap();
+    load(&store, keys);
+    commit_small_batches(&store, keys);
     store.checkpoint().unwrap();
-    read_points(&store, keys, 20_000);
-    read_points(&store, keys, 100_000);
 }

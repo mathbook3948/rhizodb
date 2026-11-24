@@ -10,6 +10,7 @@ use crate::query;
 use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
+use crate::storage::Maintenance;
 #[cfg(not(rhizodb_engine))]
 use crate::storage::redb_backend::RedbStorage;
 use crate::transaction::ReadTransaction;
@@ -44,6 +45,30 @@ fn open_backend(path: &Path) -> Result<Backend, Error> {
 fn in_memory_backend() -> Result<Backend, Error> {
     let options = crate::engine::store::EngineOptions::default();
     Ok(crate::engine::any_fs::in_memory(options).map_err(crate::storage::StorageError::from)?)
+}
+
+/// The size of a database on disk and how well its cache serves reads, from
+/// [`Database::stats`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DatabaseStats {
+    /// The bytes of the database file.
+    pub file_bytes: u64,
+    /// The bytes of the pages and values that the file's last checkpoint reaches. The rest of
+    /// the file is free space that later checkpoints fill and [`Database::compact`] gives back.
+    pub live_bytes: u64,
+    /// The extents of the file that hold data.
+    pub live_extents: u64,
+    /// The extents inside the file that hold nothing, which later writes reuse and
+    /// [`Database::compact`] cuts off when they end the file.
+    pub free_extents: u64,
+    /// The bytes of the write-ahead log beside the file, which a checkpoint empties.
+    pub wal_bytes: u64,
+    /// The page reads the cache served since the database was opened.
+    pub cache_hits: u64,
+    /// The page reads the cache could not serve, which read the file, since the database was
+    /// opened.
+    pub cache_misses: u64,
 }
 
 /// An embedded graph database. Share one `Database` across threads: reads run concurrently, and
@@ -466,6 +491,43 @@ impl Database {
         let mut tx = self.graph.write()?;
         tx.create_property_index(name, target, property)?;
         Ok(tx.commit()?)
+    }
+
+    /// Writes every committed transaction into the database file, moves the live data into as
+    /// little of the file as it needs, and shortens the file to fit. Reads go on while it runs,
+    /// and writing transactions wait for it.
+    ///
+    /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
+    /// write transaction, and with [`ErrorKind::Unsupported`] on a database stored by redb.
+    pub fn compact(&self) -> Result<(), Error> {
+        Ok(self.graph.maintain(Maintenance::compact)??)
+    }
+
+    /// The size of the database on disk and how well its cache serves reads.
+    ///
+    /// Fails with [`ErrorKind::Unsupported`] on a database stored by redb.
+    pub fn stats(&self) -> Result<DatabaseStats, Error> {
+        let stats = self.graph.maintain(Maintenance::stats)??;
+        Ok(DatabaseStats {
+            file_bytes: stats.file_bytes,
+            live_bytes: stats.live_bytes,
+            live_extents: stats.live_extents,
+            free_extents: stats.free_extents,
+            wal_bytes: stats.wal_bytes,
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+        })
+    }
+
+    /// Reads every page that the database file's last checkpoint reaches and checks its
+    /// checksum, its key order, and every count the file records, and fails with
+    /// [`ErrorKind::CorruptData`] on the first that does not hold. Commits since that checkpoint
+    /// are checked as they are read back from the log.
+    ///
+    /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
+    /// write transaction, and with [`ErrorKind::Unsupported`] on a database stored by redb.
+    pub fn check(&self) -> Result<(), Error> {
+        Ok(self.graph.maintain(Maintenance::check)??)
     }
 
     /// Drops the index `name` and all its entries in one write transaction. Returns whether an
