@@ -451,6 +451,14 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn property_of(&self, base: &Expr, key: &str, row: &Row) -> Result<(Datum, Taint), Error> {
+        if let Expr::Slot(slot) = base {
+            let taint = self.slot_taint(*slot);
+            return settle(
+                self.property(row.get(*slot).unwrap_or(&Datum::Null), key),
+                taint.is_whole(),
+                taint.entry(key),
+            );
+        }
         let (base, taint) = self.tracked(base, row)?;
         settle(
             self.property(&base, key),
