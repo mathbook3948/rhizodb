@@ -1,14 +1,15 @@
-## What and why
+## Why
 
-<!-- What the change does and the problem it solves. -->
+<!-- The problem this pull request solves. Link the issue if there is one. -->
+
+## What changed
+
+<!-- One to three bullets. -->
 
 ## Verification
 
-<!-- The tests added or run, and the tiers from CONTRIBUTING.md this change needed. -->
-
-## Checklist
+<!-- How you checked it. Name the TCK or GQL scenarios you added. -->
 
 - [ ] `mise run check` passes.
-- [ ] A `feat` or breaking change has a line under `Unreleased` in `CHANGELOG.md`, and a breaking one is under `Changed`.
-- [ ] Decisions are recorded in `docs/` and `mise run docs` was run after adding a doc.
-- [ ] New public items have doc comments with examples.
+- [ ] A user-visible change adds a line under `Unreleased` in `CHANGELOG.md`.
+- [ ] The documents in `docs/` still match, or this pull request updates them.

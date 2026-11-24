@@ -145,8 +145,16 @@ pub(crate) fn convert_redb<F: FileSystem + 'static>(
     let Some(file) = open_redb(&**fs, name)? else {
         return Ok(());
     };
-    let redb = open_source(&**fs, name, file)?;
-    if open_redb(&**fs, name)?.is_none() {
+    let redb = match open_source(&**fs, name, file) {
+        Ok(redb) => redb,
+        Err(error) => {
+            if open_redb(&**fs, name)?.is_none() {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
+    if fs.path(name).is_none() && open_redb(&**fs, name)?.is_none() {
         return Ok(());
     }
     let conversion = conversion_name(name);

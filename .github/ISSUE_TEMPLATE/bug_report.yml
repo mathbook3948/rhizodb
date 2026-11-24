@@ -1,0 +1,58 @@
+name: Bug report
+description: RhizoDB returns a wrong result, fails, or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report a security problem here. Follow the [security policy](https://github.com/mathbook3948/rhizodb/security/policy) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what RhizoDB did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest graph and query that show the problem, or the Rust code that runs them.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: RhizoDB version
+      description: The release, or the commit if you depend on the Git repository.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Query result
+        - Query parsing
+        - Transactions
+        - Storage or crash recovery
+        - Keyword or vector index
+        - Rust API
+        - Other
+  - type: textarea
+    id: output
+    attributes:
+      label: Error or panic output
+      render: text

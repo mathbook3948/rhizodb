@@ -1,0 +1,21 @@
+name: Feature request
+description: Ask for a query feature or an API RhizoDB does not have yet.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The task you want RhizoDB to help with, and what gets in the way now.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+      description: The query or the Rust API you would write. For GQL syntax, name the ISO/IEC 39075 clause if you know it.
+  - type: textarea
+    id: other
+    attributes:
+      label: Anything else
+      description: Other databases that do this, or decisions in docs/ that the idea touches.
