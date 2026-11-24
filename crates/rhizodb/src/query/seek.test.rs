@@ -253,6 +253,13 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
     let queries = [
         "MATCH (n:P {k: 1}) RETURN n",
         "MATCH (a)-[r:T {k: 2}]->(b) RETURN r",
+        "UNWIND [0] AS i MATCH (n:P {k: i + 1}) RETURN n",
+        "MATCH (n:P {k: toInteger('1')}) RETURN n",
+        "MATCH (n:P {k: [x IN [0, 1] WHERE x > 0][0]}) RETURN n",
+        "MATCH (a)-[r:T {k: CASE WHEN 1 < 2 THEN 2 END}]->(b) RETURN r",
+        "MATCH (n:P {k: toInteger(rand()) + 1}) RETURN n",
+        "MATCH (n:P {k: localtime.realtime().hour * 0 + 1}) RETURN n",
+        "MATCH (n:P {k: CASE WHEN exists { MATCH (m) } THEN 1 END}) RETURN n",
         "MERGE (n:P {k: 1}) RETURN n",
     ];
     let count =
@@ -265,7 +272,7 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
             .unwrap();
         db.create_property_index("t", PublicTarget::RelationshipType("T"), "k")
             .unwrap();
-        assert_eq!(queries.map(|query| count(&db, query)), [1, 1, 1]);
+        assert_eq!(queries.map(|query| count(&db, query)), [1; 10]);
     }
     {
         let storage = RedbStorage::open(&path).unwrap();
@@ -276,7 +283,11 @@ fn a_pattern_property_map_reads_the_index_for_its_start_node() {
         write.commit().unwrap();
     }
     let db = Database::open(&path).unwrap();
-    assert_eq!(queries.map(|query| count(&db, query)), [0, 0, 1]);
+    assert_eq!(
+        queries.map(|query| count(&db, query)),
+        [0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+        "a value that can change between candidates, as rand() or a subquery may, is not looked up"
+    );
     assert_eq!(count(&db, "MATCH (n:P) RETURN n"), 3);
 }
 

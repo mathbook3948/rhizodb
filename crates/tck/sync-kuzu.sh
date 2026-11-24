@@ -15,9 +15,6 @@ cp "$work/src/LICENSE" "$vendor/"
 cd "$work/src/test/test_files"
 for directory in transaction dml_node dml_rel function/utility projection common/types recursive_join issue; do
   grep -rlix -e '-DATASET CSV empty' "$directory" | while read -r file; do
-    case "$file" in
-      dml_rel/create/create_batch.test) continue ;;
-    esac
     mkdir -p "$vendor/test_files/$(dirname "$file")"
     cp "$file" "$vendor/test_files/$file"
   done

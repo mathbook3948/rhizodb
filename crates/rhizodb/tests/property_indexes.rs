@@ -63,12 +63,19 @@ fn a_lookup_reads_only_the_elements_the_index_finds() {
         "MATCH (n:P) WHERE id(n) = 0 AND n.trap - 1 = 0 RETURN id(n)",
         "MATCH (n) WHERE id(n) IN [0, 3.0] AND n.trap - 1 = 0 RETURN id(n)",
         "MATCH ()-[r]->() WHERE id(r) = 0 AND r.trap - 1 = 0 RETURN id(r)",
+        "UNWIND [0] AS i MATCH (n:P) WHERE n.k = i + 1 AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = toInteger('1') AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = [1, 2][0] AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = CASE WHEN 1 < 2 THEN 1 END AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k IN [x IN range(0, 3) WHERE x = 1] AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k < -(-2) AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (m:P {trap: 1})-[:T]->(:P) MATCH (n:P) WHERE n.k = m.k - 0.5 AND n.trap - 1 = 0 RETURN id(n)",
     ];
     let indexed = trapped_db(true);
     let plain = trapped_db(false);
     for query in served {
         assert!(!run(&indexed, query).is_empty(), "{query}");
-        if !query.contains("id(") {
+        if !query.contains("WHERE id(") {
             assert!(plain.execute(query, &Parameters::new()).is_err(), "{query}");
         }
     }
@@ -77,6 +84,10 @@ fn a_lookup_reads_only_the_elements_the_index_finds() {
         "MATCH (n:P) WHERE n.k + 0 = 1 AND n.trap - 1 = 0 RETURN id(n)",
         "MATCH (n:P) WHERE n.k = 1 OR n.trap - 1 = 0 RETURN id(n)",
         "MATCH (n:P) WHERE n.k = n.trap AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = toInteger(rand()) + 1 AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = 1 + localtime.realtime().hour * 0 AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = CASE WHEN exists { MATCH (m) } THEN 1 END AND n.trap - 1 = 0 RETURN id(n)",
+        "MATCH (n:P) WHERE n.k = size([(m)-[:T]->() | m]) - 1 AND n.trap - 1 = 0 RETURN id(n)",
     ];
     for query in scanned {
         assert!(
@@ -383,6 +394,58 @@ proptest! {
             prop_assert_eq!(
                 rows(&indexed, &query, &parameters),
                 rows(&plain, &scan, &parameters),
+                "{}",
+                query
+            );
+        }
+    }
+}
+
+const EXPRESSION_LOOKUPS: [&str; 12] = [
+    "UNWIND [$v, $w] AS x MATCH (n:P {k: x}) RETURN id(n) AS id",
+    "UNWIND range(-2, 2) AS i MATCH (n:P {k: i + 1}) RETURN id(n) AS id",
+    "MATCH (n:P {k: coalesce($v, $w)}) RETURN id(n) AS id",
+    "MATCH (n:P {k: $v + 0}) RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k = toInteger($v) RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k = [$v, $w][1] RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k = $v[0] RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k IN [x IN [$v, $w] WHERE x IS NOT NULL | x] RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k < CASE WHEN $v < $w THEN $v ELSE $w END RETURN id(n) AS id",
+    "MATCH (n:P) WHERE n.k >= -$v RETURN id(n) AS id",
+    "MATCH (m:P) MATCH (n:P {k: m.k}) RETURN id(n) AS id",
+    "MATCH (m:P)-[r:T]->() MATCH (n:P) WHERE n.k = r.k + $v RETURN id(n) AS id",
+];
+
+fn outcome(
+    db: &Database,
+    query: &str,
+    parameters: &Parameters,
+) -> Result<Vec<Vec<Value>>, ErrorKind> {
+    db.execute(query, parameters)
+        .map(|result| result.rows().to_vec())
+        .map_err(|error| error.kind())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn a_lookup_by_an_expression_finds_what_a_scan_finds(
+        writes in prop::collection::vec(write(), 0..30),
+        lookups in prop::collection::vec((0..EXPRESSION_LOOKUPS.len(), value(), value()), 1..12),
+    ) {
+        let indexed = indexed_db();
+        let plain = db();
+        for write in &writes {
+            apply(&indexed, write);
+            apply(&plain, write);
+        }
+        for (lookup, first, second) in lookups {
+            let query = format!("{} ORDER BY id", EXPRESSION_LOOKUPS[lookup]);
+            let parameters = with(&[("v", first), ("w", second)]);
+            prop_assert_eq!(
+                outcome(&indexed, &query, &parameters),
+                outcome(&plain, &query, &parameters),
                 "{}",
                 query
             );
