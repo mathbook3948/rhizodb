@@ -18,12 +18,16 @@ use super::store::EngineOptions;
 pub(crate) enum AnyFs {
     Os(OsFs),
     Memory(MemFs),
+    #[cfg(all(test, rhizodb_engine))]
+    Sim(super::sim_fs::SimFs),
 }
 
 #[derive(Debug)]
 pub(crate) enum AnyFile {
     Os(OsFile),
     Memory(MemFile),
+    #[cfg(all(test, rhizodb_engine))]
+    Sim(super::sim_fs::SimFile),
 }
 
 impl FileSystem for AnyFs {
@@ -33,6 +37,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.create(name, size).map(AnyFile::Os),
             AnyFs::Memory(fs) => fs.create(name, size).map(AnyFile::Memory),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.create(name, size).map(AnyFile::Sim),
         }
     }
 
@@ -40,6 +46,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.open(name, size).map(AnyFile::Os),
             AnyFs::Memory(fs) => fs.open(name, size).map(AnyFile::Memory),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.open(name, size).map(AnyFile::Sim),
         }
     }
 
@@ -47,6 +55,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.rename(from, to),
             AnyFs::Memory(fs) => fs.rename(from, to),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.rename(from, to),
         }
     }
 
@@ -54,6 +64,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.remove(name),
             AnyFs::Memory(fs) => fs.remove(name),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.remove(name),
         }
     }
 
@@ -61,6 +73,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.names(),
             AnyFs::Memory(fs) => fs.names(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.names(),
         }
     }
 
@@ -68,6 +82,8 @@ impl FileSystem for AnyFs {
         match self {
             AnyFs::Os(fs) => fs.sync_names(),
             AnyFs::Memory(fs) => fs.sync_names(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFs::Sim(fs) => fs.sync_names(),
         }
     }
 }
@@ -77,6 +93,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.block_size(),
             AnyFile::Memory(file) => file.block_size(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.block_size(),
         }
     }
 
@@ -84,6 +102,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.read(first, buffer),
             AnyFile::Memory(file) => file.read(first, buffer),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.read(first, buffer),
         }
     }
 
@@ -91,6 +111,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.write(first, buffer),
             AnyFile::Memory(file) => file.write(first, buffer),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.write(first, buffer),
         }
     }
 
@@ -98,6 +120,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.block_count(),
             AnyFile::Memory(file) => file.block_count(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.block_count(),
         }
     }
 
@@ -105,6 +129,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.is_empty(),
             AnyFile::Memory(file) => file.is_empty(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.is_empty(),
         }
     }
 
@@ -112,6 +138,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.lock(),
             AnyFile::Memory(file) => file.lock(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.lock(),
         }
     }
 
@@ -119,6 +147,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.set_block_count(count),
             AnyFile::Memory(file) => file.set_block_count(count),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.set_block_count(count),
         }
     }
 
@@ -126,6 +156,8 @@ impl BlockFile for AnyFile {
         match self {
             AnyFile::Os(file) => file.sync(),
             AnyFile::Memory(file) => file.sync(),
+            #[cfg(all(test, rhizodb_engine))]
+            AnyFile::Sim(file) => file.sync(),
         }
     }
 }
