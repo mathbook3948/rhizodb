@@ -28,6 +28,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Reading every property of a committed node, as `properties(n)`, `keys(n)`, `SET n = {...}`, and `DELETE` do, took time quadratic in its number of properties, so a node with 50,000 properties took seconds to delete. It now takes linear time.
 - A property index serves a condition whose value is any expression over earlier variables, such as `MATCH (n:L {id: i + 1})` after `UNWIND`, instead of only a literal, a parameter, a variable, or a property, so such a lookup no longer scans the label once per row.
 - A deeply nested parameter or procedure result, and query text nested close to the parser's limit in a debug build, no longer overflow the stack and abort the host process. A query now fits in 1 MiB of thread stack in debug and release builds, and a value that nests lists and maps deeper than 128 levels fails with the new `ErrorKind::NestingTooDeep`.
 - A regular expression nested deeper than 64 groups fails with `ErrorKind::InvalidRegex`.

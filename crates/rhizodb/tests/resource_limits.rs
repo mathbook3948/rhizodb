@@ -557,3 +557,72 @@ fn a_write_transaction_of_many_statements_and_nodes_commits_whole_or_rolls_back_
         int(total)
     );
 }
+
+/// Where the wide node of a run comes from.
+#[derive(Clone, Copy, Debug)]
+enum Wide {
+    Committed,
+    TouchedInTheTransaction,
+    CreatedInTheTransaction,
+}
+
+/// The fastest of three runs of `work` in a write transaction on a node with `count`
+/// properties.
+fn fastest_on_a_node_with_properties(count: i64, work: &str, wide: Wide) -> Duration {
+    let insert = "INSERT (n:Wide) SET n += $properties";
+    (0..3)
+        .map(|_| {
+            let db = db();
+            let properties = Parameters::from([(
+                "properties".to_owned(),
+                Value::Map(
+                    (0..count)
+                        .map(|i| (format!("p{i}"), Value::Integer(i)))
+                        .collect(),
+                ),
+            )]);
+            if !matches!(wide, Wide::CreatedInTheTransaction) {
+                db.execute(insert, &properties).unwrap();
+            }
+            let mut tx = db.begin_write().unwrap();
+            match wide {
+                Wide::Committed => {}
+                Wide::TouchedInTheTransaction => {
+                    tx.execute("MATCH (n:Wide) SET n.extra = 1", &Parameters::new())
+                        .unwrap();
+                }
+                Wide::CreatedInTheTransaction => {
+                    tx.execute(insert, &properties).unwrap();
+                }
+            }
+            let started = std::time::Instant::now();
+            tx.execute(work, &Parameters::new()).unwrap();
+            let elapsed = started.elapsed();
+            tx.commit().unwrap();
+            elapsed
+        })
+        .min()
+        .unwrap()
+}
+
+#[test]
+fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_number() {
+    for work in [
+        "MATCH (n:Wide) RETURN size(keys(properties(n)))",
+        "MATCH (n:Wide) SET n = {}",
+        "MATCH (n:Wide) DELETE n",
+    ] {
+        for wide in [
+            Wide::Committed,
+            Wide::TouchedInTheTransaction,
+            Wide::CreatedInTheTransaction,
+        ] {
+            let small = fastest_on_a_node_with_properties(2_000, work, wide);
+            let large = fastest_on_a_node_with_properties(16_000, work, wide);
+            assert!(
+                large < small * 24,
+                "{work} on a node {wide:?}: {small:?} for 2000 properties but {large:?} for 16000"
+            );
+        }
+    }
+}
