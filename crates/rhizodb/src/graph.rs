@@ -21,6 +21,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod columns;
+mod dump;
 mod ids;
 mod index;
 #[cfg(test)]
@@ -41,6 +42,8 @@ pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
+pub(crate) use index::IndexDefinition;
+pub(crate) use index::IndexKind;
 pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;

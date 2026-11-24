@@ -53,6 +53,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod database;
+mod dump;
 #[cfg_attr(
     not(any(test, rhizodb_engine)),
     expect(

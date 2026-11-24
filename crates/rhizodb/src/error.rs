@@ -142,6 +142,21 @@ pub enum ErrorKind {
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
+    /// The reader or writer the host passed to [`Database::import`] or [`Database::export`]
+    /// failed.
+    ///
+    /// [`Database::import`]: crate::Database::import
+    /// [`Database::export`]: crate::Database::export
+    Io,
+    /// A dump given to [`Database::import`](crate::Database::import) is malformed: a line that
+    /// is not the JSON the format defines, lines out of order, an ID out of order, a
+    /// relationship to a node the dump has not created, or a dump cut short before its end line.
+    InvalidDump,
+    /// A dump was written in a format version newer than this build reads.
+    UnsupportedDumpVersion,
+    /// A dump was imported into a database that holds an index or has ever held a node or a
+    /// relationship.
+    DatabaseNotEmpty,
 }
 
 impl ErrorKind {

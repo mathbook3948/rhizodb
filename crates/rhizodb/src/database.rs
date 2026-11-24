@@ -71,6 +71,11 @@ impl Database {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn graph(&self) -> &Graph<Backend> {
+        &self.graph
+    }
+
     /// Creates a database that lives in memory and is gone when dropped.
     pub fn in_memory() -> Result<Self, Error> {
         Ok(Self {
@@ -139,6 +144,66 @@ impl Database {
     /// ```
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         Ok(self.graph.backup_to(path.as_ref())?)
+    }
+
+    /// Writes every index definition, node, and relationship of the committed database to `out`
+    /// as a dump: UTF-8 text with one JSON object per line, read back by [`Database::import`].
+    ///
+    /// The dump holds exactly the commits that finished before the export began, read from one
+    /// snapshot as a [`ReadTransaction`] reads it, while readers and writers carry on. It keeps
+    /// node and relationship IDs, and the next ID of each, so references a host keeps by ID
+    /// stay valid after an import. It keeps every value's exact type: an integer apart from a
+    /// float of the same number, `-0.0` apart from `0.0`, NaN and the infinities by their bits,
+    /// and each temporal value with its offset or zone. The crate's guide describes the format
+    /// and how its versions stay compatible.
+    ///
+    /// It fails with [`ErrorKind::Io`](crate::ErrorKind::Io) when writing to `out` fails, and
+    /// `out` may then hold part of a dump, which [`Database::import`] refuses because its end
+    /// line is missing.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = Database::in_memory()?;
+    /// db.execute("INSERT (:Person {name: 'Ada', born: 1815})", &Parameters::new())?;
+    /// let mut dump = Vec::new();
+    /// db.export(&mut dump)?;
+    ///
+    /// let copy = Database::in_memory()?;
+    /// copy.import(dump.as_slice())?;
+    /// let result = copy.execute("MATCH (p:Person) RETURN p.name, p.born", &Parameters::new())?;
+    /// assert_eq!(
+    ///     result.rows(),
+    ///     [vec![Value::String("Ada".to_owned()), Value::Integer(1815)]]
+    /// );
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn export(&self, out: impl std::io::Write) -> Result<(), Error> {
+        crate::dump::export(&self.graph.read()?, out)
+    }
+
+    /// Reads a dump that [`Database::export`] wrote into this database, which must be new: it
+    /// must hold no index and never have held a node or a relationship, or the import fails with
+    /// [`ErrorKind::DatabaseNotEmpty`](crate::ErrorKind::DatabaseNotEmpty).
+    ///
+    /// Nodes and relationships keep their IDs, and the next IDs are those of the exported
+    /// database, so an ID deleted before the export is not given again. Indexes are created
+    /// first and filled as the elements arrive.
+    ///
+    /// The import commits a batch of lines at a time, so its memory stays bounded by the batch
+    /// and the longest line, however large the dump. A failed import therefore leaves the
+    /// batches before the failure committed. Import into a new file and delete it when the
+    /// import fails, rather than into a database other code uses.
+    ///
+    /// It fails with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump) for a malformed
+    /// or truncated dump, with
+    /// [`ErrorKind::UnsupportedDumpVersion`](crate::ErrorKind::UnsupportedDumpVersion) for one
+    /// written in a newer format version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when
+    /// reading `input` fails.
+    pub fn import(&self, input: impl std::io::BufRead) -> Result<(), Error> {
+        crate::dump::import(&self.graph, input)
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered

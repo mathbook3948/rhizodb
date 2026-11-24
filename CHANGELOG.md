@@ -22,6 +22,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
 - Online backups with `Database::backup_to`, which copies one snapshot of the committed database into a new file while readers and writers carry on, and never leaves a partial file at its path. Restoring a backup is opening it.
+- Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
 
 ### Changed
 
