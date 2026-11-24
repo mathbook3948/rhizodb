@@ -53,6 +53,13 @@ impl Choices for ByteChoices<'_> {
 const LABELS: [&str; 3] = ["A", "B", "C"];
 const STRINGS_OF_FIVE: [&str; 5] = ["0", "1", "2", "3", "4"];
 const TYPES: [&str; 2] = ["T", "U"];
+
+/// How far in keys a fan reaches from its center.
+const FAN_REACH: i64 = 300;
+
+/// The relationships above which no fan is added, since the model counts two-step paths in
+/// time quadratic in the relationships and a database materializes them through a hub.
+const MAX_RELS_BEFORE_FAN: usize = 2_000;
 const STRINGS: [&str; 4] = ["", "a", "b", "é"];
 
 /// The values of `m`, a property whose type changes from node to node and write to write. No
@@ -167,9 +174,9 @@ enum Step {
     AddLabel(i64, &'static str),
     RemoveLabel(i64, &'static str),
     CreateRel(i64, ModelRel),
-    /// Creates a relationship between the node `center` and every node whose key is a multiple
-    /// of `stride`, keyed from `first` up in the order of the other node's key, so a node gets
-    /// more relationships than a row group has slots.
+    /// Creates a relationship between the node `center` and every node within `FAN_REACH` keys
+    /// of it whose key is a multiple of `stride`, keyed from `first` up in the order of the other
+    /// node's key, so a node holds more relationships than one part of its segment fits.
     CreateFan {
         first: i64,
         center: i64,
@@ -282,6 +289,7 @@ impl Step {
             } => (
                 format!(
                     "MATCH (a {{key: $center}}), (b) WHERE b.key % $stride = 0 \
+                     AND abs(b.key - $center) < $reach \
                      WITH a, b ORDER BY b.key WITH a, collect(b) AS bs \
                      UNWIND range(0, size(bs) - 1) AS i WITH a, bs[i] AS b, i \
                      INSERT (a){}[:{rel_type} {{rk: $first + i, w: b.key % 5}}]{}(b)",
@@ -292,6 +300,7 @@ impl Step {
                     ("first", Value::Integer(*first)),
                     ("center", Value::Integer(*center)),
                     ("stride", Value::Integer(*stride)),
+                    ("reach", Value::Integer(FAN_REACH)),
                 ]),
             ),
             Step::DeleteRel(key) => (
@@ -381,7 +390,7 @@ impl Step {
                         .nodes
                         .keys()
                         .copied()
-                        .filter(|key| key % stride == 0)
+                        .filter(|key| key % stride == 0 && (key - center).abs() < FAN_REACH)
                         .collect();
                     for (at, other) in (0..).zip(others) {
                         let (start, end) = if *incoming {
@@ -488,13 +497,18 @@ impl Run {
 
     fn step(next_key: &mut i64, model: &Model, choices: &mut dyn Choices) -> Step {
         match choices.below(16) {
-            15 => {
+            15 if model.rels.len() < MAX_RELS_BEFORE_FAN => {
                 let first = *next_key;
                 let stride = 1 + i64::try_from(choices.below(3)).unwrap_or(0);
-                *next_key += 1 + model.nodes.keys().filter(|key| *key % stride == 0).count() as i64;
+                let center = Self::pick_node(first, choices);
+                *next_key += 1 + model
+                    .nodes
+                    .keys()
+                    .filter(|key| *key % stride == 0 && (*key - center).abs() < FAN_REACH)
+                    .count() as i64;
                 Step::CreateFan {
                     first,
-                    center: Self::pick_node(first, choices),
+                    center,
                     stride,
                     rel_type: TYPES[usize::try_from(choices.below(2)).unwrap_or(0)],
                     incoming: choices.below(2) == 0,
