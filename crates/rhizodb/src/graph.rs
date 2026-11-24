@@ -712,8 +712,17 @@ impl<T: ReadTransaction> GraphTx<T> {
                     self.carries(delta.after, label)?,
                 )?,
                 Meta::Edited { group, edit } => {
-                    for (slot, set) in edit.live() {
+                    let mut carrying = BTreeSet::new();
+                    for (set, _) in edit.uses() {
                         if self.carries(Some(set), label)? {
+                            carrying.insert(set);
+                        }
+                    }
+                    if carrying.is_empty() {
+                        return Ok(());
+                    }
+                    for (slot, set) in edit.live() {
+                        if carrying.contains(&set) {
                             ids.push(meta::node_at(group, slot));
                         }
                     }
@@ -759,8 +768,10 @@ impl<T: ReadTransaction> GraphTx<T> {
                     ))?,
                 Meta::Edited { edit, .. } => {
                     let mut carrying = count;
-                    for (_, set) in edit.live() {
-                        carrying += u64::from(self.carries(Some(set), label)?);
+                    for (set, uses) in edit.uses() {
+                        if self.carries(Some(set), label)? {
+                            carrying += u64::from(uses);
+                        }
                     }
                     carrying
                 }

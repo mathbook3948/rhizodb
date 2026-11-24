@@ -697,3 +697,37 @@ fn setting_or_removing_many_labels_at_once_stores_no_label_set_in_between() {
         [[int(1)], [int(3_001)]]
     );
 }
+
+/// How long one write transaction takes to run `statements` statements that each match one
+/// node by its label and insert a node of another label.
+fn label_matches_in_one_transaction(statements: i64) -> Duration {
+    let db = db();
+    run(&db, "INSERT (:Hub)");
+    let started = std::time::Instant::now();
+    let mut tx = db.begin_write().unwrap();
+    for i in 0..statements {
+        tx.execute(
+            "MATCH (h:Hub) INSERT (:Leaf {i: $i})",
+            &Parameters::from([("i".to_owned(), Value::Integer(i))]),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    started.elapsed()
+}
+
+#[test]
+fn a_label_scan_in_a_write_transaction_skips_the_nodes_it_created_without_the_label() {
+    let small = (0..3)
+        .map(|_| label_matches_in_one_transaction(2_000))
+        .min()
+        .unwrap();
+    let large = (0..3)
+        .map(|_| label_matches_in_one_transaction(16_000))
+        .min()
+        .unwrap();
+    assert!(
+        large < small * 24,
+        "{small:?} for 2000 statements but {large:?} for 16000"
+    );
+}
