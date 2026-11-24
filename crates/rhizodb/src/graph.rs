@@ -37,6 +37,7 @@ mod value_key;
 pub(crate) use adjacency::AdjacencyReader;
 pub(crate) use columns::Cell;
 pub(crate) use columns::ColumnReader;
+pub(crate) use columns::Text;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
 pub(crate) use ids::PropertyKey;

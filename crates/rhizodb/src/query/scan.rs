@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use memchr::memmem;
+
 use crate::error::Error;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
@@ -13,6 +15,7 @@ use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::ScanGroup;
 use crate::graph::Target;
+use crate::graph::Text;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
 
@@ -104,6 +107,8 @@ enum Pred {
     Compare(Value, Vec<(ComparisonOp, Value)>),
     IsNull(Value, bool),
     Text(BinaryOp, Value, Value),
+    /// `CONTAINS` of a fixed string, with its searcher built once.
+    Contains(Value, Box<memmem::Finder<'static>>),
     In(Value, Option<Vec<Datum>>),
     Not(Box<Pred>),
     Logic(BinaryOp, Box<Pred>, Box<Pred>),
@@ -254,7 +259,12 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                 let (Some(lhs), Some(rhs)) = (self.value(lhs)?, self.value(rhs)?) else {
                     return Ok(None);
                 };
-                Pred::Text(*op, lhs, rhs)
+                match (op, rhs) {
+                    (BinaryOp::Contains, Value::Fixed(Datum::String(part))) => {
+                        Pred::Contains(lhs, Box::new(memmem::Finder::new(&part).into_owned()))
+                    }
+                    (op, rhs) => Pred::Text(*op, lhs, rhs),
+                }
             }
             Expr::Binary(BinaryOp::In, needle, list) => {
                 let Some(needle) = self.value(needle)? else {
@@ -287,17 +297,17 @@ impl<'c> Arg<'c> {
 
     fn probe(self) -> Result<Probe<'c>, Error> {
         Ok(match self {
-            Arg::Cell(Cell::Str(text)) => Probe::Text(text),
+            Arg::Cell(Cell::Str(text)) => Probe::Text(text.to_str()?),
             Arg::Cell(cell) => Probe::Value(Cow::Owned(cell_datum(cell)?)),
             Arg::Datum(datum) => Probe::Value(datum),
         })
     }
 
-    fn text(&self) -> Option<&str> {
+    fn text(&self) -> Option<&[u8]> {
         match self {
-            Arg::Cell(Cell::Str(text)) => Some(text),
+            Arg::Cell(Cell::Str(text)) => Some(text.bytes()),
             Arg::Datum(datum) => match datum.as_ref() {
-                Datum::String(text) => Some(text),
+                Datum::String(text) => Some(text.as_bytes()),
                 _ => None,
             },
             Arg::Cell(_) => None,
@@ -317,17 +327,22 @@ fn cell_datum(cell: Cell<'_>) -> Result<Datum, Error> {
         Cell::Bool(value) => Datum::Boolean(value),
         Cell::Int(value) => Datum::Integer(value),
         Cell::Float(value) => Datum::Float(value),
-        Cell::Str(value) => Datum::String(value.to_owned()),
+        Cell::Str(value) => Datum::String(value.to_str()?.to_owned()),
         other => Datum::from(other.to_value()?),
     })
 }
 
-fn text_comparison(op: ComparisonOp, text: &str, other: &Datum, mirrored: bool) -> Option<bool> {
+fn text_comparison(
+    op: ComparisonOp,
+    text: Text<'_>,
+    other: &Datum,
+    mirrored: bool,
+) -> Option<bool> {
     match op {
         ComparisonOp::Equal | ComparisonOp::NotEqual => {
             let equal = match other {
                 Datum::Null => return None,
-                Datum::String(other) => text == other,
+                Datum::String(other) => text.bytes() == other.as_bytes(),
                 _ => false,
             };
             Some(equal == (op == ComparisonOp::Equal))
@@ -337,9 +352,9 @@ fn text_comparison(op: ComparisonOp, text: &str, other: &Datum, mirrored: bool) 
                 return None;
             };
             let ordering = if mirrored {
-                other.as_str().cmp(text)
+                other.as_bytes().cmp(text.bytes())
             } else {
-                text.cmp(other)
+                text.bytes().cmp(other.as_bytes())
             };
             Some(ordered(op, ordering))
         }
@@ -369,8 +384,8 @@ fn compare_args(op: ComparisonOp, left: &Arg<'_>, right: &Arg<'_>) -> Result<Opt
         return Ok(Some(ordered(op, left.cmp(right))));
     }
     Ok(match (left, right) {
-        (Arg::Cell(Cell::Str(text)), Arg::Datum(other)) => text_comparison(op, text, other, false),
-        (Arg::Datum(other), Arg::Cell(Cell::Str(text))) => text_comparison(op, text, other, true),
+        (Arg::Cell(Cell::Str(text)), Arg::Datum(other)) => text_comparison(op, *text, other, false),
+        (Arg::Datum(other), Arg::Cell(Cell::Str(text))) => text_comparison(op, *text, other, true),
         _ => comparison(op, &*left.datum()?, &*right.datum()?),
     })
 }
@@ -471,11 +486,15 @@ impl At<'_, '_> {
                     (Some(text), Some(part)) => Some(match op {
                         BinaryOp::StartsWith => text.starts_with(part),
                         BinaryOp::EndsWith => text.ends_with(part),
-                        _ => text.contains(part),
+                        _ => memmem::find(text, part).is_some(),
                     }),
                     _ => None,
                 }
             }
+            Pred::Contains(text, finder) => self
+                .arg(text)?
+                .text()
+                .map(|text| finder.find(text).is_some()),
             Pred::In(needle, items) => member(&self.arg(needle)?, items.as_deref())?,
             Pred::Not(operand) => self.holds(operand)?.map(|value| !value),
             Pred::Logic(op, lhs, rhs) => {
@@ -1044,7 +1063,7 @@ fn pred_reads(pred: &Pred, column: usize) -> bool {
         Pred::Fixed(_) => false,
         Pred::Against { column: held, .. } => *held == column,
         Pred::Compare(first, rest) => reads(first) || rest.iter().any(|(_, value)| reads(value)),
-        Pred::IsNull(value, _) | Pred::In(value, _) => reads(value),
+        Pred::IsNull(value, _) | Pred::In(value, _) | Pred::Contains(value, _) => reads(value),
         Pred::Text(_, lhs, rhs) => reads(lhs) || reads(rhs),
         Pred::Not(operand) => pred_reads(operand, column),
         Pred::Logic(_, lhs, rhs) => pred_reads(lhs, column) || pred_reads(rhs, column),
