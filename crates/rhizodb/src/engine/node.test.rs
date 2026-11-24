@@ -265,6 +265,22 @@ fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
     ]
 }
 
+fn page_keys() -> impl Strategy<Value = std::collections::BTreeSet<Vec<u8>>> {
+    proptest::collection::btree_set(key_strategy(), 1..20).prop_filter("fits one page", |keys| {
+        let cells: usize = keys
+            .iter()
+            .map(|key| {
+                32 + if key.len() > INLINE_KEY {
+                    LONG_KEY_CELL
+                } else {
+                    key.len()
+                }
+            })
+            .sum();
+        PAGE_HEADER + cells <= BLOCK
+    })
+}
+
 fn long_key_loader(
     long_keys: &[Vec<u8>],
 ) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
@@ -285,7 +301,7 @@ proptest! {
 
     #[test]
     fn a_leaf_finds_the_first_key_at_or_above_the_target(
-        keys in proptest::collection::btree_set(key_strategy(), 1..20),
+        keys in page_keys(),
         targets in vec(key_strategy(), 1..20),
         same_width in any::<bool>(),
     ) {
@@ -332,7 +348,7 @@ proptest! {
 
     #[test]
     fn a_branch_finds_the_child_whose_range_holds_the_target(
-        lows in proptest::collection::btree_set(key_strategy(), 1..20),
+        lows in page_keys(),
         targets in vec(key_strategy(), 1..20),
     ) {
         let lows: Vec<Vec<u8>> = lows.into_iter().filter(|low| !low.is_empty()).collect();
