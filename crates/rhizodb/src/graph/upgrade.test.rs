@@ -216,3 +216,70 @@ fn a_graph_stored_as_format_eight_reads_back_every_node_after_the_upgrade() {
         }
     }
 }
+
+#[test]
+fn a_graph_stored_as_format_nine_reads_back_every_relationship_after_the_upgrade() {
+    use super::adjacency_model_tests::Model as Relationships;
+    use super::adjacency_model_tests::check;
+    use super::adjacency_model_tests::create_node;
+    use super::adjacency_model_tests::create_rel;
+    use super::adjacency_model_tests::delete_rel;
+    use super::adjacency_model_tests::open;
+
+    let fs = crate::engine::sim_fs::SimFs::new();
+    let mut model = Relationships::default();
+    {
+        let graph = open(&fs);
+        let mut write = graph.write().unwrap();
+        let mut nodes = Vec::new();
+        for at in (0..40).chain(4090..4100).chain([8191, 8192, 20_000]) {
+            nodes.push(create_node(&mut write, &mut model, at));
+        }
+        let hub = 20_000;
+        for _ in 0..90 {
+            for node in &nodes {
+                create_rel(&mut write, &mut model, hub, *node, 0);
+                create_rel(&mut write, &mut model, *node, hub, 1);
+            }
+        }
+        for (at, node) in nodes.iter().enumerate() {
+            create_rel(&mut write, &mut model, *node, *node, 2);
+            create_rel(
+                &mut write,
+                &mut model,
+                *node,
+                nodes[(at + 1) % nodes.len()],
+                2,
+            );
+            create_rel(
+                &mut write,
+                &mut model,
+                *node,
+                nodes[(at + 1) % nodes.len()],
+                2,
+            );
+        }
+        write.commit().unwrap();
+        for round in 0..8 {
+            let mut write = graph.write().unwrap();
+            create_rel(&mut write, &mut model, nodes[round], nodes[round * 3], 1);
+            let doomed = *model.rels.keys().nth(round * 11).unwrap();
+            delete_rel(&mut write, &mut model, doomed);
+            write.commit().unwrap();
+        }
+        let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_nine(&mut previous);
+        previous.commit().unwrap();
+    }
+    assert!(model.rels.len() > 4096 * 2);
+    for _ in 0..2 {
+        let graph = open(&fs);
+        let read = graph.read().unwrap();
+        check(&read, &model).unwrap();
+        for table in [Table::Outgoing, Table::Incoming] {
+            if let Ok(entries) = read.transaction.scan_prefix(table, &[]) {
+                assert_eq!(entries, vec![], "{table:?} is emptied");
+            }
+        }
+    }
+}

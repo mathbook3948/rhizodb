@@ -14,9 +14,26 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Each kind of token has its own token space.
 - The database remembers each committed token that a read transaction looks up, and a write transaction never adds to that memory.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
-- Keys of the node, relationship, and adjacency tables are fixed-width big-endian integers, so key order matches ID order and prefix scans find adjacency members.
-- Each relationship is indexed twice, under its source node for outgoing scans and under its target node for incoming scans.
-- An adjacency index entry holds the node at the other end, so a traversal reads no relationship record.
+- Keys of the relationship and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
+- Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
+- An adjacency entry holds the relationship ID and the node at the other end, so a traversal reads no relationship record.
+- Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
+- An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.
+- A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.
+- A segment is stored as parts that each cover the same run of slots, the longest under which every part fits a page, or one slot when none does, and a part without relationships is not stored.
+- A part's key holds its run of slots and its index, so a reader finds the part that holds a slot from the keys of one prefix scan.
+- A part holds the end offset of each of its slots but the last, two bytes each, or four when its relationships take more than 64 KiB.
+- Reading a node's adjacency of one type is one prefix scan of the segment, and of every type one prefix scan of the run of slots.
+- A slot's relationships come out by type and then by ID, outgoing ones before incoming ones.
+- A commit that changes a few slots of a segment with stored parts writes one delta per changed slot, which lists the relationships it removes from the parts and the ones it adds.
+- Deltas sort before the parts of their segment, so a read of one slot meets its delta before its part and merges them in one pass.
+- A segment keeps at most 4 deltas and none larger than half a part, and a commit that would leave more or larger lays the segment out again and deletes its deltas.
+- Laying a segment out again copies the encoded relationships of each slot no change touched as they are stored, and writes only the parts whose bytes differ, so a change beside a hub does not rewrite the hub's part.
+- A commit that leaves a segment without relationships deletes its parts and deltas.
+- A write transaction loads a segment, with its deltas, the first time it changes it, and keeps each changed slot as its change against the stored parts until commit.
+- A commit writes the segments it changed in key order.
+- Each adjacency part and delta carries a CRC-32 that covers its key, so a damaged entry or one read under another key is reported as corruption.
+- Opening a database written before adjacency segments moves its adjacency index entries into segments one row group at a time, in the opening write transaction.
 - Nodes fall into row groups of 4096 consecutive IDs.
 - Each row group with a live node has one node meta chunk, keyed by the group, that holds a live bitmap and each live node's label set.
 - A node's labels live only in node meta, and its properties live only in property columns.

@@ -383,10 +383,10 @@ fn a_prefix_scan_yields_matching_keys_in_order<H: Harness>(harness: &mut H) {
         &[0xFE, 0xFF],
     ];
     let pairs: Vec<(&[u8], &[u8])> = stored.iter().map(|key| (*key, *key)).collect();
-    put_all(&store, Table::Outgoing, &pairs);
+    put_all(&store, Table::Adjacency, &pairs);
 
     let read = store.begin_read().unwrap();
-    let scanned = |prefix: &[u8]| keys(read.scan_prefix(Table::Outgoing, prefix).unwrap());
+    let scanned = |prefix: &[u8]| keys(read.scan_prefix(Table::Adjacency, prefix).unwrap());
     assert_eq!(scanned(&[1]), [vec![1], vec![1, 0], vec![1, 0xFF]]);
     assert_eq!(
         scanned(&[0xFF]),
@@ -401,11 +401,11 @@ fn a_prefix_scan_yields_matching_keys_in_order<H: Harness>(harness: &mut H) {
     assert_eq!(scanned(&[]), all);
     for prefix in [&[][..], &[1], &[0xFF], &[3]] {
         assert_eq!(
-            visited(&read, Table::Outgoing, prefix),
-            read.scan_prefix(Table::Outgoing, prefix).unwrap()
+            visited(&read, Table::Adjacency, prefix),
+            read.scan_prefix(Table::Adjacency, prefix).unwrap()
         );
     }
-    assert!(dump(&read, Table::Incoming).is_empty());
+    assert!(dump(&read, Table::NodeColumns).is_empty());
 }
 
 fn a_range_scan_yields_keys_from_start_to_end<H: Harness>(harness: &mut H) {

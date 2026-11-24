@@ -19,7 +19,11 @@ pub(crate) enum Table {
     /// reads.
     Nodes,
     Relationships,
+    /// The outgoing adjacency of format versions before adjacency segments, which only their
+    /// upgrade reads.
     Outgoing,
+    /// The incoming adjacency of format versions before adjacency segments, which only their
+    /// upgrade reads.
     Incoming,
     /// The label index of format versions before node meta, which only their upgrade reads.
     LabelIndex,
@@ -33,10 +37,11 @@ pub(crate) enum Table {
     LabelSets,
     LabelSetByTokens,
     NodeColumns,
+    Adjacency,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 18] = [
+    pub(crate) const ALL: [Table; 19] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -55,12 +60,16 @@ impl Table {
         Table::LabelSets,
         Table::LabelSetByTokens,
         Table::NodeColumns,
+        Table::Adjacency,
     ];
 
     /// Whether only the upgrade of an older format version reads the table, so a new database
     /// does not create it.
     pub(crate) const fn is_legacy(self) -> bool {
-        matches!(self, Table::LabelIndex | Table::Nodes)
+        matches!(
+            self,
+            Table::LabelIndex | Table::Nodes | Table::Outgoing | Table::Incoming
+        )
     }
 
     pub(crate) const fn name(self) -> &'static str {
@@ -83,6 +92,7 @@ impl Table {
             Table::LabelSets => "label_sets",
             Table::LabelSetByTokens => "label_set_by_tokens",
             Table::NodeColumns => "node_columns",
+            Table::Adjacency => "adjacency",
         }
     }
 }

@@ -354,3 +354,60 @@ fn the_damaged_file_fixture_of_format_eight_keeps_its_indexes_current_after_the_
         [vec![int(42)]]
     );
 }
+
+const FORMAT_NINE: &str = "tests/fixtures/format-9.redb";
+
+fn assert_format_nine_answers(db: &Database) {
+    let answers = answers_in("format-9.answers");
+    assert_eq!(answers.len(), 20);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn a_database_of_format_nine_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_NINE, directory.path());
+    assert_format_nine_answers(&Database::open(&path).unwrap());
+    assert_format_nine_answers(&Database::open(&path).unwrap());
+}
+
+#[test]
+fn a_database_of_format_nine_takes_relationship_writes_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of(FORMAT_NINE, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(&db, "MATCH (:Hub)-[r:FAN]->(x) WHERE x.i < 100 DELETE r");
+        run(
+            &db,
+            "MATCH (h:Hub), (x:Item) WHERE x.i >= 8900 CREATE (x)-[:BACK {w: 1}]->(h)",
+        );
+        run(&db, "MATCH (x:Item) WHERE x.i % 1000 = 500 DETACH DELETE x");
+        run(
+            &db,
+            "MATCH (a:Item {i: 20}), (b:Item {i: 8000}) CREATE (a)-[:NEW]->(b), (b)-[:NEW]->(a)",
+        );
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        single(&db, "MATCH (:Hub)-[r:FAN]->() RETURN count(*)"),
+        int(7804)
+    );
+    assert_eq!(
+        single(&db, "MATCH (:Hub)<-[r:BACK]-() RETURN count(*)"),
+        int(4596)
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a:Item {i: 20})-[:NEW]-(b) RETURN b.i, count(*) ORDER BY b.i"
+        ),
+        [vec![int(8000), int(2)]]
+    );
+    assert_eq!(
+        single(&db, "MATCH (x:Item) WHERE x.i % 1000 = 500 RETURN count(*)"),
+        int(0)
+    );
+}

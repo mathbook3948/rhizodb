@@ -241,3 +241,80 @@ fn readers_keep_their_snapshot_while_writers_on_other_threads_commit_and_drop_in
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
 }
+
+#[test]
+fn readers_see_whole_adjacency_snapshots_while_a_writer_moves_relationships_in_small_commits() {
+    let db = Arc::new(Database::in_memory().unwrap());
+    run(&db, "INSERT (:Hub)");
+    run(&db, "UNWIND range(1, 200) AS i INSERT (:N {i: i})");
+    run(
+        &db,
+        "MATCH (h:Hub), (n:N) WHERE n.i <= 100 INSERT (h)-[:T]->(n), (n)-[:T]->(h)",
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (db, stop) = (Arc::clone(&db), Arc::clone(&stop));
+        thread::spawn(move || {
+            let mut round = 0_i64;
+            while !stop.load(Ordering::Relaxed) {
+                let target = round % 200 + 1;
+                let mut tx = db.begin_write().unwrap();
+                tx.execute(
+                    "MATCH (h:Hub)-[r:T]->(n) WITH r ORDER BY id(r) LIMIT 1 DELETE r",
+                    &Parameters::new(),
+                )
+                .unwrap();
+                tx.execute(
+                    "MATCH (n:N)-[r:T]->(:Hub) WITH r ORDER BY id(r) LIMIT 1 DELETE r",
+                    &Parameters::new(),
+                )
+                .unwrap();
+                tx.execute(
+                    "MATCH (h:Hub), (n:N {i: $i}) INSERT (h)-[:T]->(n), (n)-[:T]->(h)",
+                    &Parameters::from([("i".to_owned(), rhizodb::Value::Integer(target))]),
+                )
+                .unwrap();
+                tx.commit().unwrap();
+                round += 1;
+            }
+        })
+    };
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let db = Arc::clone(&db);
+            thread::spawn(move || {
+                for _ in 0..cases(60) {
+                    let snapshot = db.begin_read().unwrap();
+                    let read = |query: &str| {
+                        snapshot
+                            .execute(query, &Parameters::new())
+                            .unwrap()
+                            .rows()
+                            .to_vec()
+                    };
+                    let out = read("MATCH (h:Hub)-[r:T]->(n) RETURN id(r), n.i ORDER BY id(r)");
+                    assert_eq!(out.len(), 100);
+                    let back = read("MATCH (n:N)<-[r:T]-(h:Hub) RETURN id(r), n.i ORDER BY id(r)");
+                    assert_eq!(back, out, "both ends list the same relationships");
+                    let into = read("MATCH (h:Hub)<-[r]-() RETURN count(r)");
+                    assert_eq!(into, [vec![int(100)]]);
+                    for _ in 0..2 {
+                        assert_eq!(
+                            read("MATCH (h:Hub)-[r:T]->(n) RETURN id(r), n.i ORDER BY id(r)"),
+                            out
+                        );
+                    }
+                }
+            })
+        })
+        .collect();
+    for reader in readers {
+        reader.join().unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+    assert_eq!(
+        run(&db, "MATCH ()-[r:T]->() RETURN count(r)"),
+        [vec![int(200)]]
+    );
+}

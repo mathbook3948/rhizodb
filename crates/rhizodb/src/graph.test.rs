@@ -604,9 +604,57 @@ pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId
     nodes
 }
 
+/// Rewrites a database of the current format in the layout of format 9, which kept each
+/// relationship as one entry under its source in the outgoing table and one under its target in
+/// the incoming table, so a test can open it as an older version.
+pub(crate) fn store_as_format_nine(write: &mut impl WriteTransaction) {
+    let mut segments: BTreeMap<SegmentId, Vec<adjacency::Stored>> = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::Adjacency, &[]).unwrap() {
+        let (id, _) = adjacency::parse_key(&key).unwrap();
+        write.delete(Table::Adjacency, &key).unwrap();
+        segments.entry(id).or_default().push((key, value));
+    }
+    for (id, stored) in segments {
+        let table = match id.side {
+            Side::Outgoing => Table::Outgoing,
+            Side::Incoming => Table::Incoming,
+        };
+        let edit = SegmentEdit::load(
+            &id,
+            stored
+                .iter()
+                .map(|(key, value)| (key.as_slice(), value.as_slice())),
+        )
+        .unwrap();
+        for (position, edges) in edit.slots().unwrap() {
+            for edge in edges {
+                write
+                    .put(
+                        table,
+                        &keys::adjacency_key(
+                            id.node_at(position),
+                            Token::new(id.rel_type),
+                            edge.relationship,
+                        ),
+                        &edge.other.0.to_be_bytes(),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &9u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
 /// Rewrites a database of the current format in the layout of format 8, which kept each node's
 /// properties in one record under its ID, so a test can open it as an older version.
 pub(crate) fn store_as_format_eight(write: &mut impl WriteTransaction) {
+    store_as_format_nine(write);
     for (node, properties) in take_columns(write) {
         let record = NodeRecord {
             labels: BTreeSet::new(),
@@ -630,6 +678,7 @@ pub(crate) fn store_as_format_eight(write: &mut impl WriteTransaction) {
 /// labels at the front of its record and in a label index, so a test can open it as an older
 /// version.
 pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
+    store_as_format_nine(write);
     let mut sets = BTreeMap::new();
     for (key, value) in write.scan_prefix(Table::LabelSets, &[]).unwrap() {
         sets.insert(
