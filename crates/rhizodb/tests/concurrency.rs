@@ -41,9 +41,6 @@ fn committer(db: &Arc<Database>, stop: &Arc<AtomicBool>) -> thread::JoinHandle<(
 }
 
 #[test]
-#[ignore = "bug: a committing writer clears the writer slot after redb already handed the write \
-            lock to the next thread, so that thread's second begin_write on itself waits forever \
-            instead of failing with WriteTransactionOnThisThread"]
 fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_committed() {
     let db = Arc::new(Database::in_memory().unwrap());
     let stop = Arc::new(AtomicBool::new(false));
@@ -53,10 +50,15 @@ fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_co
     {
         let (db, rounds) = (Arc::clone(&db), Arc::clone(&rounds));
         thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let deadline = Instant::now() + Duration::from_secs(cases(4).min(60));
             while Instant::now() < deadline {
                 let tx = db.begin_write().unwrap();
-                let nested = db.begin_write().map(drop).map_err(|error| error.kind());
+                let nested = if rounds.load(Ordering::Relaxed) % 2 == 0 {
+                    db.begin_write().map(drop)
+                } else {
+                    db.execute("INSERT (:Nested)", &Parameters::new()).map(drop)
+                }
+                .map_err(|error| error.kind());
                 if nested != Err(ErrorKind::WriteTransactionOnThisThread) {
                     let _ = done.send(Err(format!("nested begin_write gave {nested:?}")));
                     return;
@@ -67,7 +69,7 @@ fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_co
             let _ = done.send(Ok(()));
         });
     }
-    let outcome = finished.recv_timeout(Duration::from_secs(40));
+    let outcome = finished.recv_timeout(Duration::from_secs(cases(4).min(60) + 30));
     stop.store(true, Ordering::Relaxed);
     let rounds = rounds.load(Ordering::Relaxed);
     match outcome {

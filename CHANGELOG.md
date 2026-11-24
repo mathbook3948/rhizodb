@@ -22,10 +22,15 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
 
+### Changed
+
+- `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
+
 ### Fixed
 
 - A property index serves a condition whose value is any expression over earlier variables, such as `MATCH (n:L {id: i + 1})` after `UNWIND`, instead of only a literal, a parameter, a variable, or a property, so such a lookup no longer scans the label once per row.
 - A deeply nested parameter or procedure result, and query text nested close to the parser's limit in a debug build, no longer overflow the stack and abort the host process. A query now fits in 1 MiB of thread stack in debug and release builds, and a value that nests lists and maps deeper than 128 levels fails with the new `ErrorKind::NestingTooDeep`.
 - A regular expression nested deeper than 64 groups fails with `ErrorKind::InvalidRegex`.
 - A variable-length relationship over a long path, or a pattern of many steps, no longer overflows the stack and aborts the host process, because matching keeps its search on the heap.
+- A thread holding a write transaction that began another write, or ran a writing query, could wait for itself forever instead of failing with `ErrorKind::WriteTransactionOnThisThread`, when another thread had committed just before it took the write lock.
 - A damaged database file on which redb panics fails with `ErrorKind::CorruptData` instead of ending the host process, and every later operation on that `Database` fails the same way until the file is opened again. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.

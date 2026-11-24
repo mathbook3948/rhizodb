@@ -1,4 +1,5 @@
 use std::fmt;
+use std::marker::PhantomData;
 
 use crate::database::Backend;
 use crate::error::Error;
@@ -46,10 +47,22 @@ impl<'db> ReadTransaction<'db> {
 /// [`Database::begin_write`](crate::Database::begin_write). Its queries see its own writes, and
 /// other transactions see them only after [`WriteTransaction::commit`]. Dropping it without a
 /// commit rolls it back.
+///
+/// It stays on the thread that began it, so a second write begun on that thread can fail
+/// instead of waiting for itself. A host that holds a write across `.await` points runs it on
+/// one thread, for example in `spawn_blocking`.
+///
+/// ```compile_fail
+/// fn send<T: Send>(_: T) {}
+/// let db = rhizodb::Database::in_memory()?;
+/// send(db.begin_write()?);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 pub struct WriteTransaction<'db> {
     tx: Option<GraphTx<<Backend as Storage>::Write<'db>>>,
     began: DateTime,
     statements: &'db Statements,
+    on_its_thread: PhantomData<*const ()>,
 }
 
 impl<'db> WriteTransaction<'db> {
@@ -61,6 +74,7 @@ impl<'db> WriteTransaction<'db> {
             tx: Some(tx),
             began: temporal::now(),
             statements,
+            on_its_thread: PhantomData,
         }
     }
 
