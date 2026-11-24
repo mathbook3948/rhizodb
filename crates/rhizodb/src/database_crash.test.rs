@@ -330,22 +330,46 @@ fn one_failed_write_or_sync_in_a_workload_loses_only_its_own_step() {
     crash_during_workload(Failure::Once);
 }
 
+fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
+    let db = open(fs).map_err(|error| format!("reopening failed: {error}"))?;
+    consistent(&db)?;
+    let count = |db: &Database| {
+        db.execute("MATCH (n) RETURN count(*)", &Parameters::new())
+            .map(|result| result.rows().to_vec())
+            .map_err(|error| error.to_string())
+    };
+    if count(&db)? != [vec![Value::Integer(0)]] {
+        return Err("a database that was never opened holds nodes".to_owned());
+    }
+    db.execute("INSERT (:First)", &Parameters::new())
+        .map_err(|error| format!("the recovered database refused a write: {error}"))?;
+    drop(db);
+    let db = open(fs).map_err(|error| format!("second reopen: {error}"))?;
+    if count(&db)? != [vec![Value::Integer(1)]] {
+        return Err("the first write did not last".to_owned());
+    }
+    Ok(())
+}
+
 #[test]
-#[ignore = "bug: a power loss while Database::open creates a new file can leave a file that \
-            every later open refuses with a storage error, 'Not a redb database: magic number \
-            mismatch', so the host must delete it by hand"]
-fn a_power_loss_while_a_new_file_is_created_leaves_a_file_that_opens() {
+fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole_empty_one() {
     let (opened, _) = operations();
+    let seeds = u64::from(test_scale::cases(2)).min(16);
     let mut problems = Vec::new();
-    for at in 0..opened {
-        let fs = SimFs::new();
-        fs.fail_after(at, Failure::FromThenOn);
-        assert!(open(&fs).is_err(), "opening survived a failure at {at}");
-        for mode in modes(2, at) {
-            if let Err(error) = open(&fs.crash(mode)) {
-                problems.push(format!(
-                    "power loss at operation {at} of {opened}, {mode:?}: {error}"
-                ));
+    for failure in [Failure::FromThenOn, Failure::Once] {
+        for at in 0..opened {
+            let fs = SimFs::new();
+            fs.fail_after(at, failure);
+            let first = open(&fs).map(drop);
+            if failure == Failure::FromThenOn {
+                assert!(first.is_err(), "opening survived a failure at {at}");
+            }
+            for mode in modes(seeds, at) {
+                if let Err(problem) = opens_empty_and_writable(&fs.crash(mode)) {
+                    problems.push(format!(
+                        "{failure:?} at operation {at} of {opened}, {mode:?}: {problem}"
+                    ));
+                }
             }
         }
     }

@@ -387,3 +387,84 @@ fn missing_extra_and_odd_parameters_are_handled_without_a_panic() {
     assert_eq!(single(&db, "MATCH (n:N) RETURN count(n.v)"), int(6));
     assert_eq!(single(&db, "MATCH (n:N {v: 0}) RETURN count(*)"), int(1));
 }
+
+fn names_in(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn creating_a_database_leaves_only_its_file_and_replaces_a_staging_file_an_interrupted_open_left() {
+    let (directory, path) = graph_file();
+    std::fs::write(
+        directory.path().join(".graph.redb.creating"),
+        vec![9_u8; 5_000],
+    )
+    .unwrap();
+    {
+        let db = Database::open(&path).unwrap();
+        run(&db, "INSERT (:A)");
+    }
+    assert_eq!(names_in(directory.path()), ["graph.redb"]);
+    let db = Database::open(&path).unwrap();
+    assert_eq!(single(&db, "MATCH (n:A) RETURN count(*)"), int(1));
+}
+
+#[test]
+fn a_failed_creation_leaves_nothing_behind() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing");
+    assert_eq!(
+        Database::open(missing.join("graph.redb"))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Storage
+    );
+    assert_eq!(names_in(directory.path()), Vec::<String>::new());
+    assert_eq!(
+        Database::open(directory.path().join(".."))
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Storage
+    );
+}
+
+#[test]
+fn threads_racing_to_create_one_file_end_with_one_database_that_keeps_every_write() {
+    for _ in 0..cases(5) {
+        let (directory, path) = graph_file();
+        let written = thread::scope(|scope| {
+            let openers: Vec<_> = (0..8)
+                .map(|writer| {
+                    let path = &path;
+                    scope.spawn(move || match Database::open(path) {
+                        Ok(db) => {
+                            db.execute(
+                                "INSERT (:W {w: $w})",
+                                &Parameters::from([("w".to_owned(), int(writer))]),
+                            )
+                            .unwrap();
+                            1
+                        }
+                        Err(error) => {
+                            assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+                            0
+                        }
+                    })
+                })
+                .collect();
+            openers
+                .into_iter()
+                .map(|opener| opener.join().unwrap())
+                .sum::<i64>()
+        });
+        assert!(written >= 1);
+        assert_eq!(names_in(directory.path()), ["graph.redb"]);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(single(&db, "MATCH (n:W) RETURN count(*)"), int(written));
+    }
+}

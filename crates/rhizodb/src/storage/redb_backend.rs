@@ -1,13 +1,19 @@
 use std::any::Any;
 use std::cell::OnceCell;
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+use std::time::Instant;
 
 use redb::AccessGuard;
 use redb::Database;
@@ -208,8 +214,51 @@ pub(crate) struct RedbStorage {
 }
 
 impl RedbStorage {
+    /// Opens the database file at `path`. When there is none, or only an empty one, the new
+    /// database is written under a staging name next to it, synced, and linked into place, so a
+    /// power loss leaves either no database or a whole empty one.
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let path = path.as_ref();
+        if needs_creating(path).map_err(StorageError::new)? {
+            Self::create_staged(path)?;
+        }
         Self::create(|| Database::create(path))
+    }
+
+    fn create_staged(path: &Path) -> Result<(), StorageError> {
+        let staging = staging_path(path).map_err(StorageError::new)?;
+        let deadline = Instant::now() + CREATION_WAIT;
+        let mut removed_unreadable = false;
+        while needs_creating(path).map_err(StorageError::new)? {
+            match Self::create(|| Database::create(&staging)) {
+                Ok(staged) => {
+                    drop(staged);
+                    match publish(&staging, path) {
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        outcome => return outcome.map_err(StorageError::new),
+                    }
+                }
+                Err(error) if is_already_open(&error) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) if !removed_unreadable && !is_already_open(&error) => {
+                    match fs::remove_file(&staging) {
+                        Err(removal) if removal.kind() != io::ErrorKind::NotFound => {
+                            return Err(StorageError::new(removal));
+                        }
+                        _ => removed_unreadable = true,
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(StorageError::new(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "another open kept creating the database file",
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn in_memory() -> Result<Self, StorageError> {
@@ -260,6 +309,59 @@ impl RedbStorage {
         }
         Ok(Self { database })
     }
+}
+
+const CREATION_WAIT: Duration = Duration::from_secs(10);
+
+fn is_already_open(error: &StorageError) -> bool {
+    matches!(
+        error.source.downcast_ref::<redb::Error>(),
+        Some(redb::Error::DatabaseAlreadyOpen)
+    )
+}
+
+fn needs_creating(path: &Path) -> io::Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.len() == 0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn staging_path(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the database path does not name a file",
+        )
+    })?;
+    let mut staged = OsString::from(".");
+    staged.push(name);
+    staged.push(".creating");
+    Ok(path.with_file_name(staged))
+}
+
+fn publish(staging: &Path, path: &Path) -> io::Result<()> {
+    match fs::hard_link(staging, path) {
+        Ok(()) => fs::remove_file(staging)?,
+        Err(_) if needs_creating(path)? => fs::rename(staging, path)?,
+        Err(_) => fs::remove_file(staging)?,
+    }
+    sync_directory(path)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::File::open(directory)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 impl Storage for RedbStorage {

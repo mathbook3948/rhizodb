@@ -28,6 +28,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- A power loss while `Database::open` created a new file could leave a file that every later open refused as not a redb database. The file is now written under a staging name, synced, and linked into place.
 - A thread holding a write transaction that began another write, or ran a writing query, could wait for itself forever instead of failing with `ErrorKind::WriteTransactionOnThisThread`, when another thread had committed just before it took the write lock.
 
 - A damaged database file on which redb panics fails with `ErrorKind::CorruptData` instead of ending the host process, and every later operation on that `Database` fails the same way until the file is opened again. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.
