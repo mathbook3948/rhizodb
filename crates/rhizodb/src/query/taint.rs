@@ -43,12 +43,12 @@ impl Taint {
 
     /// Whether any part of the value was read as null.
     pub(crate) fn is_tainted(&self) -> bool {
-        *self != Taint::Clean
+        !matches!(self, Taint::Clean)
     }
 
     /// Whether the value itself was read as null, so that even its type is unknown.
     pub(crate) fn is_whole(&self) -> bool {
-        *self == Taint::Whole
+        matches!(self, Taint::Whole)
     }
 
     /// The taint of a result that depends on every part of a value with this taint.

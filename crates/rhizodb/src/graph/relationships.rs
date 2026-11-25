@@ -133,18 +133,18 @@ impl ChunkEdit {
     }
 
     /// Puts `record` into `slot`, or empties the slot when it is `None`.
-    pub(crate) fn set(&mut self, slot: usize, record: Option<Vec<u8>>) {
+    pub(crate) fn set(&mut self, slot: usize, record: Option<&[u8]>) {
         match (self.position(slot), record) {
             (Ok(at), Some(record)) => {
                 self.bytes = self.bytes - self.records[at].1.len() + record.len();
-                self.records[at].1 = record.into();
+                self.records[at].1 = Box::from(record);
             }
             (Ok(at), None) => {
                 self.bytes -= self.records.remove(at).1.len();
             }
             (Err(at), Some(record)) => {
                 self.bytes += record.len();
-                self.records.insert(at, (slot as u8, record.into()));
+                self.records.insert(at, (slot as u8, Box::from(record)));
             }
             (Err(_), None) => {}
         }
