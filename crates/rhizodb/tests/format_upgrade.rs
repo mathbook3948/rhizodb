@@ -588,3 +588,52 @@ fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {
         int(0)
     );
 }
+
+const ENGINE_ONE_ONE: &str = "tests/fixtures/engine-1-1.rhizodb";
+
+fn assert_engine_fixture_answers(db: &Database) {
+    let answers = answers_in("engine-1-1.answers");
+    assert_eq!(answers.len(), 6);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn an_engine_file_with_an_open_extent_per_kind_of_block_answers_takes_writes_and_compacts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(ENGINE_ONE_ONE),
+        &path,
+    )
+    .unwrap();
+    let before = std::fs::metadata(&path).unwrap().len();
+    {
+        let db = Database::open(&path).unwrap();
+        assert_engine_fixture_answers(&db);
+        db.check().unwrap();
+        db.execute(
+            "UNWIND range(3000, 3999) AS i CREATE (:Item {i: i, text: 'new ' + reduce(s = '', k IN range(1, 300) | s + toString(k))})",
+            &rhizodb::Parameters::new(),
+        )
+        .unwrap();
+    }
+    let db = Database::open(&path).unwrap();
+    db.check().unwrap();
+    assert_eq!(
+        single(&db, "MATCH (n:Item) WHERE n.i >= 3000 RETURN count(*)"),
+        int(1000)
+    );
+    db.execute(
+        "MATCH (n:Item) WHERE n.i >= 3000 DETACH DELETE n",
+        &rhizodb::Parameters::new(),
+    )
+    .unwrap();
+    db.compact().unwrap();
+    db.check().unwrap();
+    assert_engine_fixture_answers(&db);
+    drop(db);
+    assert!(std::fs::metadata(&path).unwrap().len() < before);
+    assert_engine_fixture_answers(&Database::open(&path).unwrap());
+}

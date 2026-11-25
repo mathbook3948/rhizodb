@@ -8,7 +8,9 @@ use super::layout::BlockRef;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 
-/// What an open extent receives. Each purpose appends to an extent of its own.
+/// What an extent was opened for. Files of engine format minor 1 and before kept an open extent
+/// for each purpose, and every extent opened since is a tree extent that takes every kind of
+/// block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Tree,
@@ -85,19 +87,18 @@ impl Default for ExtentTable {
 }
 
 impl ExtentTable {
-    /// Reserves `blocks` blocks in a row for `purpose`, sealing its open extent and opening a
-    /// new one when they do not fit. Calls `opened` with each new extent and its slot.
+    /// Reserves `blocks` blocks in a row in the first open extent they fit in. When they fit in
+    /// none, it seals every open extent and opens a new one. Calls `opened` with each new extent
+    /// and its slot.
     pub(crate) fn place(
         &mut self,
-        purpose: Purpose,
         blocks: u32,
         mut opened: impl FnMut(ExtentId, u64),
     ) -> Result<BlockRef, EngineError> {
         if blocks == 0 || blocks > EXTENT_BLOCKS {
             return Err(EngineError::TooLarge);
         }
-        let index = purpose.index();
-        if let Some(id) = self.open[index] {
+        for id in self.open.into_iter().flatten() {
             let entry = self.entry_mut(id)?;
             if entry.written + blocks <= EXTENT_BLOCKS {
                 let at = BlockRef::new(id, entry.written)?;
@@ -105,9 +106,11 @@ impl ExtentTable {
                 entry.live += blocks;
                 return Ok(at);
             }
-            entry.state = ExtentState::Sealed;
-            self.open[index] = None;
         }
+        for id in self.open.into_iter().flatten() {
+            self.entry_mut(id)?.state = ExtentState::Sealed;
+        }
+        self.open = [None; OPEN_EXTENTS];
         let id = self.next_extent;
         self.next_extent = ExtentId(id.0 + 1);
         let slot = match self.reusable.pop_first() {
@@ -124,12 +127,12 @@ impl ExtentTable {
                 written: blocks,
                 live: blocks,
                 state: ExtentState::Open,
-                purpose,
+                purpose: Purpose::Tree,
                 scheme: 0,
                 opened_term: 0,
             },
         );
-        self.open[index] = Some(id);
+        self.open[0] = Some(id);
         opened(id, slot);
         BlockRef::new(id, 0)
     }

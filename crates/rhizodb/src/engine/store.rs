@@ -34,7 +34,6 @@ use super::checkpoint::load_catalog;
 use super::convert;
 use super::error::EngineError;
 use super::extent::ExtentTable;
-use super::extent::Purpose;
 use super::header;
 use super::header::FORMAT_MINOR;
 use super::header::Header;
@@ -762,12 +761,12 @@ impl<F: FileSystem + 'static> Shared<F> {
             .sum::<u64>()
             * BLOCK as u64;
         let slack = self.options.reclaim_slack;
-        let open_extents = Purpose::ALL.len() as u64 * u64::from(EXTENT_BLOCKS) * BLOCK as u64;
+        let open_extent = u64::from(EXTENT_BLOCKS) * BLOCK as u64;
         let compacted = self.compacted_bytes.load(Ordering::Relaxed);
         file > live
             .saturating_mul(2)
             .saturating_add(slack)
-            .saturating_add(open_extents)
+            .saturating_add(open_extent)
             && file > compacted.saturating_add(live.max(slack))
     }
 

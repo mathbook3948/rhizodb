@@ -44,6 +44,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `Database::register_procedure` takes `&self`, so a database shared through an `Arc` can register procedures.
 - The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
+- The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
 
 ### Fixed
 
