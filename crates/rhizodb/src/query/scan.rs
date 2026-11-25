@@ -854,31 +854,35 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(());
         }
         let ids = self.scanned_ids(scan)?;
-        let mut groups: Vec<ScanGroup<'_>> = Vec::new();
+        let mut groups: Vec<(ScanGroup<'_>, usize)> = Vec::new();
         for (input, row) in rows.iter().enumerate() {
+            let mut start = 0;
             let mut held = 0;
-            for node in &ids {
-                if groups.get(held).is_some_and(|group| !group.holds(*node)) {
+            while let Some(first) = ids.get(start) {
+                if groups.len() == held {
                     if rows.len() == 1 {
                         groups.clear();
-                    } else {
-                        held += 1;
+                        held = 0;
+                    }
+                    let group = self.tx.scan_group(*first, tokens)?;
+                    let end = start + ids[start..].partition_point(|node| group.holds(*node));
+                    groups.push((group, end));
+                }
+                let Some((group, end)) = groups.get(held) else {
+                    break;
+                };
+                for node in &ids[start..*end] {
+                    let at = At {
+                        group,
+                        node: *node,
+                        row,
+                    };
+                    if at.keeps(filter)? && !visit(&at, input)? {
+                        return Ok(());
                     }
                 }
-                if groups.len() == held {
-                    groups.push(self.tx.scan_group(*node, tokens)?);
-                }
-                let Some(group) = groups.get(held) else {
-                    continue;
-                };
-                let at = At {
-                    group,
-                    node: *node,
-                    row,
-                };
-                if at.keeps(filter)? && !visit(&at, input)? {
-                    return Ok(());
-                }
+                start = *end;
+                held += 1;
             }
         }
         Ok(())
