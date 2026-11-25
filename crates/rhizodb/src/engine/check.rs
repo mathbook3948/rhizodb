@@ -142,7 +142,7 @@ impl Checker<'_> {
     }
 
     fn reach_run(&mut self, run: RunRef) -> Result<(), EngineError> {
-        if run.lsn > self.header.checkpoint_lsn {
+        if run.lsn > self.header.tree_lsn() {
             return Err(problem(format!(
                 "the run at {:?} is newer than the checkpoint",
                 run.at
@@ -189,7 +189,7 @@ impl Checker<'_> {
         entries: &mut u64,
     ) -> Result<(), EngineError> {
         let cached = fetch(self.source, table, page, level)?;
-        if cached.header.lsn > self.header.checkpoint_lsn
+        if cached.header.lsn > self.header.tree_lsn()
             || cached.header.generation > self.header.generation
         {
             return Err(problem(format!(

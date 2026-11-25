@@ -20,6 +20,7 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         checkpoint,
         cache_pages: 32,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     }
 }
 
@@ -218,7 +219,11 @@ fn manual(checkpoint: CheckpointMode) -> EngineOptions {
 #[test]
 fn a_block_the_durable_header_reaches_never_changes_and_freed_blocks_take_later_pages() {
     let fs = SimFs::new();
-    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    let unstaged = EngineOptions {
+        stage_floor: u64::MAX,
+        ..manual(CheckpointMode::Inline)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, unstaged).unwrap();
     let mut previous: Option<LiveBlocks> = None;
     let mut freed = std::collections::BTreeSet::new();
     let mut checked = 0;

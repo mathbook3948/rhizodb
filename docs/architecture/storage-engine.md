@@ -135,6 +135,10 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
+- A checkpoint makes its work durable in stages: once a stage has freed an eighth of the file's live blocks, and at least 256, it syncs the file and writes a header, so the next stage reuses the blocks it freed and a rewrite of most of the file does not double it.
+- A table's changes are cut into parts of at most a stage's blocks, in keys and in bytes, only when its tree already holds entries, so a load into empty tables writes no extra pages.
+- A stage's header keeps the LSN the log replays from and records the LSN its tree holds, and a crash after it replays the log over that tree, which ends in the same state since every logged operation sets or removes its keys outright.
+- Each stage publishes its tree, so a reader that begins during a staged checkpoint reads the frozen memtable over the newest stage.
 - Commits go on into a new memtable while a background checkpoint or compaction runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.

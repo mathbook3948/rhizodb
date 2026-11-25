@@ -209,6 +209,7 @@ pub(crate) struct Checkpointer<'a, B: BlockFile> {
     lsn: u64,
     generation: u64,
     entry_change: i64,
+    freed: u64,
 }
 
 impl<'a, B: BlockFile> Checkpointer<'a, B> {
@@ -224,7 +225,13 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             lsn,
             generation,
             entry_change: 0,
+            freed: 0,
         }
+    }
+
+    /// The blocks of pages and runs freed so far, the previous catalog aside.
+    pub(crate) fn freed(&self) -> u64 {
+        self.freed
     }
 
     fn source(&self) -> &dyn PageSource {
@@ -320,6 +327,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         let mut run = blob.first;
         for _ in 0..(blob.length as usize / RUN_PAYLOAD_LIMIT + 1) {
             self.extents.free(run.at, run.blocks)?;
+            self.freed += u64::from(run.blocks);
             if blob.length as usize <= RUN_PAYLOAD_LIMIT {
                 return Ok(());
             }
@@ -400,6 +408,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         let load = |blob: &BlobRef| load_blob(self.source(), blob, Role::Key);
         let (content, owned) = node.content(&load, low)?;
         self.extents.free(page.at, 1)?;
+        self.freed += 1;
         for blob in owned {
             self.free_item(&blob, Role::Key)?;
         }
@@ -681,6 +690,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             }
             let child = node.child(0)?;
             self.extents.free(page.at, 1)?;
+            self.freed += 1;
             page = child;
             level -= 1;
         }

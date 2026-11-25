@@ -58,12 +58,24 @@ pub(crate) struct Header {
     pub(crate) wal: WalIdentity,
     /// The database was closed cleanly: the checkpoint holds every commit and no log is needed.
     pub(crate) clean: bool,
+    /// The LSN of the newest commit the tree holds, when a checkpoint has made only some of its
+    /// stages durable, and zero otherwise. The log still replays from `checkpoint_lsn`.
+    pub(crate) staged_lsn: u64,
 }
 
 impl Header {
     /// The slot this header is written to, which alternates with the generation.
     pub(crate) fn slot(&self) -> u64 {
         self.generation % 2
+    }
+
+    /// The LSN of the newest commit the tree holds, which no page of the tree passes.
+    pub(crate) fn tree_lsn(&self) -> u64 {
+        if self.staged_lsn == 0 {
+            self.checkpoint_lsn
+        } else {
+            self.staged_lsn
+        }
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -91,6 +103,7 @@ impl Header {
         put_u64(&mut out, self.wal.first_segment);
         put_u64(&mut out, self.wal.salt);
         put_u32(&mut out, if self.clean { CLEAN } else { 0 });
+        put_u64(&mut out, self.staged_lsn);
         out.resize(CHECKSUM_AT, 0);
         let sum = checksum(0, &[&out]);
         put_u64(&mut out, sum);
@@ -161,10 +174,15 @@ impl Header {
         if flags & !KNOWN_FLAGS != 0 {
             return Err(EngineError::Unsupported(format!("header flags {flags:#x}")));
         }
+        let staged_lsn = reader.u64()?;
         if reader.rest().iter().any(|byte| *byte != 0) {
             return Err(reader.bad("reserved area"));
         }
-        if generation == 0 || next_extent.is_none() || catalog_lsn > checkpoint_lsn {
+        if staged_lsn != 0 && (staged_lsn <= checkpoint_lsn || flags & CLEAN != 0) {
+            return Err(reader.bad("staged LSN"));
+        }
+        if generation == 0 || next_extent.is_none() || catalog_lsn > checkpoint_lsn.max(staged_lsn)
+        {
             return Err(reader.bad("generation, extent counter, or catalog LSN"));
         }
         Ok(Self {
@@ -180,6 +198,7 @@ impl Header {
             open,
             wal,
             clean: flags & CLEAN != 0,
+            staged_lsn,
         })
     }
 }

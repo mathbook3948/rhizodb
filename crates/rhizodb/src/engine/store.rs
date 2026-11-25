@@ -43,7 +43,9 @@ use super::layout::BLOCK;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
+use super::memtable::Bytes;
 use super::memtable::Memtable;
+use super::memtable::Slot;
 use super::page::page_seed;
 use super::pages::PageSource;
 use super::pages::Pages;
@@ -68,6 +70,32 @@ use crate::storage::StorageError;
 use crate::storage::StorageStats;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
+
+#[derive(Clone, Copy, Debug)]
+enum Stage {
+    Partial,
+    Whole { clean: bool },
+}
+
+const STAGE_SHARE: u64 = 8;
+
+fn parts(changes: &[(Bytes, Slot)], blocks: u64) -> Vec<&[(Bytes, Slot)]> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut held = 0;
+    for (index, (key, slot)) in changes.iter().enumerate() {
+        held += (key.len() + slot.as_ref().map_or(0, |value| value.len())) as u64;
+        if held >= blocks.saturating_mul(BLOCK as u64) || (index + 1 - start) as u64 >= blocks {
+            parts.push(&changes[start..=index]);
+            start = index + 1;
+            held = 0;
+        }
+    }
+    if start < changes.len() {
+        parts.push(&changes[start..]);
+    }
+    parts
+}
 
 /// Where checkpoints run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +122,8 @@ pub(crate) struct EngineOptions {
     /// The bytes of free space the file may hold beyond twice its live data before a
     /// checkpoint compacts it.
     pub(crate) reclaim_slack: u64,
+    /// The fewest blocks a stage of a checkpoint frees before its header is written.
+    pub(crate) stage_floor: u64,
 }
 
 impl Default for EngineOptions {
@@ -105,6 +135,7 @@ impl Default for EngineOptions {
             checkpoint: CheckpointMode::Background,
             cache_pages: (1 << 30) / BLOCK,
             reclaim_slack: 64 << 20,
+            stage_floor: 256,
         }
     }
 }
@@ -835,28 +866,66 @@ impl<F: FileSystem + 'static> Shared<F> {
                     ..durable.header.wal
                 },
                 clean,
+                staged_lsn: 0,
                 ..durable.header
             };
             self.pages.write_header(&header)?;
             durable.header = header;
             return Ok(Arc::clone(&durable.tree));
         }
-        let generation = durable.header.generation + 1;
+        let stage = self.stage_blocks(&durable.extents);
         let mut checkpointer = Checkpointer::new(
             &self.pages,
             self.extents_to_place(&durable.extents),
             job.lsn,
-            generation,
+            durable.header.generation + 1,
         );
         let mut roots = durable.tree.roots.clone();
         for (table, changes) in &changes {
-            match checkpointer.merge_table(*table, roots.get(table).copied(), changes)? {
-                Some(root) => roots.insert(*table, root),
-                None => roots.remove(table),
+            let parts = match roots.get(table) {
+                Some(_) => parts(changes, stage),
+                None => vec![changes.as_slice()],
             };
+            for part in parts {
+                match checkpointer.merge_table(*table, roots.get(table).copied(), part)? {
+                    Some(root) => roots.insert(*table, root),
+                    None => roots.remove(table),
+                };
+                if checkpointer.freed() >= stage {
+                    let finished = checkpointer.finish(roots.clone(), &durable.catalog)?;
+                    let tree =
+                        self.install(&mut durable, roots.clone(), finished, job, Stage::Partial)?;
+                    self.publish_tree(tree);
+                    checkpointer = Checkpointer::new(
+                        &self.pages,
+                        self.extents_to_place(&durable.extents),
+                        job.lsn,
+                        durable.header.generation + 1,
+                    );
+                }
+            }
         }
         let finished = checkpointer.finish(roots.clone(), &durable.catalog)?;
-        self.install(&mut durable, roots, finished, job, clean)
+        self.install(&mut durable, roots, finished, job, Stage::Whole { clean })
+    }
+
+    fn stage_blocks(&self, extents: &ExtentTable) -> u64 {
+        let live: u64 = extents
+            .entries
+            .values()
+            .map(|entry| u64::from(entry.live()))
+            .sum();
+        (live / STAGE_SHARE).max(self.options.stage_floor)
+    }
+
+    fn publish_tree(&self, tree: Arc<Tree>) {
+        let mut published = lock(&self.published);
+        let layers = &published.view.layers;
+        published.view.layers = Arc::new(Layers {
+            active: Arc::clone(&layers.active),
+            frozen: layers.frozen.clone(),
+            tree,
+        });
     }
 
     fn install(
@@ -865,7 +934,7 @@ impl<F: FileSystem + 'static> Shared<F> {
         roots: BTreeMap<TableId, Root>,
         finished: Finished,
         job: &Job,
-        clean: bool,
+        stage: Stage,
     ) -> Result<Arc<Tree>, EngineError> {
         self.pages.sync()?;
         let generation = durable.header.generation + 1;
@@ -873,21 +942,32 @@ impl<F: FileSystem + 'static> Shared<F> {
             .catalog
             .first()
             .ok_or_else(|| EngineError::corrupt("a checkpoint wrote no catalog"))?;
+        let previous = durable.header;
         let header = Header {
             generation,
-            checkpoint_lsn: job.lsn,
-            checkpoint_hlc: job.hlc,
             catalog: first.at,
             catalog_lsn: first.lsn,
             next_extent: finished.extents.next_extent,
             open: finished.extents.open_extents()?,
-            wal: WalIdentity {
-                first_segment: job.first_segment,
-                ..durable.header.wal
-            },
-            clean,
             minor: FORMAT_MINOR,
-            ..durable.header
+            ..match stage {
+                Stage::Partial => Header {
+                    clean: false,
+                    staged_lsn: job.lsn,
+                    ..previous
+                },
+                Stage::Whole { clean } => Header {
+                    checkpoint_lsn: job.lsn,
+                    checkpoint_hlc: job.hlc,
+                    wal: WalIdentity {
+                        first_segment: job.first_segment,
+                        ..previous.wal
+                    },
+                    clean,
+                    staged_lsn: 0,
+                    ..previous
+                },
+            }
         };
         self.pages.write_header(&header)?;
         let tree = Arc::new(Tree::new(
@@ -1018,16 +1098,16 @@ impl<F: FileSystem + 'static> Shared<F> {
                 hlc: durable.header.checkpoint_hlc,
                 first_segment: durable.header.wal.first_segment,
             };
-            let tree = self.install(&mut durable, roots, finished, &job, false)?;
+            let tree = self.install(
+                &mut durable,
+                roots,
+                finished,
+                &job,
+                Stage::Whole { clean: false },
+            )?;
             drop(durable);
             drop(old);
-            let mut published = lock(&self.published);
-            let layers = &published.view.layers;
-            published.view.layers = Arc::new(Layers {
-                active: Arc::clone(&layers.active),
-                frozen: layers.frozen.clone(),
-                tree,
-            });
+            self.publish_tree(tree);
         }
         let mut durable = lock(&self.durable);
         self.trim(&mut durable)?;

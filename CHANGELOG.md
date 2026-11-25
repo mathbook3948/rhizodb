@@ -52,6 +52,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 - The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
 - Checkpoints reuse the freed blocks inside partly live extents of the database file, and cut the file's free tail as soon as their header is durable, so loading, deleting, and loading a graph again keeps the file near the size of one load instead of growing to several times its live data. This is engine format 1.2, which an earlier build cannot open, and opening a file of format 1.1 finds its live blocks by walking it once.
+- A checkpoint that rewrites much of the database makes its work durable in stages and reuses each stage's freed blocks in the next, so deleting a tenth of the medium benchmark graph, which rewrites nearly every page, leaves a 16.8 MiB file instead of 28.3 MiB.
 - A scan that starts in the page where the previous scan of the same transaction started reads that page without searching down from the root, so traversals and aggregates over relationships read storage with fewer comparisons.
 
 ### Fixed

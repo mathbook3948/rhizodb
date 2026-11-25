@@ -137,6 +137,7 @@ fn options() -> EngineOptions {
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     }
 }
 
@@ -518,30 +519,34 @@ fn file_blocks(fs: &SimFs) -> u64 {
 
 fn fail_each_operation_of(
     base: &SimFs,
+    options: EngineOptions,
+    seeds: u64,
     states: &[State],
     start: usize,
     step: &dyn Fn(&Engine<SimFs>) -> (usize, bool),
-) {
+) -> usize {
     let total = {
         let copy = base.crash(Crash::KeepUnsynced);
-        let engine = open(&copy, by_hand()).unwrap();
+        let engine = open(&copy, options).unwrap();
         let before = copy.operations();
         step(&engine);
         copy.operations() - before
     };
     assert!(total > 20, "the step ran only {total} operations");
+    let mut staged = 0;
     for fail_at in 0..=total {
         let copy = base.crash(Crash::KeepUnsynced);
-        let engine = open(&copy, by_hand()).unwrap();
+        let engine = open(&copy, options).unwrap();
         copy.fail_after(fail_at, Failure::FromThenOn);
         let (acknowledged, in_flight) = step(&engine);
         drop(engine);
-        for crash in crashes(2) {
-            let reopened = open(&copy.crash(crash), by_hand())
+        for crash in crashes(seeds) {
+            let reopened = open(&copy.crash(crash), options)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
             reopened.check().unwrap_or_else(|error| {
                 panic!("check after fail at {fail_at}, {crash:?}: {error}")
             });
+            staged += usize::from(reopened.header().staged_lsn != 0);
             let found = dump(&reopened);
             let at = start + acknowledged;
             assert!(
@@ -550,6 +555,7 @@ fn fail_each_operation_of(
             );
         }
     }
+    staged
 }
 
 fn commit_then_checkpoint(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -> (usize, bool) {
@@ -588,7 +594,7 @@ fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the
     assert!(filled, "the checkpoint placed nothing in a freed block");
     assert_eq!(dump(&engine), states[40]);
     drop(engine);
-    fail_each_operation_of(&crashed, &states, 30, &|engine| {
+    fail_each_operation_of(&crashed, by_hand(), 2, &states, 30, &|engine| {
         commit_then_checkpoint(engine, rest)
     });
 }
@@ -596,12 +602,12 @@ fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the
 #[test]
 fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the_database_whole() {
     let big = |index: usize| {
-        (0..20u8)
+        (0..2u8)
             .map(|key| {
                 Write::Put(
                     Table::NodeColumns,
                     vec![index as u8, key],
-                    vec![key ^ index as u8; 70_000],
+                    vec![key ^ index as u8; 700_000],
                 )
             })
             .collect::<Vec<_>>()
@@ -609,12 +615,16 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
     let mut transactions: Vec<Vec<Write>> = (0..6).map(big).collect();
     transactions.push(vec![Write::DeleteRange(
         Table::NodeColumns,
-        vec![2],
+        vec![1],
         vec![6],
     )]);
     let states = states(&transactions);
     let base = SimFs::new();
-    let engine = open(&base, by_hand()).unwrap();
+    let unstaged = EngineOptions {
+        stage_floor: u64::MAX,
+        ..by_hand()
+    };
+    let engine = open(&base, unstaged).unwrap();
     for writes in &transactions[..6] {
         commit(&engine, writes).unwrap();
         engine.checkpoint().unwrap();
@@ -637,5 +647,41 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
         file_blocks(&base)
     );
     drop(engine);
-    fail_each_operation_of(&crashed, &states, 6, &cut);
+    fail_each_operation_of(&crashed, unstaged, 0, &states, 6, &cut);
+}
+
+#[test]
+fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_database_whole() {
+    let load: Vec<Write> = (0..60u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
+        .collect();
+    let rewrite: Vec<Write> = (0..60u8)
+        .map(|key| {
+            Write::Put(
+                Table::NodeColumns,
+                vec![key],
+                vec![!key; 1500 + usize::from(key)],
+            )
+        })
+        .chain([Write::DeleteRange(Table::NodeColumns, vec![50], vec![55])])
+        .collect();
+    let transactions = vec![load, rewrite];
+    let states = states(&transactions);
+    let base = SimFs::new();
+    let engine = open(&base, by_hand()).unwrap();
+    commit(&engine, &transactions[0]).unwrap();
+    engine.checkpoint().unwrap();
+    let crashed = base.crash(Crash::DropUnsynced);
+    let before = engine.header().generation;
+    commit_then_checkpoint(&engine, &transactions[1..]);
+    assert!(
+        engine.header().generation >= before + 3,
+        "the rewrite was not made durable in stages"
+    );
+    assert_eq!(dump(&engine), states[2]);
+    drop(engine);
+    let staged = fail_each_operation_of(&crashed, by_hand(), 2, &states, 1, &|engine| {
+        commit_then_checkpoint(engine, &transactions[1..])
+    });
+    assert!(staged > 0, "no power loss came back to a staged header");
 }
