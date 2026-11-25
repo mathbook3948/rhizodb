@@ -57,6 +57,7 @@ pub(crate) struct Groups<'p> {
     aggregates: &'p [(Aggregate, Slot)],
     index: KeyIndex,
     groups: Vec<(Vec<Datum>, Vec<Accumulator>)>,
+    partial: bool,
 }
 
 #[derive(Default)]
@@ -134,7 +135,24 @@ impl<'p> Groups<'p> {
             aggregates,
             index: KeyIndex::default(),
             groups: Vec::new(),
+            partial: false,
         }
+    }
+
+    /// Adds the groups and states of `other`, found by a worker of a parallel read, as if its
+    /// rows came after every row added so far.
+    pub(crate) fn merge(&mut self, other: Groups<'_>) -> Result<(), Error> {
+        for (values, theirs) in other.groups {
+            let position = self.group(values);
+            if let Some((_, mine)) = self.groups.get_mut(position) {
+                for ((aggregate, _), (mine, theirs)) in
+                    self.aggregates.iter().zip(mine.iter_mut().zip(theirs))
+                {
+                    mine.merge(aggregate, theirs)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn add<T: ReadTransaction>(
@@ -194,7 +212,7 @@ impl<'p> Groups<'p> {
             for (index, ((aggregate, _), accumulator)) in
                 self.aggregates.iter().zip(accumulators).enumerate()
             {
-                accumulator.add(aggregate, index, &mut eval)?;
+                accumulator.add(aggregate, index, self.partial, &mut eval)?;
             }
         }
         Ok(())
@@ -255,6 +273,19 @@ impl<'p> Groups<'p> {
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
+    /// No groups yet, for the aggregating projection with `keys` and `aggregates`, partial on a
+    /// worker of a parallel read.
+    pub(crate) fn groups<'p>(
+        &self,
+        keys: &'p [(Expr, Slot)],
+        aggregates: &'p [(Aggregate, Slot)],
+    ) -> Groups<'p> {
+        Groups {
+            partial: self.morsel.is_some(),
+            ..Groups::new(keys, aggregates)
+        }
+    }
+
     /// Groups `rows` by the key values and yields one row per group with keys, aggregates, and
     /// final expressions filled in. Without keys, even no rows make one group.
     pub(crate) fn aggregate(
@@ -277,6 +308,7 @@ impl Accumulator {
         &mut self,
         aggregate: &Aggregate,
         index: usize,
+        partial: bool,
         eval: &mut impl FnMut(Part, &Expr) -> Result<Datum, Error>,
     ) -> Result<(), Error> {
         self.rows += 1;
@@ -289,7 +321,13 @@ impl Accumulator {
             function.admit(&value)?;
             if !aggregate.distinct || self.seen.insert(&value) {
                 match function {
+                    AggregateFunction::Count if partial && aggregate.distinct => {
+                        self.values.push(value);
+                    }
                     AggregateFunction::Count => self.counted += 1,
+                    AggregateFunction::Sum | AggregateFunction::Avg if partial => {
+                        self.values.push(value);
+                    }
                     AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
                     _ => self.values.push(value),
                 }
@@ -303,15 +341,38 @@ impl Accumulator {
         {
             let value = eval(Part::Extra(index), extra)?;
             function.admit(&value)?;
-            match &self.percentile {
-                Some(first) if order(first, &value) != Ordering::Equal => {
-                    return Err(Error::new(
-                        ErrorKind::InvalidArgumentValue,
-                        "the percentile must be the same for every row of a group",
-                    ));
+            self.same_percentile(value)?;
+        }
+        Ok(())
+    }
+
+    fn same_percentile(&mut self, value: Datum) -> Result<(), Error> {
+        match &self.percentile {
+            Some(first) if order(first, &value) != Ordering::Equal => Err(Error::new(
+                ErrorKind::InvalidArgumentValue,
+                "the percentile must be the same for every row of a group",
+            )),
+            Some(_) => Ok(()),
+            None => {
+                self.percentile = Some(value);
+                Ok(())
+            }
+        }
+    }
+
+    fn merge(&mut self, aggregate: &Aggregate, other: Accumulator) -> Result<(), Error> {
+        self.rows += other.rows;
+        self.counted += other.counted;
+        if let Some(percentile) = other.percentile {
+            self.same_percentile(percentile)?;
+        }
+        for value in other.values {
+            if !aggregate.distinct || self.seen.insert(&value) {
+                match aggregate.function {
+                    AggregateFunction::Count => self.counted += 1,
+                    AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
+                    _ => self.values.push(value),
                 }
-                Some(_) => {}
-                None => self.percentile = Some(value),
             }
         }
         Ok(())
