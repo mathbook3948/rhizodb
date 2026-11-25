@@ -92,8 +92,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
 - A commit's timestamp is the wall clock in microseconds, or one past the previous commit's when the clock has not moved past it.
 - A replayed operation on a table id this build does not know refuses the log.
-- The database file is log-structured: checkpoints append to extents and never rewrite a block in place.
-- Each table is an append-only B+tree of one-block pages, and a checkpoint writes the leaves it changes and their paths as new pages.
+- The database file is copy-on-write: a checkpoint writes each changed page and run to a block that neither a durable header nor an open snapshot reaches, never in place.
+- Each table is a copy-on-write B+tree of one-block pages, and a checkpoint writes the leaves it changes and their paths as new pages.
 - A child pointer holds the child's block reference and LSN, and a child of another LSN, kind, level, or table is corruption.
 - A page shares the common prefix of its keys, capped at 512 bytes, and stores each key's rest.
 - A cell stores its key before its value or child pointer, and a search compares the page prefix once and then the stored rests.
@@ -117,17 +117,30 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A file of engine format minor 1 may hold an open extent for each kind of block, and checkpoints fill the room left in each of them before the first new extent.
 - Every new extent is recorded with the tree purpose as the first open extent, so the layout needs no new format minor and an earlier build still reads and writes the file.
 - Extents stay 1024 blocks at every file size, since the space a small file lost was the empty room of one open extent per kind of block.
-- The engine tracks each extent's live blocks as pages and runs are written and replaced.
+- The extent table records which blocks of each extent hold a live page or run, stored as the free ranges below its written length.
+- A checkpoint places each page and run in the first free range that fits it in the lowest slot, and appends to the open extent only when no free range fits.
+- A block freed by a checkpoint takes a new page only in a later checkpoint and only once no reader holds a tree older than the one that freed it, as a freed slot does.
+- The catalog goes only to an open extent, in a free range or at its end, so its first run always lies in an open extent the header names.
+- A checkpoint seals the open extent and opens one in the lowest free slot when that slot lies below it, so the slots above it can empty and be cut off the file.
+- A checkpoint with no commits to write still writes a new catalog when that moves the open extent down, and a clean close runs one more such checkpoint, so a file that has emptied its last extents shrinks before it closes.
+- Writing a block removes the page the block cache held for it, so a reused block never reads back its old page.
+- A compaction places nothing in free ranges, so its first copy empties every old extent and its second fills the lowest free slots.
+- Opening a file of engine format minor 1, whose catalog counts each extent's live blocks without naming them, finds them by walking every tree, and the first checkpoint stores them.
 - A checkpoint drops every sealed extent left with no live block from the extent table, and its slot becomes free.
 - A free slot takes a new extent only in a later checkpoint and only once no reader holds a tree older than the one that dropped it, so neither a durable header nor a snapshot loses a page.
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
-- A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread.
+- A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread, both before it writes and once its header is durable.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
-- After each checkpoint but a clean close's, the engine compacts the file when it holds more than twice its live data plus 64 MiB and one extent, and has grown by its live data, or by 64 MiB, since the last compaction.
+- After each checkpoint, a clean close's included, the engine compacts the file when it holds more than twice its live data plus one extent, and has grown by its live data since the last compaction, so a file that has lost most of its data gives the space back by the time it closes.
+- A clean close that compacted writes one more clean header, so the file it leaves needs no log.
 - The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
+- A checkpoint makes its work durable in stages: once a stage has freed an eighth of the file's live blocks, and at least 256, it syncs the file and writes a header, so the next stage reuses the blocks it freed and a rewrite of most of the file does not double it.
+- A table's changes are cut into parts of at most a stage's blocks, in keys and in bytes, only when its tree already holds entries, so a load into empty tables writes no extra pages.
+- A stage's header keeps the LSN the log replays from and records the LSN its tree holds, and a crash after it replays the log over that tree, which ends in the same state since every logged operation sets or removes its keys outright.
+- Each stage publishes its tree, so a reader that begins during a staged checkpoint reads the frozen memtable over the newest stage.
 - Commits go on into a new memtable while a background checkpoint or compaction runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.

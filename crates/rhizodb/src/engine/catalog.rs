@@ -5,17 +5,21 @@ use super::codec::put_u16;
 use super::codec::put_u32;
 use super::codec::put_u64;
 use super::error::EngineError;
+use super::extent::Blocks;
 use super::extent::ExtentEntry;
 use super::extent::ExtentState;
 use super::extent::ExtentTable;
 use super::extent::Purpose;
 use super::header::OPEN_EXTENTS;
 use super::layout::BlockRef;
+use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
 use super::node::ChildRef;
 
-const FORMAT: u8 = 1;
+const FORMAT: u8 = 2;
+
+const COUNTS_ONLY: u8 = 1;
 
 /// The root page of one table's tree, its height, and its entry count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +34,9 @@ pub(crate) struct Root {
 pub(crate) struct Catalog {
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) extents: ExtentTable,
+    /// Each extent's count of live blocks, for a catalog of the format that recorded only that.
+    /// Its extents count every written block as used until a walk of the trees finds which are.
+    pub(crate) live_counts: Option<BTreeMap<ExtentId, u32>>,
 }
 
 impl Catalog {
@@ -59,7 +66,7 @@ impl Catalog {
             put_u64(&mut out, id.0);
             put_u64(&mut out, entry.slot);
             put_u32(&mut out, entry.written);
-            put_u32(&mut out, entry.live);
+            put_u32(&mut out, entry.live());
             out.push(match entry.state {
                 ExtentState::Open => 0,
                 ExtentState::Sealed => 1,
@@ -69,6 +76,21 @@ impl Catalog {
             out.push(0);
             put_u64(&mut out, entry.opened_term);
             put_u64(&mut out, 0);
+            let holes: Vec<(u32, u32)> = entry.free().ranges().collect();
+            put_u16(
+                &mut out,
+                u16::try_from(holes.len()).map_err(|_| EngineError::TooLarge)?,
+            );
+            for (start, length) in holes {
+                put_u16(
+                    &mut out,
+                    u16::try_from(start).map_err(|_| EngineError::TooLarge)?,
+                );
+                put_u16(
+                    &mut out,
+                    u16::try_from(length).map_err(|_| EngineError::TooLarge)?,
+                );
+            }
         }
         Ok(out)
     }
@@ -76,9 +98,10 @@ impl Catalog {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, EngineError> {
         let mut reader = Reader::new(bytes, "the catalog");
         let format = reader.u8()?;
-        if format != FORMAT {
+        if format != FORMAT && format != COUNTS_ONLY {
             return Err(EngineError::Unsupported(format!("catalog format {format}")));
         }
+        let mut live_counts = (format == COUNTS_ONLY).then(BTreeMap::new);
         let next_slot = reader.u64()?;
         let next_extent = ExtentId(reader.u64()?);
         let mut open = [None; OPEN_EXTENTS];
@@ -127,12 +150,42 @@ impl Catalog {
                 return Err(reader.bad("extent entry"));
             }
             previous = id;
+            if written > EXTENT_BLOCKS || live > written {
+                return Err(reader.bad("extent entry"));
+            }
+            let used = match live_counts.as_mut() {
+                Some(counts) => {
+                    counts.insert(id, live);
+                    Blocks::range(0, written)
+                }
+                None => {
+                    let mut free = Blocks::default();
+                    let mut end = None;
+                    for _ in 0..reader.u16()? {
+                        let start = u32::from(reader.u16()?);
+                        let length = u32::from(reader.u16()?);
+                        if length == 0
+                            || start + length > written
+                            || end.is_some_and(|end| start <= end)
+                        {
+                            return Err(reader.bad("extent hole"));
+                        }
+                        end = Some(start + length);
+                        free = free.with(&Blocks::range(start, length));
+                    }
+                    let used = Blocks::range(0, written).without(&free);
+                    if used.count() != live {
+                        return Err(reader.bad("extent hole"));
+                    }
+                    used
+                }
+            };
             entries.insert(
                 id,
                 ExtentEntry {
                     slot,
                     written,
-                    live,
+                    used,
                     state,
                     purpose,
                     scheme,
@@ -149,7 +202,9 @@ impl Catalog {
                 next_slot,
                 open,
                 reusable: std::collections::BTreeSet::new(),
+                holes: Vec::new(),
             },
+            live_counts,
         })
     }
 }
