@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map;
+use std::slice;
 use std::sync::Arc;
 
 use crate::error::Error;
@@ -20,7 +22,7 @@ pub(crate) enum Datum {
     String(String),
     Bytes(Vec<u8>),
     List(Arc<Vec<Datum>>),
-    Map(Arc<BTreeMap<String, Datum>>),
+    Map(Arc<BTreeMap<Arc<str>, Datum>>),
     Node(NodeId),
     Relationship(RelationshipId),
     Path(PathIds),
@@ -77,6 +79,8 @@ impl From<PropertyValue> for Datum {
 /// recursively, from comparing and hashing to dropping, stays within a bounded stack this way.
 pub(crate) const MAX_NESTING: usize = 128;
 
+const SHARED_KEYS: usize = 16;
+
 fn nesting_too_deep() -> Error {
     Error::new(
         ErrorKind::NestingTooDeep,
@@ -108,7 +112,7 @@ pub(crate) fn list(items: Vec<Datum>) -> Result<Datum, Error> {
 }
 
 /// The map of `entries`, or an error when it would nest too deeply.
-pub(crate) fn map(entries: BTreeMap<String, Datum>) -> Result<Datum, Error> {
+pub(crate) fn map(entries: BTreeMap<Arc<str>, Datum>) -> Result<Datum, Error> {
     entries.values().try_for_each(check_item)?;
     Ok(Datum::Map(Arc::new(entries)))
 }
@@ -160,19 +164,49 @@ fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
 /// Turns a parameter into a runtime value, or fails when it nests too deeply. Graph elements are
 /// kept by ID.
 pub(crate) fn from_parameter(value: &Value) -> Result<Datum, Error> {
-    let mut pending = vec![(value, 0)];
-    while let Some((value, depth)) = pending.pop() {
-        let items: Box<dyn Iterator<Item = &Value>> = match value {
-            Value::List(items) => Box::new(items.iter()),
-            Value::Map(entries) => Box::new(entries.values()),
-            _ => continue,
-        };
-        if depth == MAX_NESTING {
-            return Err(nesting_too_deep());
+    let mut open: Vec<Children<'_>> = Vec::new();
+    let mut next = Some(value);
+    loop {
+        if let Some(value) = next.take() {
+            let children = match value {
+                Value::List(items) => Children::List(items.iter()),
+                Value::Map(entries) => Children::Map(entries.values()),
+                _ => Children::None,
+            };
+            if !matches!(children, Children::None) {
+                if open.len() == MAX_NESTING {
+                    return Err(nesting_too_deep());
+                }
+                open.push(children);
+            }
         }
-        pending.extend(items.map(|item| (item, depth + 1)));
+        let Some(children) = open.last_mut() else {
+            break;
+        };
+        match children.next() {
+            Some(child) => next = Some(child),
+            None => {
+                open.pop();
+            }
+        }
     }
-    Ok(converted(value))
+    Ok(converted(value, &mut Vec::new()))
+}
+
+enum Children<'a> {
+    None,
+    List(slice::Iter<'a, Value>),
+    Map(btree_map::Values<'a, String, Value>),
+}
+
+impl<'a> Children<'a> {
+    fn next(&mut self) -> Option<&'a Value> {
+        match self {
+            Children::None => None,
+            Children::List(items) => items.next(),
+            Children::Map(entries) => entries.next(),
+        }
+    }
 }
 
 /// Drops `values` one level at a time, so a value of any depth is dropped without recursing.
@@ -195,7 +229,7 @@ pub(crate) fn dismantle(mut values: Vec<Value>) {
     }
 }
 
-fn converted(value: &Value) -> Datum {
+fn converted(value: &Value, keys: &mut Vec<Arc<str>>) -> Datum {
     match value {
         Value::Null => Datum::Null,
         Value::Boolean(value) => Datum::Boolean(*value),
@@ -204,13 +238,16 @@ fn converted(value: &Value) -> Datum {
         Value::String(value) => Datum::String(value.clone()),
         Value::Bytes(value) => Datum::Bytes(value.clone()),
         Value::Temporal(value) => Datum::Temporal(value.clone()),
-        Value::List(items) => Datum::List(Arc::new(items.iter().map(converted).collect())),
-        Value::Map(entries) => Datum::Map(Arc::new(
-            entries
-                .iter()
-                .map(|(key, value)| (key.clone(), converted(value)))
-                .collect(),
+        Value::List(items) => Datum::List(Arc::new(
+            items.iter().map(|item| converted(item, keys)).collect(),
         )),
+        Value::Map(entries) => {
+            let mut map = BTreeMap::new();
+            for (key, value) in entries {
+                map.insert(shared_key(keys, key), converted(value, keys));
+            }
+            Datum::Map(Arc::new(map))
+        }
         Value::Node(node) => Datum::Node(node.id),
         Value::Relationship(relationship) => Datum::Relationship(relationship.id),
         Value::Path(path) => Datum::Path(PathIds {
@@ -222,4 +259,15 @@ fn converted(value: &Value) -> Datum {
                 .collect(),
         }),
     }
+}
+
+fn shared_key(keys: &mut Vec<Arc<str>>, key: &str) -> Arc<str> {
+    if let Some(held) = keys.iter().find(|held| &***held == key) {
+        return Arc::clone(held);
+    }
+    let key: Arc<str> = Arc::from(key);
+    if keys.len() < SHARED_KEYS {
+        keys.push(Arc::clone(&key));
+    }
+    key
 }

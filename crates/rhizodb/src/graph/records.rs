@@ -87,6 +87,8 @@ fn token<K>(reader: &mut Reader<'_>) -> Result<Token<K>, DecodeError> {
         .map_err(|_| DecodeError::LengthOverflow)
 }
 
+const RECORD_GUESS: usize = 64;
+
 impl RelationshipRecord {
     /// The value of `key` in an encoded relationship record, decoding none of the other values.
     pub(crate) fn property(
@@ -110,7 +112,7 @@ impl RelationshipRecord {
     /// The record with its type, its ends, its property count, and each property key as
     /// varints, and each integer property as a zigzag varint when that is shorter.
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(RECORD_GUESS);
         put_varint_u64(&mut out, u64::from(self.rel_type.id()));
         put_varint_u64(&mut out, self.source.0);
         put_varint_u64(&mut out, self.target.0);
@@ -119,7 +121,7 @@ impl RelationshipRecord {
             put_varint_u64(&mut out, u64::from(key.id()));
             value.encode_compact_into(&mut out);
         }
-        out
+        out.as_slice().to_vec()
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {

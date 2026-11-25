@@ -276,10 +276,15 @@ impl<T: ReadTransaction> Env<'_, T> {
     pub(crate) fn property_map(
         &self,
         properties: &crate::graph::Properties,
-    ) -> Result<BTreeMap<String, Datum>, Error> {
+    ) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         properties
             .iter()
-            .map(|(key, value)| Ok((self.tx.token_name(*key)?, Datum::from(value.clone()))))
+            .map(|(key, value)| {
+                Ok((
+                    Arc::from(self.tx.token_name(*key)?),
+                    Datum::from(value.clone()),
+                ))
+            })
             .collect()
     }
 
@@ -527,7 +532,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             } else {
                 taints.remove(key);
             }
-            values.insert(key.clone(), value);
+            values.insert(Arc::from(key.as_str()), value);
         }
         Ok((datum::map(values)?, Taint::map(taints)))
     }
@@ -954,7 +959,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 ),
             )),
             (Datum::Map(entries), Datum::String(key)) => {
-                Ok(entries.get(&key).cloned().unwrap_or(Datum::Null))
+                Ok(entries.get(key.as_str()).cloned().unwrap_or(Datum::Null))
             }
             (base @ (Datum::Node(_) | Datum::Relationship(_)), Datum::String(key)) => {
                 self.property(&base, &key)
