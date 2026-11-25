@@ -28,8 +28,8 @@ const FILE_NAME: &str = "graph.rhizodb";
 const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN id(p)";
 const CREATE_CITIES: &str =
     "UNWIND $rows AS r CREATE (c:City {id: r.id, name: r.name}) RETURN id(c)";
-const CREATE_KNOWS: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH (b) WHERE id(b) = r.b CREATE (a)-[:KNOWS {since: r.since}]->(b)";
-const CREATE_LIVES_IN: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH (b) WHERE id(b) = r.b CREATE (a)-[:LIVES_IN]->(b)";
+const CREATE_KNOWS: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = $persons[r.a] MATCH (b) WHERE id(b) = $persons[r.b] CREATE (a)-[:KNOWS {since: r.since}]->(b)";
+const CREATE_LIVES_IN: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = $persons[r.a] MATCH (b) WHERE id(b) = $cities[r.b] CREATE (a)-[:LIVES_IN]->(b)";
 
 /// RhizoDB, opened as a file.
 #[derive(Clone, Copy, Debug)]
@@ -39,8 +39,8 @@ pub struct RhizoEngine;
 struct Prepared {
     persons: Vec<Parameters>,
     cities: Vec<Parameters>,
-    knows: Vec<(usize, usize, i64)>,
-    lives_in: Vec<(usize, usize)>,
+    knows: Vec<Parameters>,
+    lives_in: Vec<Parameters>,
 }
 
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl Instance for RhizoInstance {
     }
 
     fn prepare_bulk_load(&self, data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
-        let index_of = |id: i64| usize::try_from(id - 1).unwrap_or(usize::MAX);
+        let index = |id: i64| Value::Integer(id - 1);
         let prepared = Prepared {
             persons: person_rows(data)
                 .chunks(NODE_BATCH)
@@ -112,13 +112,33 @@ impl Instance for RhizoInstance {
                 .collect(),
             knows: data
                 .knows
-                .iter()
-                .map(|edge| (index_of(edge.from), index_of(edge.to), edge.since))
+                .chunks(EDGE_BATCH)
+                .map(|batch| {
+                    rows_parameter(
+                        batch
+                            .iter()
+                            .map(|edge| {
+                                vec![
+                                    ("a", index(edge.from)),
+                                    ("b", index(edge.to)),
+                                    ("since", Value::Integer(edge.since)),
+                                ]
+                            })
+                            .collect(),
+                    )
+                })
                 .collect(),
             lives_in: data
                 .lives_in
-                .iter()
-                .map(|edge| (index_of(edge.person), index_of(edge.city)))
+                .chunks(EDGE_BATCH)
+                .map(|batch| {
+                    rows_parameter(
+                        batch
+                            .iter()
+                            .map(|edge| vec![("a", index(edge.person)), ("b", index(edge.city))])
+                            .collect(),
+                    )
+                })
                 .collect(),
         };
         *self.prepared.lock().map_err(|_| poisoned())? = Some(prepared);
@@ -135,21 +155,17 @@ impl Instance for RhizoInstance {
         let mut transaction = self.database.begin_write().map_err(failed)?;
         let persons = create_nodes(&mut transaction, CREATE_PERSONS, &prepared.persons)?;
         let cities = create_nodes(&mut transaction, CREATE_CITIES, &prepared.cities)?;
-        let knows = prepared.knows.iter().map(|&(from, to, since)| {
-            vec![
-                ("a", persons.get(from).cloned().unwrap_or(Value::Null)),
-                ("b", persons.get(to).cloned().unwrap_or(Value::Null)),
-                ("since", Value::Integer(since)),
-            ]
-        });
-        create_edges(&mut transaction, CREATE_KNOWS, knows)?;
-        let lives_in = prepared.lives_in.iter().map(|&(person, city)| {
-            vec![
-                ("a", persons.get(person).cloned().unwrap_or(Value::Null)),
-                ("b", cities.get(city).cloned().unwrap_or(Value::Null)),
-            ]
-        });
-        create_edges(&mut transaction, CREATE_LIVES_IN, lives_in)?;
+        for mut batch in prepared.knows {
+            batch.insert("persons", persons.clone());
+            transaction.execute(CREATE_KNOWS, &batch).map_err(failed)?;
+        }
+        for mut batch in prepared.lives_in {
+            batch.insert("persons", persons.clone());
+            batch.insert("cities", cities.clone());
+            transaction
+                .execute(CREATE_LIVES_IN, &batch)
+                .map_err(failed)?;
+        }
         transaction.commit().map_err(failed)
     }
 
@@ -340,7 +356,7 @@ fn create_nodes(
     transaction: &mut WriteTransaction<'_>,
     statement: &str,
     batches: &[Parameters],
-) -> Result<Vec<Value>, EngineError> {
+) -> Result<Value, EngineError> {
     let mut handles = Vec::new();
     for batch in batches {
         let result = transaction.execute(statement, batch).map_err(failed)?;
@@ -350,28 +366,7 @@ fn create_nodes(
             }
         }
     }
-    Ok(handles)
-}
-
-fn create_edges(
-    transaction: &mut WriteTransaction<'_>,
-    statement: &str,
-    edges: impl Iterator<Item = Vec<(&'static str, Value)>>,
-) -> Result<(), EngineError> {
-    let mut batch = Vec::with_capacity(EDGE_BATCH);
-    for edge in edges {
-        batch.push(edge);
-        if batch.len() == EDGE_BATCH {
-            let rows = rows_parameter(std::mem::take(&mut batch));
-            transaction.execute(statement, &rows).map_err(failed)?;
-        }
-    }
-    if !batch.is_empty() {
-        transaction
-            .execute(statement, &rows_parameter(batch))
-            .map_err(failed)?;
-    }
-    Ok(())
+    Ok(Value::List(handles))
 }
 
 #[cfg(test)]
