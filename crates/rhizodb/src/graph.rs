@@ -948,7 +948,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         reader: &mut AdjacencyReader,
         side: Side,
         prefix: &[u8],
-        mut visit: impl FnMut(&[u8], &[u8], &mut bool) -> Result<(), GraphError>,
+        mut visit: impl FnMut(&[u8], &[u8], &mut Option<adjacency::Checked>) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
         let entries = reader.entries(side, prefix, |window| {
             let mut held = Vec::new();
@@ -964,7 +964,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                         return Err(ENTRIES_OUT_OF_ORDER);
                     }
                     if window.holds(key) {
-                        held.push((key.into(), value.into(), false));
+                        held.push((key.into(), value.into(), None));
                     }
                     Ok::<(), GraphError>(())
                 },
@@ -981,7 +981,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             Entries::Stored => {
                 self.transaction
                     .visit_prefix(Table::Adjacency, prefix, |key, value| {
-                        visit(key, value, &mut false)
+                        visit(key, value, &mut None)
                     })
             }
         }

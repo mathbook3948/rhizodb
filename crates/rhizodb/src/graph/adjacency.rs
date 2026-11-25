@@ -513,6 +513,16 @@ fn lay_out(id: &SegmentId, slots: &[(usize, &[u8])], span: Option<usize>) -> Vec
     out
 }
 
+/// The layout of a part whose checksum and offsets a read checked, so a reader that holds the
+/// part reads it again without parsing it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Checked {
+    span: usize,
+    index: usize,
+    width: usize,
+    data: usize,
+}
+
 /// A stored part of a segment, read in place.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PartRef<'a> {
@@ -544,8 +554,23 @@ impl<'a> PartRef<'a> {
         Ok(part)
     }
 
-    fn verified(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
-        Self::laid_out(key, bytes)
+    fn checked(bytes: &'a [u8], checked: Checked) -> Self {
+        Self {
+            bytes,
+            span: checked.span,
+            index: checked.index,
+            width: checked.width,
+            data: checked.data,
+        }
+    }
+
+    fn layout(&self) -> Checked {
+        Checked {
+            span: self.span,
+            index: self.index,
+            width: self.width,
+            data: self.data,
+        }
     }
 
     fn laid_out(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
@@ -577,11 +602,14 @@ impl<'a> PartRef<'a> {
         })
     }
 
+    #[inline]
     fn offset(&self, at: usize) -> usize {
         let start = OFFSETS_AT + self.width * at;
-        let mut word = [0u8; 4];
-        word[..self.width].copy_from_slice(&self.bytes[start..start + self.width]);
-        u32::from_le_bytes(word) as usize
+        match self.bytes.get(start..start + self.width) {
+            Some(&[a, b]) => usize::from(u16::from_le_bytes([a, b])),
+            Some(&[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]) as usize,
+            _ => 0,
+        }
     }
 
     fn slot_bytes(&self, at: usize) -> &'a [u8] {
@@ -789,13 +817,13 @@ pub(crate) struct SlotRead {
 impl SlotRead {
     /// Reads the entry under `key` if it holds `position`, emitting the slot's relationships
     /// once its part is read.
-    /// `verified` says whether the entry's checksum was checked before, and is set once this
-    /// read checks it.
+    /// `checked` holds the entry's layout once a read checked it, and is set once this read
+    /// checks it.
     pub(crate) fn visit(
         &mut self,
         entry: Entry,
         position: usize,
-        (key, value, verified): (&[u8], &[u8], &mut bool),
+        (key, value, checked): (&[u8], &[u8], &mut Option<Checked>),
         emit: &mut impl FnMut(Edge),
     ) -> Result<(), GraphError> {
         match entry {
@@ -815,12 +843,13 @@ impl SlotRead {
                         return Err(SPANS_DISAGREE);
                     }
                     self.covered = true;
-                    let part = if *verified {
-                        PartRef::verified(key, value)?
-                    } else {
-                        let part = PartRef::parse(key, value)?;
-                        *verified = true;
-                        part
+                    let part = match *checked {
+                        Some(layout) => PartRef::checked(value, layout),
+                        None => {
+                            let part = PartRef::parse(key, value)?;
+                            *checked = Some(part.layout());
+                            part
+                        }
                     };
                     match &self.change {
                         None => part.visit_slot(position, |edge| {
@@ -1134,8 +1163,8 @@ struct Recent {
     run: u8,
 }
 
-/// A stored entry a reader holds, and whether a read checked its checksum.
-pub(crate) type Verified = (Box<[u8]>, Box<[u8]>, bool);
+/// A stored entry a reader holds, and its layout once a read checked it.
+pub(crate) type Verified = (Box<[u8]>, Box<[u8]>, Option<Checked>);
 
 /// The segments to read in one pass: those of one side, group, and relationship type, or of
 /// every type, from the segment of `first` up to `segments` segments on.
