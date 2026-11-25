@@ -11,6 +11,7 @@ use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
 use crate::query;
+use crate::query::Parallelism;
 use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
@@ -49,11 +50,15 @@ fn in_memory_backend() -> Result<Backend, Error> {
 #[must_use]
 pub struct OpenOptions {
     create: bool,
+    parallelism: Parallelism,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        Self { create: true }
+        Self {
+            create: true,
+            parallelism: Parallelism::default(),
+        }
     }
 }
 
@@ -71,6 +76,46 @@ impl OpenOptions {
         self
     }
 
+    /// How many threads one read query may run on, which defaults to what
+    /// [`std::thread::available_parallelism`] reports. A query that reads enough start nodes
+    /// splits them across these threads, the calling thread among them, and returns the same rows
+    /// in the same order, and fails the same way, as on one thread. A query that calls a procedure
+    /// the host registered, or runs in a write transaction, stays on the calling thread. Zero and
+    /// one keep every query on the calling thread.
+    ///
+    /// ```
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let db = OpenOptions::new().threads(4).parallel_threshold(2).in_memory()?;
+    /// db.execute("UNWIND range(1, 100) AS i INSERT (:N {i: i})", &Parameters::new())?;
+    /// let result = db.execute("MATCH (n:N) RETURN sum(n.i)", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::Integer(5050)]]);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn threads(mut self, threads: usize) -> Self {
+        self.parallelism.threads = threads;
+        self
+    }
+
+    /// How many start nodes a match must read before a read query splits them across
+    /// [threads](OpenOptions::threads), so that a small query does not pay to start them. It
+    /// defaults to 8192, two row groups.
+    pub fn parallel_threshold(mut self, nodes: usize) -> Self {
+        self.parallelism.threshold = nodes;
+        self
+    }
+
+    /// Creates a database with these settings that lives in memory and is gone when dropped, as
+    /// [`Database::in_memory`] describes.
+    pub fn in_memory(&self) -> Result<Database, Error> {
+        Ok(Database {
+            graph: Graph::open(in_memory_backend()?)?,
+            statements: Statements::new(self.parallelism),
+        })
+    }
+
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
         let path = path.as_ref();
@@ -82,7 +127,7 @@ impl OpenOptions {
         }
         Ok(Database {
             graph: Graph::open(open_backend(path)?)?,
-            statements: Statements::default(),
+            statements: Statements::new(self.parallelism),
         })
     }
 }
@@ -178,10 +223,7 @@ impl Database {
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     pub fn in_memory() -> Result<Self, Error> {
-        Ok(Self {
-            graph: Graph::open(in_memory_backend()?)?,
-            statements: Statements::default(),
-        })
+        OpenOptions::new().in_memory()
     }
 
     /// Runs one GQL query in its own transaction and returns its rows. To run several queries in

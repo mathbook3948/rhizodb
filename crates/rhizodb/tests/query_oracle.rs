@@ -16,6 +16,9 @@ use rhizodb::IndexTarget;
 use rhizodb::Value;
 use support::Rng;
 use support::cases;
+use support::db;
+use support::options;
+use support::parallel_options;
 use support::seed;
 
 const FAST_GRAPHS: u64 = 24;
@@ -972,13 +975,12 @@ fn session(db: Database, rng: &mut Rng) -> Result<Session, String> {
     })
 }
 
-#[test]
-fn random_queries_in_memory_match_the_reference() {
+fn in_memory_sessions(salt: u64, open: impl Fn() -> Database) {
     let base = seed();
     for offset in 0..cases(FAST_GRAPHS) {
-        let seed = base.wrapping_add(offset);
+        let seed = base.wrapping_add(offset).wrapping_add(salt);
         let mut rng = Rng::new(seed);
-        let mut session = match session(Database::in_memory().unwrap(), &mut rng) {
+        let mut session = match session(open(), &mut rng) {
             Ok(session) => session,
             Err(reason) => fail(seed, "", &reason),
         };
@@ -991,6 +993,16 @@ fn random_queries_in_memory_match_the_reference() {
 }
 
 #[test]
+fn random_queries_in_memory_match_the_reference() {
+    in_memory_sessions(0, db);
+}
+
+#[test]
+fn random_queries_split_across_threads_match_the_reference() {
+    in_memory_sessions(2 << 40, || parallel_options().in_memory().unwrap());
+}
+
+#[test]
 fn random_queries_on_a_reopened_file_match_the_reference() {
     let base = seed();
     let directory = tempfile::tempdir().unwrap();
@@ -998,18 +1010,15 @@ fn random_queries_on_a_reopened_file_match_the_reference() {
         let seed = base.wrapping_add(offset).wrapping_add(1 << 40);
         let mut rng = Rng::new(seed);
         let path = directory.path().join(format!("oracle-{offset}.rhizodb"));
-        let mut session = match session(Database::open(&path).unwrap(), &mut rng) {
+        let mut session = match session(options().open(&path).unwrap(), &mut rng) {
             Ok(session) => session,
             Err(reason) => fail(seed, "", &reason),
         };
         for _ in 0..ROUNDS_PER_GRAPH {
             if rng.chance(1, 3) {
                 session.log.push_str("-- reopen\n");
-                drop(std::mem::replace(
-                    &mut session.db,
-                    Database::in_memory().unwrap(),
-                ));
-                session.db = Database::open(&path).unwrap();
+                drop(std::mem::replace(&mut session.db, db()));
+                session.db = options().open(&path).unwrap();
             }
             if let Err(reason) = session.round(&mut rng) {
                 fail(seed, &session.log, &reason);

@@ -48,6 +48,9 @@ pub(crate) struct Program<C> {
     pub(crate) closed: Vec<Expr>,
     /// The names of the parameters the query reads, in the order it first reads them.
     pub(crate) parameters: Vec<String>,
+    /// Whether the query calls a procedure the host registered, which then runs on the thread
+    /// that runs the query.
+    pub(crate) calls_host: bool,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.

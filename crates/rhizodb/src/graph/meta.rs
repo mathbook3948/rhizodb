@@ -1,7 +1,7 @@
-use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 
@@ -39,6 +39,11 @@ const DELTA_DISAGREES: GraphError =
     GraphError::Corrupt("a node meta delta does not amend its chunk");
 
 /// The row group holding `node` and the node's slot in it.
+/// The row group that holds `node`.
+pub(crate) fn row_group(node: NodeId) -> u64 {
+    locate(node).0
+}
+
 pub(crate) fn locate(node: NodeId) -> (u64, usize) {
     (
         node.0 >> GROUP_SHIFT,
@@ -626,7 +631,7 @@ pub(crate) struct GroupEdit {
     fresh: usize,
     rewrite: bool,
     full: Option<MetaEdit>,
-    view: OnceCell<MetaEdit>,
+    view: OnceLock<MetaEdit>,
 }
 
 /// What commit writes for one edited group.
@@ -675,7 +680,7 @@ impl GroupEdit {
             touched: BTreeMap::new(),
             fresh: 0,
             full: None,
-            view: OnceCell::new(),
+            view: OnceLock::new(),
         };
         if let Some(chunk) = &edit.chunk {
             edit.live = MetaBytes::trusted(chunk)?.head().live();
@@ -748,7 +753,7 @@ impl GroupEdit {
             if self.full.is_none() {
                 self.full = Some(self.build()?);
                 self.current.clear();
-                self.view = OnceCell::new();
+                self.view = OnceLock::new();
             }
             if let Some(full) = &mut self.full {
                 full.set(slot, state);
@@ -756,7 +761,7 @@ impl GroupEdit {
             return Ok(());
         }
         self.current.insert(slot, state);
-        self.view = OnceCell::new();
+        self.view = OnceLock::new();
         Ok(())
     }
 

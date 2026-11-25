@@ -9,6 +9,7 @@ mod exec;
 mod functions;
 mod keys;
 mod matcher;
+mod parallel;
 mod plan;
 mod regex;
 mod scan;
@@ -41,19 +42,28 @@ pub(crate) use self::builtin::is_reserved;
 use self::cache::PlanCache;
 use self::datum::Datum;
 use self::datum::from_parameter;
+pub(crate) use self::parallel::Parallelism;
 use self::plan::Plan;
 
-/// The procedures that `CALL` reaches and the plans of the queries bound against them, which a
-/// database shares with its transactions. A plan is looked up, or bound and cached, while the
+/// The procedures that `CALL` reaches, the plans of the queries bound against them, and how many
+/// threads a read query may run on, which a database shares with its transactions. A plan is looked up, or bound and cached, while the
 /// procedures are locked for reading, so a registration, which locks them for writing, never
 /// leaves a plan bound against the procedures it replaced.
 #[derive(Debug, Default)]
 pub(crate) struct Statements {
     procedures: RwLock<Procedures>,
     plans: PlanCache,
+    parallelism: Parallelism,
 }
 
 impl Statements {
+    pub(crate) fn new(parallelism: Parallelism) -> Self {
+        Self {
+            parallelism,
+            ..Self::default()
+        }
+    }
+
     /// Makes `procedure` callable by its name, replacing any procedure of that name, and forgets
     /// every bound plan.
     pub(crate) fn register(&self, procedure: Procedure) {
@@ -104,14 +114,18 @@ pub(crate) fn execute<S: Storage>(
     statements: &Statements,
     query: &str,
     parameters: &Parameters,
-) -> Result<QueryResult, Error> {
+) -> Result<QueryResult, Error>
+where
+    for<'a> GraphTx<S::Read<'a>>: Sync,
+{
     let (plan, values) = statements.prepare(query, parameters)?;
     match &*plan {
-        Plan::ReadOnly(program) => exec::run_read(
+        Plan::ReadOnly(program) => parallel::run_read(
             &graph.read()?,
             program,
             &values,
             &Clocks::for_own_transaction(),
+            statements.parallelism,
         ),
         Plan::Updating(program) => {
             let mut tx = graph.write()?;
@@ -130,10 +144,19 @@ pub(crate) fn execute_read<T: ReadTransaction>(
     statements: &Statements,
     query: &str,
     parameters: &Parameters,
-) -> Result<QueryResult, Error> {
+) -> Result<QueryResult, Error>
+where
+    GraphTx<T>: Sync,
+{
     let (plan, values) = statements.prepare(query, parameters)?;
     match &*plan {
-        Plan::ReadOnly(program) => exec::run_read(tx, program, &values, &Clocks::within(began)),
+        Plan::ReadOnly(program) => parallel::run_read(
+            tx,
+            program,
+            &values,
+            &Clocks::within(began),
+            statements.parallelism,
+        ),
         Plan::Updating(_) => Err(Error::new(
             ErrorKind::ReadOnlyTransaction,
             "a read transaction cannot run a query that updates the graph",

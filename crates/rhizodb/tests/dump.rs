@@ -27,7 +27,7 @@ use support::*;
 const FIXTURE: &str = include_str!("fixtures/dump-v1.jsonl");
 
 fn imported(text: &str) -> Database {
-    let db = Database::in_memory().unwrap();
+    let db = db();
     db.import(text.as_bytes()).unwrap();
     db
 }
@@ -39,7 +39,7 @@ fn exported(db: &Database) -> String {
 }
 
 fn import_error(text: &str) -> ErrorKind {
-    let db = Database::in_memory().unwrap();
+    let db = db();
     match db.import(text.as_bytes()) {
         Ok(()) => panic!("imported {text:?}"),
         Err(error) => error.kind(),
@@ -358,7 +358,7 @@ fn a_malformed_dump_fails_as_invalid() {
     }
     let mut bytes = format!("{header}\n").into_bytes();
     bytes.extend_from_slice(b"{\"type\":\"end\",\"nodes\":0,\"relationships\":0,\"x\":\"\xff\"}");
-    let db = Database::in_memory().unwrap();
+    let db = db();
     assert_eq!(
         db.import(bytes.as_slice()).unwrap_err().kind(),
         ErrorKind::InvalidDump
@@ -373,13 +373,13 @@ fn a_newer_version_fails_with_its_own_kind() {
 
 #[test]
 fn only_a_new_database_takes_an_import() {
-    let used = Database::in_memory().unwrap();
+    let used = db();
     run(&used, "INSERT (n) WITH n DELETE n");
     assert_eq!(
         used.import(FIXTURE.as_bytes()).unwrap_err().kind(),
         ErrorKind::DatabaseNotEmpty
     );
-    let indexed = Database::in_memory().unwrap();
+    let indexed = db();
     indexed
         .create_property_index("i", IndexTarget::Label("A"), "p")
         .unwrap();
@@ -435,7 +435,7 @@ fn a_failing_reader_or_writer_fails_as_io() {
             ErrorKind::Io
         );
     }
-    let copy = Database::in_memory().unwrap();
+    let copy = support::db();
     let reader = io::BufReader::new(Failing {
         left: FIXTURE.len(),
     });
@@ -444,7 +444,7 @@ fn a_failing_reader_or_writer_fails_as_io() {
 
 #[test]
 fn a_dump_larger_than_one_batch_imports_whole() {
-    let db = Database::in_memory().unwrap();
+    let db = db();
     db.create_keyword_index("words", IndexTarget::Label("Item"), &["text"])
         .unwrap();
     db.create_property_index("item_i", IndexTarget::Label("Item"), "i")
@@ -475,7 +475,7 @@ fn a_dump_larger_than_one_batch_imports_whole() {
 
 #[test]
 fn an_export_while_a_writer_commits_holds_one_commit_whole() {
-    let db = Arc::new(Database::in_memory().unwrap());
+    let db = Arc::new(db());
     run(&db, "INSERT (:Counter {n: 0})");
     let stop = Arc::new(AtomicBool::new(false));
     let writer = {

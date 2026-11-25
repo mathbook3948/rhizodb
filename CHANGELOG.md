@@ -27,6 +27,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
 - Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
 - `OpenOptions`, whose `create(false)` fails with the new `ErrorKind::DatabaseNotFound` instead of creating a missing file, and where later settings will go.
+- Read queries that match from many start nodes split them across threads, set with `OpenOptions::threads` and `OpenOptions::parallel_threshold`, and return the same rows in the same order as on one thread. `OpenOptions::in_memory` opens an in-memory database with these settings.
 - `NodeId::from_u64` and `RelationshipId::from_u64`, for a host that stored an ID as a number.
 - `ErrorKind::DatabaseAlreadyOpen` and `ErrorKind::BackupTargetExists`, which opening a file that another `Database` holds and a backup to a path that already holds something report instead of `ErrorKind::Storage`.
 - Online backups with `Database::backup_to`, which copies one snapshot of the committed database into a new file while readers and writers carry on, and never leaves a partial file at its path. Restoring a backup is opening it.

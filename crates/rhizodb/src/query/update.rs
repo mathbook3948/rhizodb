@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -106,22 +105,14 @@ impl<W: WriteTransaction> Writer<'_, W> {
     }
 
     fn env(&self) -> Env<'_, W> {
-        Env {
-            tx: &*self.tx,
-            slots: self.slots,
-            parameters: self.parameters,
-            now: self.now,
-            graveyard: &*self.graveyard,
-            patterns: self.patterns,
-            check: None,
-            columns: RefCell::default(),
-            keys: RefCell::default(),
-            labels: RefCell::default(),
-            label_tokens: RefCell::default(),
-            property_indexes: RefCell::default(),
-            adjacency: RefCell::default(),
-            rel_type_tokens: RefCell::default(),
-        }
+        Env::new(
+            &*self.tx,
+            self.slots,
+            self.parameters,
+            self.now,
+            &*self.graveyard,
+            self.patterns,
+        )
     }
 
     fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
