@@ -495,7 +495,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         let mut kept = stored;
         for (slot, edit) in slots {
             let key = columns::delta_key(group, slot);
-            let before = match edit.fresh {
+            let before = match edit.fresh || stored == 0 {
                 true => None,
                 false => self.transaction.get(Table::NodeColumns, &key)?,
             };

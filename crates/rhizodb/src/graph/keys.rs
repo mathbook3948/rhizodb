@@ -112,10 +112,22 @@ pub(crate) fn term_prefix(index: u32, prefix: &str) -> Vec<u8> {
     key
 }
 
-pub(crate) fn posting_key(index: u32, term: &str, element: u64) -> Vec<u8> {
-    let mut key = posting_prefix(index, term);
-    key.extend_from_slice(&element.to_be_bytes());
+#[cfg(test)]
+/// The key of the posting block `block` of `term` in the keyword index `index`. Before format
+/// version 14 the same layout keyed one element's posting by its element ID.
+pub(crate) fn posting_key(index: u32, term: &str, block: u64) -> Vec<u8> {
+    let mut key = Vec::new();
+    put_posting_key(&mut key, index, term, block);
     key
+}
+
+/// Writes [`posting_key`] into `key` in place of what it held.
+pub(crate) fn put_posting_key(key: &mut Vec<u8>, index: u32, term: &str, block: u64) {
+    key.clear();
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(term.as_bytes());
+    key.push(0);
+    key.extend_from_slice(&block.to_be_bytes());
 }
 
 pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
@@ -127,12 +139,12 @@ pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
     std::str::from_utf8(term).map_err(|_| DecodeError::InvalidUtf8)
 }
 
-pub(crate) fn parse_posting_element(key: &[u8]) -> Result<u64, DecodeError> {
+pub(crate) fn parse_posting_block(key: &[u8]) -> Result<u64, DecodeError> {
     let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
     let mut reader = Reader::new(&key[start..]);
-    let element = reader.u64()?;
+    let block = reader.u64()?;
     reader.finish()?;
-    Ok(element)
+    Ok(block)
 }
 
 /// The key of a property index entry: the index, the value's key, and the element, so the

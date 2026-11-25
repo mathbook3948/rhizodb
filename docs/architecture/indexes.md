@@ -58,6 +58,8 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - A phrase is ranked as one term whose occurrences are the phrase's.
 - A prefix is ranked in each element by the best of the terms it matches there.
 - Each keyword index keeps its element count and total term count.
+- The postings of one term are stored in blocks of 128 consecutive element IDs, one entry per term and block.
+- A write transaction holds each posting block it changes and writes it once at commit, or earlier when the held blocks grow past a bound.
 - Each posting keeps its element's term count.
 - Each posting keeps the positions of its term in the element.
 - Each indexed element keeps the terms it was indexed under.
@@ -99,6 +101,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - A comparison that is never true, such as one with null, NaN, a byte string, or a duration, makes an index lookup return nothing.
 - A comparison with a list, or a value that fails to evaluate, leaves the lookup to the label scan.
 - A query applies every condition to each element an index or ID lookup returns, except the pattern map entry whose `=` an index lookup served, since equal keys mean `=` holds.
+- A query reads the one `id()` equality that an ID lookup of the start node served as true for the node the lookup returns, since that node's ID is the value it compares.
 - A pattern map that repeats a key looks up its last entry for that key, which is the one the map holds.
 - Elements that an index or ID lookup returns are matched in ascending ID order, as a label scan matches them.
 - A value error in a condition is raised only for the elements a lookup returns, not for the elements it skips.
