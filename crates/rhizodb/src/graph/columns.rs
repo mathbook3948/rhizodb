@@ -294,13 +294,37 @@ impl Kind {
     }
 }
 
+/// The bytes of a stored string. The text of a string segment is checked as UTF-8 only where a
+/// string is taken out of it, since a comparison or a search gives the same answer on the bytes
+/// of valid text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Text<'a>(&'a [u8]);
+
+impl<'a> Text<'a> {
+    pub(crate) fn of(text: &'a str) -> Self {
+        Text(text.as_bytes())
+    }
+
+    pub(crate) fn bytes(self) -> &'a [u8] {
+        self.0
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn to_str(self) -> Result<&'a str, GraphError> {
+        std::str::from_utf8(self.0).map_err(|_| DecodeError::InvalidUtf8.into())
+    }
+}
+
 /// One stored value, read in place where its segment allows.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cell<'a> {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(&'a str),
+    Str(Text<'a>),
     /// A value of another type in its tagged encoding.
     Encoded(&'a [u8]),
     /// A value of another type, not encoded yet.
@@ -313,7 +337,7 @@ impl<'a> Cell<'a> {
             PropertyValue::Boolean(value) => Cell::Bool(*value),
             PropertyValue::Integer(value) => Cell::Int(*value),
             PropertyValue::Float(value) => Cell::Float(*value),
-            PropertyValue::String(value) => Cell::Str(value),
+            PropertyValue::String(value) => Cell::Str(Text::of(value)),
             other => Cell::Value(other),
         }
     }
@@ -345,7 +369,7 @@ impl<'a> Cell<'a> {
             Cell::Str(value) => {
                 out.push(TAG_STRING);
                 put_varint(out, value.len());
-                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(value.bytes());
             }
             Cell::Encoded(bytes) => out.extend_from_slice(bytes),
             Cell::Value(value) => value.encode_into(out),
@@ -357,7 +381,7 @@ impl<'a> Cell<'a> {
             Cell::Bool(value) => PropertyValue::Boolean(value),
             Cell::Int(value) => PropertyValue::Integer(value),
             Cell::Float(value) => PropertyValue::Float(value),
-            Cell::Str(value) => PropertyValue::String(value.to_owned()),
+            Cell::Str(value) => PropertyValue::String(value.to_str()?.to_owned()),
             Cell::Encoded(bytes) => {
                 let mut reader = Reader::new(bytes);
                 let value = reader.value()?;
@@ -419,7 +443,9 @@ fn classify(bytes: &[u8]) -> Result<Cell<'_>, GraphError> {
             reader.u8()?;
             let length = reader.varint()?;
             let text = reader.take(length)?;
-            Cell::Str(std::str::from_utf8(text).map_err(|_| DecodeError::InvalidUtf8)?)
+            Cell::Str(Text::of(
+                std::str::from_utf8(text).map_err(|_| DecodeError::InvalidUtf8)?,
+            ))
         }
         _ => {
             reader.skip_value()?;
@@ -677,7 +703,7 @@ pub(crate) fn encode_part(
             let mut ends = Vec::with_capacity(count);
             for (_, cell) in cells {
                 match (kind, cell) {
-                    (Kind::Str, Cell::Str(text)) => heap.extend_from_slice(text.as_bytes()),
+                    (Kind::Str, Cell::Str(text)) => heap.extend_from_slice(text.bytes()),
                     _ => cell.encode_tagged(&mut heap),
                 }
                 ends.push(heap.len());
@@ -848,7 +874,7 @@ impl<'a> SegmentRef<'a> {
                     .get(layout.heap + start..layout.heap + self.end_of(index))
                     .ok_or(VALUE_OUTSIDE)?;
                 if layout.kind == Kind::Str {
-                    Cell::Str(std::str::from_utf8(value).map_err(|_| DecodeError::InvalidUtf8)?)
+                    Cell::Str(Text(value))
                 } else {
                     classify(value)?
                 }

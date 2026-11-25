@@ -1118,6 +1118,8 @@ impl SegmentEdit {
 
 /// The stored entries of the adjacency segments a query read last, one per side, so a scan that
 /// expands consecutive nodes reads each segment from storage once instead of once per node.
+/// A segment is held once it is read twice in a row, or when it follows the segment read
+/// before it, as in a scan.
 #[derive(Debug, Default)]
 pub(crate) struct AdjacencyReader {
     sides: [Recent; 2],
@@ -1141,8 +1143,8 @@ pub(crate) enum Entries<'r> {
 }
 
 impl AdjacencyReader {
-    /// The entries of `prefix` on `side`, held once the prefix is read twice in a row. `load`
-    /// reads them from storage.
+    /// The entries of `prefix` on `side`, held once the prefix is read twice in a row or right
+    /// after the prefix of the segment before it. `load` reads them from storage.
     pub(crate) fn entries<E>(
         &mut self,
         side: Side,
@@ -1151,10 +1153,13 @@ impl AdjacencyReader {
     ) -> Result<Entries<'_>, E> {
         let recent = &mut self.sides[usize::from(side.byte())];
         if recent.prefix != prefix {
+            let scanning = follows(&recent.prefix, prefix);
             recent.prefix.clear();
             recent.prefix.extend_from_slice(prefix);
             recent.entries = None;
-            return Ok(Entries::Stored);
+            if !scanning {
+                return Ok(Entries::Stored);
+            }
         }
         if recent.entries.is_none() {
             recent.entries = Some(load()?);
@@ -1164,6 +1169,20 @@ impl AdjacencyReader {
             None => Entries::Stored,
         })
     }
+}
+
+fn follows(previous: &[u8], next: &[u8]) -> bool {
+    let position = |prefix: &[u8]| {
+        prefix.get(GROUP_AT..=SEGMENT_AT).map(|bytes| {
+            bytes
+                .iter()
+                .fold(0u128, |at, byte| at << 8 | u128::from(*byte))
+        })
+    };
+    previous.len() == next.len()
+        && previous.get(SIDE_AT) == next.get(SIDE_AT)
+        && previous.get(TYPE_AT..) == next.get(TYPE_AT..)
+        && matches!((position(previous), position(next)), (Some(at), Some(after)) if at + 1 == after)
 }
 
 #[cfg(test)]

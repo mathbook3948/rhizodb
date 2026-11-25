@@ -39,6 +39,7 @@ mod value_key;
 pub(crate) use adjacency::AdjacencyReader;
 pub(crate) use columns::Cell;
 pub(crate) use columns::ColumnReader;
+pub(crate) use columns::Text;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
 pub(crate) use ids::PropertyKey;
@@ -94,6 +95,8 @@ const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
 const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
+const ENTRIES_OUT_OF_ORDER: GraphError =
+    GraphError::Corrupt("the adjacency entries of a segment are out of order");
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -910,6 +913,19 @@ impl<T: ReadTransaction> GraphTx<T> {
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
         let mut found = Vec::new();
+        self.adjacent_into(reader, node, direction, rel_type, &mut found)?;
+        Ok(found)
+    }
+
+    /// Appends to `found` what [`GraphTx::adjacent_with`] returns.
+    pub(crate) fn adjacent_into(
+        &self,
+        reader: &mut AdjacencyReader,
+        node: NodeId,
+        direction: Direction,
+        rel_type: Option<Token<RelationshipType>>,
+        found: &mut Vec<Adjacent>,
+    ) -> Result<(), GraphError> {
         if direction != Direction::Incoming {
             self.visit_adjacency(reader, Side::Outgoing, node, rel_type, &mut |adjacent| {
                 found.push(adjacent);
@@ -923,7 +939,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }
             })?;
         }
-        Ok(found)
+        Ok(())
     }
 
     fn visit_adjacency_prefix(
@@ -937,6 +953,12 @@ impl<T: ReadTransaction> GraphTx<T> {
             let mut held = Vec::new();
             self.transaction
                 .visit_prefix(Table::Adjacency, prefix, |key, value| {
+                    if held
+                        .last()
+                        .is_some_and(|(last, _, _): &adjacency::Verified| **last >= *key)
+                    {
+                        return Err(ENTRIES_OUT_OF_ORDER);
+                    }
                     held.push((key.into(), value.into(), false));
                     Ok::<(), GraphError>(())
                 })?;

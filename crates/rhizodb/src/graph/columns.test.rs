@@ -581,11 +581,11 @@ fn cells_differ_by_type_and_bits_and_agree_otherwise() {
         (Cell::Int(1), Cell::Float(1.0), false),
         (Cell::Int(1), Cell::Int(1), true),
         (Cell::Bool(true), Cell::Int(1), false),
-        (Cell::Str(""), Cell::Str(""), true),
-        (Cell::Str("a"), Cell::Str("b"), false),
+        (Cell::Str(Text::of("")), Cell::Str(Text::of("")), true),
+        (Cell::Str(Text::of("a")), Cell::Str(Text::of("b")), false),
         (Cell::Value(&list), Cell::Encoded(&tagged), true),
         (Cell::Value(&list), Cell::Value(&other), false),
-        (Cell::Str("1"), Cell::Value(&list), false),
+        (Cell::Str(Text::of("1")), Cell::Value(&list), false),
     ];
     for (left, right, same) in pairs {
         assert_eq!(left.same(&right), same, "{left:?} {right:?}");
@@ -751,6 +751,19 @@ fn a_resealed_segment_whose_offsets_or_text_are_wrong_still_fails_as_corruption(
             "{name}: {result:?}"
         );
     }
+}
+
+#[test]
+fn a_resealed_string_segment_that_is_not_utf8_fails_only_where_its_text_is_taken() {
+    let values = full(|at| PropertyValue::String(format!("v{at}")), 0..40);
+    let mut segment = encode(&values).unwrap();
+    segment[values_at(SEGMENT_SLOTS) + 2 * values.len()] = 0xff;
+    reseal(&mut segment);
+    let view = SegmentRef::parse(&key(), &segment).unwrap();
+    let damaged = view.cell_at(0).unwrap().unwrap();
+    assert!(matches!(damaged, Cell::Str(text) if text.bytes() == b"\xff0"));
+    assert!(damaged.to_value().is_err_and(|error| is_corruption(&error)));
+    assert!(view.cell_at(1).unwrap().unwrap().to_value().is_ok());
 }
 
 #[test]
