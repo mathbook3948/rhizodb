@@ -1259,11 +1259,22 @@ impl<T: ReadTransaction> Env<'_, T> {
         self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, input| {
             let mut values = None;
             if let Some(outputs) = &outputs {
-                let output = outputs
-                    .iter()
-                    .map(|value| at.arg(value)?.probe())
-                    .collect::<Result<Vec<_>, _>>()?;
-                if !seen.insert_probe(&output)? {
+                let one;
+                let many;
+                let output = match outputs.as_slice() {
+                    [value] => {
+                        one = at.arg(value)?.probe()?;
+                        std::slice::from_ref(&one)
+                    }
+                    _ => {
+                        many = outputs
+                            .iter()
+                            .map(|value| at.arg(value)?.probe())
+                            .collect::<Result<Vec<_>, _>>()?;
+                        many.as_slice()
+                    }
+                };
+                if !seen.insert_probe(output)? {
                     return Ok(true);
                 }
                 if outputs_are_items && !early {
