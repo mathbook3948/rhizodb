@@ -464,6 +464,7 @@ fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
     )
     .unwrap();
     fill(&engine, 4);
+    let checkpoint_held = lock(&engine.shared.durable);
     engine.start_checkpoint(&mut lock(&engine.shared.writer));
     let frozen = {
         let published = lock(&engine.shared.published);
@@ -471,7 +472,9 @@ fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
     };
     let mut write = engine.begin_write().unwrap();
     write.put(Table::Nodes, b"late", b"v").unwrap();
+    drop(checkpoint_held);
     engine.shared.wait_for_checkpoint();
+    engine.shared.drop_segments(&mut write.writer);
 
     write.commit().unwrap();
 
