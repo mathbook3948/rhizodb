@@ -155,7 +155,7 @@ fn stress(db: Arc<Database>, seconds: u64) {
 
 #[test]
 fn snapshots_held_across_commits_and_checkpoints_stay_whole_in_memory() {
-    stress(Arc::new(Database::in_memory().unwrap()), cases(2));
+    stress(Arc::new(db()), cases(2));
 }
 
 #[test]

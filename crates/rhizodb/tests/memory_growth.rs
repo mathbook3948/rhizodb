@@ -88,7 +88,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     let slack = (256 << 10) + ENGINE_LOG_AND_MEMTABLE;
     let mut reports = Vec::new();
 
-    let db = Database::in_memory().unwrap();
+    let db = support::db();
     db.execute(
         "UNWIND range(1, 50) AS i INSERT (:P {k: i, name: 'n' + toString(i)})",
         &none(),
