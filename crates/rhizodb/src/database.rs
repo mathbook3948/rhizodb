@@ -81,7 +81,10 @@ impl OpenOptions {
     /// splits them across these threads, the calling thread among them, and returns the same rows
     /// in the same order, and fails the same way, as on one thread. A query that calls a procedure
     /// the host registered, updates the graph, or runs in a write transaction stays on the calling
-    /// thread. Zero and one keep every query on the calling thread.
+    /// thread. Zero and one keep every query on the calling thread. The threads are a budget the
+    /// database's read queries share: a query splits only across the threads that other read
+    /// queries of the database leave idle, so many concurrent queries each stay on their own
+    /// thread instead of crowding the cores.
     ///
     /// ```
     /// use rhizodb::OpenOptions;
@@ -101,7 +104,8 @@ impl OpenOptions {
 
     /// How many start nodes a match must read before a read query splits them across
     /// [threads](OpenOptions::threads), so that a small query does not pay to start them. It
-    /// defaults to 8192.
+    /// defaults to 8192. Zero and one act as two, since a match of one start node has nothing to
+    /// split.
     pub fn parallel_threshold(mut self, nodes: usize) -> Self {
         self.parallelism.threshold = nodes;
         self

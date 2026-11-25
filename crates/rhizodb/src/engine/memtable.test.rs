@@ -111,6 +111,59 @@ fn the_newest_versions_are_what_a_checkpoint_writes() {
 }
 
 #[test]
+fn a_buried_tombstone_goes_once_every_snapshot_sees_it() {
+    let memtable = Memtable::default();
+    memtable.apply(1, [put(b"a", b"1")], 0);
+    memtable.apply(2, [delete(b"a")], 0);
+    memtable.bury(2, [(TABLE, bytes(b"a"))]);
+    let all = |snapshot| memtable.range(TABLE, Bound::Unbounded, Bound::Unbounded, snapshot);
+
+    memtable.apply(3, [put(b"b", b"2")], 1);
+    assert_eq!(memtable.get(TABLE, b"a", 1), Lookup::Found(bytes(b"1")));
+    assert_eq!(
+        all(3),
+        [(bytes(b"a"), None), (bytes(b"b"), Some(bytes(b"2")))]
+    );
+
+    memtable.apply(4, [put(b"c", b"3")], 3);
+    assert_eq!(memtable.get(TABLE, b"a", 4), Lookup::Absent);
+    assert_eq!(
+        all(4),
+        [
+            (bytes(b"b"), Some(bytes(b"2"))),
+            (bytes(b"c"), Some(bytes(b"3")))
+        ]
+    );
+}
+
+#[test]
+fn sweeping_a_buried_tombstone_frees_its_chain() {
+    let memtable = Memtable::default();
+    memtable.apply(1, [put(b"other", b"x")], 0);
+    let base = memtable.bytes();
+    memtable.apply(2, [put(b"a", &[0; 1000])], 1);
+    memtable.apply(3, [delete(b"a")], 1);
+    memtable.bury(3, [(TABLE, bytes(b"a"))]);
+
+    memtable.apply(4, [], 3);
+
+    assert_eq!(memtable.bytes(), base);
+}
+
+#[test]
+fn a_key_written_again_after_its_burial_stays() {
+    let memtable = Memtable::default();
+    memtable.apply(1, [put(b"a", b"1")], 0);
+    memtable.apply(2, [delete(b"a")], 1);
+    memtable.bury(2, [(TABLE, bytes(b"a"))]);
+    memtable.apply(3, [put(b"a", b"2")], 2);
+
+    memtable.apply(4, [put(b"b", b"3")], 3);
+
+    assert_eq!(memtable.get(TABLE, b"a", 4), Lookup::Found(bytes(b"2")));
+}
+
+#[test]
 fn ordered_bounds_match_what_a_btree_map_accepts() {
     let keys: [&[u8]; 3] = [b"", b"a", b"b"];
     for start in keys {

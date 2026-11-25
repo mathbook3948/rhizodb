@@ -20,6 +20,21 @@ pub(crate) struct Layers {
     pub(crate) tree: Arc<Tree>,
 }
 
+impl Layers {
+    /// Whether a layer below the active memtable may hold a value under `key`, which a
+    /// tombstone in the active memtable must then keep hidden.
+    pub(crate) fn below_may_hold(&self, table: TableId, key: &[u8]) -> bool {
+        if let Some(frozen) = &self.frozen {
+            match frozen.get(table, key, u64::MAX) {
+                Lookup::Found(_) => return true,
+                Lookup::Deleted => return false,
+                Lookup::Absent => {}
+            }
+        }
+        !matches!(self.tree.get_with(table, key, |_| ()), Ok(None))
+    }
+}
+
 /// The database as committed at one LSN.
 #[derive(Debug)]
 pub(crate) struct View {

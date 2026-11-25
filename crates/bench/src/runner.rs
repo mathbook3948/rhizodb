@@ -146,6 +146,12 @@ impl<'a> Environment<'a> {
         Ok(dir)
     }
 
+    /// A fresh copy of the loaded graph of `engine`, flushed to disk, in a directory of its own
+    /// that the caller removes.
+    pub fn loaded_copy(&mut self, engine: &dyn Engine) -> Result<PathBuf, EngineError> {
+        self.copy_of_master(engine)
+    }
+
     fn ensure_base(&mut self, engine: &dyn Engine) -> Result<(), EngineError> {
         if self.bases.contains_key(&engine.kind()) {
             return Ok(());

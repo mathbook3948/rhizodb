@@ -28,4 +28,5 @@ pub mod rhizo;
 pub mod runner;
 pub mod scale;
 pub mod sqlite;
+pub mod stress;
 pub mod workloads;

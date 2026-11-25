@@ -42,7 +42,9 @@ use super::layout::BLOCK;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
+use super::memtable::Bytes;
 use super::memtable::Memtable;
+use super::memtable::Slot;
 use super::page::page_seed;
 use super::pages::PageSource;
 use super::pages::Pages;
@@ -53,6 +55,7 @@ use super::view::Layers;
 use super::view::View;
 use super::view::Visit;
 use super::view::prefix_end;
+use super::wal::Detached;
 use super::wal::LogIdentity;
 use super::wal::Wal;
 use super::wal::segment_files;
@@ -164,6 +167,12 @@ struct Job {
 }
 
 #[derive(Debug)]
+enum Task<F: FileSystem> {
+    Checkpoint(Job),
+    Remove(Detached<F>),
+}
+
+#[derive(Debug)]
 struct Shared<F: FileSystem> {
     options: EngineOptions,
     pages: Arc<Pages<F::File>>,
@@ -185,7 +194,7 @@ struct Shared<F: FileSystem> {
 #[derive(Debug)]
 pub(crate) struct Engine<F: FileSystem + 'static> {
     shared: Arc<Shared<F>>,
-    jobs: Option<mpsc::Sender<Job>>,
+    jobs: Option<mpsc::Sender<Task<F>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -348,6 +357,44 @@ fn replay_into(
     Ok(())
 }
 
+const RETIRED_POLL: Duration = Duration::from_millis(50);
+
+fn checkpoint_worker<F: FileSystem + 'static>(
+    shared: &Shared<F>,
+    receiver: &mpsc::Receiver<Task<F>>,
+) {
+    let mut retired: Vec<Arc<Memtable>> = Vec::new();
+    loop {
+        let task = if retired.is_empty() {
+            receiver.recv().ok()
+        } else {
+            match receiver.recv_timeout(RETIRED_POLL) {
+                Ok(task) => Some(task),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    retired.retain(|memtable| Arc::strong_count(memtable) > 1);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => None,
+            }
+        };
+        let Some(task) = task else {
+            return;
+        };
+        match task {
+            Task::Checkpoint(job) => {
+                retired.push(Arc::clone(&job.frozen));
+                shared.run_checkpoint(job, false);
+            }
+            Task::Remove(detached) => {
+                if detached.remove().is_err() {
+                    shared.poison();
+                }
+            }
+        }
+        retired.retain(|memtable| Arc::strong_count(memtable) > 1);
+    }
+}
+
 impl<F: FileSystem + 'static> Engine<F> {
     /// Opens the database file `name` on `fs`, creating it when there is none, converting it
     /// when it holds a redb database, and replays the log of an unclean shutdown before it
@@ -482,15 +529,11 @@ impl<F: FileSystem + 'static> Engine<F> {
             #[cfg(any(test, feature = "fuzzing"))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
-                let (sender, receiver) = mpsc::channel::<Job>();
+                let (sender, receiver) = mpsc::channel::<Task<F>>();
                 let worker_shared = Arc::clone(&shared);
                 let worker = thread::Builder::new()
                     .name("rhizodb-checkpoint".to_owned())
-                    .spawn(move || {
-                        for job in receiver {
-                            worker_shared.run_checkpoint(job, false);
-                        }
-                    })?;
+                    .spawn(move || checkpoint_worker(&worker_shared, &receiver))?;
                 (Some(sender), Some(worker))
             }
         };
@@ -526,7 +569,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         if staged.ops.is_empty() {
             return Ok(());
         }
-        shared.drop_segments(writer);
+        self.drop_segments_aside(writer);
         let lsn = writer.last_lsn + 1;
         let hlc = hybrid_clock_after(writer.last_hlc);
         let record = batch_record(
@@ -548,7 +591,14 @@ impl<F: FileSystem + 'static> Engine<F> {
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
-        layers.active.apply(lsn, staged.into_changes(), horizon);
+        let changes: Vec<(TableId, Bytes, Slot)> = staged.into_changes().collect();
+        let graves: Vec<(TableId, Bytes)> = changes
+            .iter()
+            .filter(|(table, key, slot)| slot.is_none() && !layers.below_may_hold(*table, key))
+            .map(|(table, key, _)| (*table, Arc::clone(key)))
+            .collect();
+        layers.active.apply(lsn, changes, horizon);
+        layers.active.bury(lsn, graves);
         lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
         shared.wal_bytes.store(wal_size, Ordering::Relaxed);
@@ -563,13 +613,42 @@ impl<F: FileSystem + 'static> Engine<F> {
         Ok(())
     }
 
+    fn drop_segments_aside(&self, writer: &mut Writer<F>) {
+        let Some(sequence) = lock(&self.shared.droppable).take() else {
+            return;
+        };
+        let Some(wal) = writer.wal.as_mut() else {
+            return;
+        };
+        let detached = wal.detach_before(sequence);
+        self.shared.wal_bytes.store(wal.size(), Ordering::Relaxed);
+        if detached.is_empty() {
+            return;
+        }
+        let unsent = match &self.jobs {
+            Some(jobs) => match jobs.send(Task::Remove(detached)) {
+                Ok(()) => None,
+                Err(mpsc::SendError(Task::Remove(detached))) => Some(detached),
+                Err(mpsc::SendError(Task::Checkpoint(_))) => None,
+            },
+            None => Some(detached),
+        };
+        if let Some(detached) = unsent
+            && detached.remove().is_err()
+        {
+            self.shared.poison();
+        }
+    }
+
     fn start_checkpoint(&self, writer: &mut Writer<F>) {
         let Some(job) = self.shared.freeze(writer) else {
             return;
         };
         match &self.jobs {
             Some(jobs) => {
-                if let Err(mpsc::SendError(job)) = jobs.send(job) {
+                if let Err(mpsc::SendError(Task::Checkpoint(job))) =
+                    jobs.send(Task::Checkpoint(job))
+                {
                     self.shared.run_checkpoint(job, false);
                 }
             }

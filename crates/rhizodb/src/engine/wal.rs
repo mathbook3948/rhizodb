@@ -61,6 +61,27 @@ struct Segment {
 
 /// The write-ahead log of one database: segments of whole sector blocks, each record starting a
 /// block of its own, so an append never rewrites a synced sector.
+/// Log segments no durable header needs, which the log no longer lists.
+#[derive(Debug)]
+pub(crate) struct Detached<F: FileSystem> {
+    fs: Arc<F>,
+    names: Vec<String>,
+}
+
+impl<F: FileSystem> Detached<F> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// Removes the segments' files.
+    pub(crate) fn remove(self) -> Result<(), EngineError> {
+        for name in &self.names {
+            self.fs.remove(name)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Wal<F: FileSystem> {
     fs: Arc<F>,
@@ -354,14 +375,23 @@ impl<F: FileSystem> Wal<F> {
 
     /// Removes the segments before `sequence`, once a durable header no longer needs them.
     pub(crate) fn drop_before(&mut self, sequence: u64) -> Result<(), EngineError> {
+        self.detach_before(sequence).remove()
+    }
+
+    /// Forgets the segments before `sequence`, once a durable header no longer needs them, and
+    /// returns them for the caller to remove where removing them delays no commit.
+    pub(crate) fn detach_before(&mut self, sequence: u64) -> Detached<F> {
+        let mut names = Vec::new();
         while self.segments_oldest_first.len() > 1
             && self.segments_oldest_first[0].sequence < sequence
         {
             let segment = self.segments_oldest_first.remove(0);
-            self.fs
-                .remove(&segment_name(&self.base, segment.sequence))?;
+            names.push(segment_name(&self.base, segment.sequence));
         }
-        Ok(())
+        Detached {
+            fs: Arc::clone(&self.fs),
+            names,
+        }
     }
 
     /// Removes every segment, after a clean close made the log unneeded.
