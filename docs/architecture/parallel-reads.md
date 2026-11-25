@@ -28,11 +28,12 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - A query that calls a host procedure, any updating query including an updating `CALL` or `NEXT` block, any query in a write transaction, and `MATCH (n) RETURN count(n)` answered from node counts stay on the calling thread.
 - `OpenOptions::threads` sets the threads per query, defaulting to the available parallelism, and one or zero keeps every query on the calling thread.
 - `OpenOptions::parallel_threshold` sets the start nodes a match needs before it splits, defaulting to 8192, which is two row groups.
+- A threshold below two acts as two, since one start node cannot split.
 - Consecutive row groups join one morsel up to a quarter of a thread's share of the start nodes.
 - Threads are scoped to the query and spawned per split clause, with no pool.
 - Each database counts the threads running its read queries, callers and helpers alike, and a clause splits only when that count leaves some of `threads` idle, taking at most the idle ones as helpers.
 - A clause that finds no idle thread runs on the calling thread without collecting its start nodes for morsels.
-- Tests compare every split query with the serial path on random graphs, and the whole suite and the reference evaluator also run with splitting forced at a threshold of two.
+- Tests compare every split query with the serial path on random graphs, and the whole integration suite, the reference evaluator among it, also runs with splitting forced at a threshold of two in `mise run random-deep`.
 
 ## Open
 
