@@ -431,7 +431,111 @@ pub(crate) enum Expr {
     Count(Box<Subquery>),
     /// `COLLECT { query }`: the values of the single column the query returns.
     Collect(Box<SingleQuery>),
+    /// `VALUE { query }`: the value of the single column in the one row the query returns.
+    Value(Box<SingleQuery>),
+    /// `operand IS [NOT] ...` for the tests after `IS` other than `NULL` and `LABELED`.
+    Is(Box<IsTest>),
+    /// `CAST(operand AS target)`.
+    Cast(Box<Cast>),
     Reduce(Box<Reduce>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IsTest {
+    pub operand: Expr,
+    pub negated: bool,
+    pub test: Test,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Test {
+    /// `IS TYPED type` and `IS :: type`.
+    Typed(TypeExpr),
+    /// `IS TRUE`, `IS FALSE`, and `IS UNKNOWN` as `None`.
+    Truth(Option<bool>),
+    /// `IS [form] NORMALIZED`.
+    Normalized(NormalForm),
+    /// `IS DISTINCT FROM other`.
+    DistinctFrom(Expr),
+}
+
+/// A Unicode normalization form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NormalForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
+}
+
+impl NormalForm {
+    /// The form named by `name`, in any letter case.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [
+            ("NFC", Self::Nfc),
+            ("NFD", Self::Nfd),
+            ("NFKC", Self::Nfkc),
+            ("NFKD", Self::Nfkd),
+        ]
+        .into_iter()
+        .find(|(held, _)| held.eq_ignore_ascii_case(name))
+        .map(|(_, form)| form)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Nfc => "NFC",
+            Self::Nfd => "NFD",
+            Self::Nfkc => "NFKC",
+            Self::Nfkd => "NFKD",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Cast {
+    pub operand: Expr,
+    pub target: ValueType,
+}
+
+/// A union of value types, any of which a value may belong to. Never empty.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TypeExpr {
+    pub members: Vec<TypeMember>,
+}
+
+/// One type of a union. Null belongs to it unless `not_null` is set.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TypeMember {
+    pub value_type: ValueType,
+    pub not_null: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ValueType {
+    /// Every value.
+    Any,
+    /// No value, not even null.
+    Nothing,
+    /// Only null.
+    Null,
+    Boolean,
+    String,
+    Integer,
+    Float,
+    Date,
+    LocalTime,
+    ZonedTime,
+    LocalDateTime,
+    ZonedDateTime,
+    Duration,
+    Bytes,
+    Map,
+    Node,
+    Relationship,
+    Path,
+    /// A list whose every item belongs to the union.
+    List(Box<TypeExpr>),
 }
 
 /// `reduce(accumulator = init, variable IN source | body)`

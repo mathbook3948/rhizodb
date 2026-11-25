@@ -196,7 +196,14 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
         | Expr::Negate(inner)
         | Expr::UnaryPlus(inner)
         | Expr::HasLabels(inner, _)
-        | Expr::IsNull { operand: inner, .. } => independent(inner, bound_later),
+        | Expr::IsNull { operand: inner, .. }
+        | Expr::Typed(inner, _)
+        | Expr::Cast(inner, _)
+        | Expr::Truth(inner, _)
+        | Expr::Normalized(inner, _) => independent(inner, bound_later),
+        Expr::Distinct(left, right) => {
+            independent(left, bound_later) && independent(right, bound_later)
+        }
         Expr::Index(left, right) | Expr::Binary(_, left, right) => {
             independent(left, bound_later) && independent(right, bound_later)
         }
@@ -244,7 +251,9 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
 fn deterministic(function: Function) -> bool {
     !matches!(
         function,
-        Function::Rand | Function::Temporal(TemporalFunction::Clock(_, Moment::Realtime))
+        Function::Rand
+            | Function::RandomUuid
+            | Function::Temporal(TemporalFunction::Clock(_, Moment::Realtime))
     )
 }
 

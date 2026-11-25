@@ -6,6 +6,7 @@ use crate::gql::ast;
 use crate::gql::ast::Direction;
 use crate::procedure::Procedures;
 use crate::result::Parameters;
+use crate::temporal::build::Kind as TemporalKind;
 
 use super::builtin::Builtin;
 use super::datum::Datum;
@@ -51,6 +52,7 @@ use super::shape::procedure_parameter;
 use super::shape::slice_bound_error;
 use super::shape::slice_error;
 use super::shape::unary_error;
+use super::temporals::TemporalFunction;
 
 /// Resolves every variable of `query` to a row slot and rejects queries that are malformed by
 /// scope or by clause order. Parameters are folded in as constants.
@@ -153,6 +155,20 @@ fn clause_updates(clause: &ast::Clause) -> bool {
         | ast::Clause::Filter(_)
         | ast::Clause::Let(_) => false,
     }
+}
+
+fn current_clock(name: &str) -> Option<TemporalKind> {
+    [
+        ("CURRENT_DATE", TemporalKind::Date),
+        ("CURRENT_TIME", TemporalKind::Time),
+        ("CURRENT_TIMESTAMP", TemporalKind::DateTime),
+        ("LOCAL_TIME", TemporalKind::LocalTime),
+        ("LOCAL_TIMESTAMP", TemporalKind::LocalDateTime),
+        ("LOCAL_DATETIME", TemporalKind::LocalDateTime),
+    ]
+    .into_iter()
+    .find(|(held, _)| held.eq_ignore_ascii_case(name))
+    .map(|(_, kind)| kind)
 }
 
 fn union_parts(query: &ast::Query) -> (Vec<&ast::SingleQuery>, ast::UnionKind) {
@@ -1294,6 +1310,7 @@ impl Binder<'_> {
             ast::Expr::Map(_) => Some(Shape::Map),
             ast::Expr::Comparison { .. }
             | ast::Expr::IsNull { .. }
+            | ast::Expr::Is(_)
             | ast::Expr::HasLabels { .. }
             | ast::Expr::ListPredicate(_)
             | ast::Expr::Pattern(_)
@@ -1638,12 +1655,46 @@ impl Binder<'_> {
             ast::Expr::Pattern(element) => self.pattern_predicate(element, scope, mode),
             ast::Expr::Exists(subquery) => self.subquery(subquery, false, scope, mode),
             ast::Expr::Count(subquery) => self.subquery(subquery, true, scope, mode),
-            ast::Expr::Collect(query) => self.collect(query, scope, mode),
+            ast::Expr::Collect(query) => self.collect(query, false, scope, mode),
+            ast::Expr::Value(query) => self.collect(query, true, scope, mode),
             ast::Expr::Reduce(reduce) => self.reduce(reduce, scope, mode),
             ast::Expr::PatternComprehension(comprehension) => {
                 self.pattern_comprehension(comprehension, scope, mode)
             }
+            ast::Expr::Is(test) => self.is_test(test, scope, mode),
+            ast::Expr::Cast(cast) => Ok(Expr::Cast(
+                self.boxed(&cast.operand, scope, mode)?,
+                Box::new(cast.target.clone()),
+            )),
         }
+    }
+
+    fn is_test(
+        &mut self,
+        test: &ast::IsTest,
+        scope: &Scope,
+        mode: &mut Mode<'_>,
+    ) -> Result<Expr, Error> {
+        let operand = self.boxed(&test.operand, scope, mode)?;
+        let tested = match &test.test {
+            ast::Test::Typed(types) => Expr::Typed(operand, Box::new(types.clone())),
+            ast::Test::Truth(truth) => {
+                self.expect_shape(&test.operand, scope, &[Shape::Boolean]);
+                Expr::Truth(operand, *truth)
+            }
+            ast::Test::Normalized(form) => {
+                self.expect_shape(&test.operand, scope, &[Shape::String]);
+                Expr::Normalized(operand, *form)
+            }
+            ast::Test::DistinctFrom(other) => {
+                Expr::Distinct(operand, self.boxed(other, scope, mode)?)
+            }
+        };
+        Ok(if test.negated {
+            Expr::Not(Box::new(tested))
+        } else {
+            tested
+        })
     }
 
     fn projected_slot(
@@ -1719,6 +1770,14 @@ impl Binder<'_> {
             return Err(error(
                 ErrorKind::NonConstantExpression,
                 "SKIP and LIMIT cannot refer to variables",
+            ));
+        }
+        if scope.get(&name.0).is_none()
+            && let Some(kind) = current_clock(&name.0)
+        {
+            return Ok(Expr::Call(
+                Function::Temporal(TemporalFunction::Construct(kind)),
+                Vec::new(),
             ));
         }
         Ok(Expr::Slot(self.lookup(&name.0, scope)?.slot))
@@ -2117,15 +2176,21 @@ impl Binder<'_> {
     fn collect(
         &mut self,
         query: &ast::SingleQuery,
+        value: bool,
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
         let (clauses, output) = self.subquery_clauses(query, scope, mode)?;
-        match output.as_slice() {
-            [slot] => Ok(Expr::Subquery(SubqueryKind::Collect(*slot), clauses)),
-            _ => Err(error(
+        match (output.as_slice(), value) {
+            ([slot], false) => Ok(Expr::Subquery(SubqueryKind::Collect(*slot), clauses)),
+            ([slot], true) => Ok(Expr::Subquery(SubqueryKind::Value(*slot), clauses)),
+            (_, false) => Err(error(
                 ErrorKind::InvalidClauseComposition,
                 "a COLLECT subquery must end with a RETURN of one column",
+            )),
+            (_, true) => Err(error(
+                ErrorKind::InvalidClauseComposition,
+                "a VALUE subquery must end with a RETURN of one column",
             )),
         }
     }
@@ -2430,7 +2495,12 @@ fn evaluated_parts(expr: &Expr) -> Option<Parts<'_>> {
         | Expr::Not(operand)
         | Expr::Negate(operand)
         | Expr::UnaryPlus(operand)
-        | Expr::IsNull { operand, .. } => Parts::always(vec![operand]),
+        | Expr::IsNull { operand, .. }
+        | Expr::Typed(operand, _)
+        | Expr::Cast(operand, _)
+        | Expr::Truth(operand, _)
+        | Expr::Normalized(operand, _) => Parts::always(vec![operand]),
+        Expr::Distinct(a, b) => Parts::always(vec![a, b]),
         Expr::Index(base, index) | Expr::Binary(_, base, index) => Parts::always(vec![base, index]),
         Expr::Slice(base, from, to) => Parts::always(
             std::iter::once(&**base)
@@ -2660,7 +2730,9 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             collect_free(&reduce.body, bound, free);
             bound.truncate(bound.len() - 2);
         }
-        ast::Expr::Collect(query) => collect_clauses_free(&query.clauses, bound, free),
+        ast::Expr::Collect(query) | ast::Expr::Value(query) => {
+            collect_clauses_free(&query.clauses, bound, free);
+        }
         ast::Expr::Exists(subquery) | ast::Expr::Count(subquery) => match subquery.as_ref() {
             ast::Subquery::Pattern { patterns, filter } => {
                 for part in patterns {
@@ -2920,7 +2992,8 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
         | ast::Expr::Pattern(_)
         | ast::Expr::Exists(_)
         | ast::Expr::Count(_)
-        | ast::Expr::Collect(_) => Vec::new(),
+        | ast::Expr::Collect(_)
+        | ast::Expr::Value(_) => Vec::new(),
         ast::Expr::List(items) => items.iter().collect(),
         ast::Expr::Map(entries) => entries.iter().map(|(_, value)| value).collect(),
         ast::Expr::Property { base, .. } => vec![base],
@@ -2936,6 +3009,11 @@ fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
             .chain(rest.iter().map(|(_, operand)| operand))
             .collect(),
         ast::Expr::IsNull { operand, .. } => vec![operand],
+        ast::Expr::Is(test) => match &test.test {
+            ast::Test::DistinctFrom(other) => vec![&test.operand, other],
+            _ => vec![&test.operand],
+        },
+        ast::Expr::Cast(cast) => vec![&cast.operand],
         ast::Expr::Function(call) => call.args.iter().collect(),
         ast::Expr::Case(case) => case
             .scrutinee
@@ -2983,6 +3061,8 @@ fn kind_of(expr: &ast::Expr, scope: &Scope) -> Kind {
         | ast::Expr::Binary { .. }
         | ast::Expr::Comparison { .. }
         | ast::Expr::IsNull { .. }
+        | ast::Expr::Is(_)
+        | ast::Expr::Cast(_)
         | ast::Expr::HasLabels { .. }
         | ast::Expr::Unary { .. }
         | ast::Expr::ListPredicate(_)

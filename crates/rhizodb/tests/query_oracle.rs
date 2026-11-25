@@ -181,6 +181,10 @@ fn check_filter(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Re
         format!("MATCH (n) WHERE EXISTS {{ MATCH (m) WHERE m = n AND {with_m} }} RETURN n.k"),
         format!("MATCH (m) WITH m AS n WHERE {text} RETURN n.k"),
         format!("MATCH (n) RETURN n NEXT FILTER {text} RETURN n.k"),
+        format!("MATCH (n) WHERE VALUE {{ RETURN {text} }} RETURN n.k"),
+        format!("MATCH (n) WHERE ({text}) IS TRUE RETURN n.k"),
+        format!("MATCH (n) WHERE ({text}) IS NOT DISTINCT FROM true RETURN n.k"),
+        format!("MATCH (n) WHERE NOT ({text}) IS NOT TRUE RETURN n.k"),
         format!("MATCH (n) RETURN n, {text} AS keep NEXT YIELD n, keep FILTER keep RETURN n.k"),
     ];
     let variant = choices.pick(&variants);

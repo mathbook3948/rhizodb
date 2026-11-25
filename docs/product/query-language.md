@@ -56,6 +56,9 @@ GQL is the reference language, but the only public conformance suite is the open
 - `COUNT { ... }` takes the same bodies as `EXISTS` under the same scope rules, and gives how many rows its query gives or how many times its patterns match.
 - `COLLECT { query }` gives, as a list in row order, the one column that its query's final `RETURN` gives, and any other query is an invalid clause composition.
 - A query inside `COUNT` or `COLLECT` cannot update the graph, and `COUNT` and `COLLECT` followed by parentheses stay the aggregates.
+- `VALUE { query }` takes the bodies of `COLLECT` under the same scope rules, and gives the value of the one column in the one row its query returns, or null when the query returns no row.
+- A `VALUE` query that returns more than one row fails with `ErrorKind::CardinalityViolation`, which depends on data and never on the query text alone.
+- A query inside `VALUE` cannot update the graph, and `VALUE` is a keyword only before `{`, so it still works as a name.
 - `reduce(accumulator = init, variable IN list | body)` folds the list from the left, gives `init` for an empty list and null for a null list, and its body cannot aggregate.
 - `[OPTIONAL] CALL { query }` runs its query once per incoming row and extends the row with each row the query returns, and `OPTIONAL CALL` keeps a row whose query returns none, with nulls.
 - A `CALL` query sees the outer variables its scope clause names, `(a, b)`, `()`, or `(*)`, and without a scope clause those that the plain variable items of a leading `WITH` name, so any other name inside is a new variable.
@@ -70,6 +73,14 @@ GQL is the reference language, but the only public conformance suite is the open
 - A simple `CASE` branch takes a list of tests of the scrutinee, each a value it must equal, a comparison operator and a value, or `IS [NOT] NULL`, and the scrutinee is evaluated once.
 - `ORDER BY` takes `NULLS FIRST` and `NULLS LAST`, and without them nulls sort last ascending and first descending.
 - GQL's function names `upper`, `lower`, `char_length`, `character_length`, `byte_length`, `octet_length`, `cardinality`, `path_length`, `ln`, `power`, `mod`, `sinh`, `cosh`, `tanh`, `cot`, `nullif`, and two-argument `log(base, value)` exist next to the Cypher names.
+- `randomUUID()` gives a new random version 4 UUID in its hyphenated lowercase form at each call.
+- `haversin(x)` is `(1 - cos(x)) / 2`.
+- `round(value, precision [, mode])` rounds the shortest decimal form of the value to `precision` places, with the modes `UP`, `DOWN`, `CEILING`, `FLOOR`, `HALF_UP` by default, `HALF_DOWN`, and `HALF_EVEN`, and a negative precision fails as a number out of range.
+- `timestamp()` gives the statement clock in milliseconds since the Unix epoch.
+- `ceiling` is another name for `ceil`.
+- `toBooleanList`, `toIntegerList`, `toFloatList`, and `toStringList` convert each item of a list as the `OrNull` conversions do.
+- `vector.similarity.cosine` and `vector.similarity.euclidean` follow Neo4j: `(1 + cosine) / 2` and `1 / (1 + d²)`, null when an item is null or a cosine vector is zero, and an error for vectors of different lengths.
+- `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`, `LOCAL_TIMESTAMP`, and `LOCAL_DATETIME` without parentheses read the statement clock, unless a variable of that name is in scope.
 - `trim([LEADING | TRAILING | BOTH] [characters] FROM text)` and two-argument `ltrim`, `rtrim`, and `btrim` strip any character of `characters` rather than one character string.
 - Cypher's `isEmpty`, `isNaN`, `elementId`, and the `OrNull` conversions exist, and `elementId` gives a string that names the kind and ID of the element.
 - Single queries join with GQL's `EXCEPT`, `INTERSECT`, and `OTHERWISE` as well as `UNION`, from left to right, and one query uses only one operator.
@@ -178,6 +189,19 @@ GQL is the reference language, but the only public conformance suite is the open
 - Within a temporal type, `ORDER BY` sorts by instant or by value, and then by offset and zone.
 - A temporal argument that does not parse, a map key a temporal function does not know or cannot combine, and a component outside its range fail with their own error kind.
 - That error kind depends on values and never on the query text alone.
+- `IS TYPED type` and Cypher's `IS :: type` test whether a value belongs to a type, and never give null.
+- A type is a name from GQL or Cypher, such as `INTEGER`, `INT`, `STRING`, `ZONED DATETIME`, or `TIMESTAMP WITH TIME ZONE`, `LIST<type>` or `type LIST`, `ANY`, `NOTHING`, or `NULL`, optionally followed by `NOT NULL`.
+- A type may be a union joined by `|` or written `ANY<...>`, and a union at the top of a comprehension filter needs parentheses, as a label disjunction does.
+- Null belongs to every type not declared `NOT NULL` except `NOTHING`, and a list belongs to `LIST<type>` when every item belongs to `type`.
+- `valueType(value)` gives the name of the most specific type of a value, in Cypher's form such as `INTEGER NOT NULL` or `LIST<INTEGER | STRING> NOT NULL`.
+- `valueType` lists the item types of a list in a fixed order set in code, marks them `NOT NULL` when the list holds no null, and gives `LIST<NOTHING>` for an empty list.
+- `CAST(value AS type)` keeps null and a value of the target type, and converts numbers, booleans, and temporal values to text, text to numbers, booleans, and temporal values, integers to floats, floats to integers toward zero, temporal values to other temporal types, and lists item by item.
+- `CAST` of any other value, or of text that does not read as the target type, fails with `ErrorKind::InvalidCast`, except that malformed temporal text fails as an invalid temporal value.
+- `CAST` reads text as the conversion function of the target type does, such as `toInteger` for `INTEGER` and `date` for `DATE`.
+- `IS TRUE`, `IS FALSE`, and `IS UNKNOWN` test a boolean, where null is unknown, never give null, and fail on any other type.
+- `IS DISTINCT FROM` compares two values as `DISTINCT` does, so two nulls are not distinct, and it never gives null.
+- `normalize(text [, form])` and `text IS [form] NORMALIZED` take the form `NFC`, `NFD`, `NFKC`, or `NFKD`, as a bare word or a string, with `NFC` by default.
+- `NFC`, `NFD`, `NFKC`, and `NFKD` are read as forms only as the last argument of `normalize`, so they still work as names elsewhere.
 - `=~` is true when the regular expression on its right matches the whole string on its left.
 - Regular expressions follow the syntax of the Rust `regex` crate, so lookaround and backreferences are not accepted.
 - Matching takes time linear in the length of the string, whatever the pattern.

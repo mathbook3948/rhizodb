@@ -2,6 +2,7 @@ mod clause;
 mod expression;
 mod label;
 mod pattern;
+mod types;
 
 use super::ast::Block;
 use super::ast::Call;

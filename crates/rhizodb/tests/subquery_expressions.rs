@@ -203,3 +203,68 @@ fn reduce_is_still_a_name_without_an_accumulator() {
         ErrorKind::UnknownFunction
     );
 }
+
+#[test]
+fn value_gives_the_one_value_its_query_returns() {
+    let db = graph();
+    assert_eq!(single(&db, "RETURN VALUE { RETURN 1 } AS v"), int(1));
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (p:P) RETURN p.k, VALUE { MATCH (p)-[:T]->(q) RETURN max(q.k) } AS m ORDER BY p.k"
+        ),
+        [
+            [int(1), int(3)],
+            [int(2), int(3)],
+            [int(3), rhizodb::Value::Null]
+        ]
+    );
+    assert_eq!(
+        single(&db, "RETURN VALUE { MATCH (z:Nope) RETURN z.k } AS v"),
+        rhizodb::Value::Null
+    );
+    assert_eq!(
+        ints(&run(
+            &db,
+            "MATCH (p:P) WHERE VALUE { RETURN p.k > 1 } RETURN p.k ORDER BY p.k"
+        )),
+        [2, 3]
+    );
+    assert_eq!(single(&db, "LET v = VALUE { RETURN 5 } RETURN v"), int(5));
+}
+
+#[test]
+fn value_fails_when_its_query_returns_more_than_one_row() {
+    let db = graph();
+    assert_eq!(
+        error_kind(
+            &db,
+            "MATCH (p:P {k: 1}) RETURN VALUE { MATCH (p)-[:T]->(q) RETURN q.k } AS v"
+        ),
+        ErrorKind::CardinalityViolation
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (p:P) WHERE p.k > 1 RETURN VALUE { MATCH (p)-[:T]->(q) RETURN q.k } AS v ORDER BY v"
+        ),
+        [[int(3)], [rhizodb::Value::Null]]
+    );
+}
+
+#[test]
+fn value_takes_a_query_of_one_column_that_does_not_update() {
+    let db = graph();
+    for query in [
+        "RETURN VALUE { RETURN 1 AS a, 2 AS b } AS v",
+        "RETURN VALUE { MATCH (p) } AS v",
+        "RETURN VALUE { INSERT (:X) RETURN 1 } AS v",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::InvalidClauseComposition,
+            "{query}"
+        );
+    }
+    assert_eq!(single(&db, "WITH 2 AS value RETURN value"), int(2));
+}

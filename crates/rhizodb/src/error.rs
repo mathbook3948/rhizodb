@@ -124,6 +124,11 @@ pub enum ErrorKind {
     InvalidRegex,
     /// A numeric argument outside the range the function accepts.
     NumberOutOfRange,
+    /// A `VALUE { ... }` subquery returned more than one row.
+    CardinalityViolation,
+    /// `CAST` got a value it cannot convert to the target type, such as text that does not read
+    /// as a number, or a value of a type with no conversion to the target.
+    InvalidCast,
     /// A temporal value that cannot be built or read: a malformed date or duration string, a
     /// component out of range, an unknown time zone, or a result past the supported years.
     InvalidTemporalValue,

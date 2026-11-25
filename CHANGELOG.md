@@ -21,6 +21,9 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `CALL { ... }` subqueries with GQL variable scope clauses, `OPTIONAL CALL`, and `UNION` inside, the GQL string and numeric functions, `trim(... FROM ...)`, simple `CASE` branches with lists of tests and comparisons, and `ORDER BY ... NULLS FIRST | LAST`.
 - GQL's `EXCEPT`, `INTERSECT`, each with `ALL` or `DISTINCT`, and `OTHERWISE` between queries and inside `CALL { ... }`.
 - GQL's `||` concatenation of strings and of lists.
+- The functions `randomUUID`, `haversin`, `timestamp`, `ceiling`, `toBooleanList`, `toIntegerList`, `toFloatList`, `toStringList`, `vector.similarity.cosine`, and `vector.similarity.euclidean`, `round` with a precision and a rounding mode, and GQL's `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`, and `LOCAL_TIMESTAMP`.
+- Value type predicates `IS [NOT] TYPED` and `IS [NOT] ::`, `CAST(value AS type)` with the new `ErrorKind::InvalidCast`, `valueType()`, `normalize()`, `IS [NOT] [form] NORMALIZED`, `IS [NOT] TRUE`, `FALSE`, and `UNKNOWN`, and `IS [NOT] DISTINCT FROM`.
+- GQL's `VALUE { ... }` subqueries, and the new `ErrorKind::CardinalityViolation` for one that returns more than one row.
 - GQL's `NEXT` between statements, with `NEXT YIELD`, at the top of a query and inside `CALL { ... }`.
 - Updating `CALL { ... }` subqueries, which run their writes once per incoming row in the enclosing transaction, may end without `RETURN`, and work with scope clauses, `OPTIONAL CALL`, and `UNION`.
 - Explicit read and write transactions through `Database::begin_read` and `Database::begin_write`.

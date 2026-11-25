@@ -4,9 +4,12 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::TypeExpr;
 use crate::gql::ast::UnionKind;
+use crate::gql::ast::ValueType;
 use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
@@ -355,6 +358,16 @@ pub(crate) enum Expr {
     Reduce(Box<Reduce>),
     /// `[pattern WHERE filter | projection]`: one value per match.
     PatternComprehension(Box<PatternQuery>, Box<Expr>),
+    /// Whether the value belongs to one of the types.
+    Typed(Box<Expr>, Box<TypeExpr>),
+    /// `CAST(value AS type)`.
+    Cast(Box<Expr>, Box<ValueType>),
+    /// `IS TRUE`, `IS FALSE`, or `IS UNKNOWN` as `None`, of a boolean or null.
+    Truth(Box<Expr>, Option<bool>),
+    /// `IS form NORMALIZED`, null for null.
+    Normalized(Box<Expr>, NormalForm),
+    /// `IS DISTINCT FROM`, which treats two nulls as the same and never gives null.
+    Distinct(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Debug)]
@@ -370,6 +383,8 @@ pub(crate) enum SubqueryKind {
     Count,
     /// The values of this slot, one per row.
     Collect(Slot),
+    /// The value of this slot in the one row, or null without rows.
+    Value(Slot),
 }
 
 #[derive(Clone, Debug)]

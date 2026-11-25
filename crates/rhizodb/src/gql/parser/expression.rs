@@ -2,17 +2,22 @@ use super::ParseResult;
 use super::Parser;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::Case;
+use crate::gql::ast::Cast;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Expr;
 use crate::gql::ast::FunctionCall;
+use crate::gql::ast::IsTest;
 use crate::gql::ast::ListComprehension;
 use crate::gql::ast::ListPredicate;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::PatternComprehension;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::Reduce;
+use crate::gql::ast::SingleQuery;
 use crate::gql::ast::Subquery;
+use crate::gql::ast::Test;
 use crate::gql::ast::UnaryOp;
 use crate::gql::ast::WhenOperand;
 use crate::gql::ast::WhenThen;
@@ -132,6 +137,13 @@ impl Parser {
     fn is_suffix(&mut self, lhs: Expr) -> ParseResult<Expr> {
         self.pos += 1;
         let negated = self.eat_keyword("NOT");
+        if let Some(test) = self.is_test()? {
+            return Ok(Expr::Is(Box::new(IsTest {
+                operand: lhs,
+                negated,
+                test,
+            })));
+        }
         if self.eat_keyword("LABELED") {
             let test = Expr::HasLabels {
                 operand: Box::new(lhs),
@@ -152,6 +164,45 @@ impl Parser {
                 negated,
             })
         }
+    }
+
+    fn is_test(&mut self) -> ParseResult<Option<Test>> {
+        if self.eat_keyword("TYPED") {
+            return Ok(Some(Test::Typed(self.type_expr()?)));
+        }
+        if self.at_punct(Punct::Colon) && self.punct_at(1, Punct::Colon) {
+            self.pos += 2;
+            return Ok(Some(Test::Typed(self.type_expr()?)));
+        }
+        for (keyword, truth) in [
+            ("TRUE", Some(true)),
+            ("FALSE", Some(false)),
+            ("UNKNOWN", None),
+        ] {
+            if self.eat_keyword(keyword) {
+                return Ok(Some(Test::Truth(truth)));
+            }
+        }
+        if self.at_keyword("DISTINCT") && self.keyword_at(1, "FROM") {
+            self.pos += 2;
+            return Ok(Some(Test::DistinctFrom(
+                self.binary(PREDICATE_PRECEDENCE + 1)?,
+            )));
+        }
+        if self.eat_keyword("NORMALIZED") {
+            return Ok(Some(Test::Normalized(NormalForm::Nfc)));
+        }
+        if let Some(TokenKind::Word {
+            text,
+            quoted: false,
+        }) = self.kind_at(0)
+            && let Some(form) = NormalForm::named(text)
+            && self.keyword_at(1, "NORMALIZED")
+        {
+            self.pos += 2;
+            return Ok(Some(Test::Normalized(form)));
+        }
+        Ok(None)
     }
 
     fn comparison_rest(
@@ -446,14 +497,14 @@ impl Parser {
         })))
     }
 
-    fn collect_subquery(&mut self) -> ParseResult<Expr> {
+    fn query_in_braces(&mut self) -> ParseResult<SingleQuery> {
         self.pos += 2;
         if !self.at_clause_start() {
             return Err(self.unexpected());
         }
         let query = self.nested(Self::single_query)?;
         self.expect_punct(Punct::RBrace)?;
-        Ok(Expr::Collect(Box::new(query)))
+        Ok(query)
     }
 
     fn subquery_body(&mut self) -> ParseResult<Subquery> {
@@ -516,7 +567,10 @@ impl Parser {
                     return Ok(Expr::Count(Box::new(self.subquery_body()?)));
                 }
                 if is("COLLECT") {
-                    return self.collect_subquery();
+                    return Ok(Expr::Collect(Box::new(self.query_in_braces()?)));
+                }
+                if is("VALUE") {
+                    return Ok(Expr::Value(Box::new(self.query_in_braces()?)));
                 }
             }
         }
@@ -581,6 +635,40 @@ impl Parser {
             {
                 self.pos += 2;
                 return Ok(Expr::CountStar);
+            }
+            if name.0.eq_ignore_ascii_case("cast") {
+                let operand = self.expression()?;
+                self.expect_keyword("AS")?;
+                let target = self.value_type()?;
+                self.expect_punct(Punct::RParen)?;
+                return Ok(Expr::Cast(Box::new(Cast { operand, target })));
+            }
+            if name.0.eq_ignore_ascii_case("normalize") && !self.at_punct(Punct::RParen) {
+                let text = self.expression()?;
+                let mut args = vec![text];
+                if self.eat_punct(Punct::Comma) {
+                    let form = match self.kind_at(0) {
+                        Some(TokenKind::Word {
+                            text: word,
+                            quoted: false,
+                        }) if self.punct_at(1, Punct::RParen) => NormalForm::named(word),
+                        _ => None,
+                    };
+                    args.push(match form {
+                        Some(form) => {
+                            self.pos += 1;
+                            Expr::Literal(Literal::String(form.name().to_owned()))
+                        }
+                        None => self.expression()?,
+                    });
+                }
+                self.expect_punct(Punct::RParen)?;
+                return Ok(Expr::Function(Box::new(FunctionCall {
+                    namespace,
+                    name,
+                    distinct: false,
+                    args,
+                })));
             }
         }
         let distinct = self.eat_keyword("DISTINCT");
