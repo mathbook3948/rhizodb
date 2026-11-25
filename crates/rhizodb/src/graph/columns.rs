@@ -968,28 +968,61 @@ impl Column {
     }
 }
 
-const NO_VALUE: u32 = u32::MAX;
+/// What a scan knows of a value without decoding it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Quick {
+    Absent,
+    Int(i64),
+    /// A value to read in full.
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Placed {
+    Absent,
+    Int(i64),
+    Float(f64),
+    Heap(u32),
+}
 
 /// A [`Column`] with where each slot's value lies, for a scan that reads the value of many slots.
+/// An integer or a float is held decoded.
 #[derive(Debug)]
 pub(crate) struct IndexedColumn {
     column: Column,
-    at: Vec<u32>,
+    at: Vec<Placed>,
 }
 
 impl IndexedColumn {
     pub(crate) fn new(column: Column) -> Self {
-        let mut at = vec![NO_VALUE; SLOTS];
+        let mut at = vec![Placed::Absent; SLOTS];
         for (segment, parts) in column.segments.iter().enumerate() {
             let Some(first) = parts.first() else {
                 continue;
             };
             let span = first.layout.span;
             for (held, part) in parts.iter().enumerate() {
-                for (index, position) in ones(part.layout.bitmap).enumerate() {
-                    if position / span == part.part {
-                        at[segment * SEGMENT_SLOTS + position] =
-                            (segment as u32) << 16 | (held as u32) << 8 | index as u32;
+                let layout = part.layout;
+                let words = match layout.kind {
+                    Kind::Int | Kind::Float => part.bytes.get(layout.values..).unwrap_or_default(),
+                    Kind::Bool | Kind::Str | Kind::Variant => &[],
+                };
+                let words = words.as_chunks::<8>().0;
+                for (index, position) in ones(layout.bitmap).enumerate() {
+                    if position / span != part.part {
+                        continue;
+                    }
+                    let placed = match words.get(index) {
+                        Some(word) if layout.kind == Kind::Int => {
+                            Placed::Int(i64::from_le_bytes(*word))
+                        }
+                        Some(word) => Placed::Float(f64::from_le_bytes(*word)),
+                        None => {
+                            Placed::Heap((segment as u32) << 16 | (held as u32) << 8 | index as u32)
+                        }
+                    };
+                    if let Some(slot) = at.get_mut(segment * SEGMENT_SLOTS + position) {
+                        *slot = placed;
                     }
                 }
             }
@@ -997,15 +1030,23 @@ impl IndexedColumn {
         Self { column, at }
     }
 
+    /// The value in `slot` of the group where it is absent or an integer.
+    pub(crate) fn quick(&self, slot: usize) -> Quick {
+        match self.at.get(slot) {
+            None | Some(Placed::Absent) => Quick::Absent,
+            Some(Placed::Int(value)) => Quick::Int(*value),
+            Some(Placed::Float(_) | Placed::Heap(_)) => Quick::Unknown,
+        }
+    }
+
     /// The value in `slot` of the group, as [`Column::cell_at`] reads it.
     pub(crate) fn cell_at(&self, slot: usize) -> Result<Option<Cell<'_>>, GraphError> {
-        let Some(&at) = self.at.get(slot) else {
-            return Ok(None);
+        let at = match self.at.get(slot) {
+            None | Some(Placed::Absent) => return Ok(None),
+            Some(Placed::Int(value)) => return Ok(Some(Cell::Int(*value))),
+            Some(Placed::Float(value)) => return Ok(Some(Cell::Float(*value))),
+            Some(Placed::Heap(at)) => *at as usize,
         };
-        if at == NO_VALUE {
-            return Ok(None);
-        }
-        let at = at as usize;
         match self
             .column
             .segments

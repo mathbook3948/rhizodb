@@ -17,6 +17,7 @@ use crate::graph::Cell;
 use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
+use crate::graph::Quick;
 use crate::graph::ScanGroup;
 use crate::graph::Target;
 use crate::graph::Text;
@@ -445,6 +446,17 @@ fn ordered(op: ComparisonOp, ordering: Ordering) -> bool {
     }
 }
 
+fn int_order(op: ComparisonOp, stored: i64, fixed: i64, mirrored: bool) -> bool {
+    ordered(
+        op,
+        if mirrored {
+            fixed.cmp(&stored)
+        } else {
+            stored.cmp(&fixed)
+        },
+    )
+}
+
 fn compare_args(op: ComparisonOp, left: &Arg<'_>, right: &Arg<'_>) -> Result<Option<bool>, Error> {
     if let (Arg::Cell(Cell::Int(left)), Arg::Datum(right)) = (left, right)
         && let Datum::Integer(right) = right.as_ref()
@@ -519,6 +531,11 @@ impl At<'_, '_> {
 
     fn datum(&self, value: &Value) -> Result<Datum, Error> {
         if let Value::Column(column) = value {
+            match self.group.quick(self.node, *column) {
+                Quick::Absent => return Ok(Datum::Null),
+                Quick::Int(value) => return Ok(Datum::Integer(value)),
+                Quick::Unknown => {}
+            }
             return match self.group.cell(self.node, *column)? {
                 Some(cell) => cell_datum(cell),
                 None => Ok(Datum::Null),
@@ -530,7 +547,43 @@ impl At<'_, '_> {
         })
     }
 
+    #[inline]
     fn holds(&self, pred: &Pred) -> Result<Option<bool>, Error> {
+        match self.quick(pred) {
+            Some(result) => Ok(result),
+            None => self.evaluate(pred),
+        }
+    }
+
+    #[inline]
+    fn quick(&self, pred: &Pred) -> Option<Option<bool>> {
+        match pred {
+            Pred::Against {
+                column,
+                op,
+                fixed,
+                mirrored,
+            } => match (self.group.quick(self.node, *column), fixed) {
+                (Quick::Int(value), Datum::Integer(fixed)) => {
+                    Some(Some(int_order(*op, value, *fixed, *mirrored)))
+                }
+                (Quick::Absent, fixed) if *mirrored => Some(comparison(*op, fixed, &Datum::Null)),
+                (Quick::Absent, fixed) => Some(comparison(*op, &Datum::Null, fixed)),
+                _ => None,
+            },
+            Pred::IsNull(Value::Column(column), negated) => {
+                match self.group.quick(self.node, *column) {
+                    Quick::Absent => Some(Some(!*negated)),
+                    Quick::Int(_) => Some(Some(*negated)),
+                    Quick::Unknown => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(never)]
+    fn evaluate(&self, pred: &Pred) -> Result<Option<bool>, Error> {
         Ok(match pred {
             Pred::Fixed(value) => *value,
             Pred::Against {
@@ -590,14 +643,9 @@ impl At<'_, '_> {
         mirrored: bool,
     ) -> Result<Option<bool>, Error> {
         Ok(match (self.group.cell(self.node, column)?, fixed) {
-            (Some(Cell::Int(value)), Datum::Integer(fixed)) => Some(ordered(
-                op,
-                if mirrored {
-                    fixed.cmp(&value)
-                } else {
-                    value.cmp(fixed)
-                },
-            )),
+            (Some(Cell::Int(value)), Datum::Integer(fixed)) => {
+                Some(int_order(op, value, *fixed, mirrored))
+            }
             (cell, fixed) => {
                 let stored = match cell {
                     Some(cell) => Arg::Cell(cell),
