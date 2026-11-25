@@ -161,6 +161,7 @@ fn split<'q, T: ReadTransaction>(
                 }
                 Job::Groups { found, projection }
             }
+            Items::Plain(_) if projection.distinct && projection.limit.is_none() => return None,
             Items::Plain(_) => Job::Rows {
                 next: Some(ReadClause::Project(Box::new(per_morsel(env, projection)?))),
                 projection: Some(projection),
