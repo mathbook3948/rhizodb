@@ -2,11 +2,26 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::engine::extent::Purpose;
+use crate::engine::layout::EXTENT_BLOCKS;
 
 fn sample() -> Catalog {
     let mut extents = ExtentTable::default();
-    extents.place(Purpose::Tree, 5, |_, _| {}).unwrap();
-    extents.place(Purpose::Meta, 1, |_, _| {}).unwrap();
+    extents.place(5, |_, _| {}).unwrap();
+    extents.place(EXTENT_BLOCKS, |_, _| {}).unwrap();
+    extents.entries.insert(
+        extents.next_extent,
+        ExtentEntry {
+            slot: extents.next_slot,
+            written: 7,
+            live: 2,
+            state: ExtentState::Sealed,
+            purpose: Purpose::Meta,
+            scheme: 0,
+            opened_term: 0,
+        },
+    );
+    extents.next_extent = ExtentId(extents.next_extent.0 + 1);
+    extents.next_slot += 1;
     let mut roots = BTreeMap::new();
     roots.insert(
         TableId(0x100),

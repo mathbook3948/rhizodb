@@ -15,7 +15,6 @@ use super::catalog::Catalog;
 use super::catalog::Root;
 use super::error::EngineError;
 use super::extent::ExtentTable;
-use super::extent::Purpose;
 use super::layout::BLOCK;
 use super::layout::ExtentId;
 use super::layout::TableId;
@@ -233,7 +232,6 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
     fn plan_runs(
         extents: &mut ExtentTable,
         pages: &Pages<B>,
-        purpose: Purpose,
         length: usize,
         lsn: u64,
     ) -> Result<Vec<RunRef>, EngineError> {
@@ -242,7 +240,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             .rev()
             .map(|payload| {
                 let blocks = run_blocks(payload);
-                let at = extents.place(purpose, blocks, |id, slot| pages.place_extent(id, slot))?;
+                let at = extents.place(blocks, |id, slot| pages.place_extent(id, slot))?;
                 Ok(RunRef { at, blocks, lsn })
             })
             .collect::<Result<Vec<_>, EngineError>>()?;
@@ -307,13 +305,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         owner: &[u8],
         bytes: &[u8],
     ) -> Result<BlobRef, EngineError> {
-        let runs = Self::plan_runs(
-            &mut self.extents,
-            self.pages,
-            Purpose::Values,
-            bytes.len(),
-            self.lsn,
-        )?;
+        let runs = Self::plan_runs(&mut self.extents, self.pages, bytes.len(), self.lsn)?;
         self.write_runs(&runs, role, table, owner, bytes)
     }
 
@@ -361,9 +353,9 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                     .ok_or_else(|| EngineError::corrupt("a long key was not written"))
             })?
         };
-        let at = self.extents.place(Purpose::Tree, 1, |id, slot| {
-            self.pages.place_extent(id, slot)
-        })?;
+        let at = self
+            .extents
+            .place(1, |id, slot| self.pages.place_extent(id, slot))?;
         let mut page = vec![0; PAGE_HEADER];
         page.extend_from_slice(&body);
         let free = page.len() as u16;
@@ -707,7 +699,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         .len();
         loop {
             let mut planned = self.extents.clone();
-            let runs = Self::plan_runs(&mut planned, self.pages, Purpose::Meta, length, self.lsn)?;
+            let runs = Self::plan_runs(&mut planned, self.pages, length, self.lsn)?;
             let payload = Catalog {
                 roots: roots.clone(),
                 extents: planned.clone(),

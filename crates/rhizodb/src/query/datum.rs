@@ -121,6 +121,14 @@ pub(crate) fn to_property(value: &Datum) -> Result<Option<PropertyValue>, Error>
     }
 }
 
+/// [`to_property`] of an owned value, which keeps a string's buffer.
+pub(crate) fn into_property(value: Datum) -> Result<Option<PropertyValue>, Error> {
+    match value {
+        Datum::String(value) => Ok(Some(PropertyValue::String(value))),
+        other => to_property(&other),
+    }
+}
+
 fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
     match value {
         Datum::Boolean(value) => Ok(PropertyValue::Boolean(*value)),
@@ -136,11 +144,11 @@ fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
                     format!("a property list cannot nest deeper than {MAX_DEPTH} levels"),
                 ));
             }
-            items
-                .iter()
-                .map(|item| to_stored(item, depth + 1))
-                .collect::<Result<_, _>>()
-                .map(PropertyValue::List)
+            let mut stored = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                stored.push(to_stored(item, depth + 1)?);
+            }
+            Ok(PropertyValue::List(stored))
         }
         other => Err(Error::new(
             ErrorKind::InvalidPropertyType,

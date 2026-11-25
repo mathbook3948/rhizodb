@@ -4,9 +4,12 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::TypeExpr;
 use crate::gql::ast::UnionKind;
+use crate::gql::ast::ValueType;
 use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
@@ -79,16 +82,22 @@ pub(crate) enum ReadClause {
     Filter(Expr),
     /// Extends each row with the value of each expression in its slot.
     Let(Vec<(Expr, Slot)>),
-    CallSubquery(Box<CallSubquery>),
+    CallSubquery(Box<CallSubquery<ReadClause>>),
 }
 
 /// `CALL { ... }`: runs every branch from each row and extends the row with each row the
-/// branches return, in `outputs`.
+/// branches return, in `outputs`. Without `outputs`, the branches end without `RETURN` and each
+/// row is kept once.
+///
+/// A statement after `NEXT` is a `table` call instead: every branch runs once on all the rows,
+/// and the rows the branches return, in `outputs`, replace them. Without `outputs` they become
+/// one row.
 #[derive(Clone, Debug)]
-pub(crate) struct CallSubquery {
+pub(crate) struct CallSubquery<C> {
     pub(crate) optional: bool,
+    pub(crate) table: bool,
     pub(crate) combine: UnionKind,
-    pub(crate) branches: Vec<Pipeline<ReadClause>>,
+    pub(crate) branches: Vec<Pipeline<C>>,
     pub(crate) outputs: Vec<Slot>,
 }
 
@@ -103,6 +112,8 @@ pub(crate) enum UpdateClause {
         targets: Vec<Expr>,
         retain: bool,
     },
+    /// A `CALL { ... }` whose query updates the graph.
+    CallSubquery(Box<CallSubquery<Clause>>),
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +123,16 @@ pub(crate) struct MatchClause {
     pub(crate) filter: Option<Expr>,
     /// Slots the clause binds, set to null when an optional match finds nothing.
     pub(crate) introduced: Vec<Slot>,
+    pub(crate) by_id: Option<Box<IdStart>>,
+}
+
+/// How a match of one pattern part runs when the ID lookup of its start node succeeds: `value`
+/// gives the ID, and `clause` matches from that node, bound, with the equality that the lookup
+/// served read as true.
+#[derive(Clone, Debug)]
+pub(crate) struct IdStart {
+    pub(crate) value: Expr,
+    pub(crate) clause: MatchClause,
 }
 
 /// A procedure call. Each row gets one row per result, with output `index` of the result in
@@ -350,6 +371,16 @@ pub(crate) enum Expr {
     Reduce(Box<Reduce>),
     /// `[pattern WHERE filter | projection]`: one value per match.
     PatternComprehension(Box<PatternQuery>, Box<Expr>),
+    /// Whether the value belongs to one of the types.
+    Typed(Box<Expr>, Box<TypeExpr>),
+    /// `CAST(value AS type)`.
+    Cast(Box<Expr>, Box<ValueType>),
+    /// `IS TRUE`, `IS FALSE`, or `IS UNKNOWN` as `None`, of a boolean or null.
+    Truth(Box<Expr>, Option<bool>),
+    /// `IS form NORMALIZED`, null for null.
+    Normalized(Box<Expr>, NormalForm),
+    /// `IS DISTINCT FROM`, which treats two nulls as the same and never gives null.
+    Distinct(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Debug)]
@@ -365,6 +396,8 @@ pub(crate) enum SubqueryKind {
     Count,
     /// The values of this slot, one per row.
     Collect(Slot),
+    /// The value of this slot in the one row, or null without rows.
+    Value(Slot),
 }
 
 #[derive(Clone, Debug)]

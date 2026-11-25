@@ -143,6 +143,70 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
     seeks
 }
 
+/// The value of the one `id()` equality of `filter` that names the start node of `part`, when
+/// the ID lookup of the start node reads that equality alone, and `filter` with that equality
+/// read as true. `None` when the start node has no such lookup.
+pub(crate) fn start_by_id(
+    part: &PatternPart,
+    filter: Option<&Expr>,
+    bound_later: &[Slot],
+) -> Option<(Expr, Option<Expr>)> {
+    let [first, ..] = part.seeks.as_slice() else {
+        return None;
+    };
+    if first.element != SeekElement::Start
+        || first.key != SeekKey::Id
+        || !matches!(first.tests.as_slice(), [SeekTest::Equal(_)])
+    {
+        return None;
+    }
+    let names_start = |expr: &Expr| match expr {
+        Expr::Call(Function::Id, args) => {
+            matches!(args.as_slice(), [Expr::Slot(slot)] if *slot == part.start.slot)
+        }
+        _ => false,
+    };
+    let filter = filter?;
+    let mut conjuncts = Vec::new();
+    collect_conjuncts(filter, &mut conjuncts);
+    let mut served = conjuncts.into_iter().filter_map(|conjunct| match conjunct {
+        Expr::Comparison(left, rest) => match rest.as_slice() {
+            [(ComparisonOp::Equal, right)]
+                if names_start(left) && independent(right, bound_later) =>
+            {
+                Some((conjunct, right))
+            }
+            [(ComparisonOp::Equal, right)]
+                if names_start(right) && independent(left, bound_later) =>
+            {
+                Some((conjunct, left.as_ref()))
+            }
+            _ => None,
+        },
+        _ => None,
+    });
+    let (conjunct, value) = served.next()?;
+    if served.next().is_some() {
+        return None;
+    }
+    let rest = (!std::ptr::eq(conjunct, filter)).then(|| read_as_true(filter, conjunct));
+    Some((value.clone(), rest))
+}
+
+fn read_as_true(expr: &Expr, conjunct: &Expr) -> Expr {
+    if std::ptr::eq(expr, conjunct) {
+        return Expr::Constant(Datum::Boolean(true));
+    }
+    match expr {
+        Expr::Binary(BinaryOp::And, left, right) => Expr::Binary(
+            BinaryOp::And,
+            Box::new(read_as_true(left, conjunct)),
+            Box::new(read_as_true(right, conjunct)),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn reaches_start(relationship: &RelationshipPattern) -> bool {
     !relationship.bound
         && relationship.direction != Direction::Undirected
@@ -196,7 +260,14 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
         | Expr::Negate(inner)
         | Expr::UnaryPlus(inner)
         | Expr::HasLabels(inner, _)
-        | Expr::IsNull { operand: inner, .. } => independent(inner, bound_later),
+        | Expr::IsNull { operand: inner, .. }
+        | Expr::Typed(inner, _)
+        | Expr::Cast(inner, _)
+        | Expr::Truth(inner, _)
+        | Expr::Normalized(inner, _) => independent(inner, bound_later),
+        Expr::Distinct(left, right) => {
+            independent(left, bound_later) && independent(right, bound_later)
+        }
         Expr::Index(left, right) | Expr::Binary(_, left, right) => {
             independent(left, bound_later) && independent(right, bound_later)
         }
@@ -244,7 +315,9 @@ fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
 fn deterministic(function: Function) -> bool {
     !matches!(
         function,
-        Function::Rand | Function::Temporal(TemporalFunction::Clock(_, Moment::Realtime))
+        Function::Rand
+            | Function::RandomUuid
+            | Function::Temporal(TemporalFunction::Clock(_, Moment::Realtime))
     )
 }
 
@@ -428,7 +501,8 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 }
 
-fn id(value: &Datum) -> Option<u64> {
+/// The element ID that `id()` of an element equal to `value` gives, if any.
+pub(crate) fn id(value: &Datum) -> Option<u64> {
     match value {
         Datum::Integer(id) => Some(*id as u64),
         Datum::Float(id) if id.fract() == 0.0 && (-TWO_TO_63..TWO_TO_63).contains(id) => {

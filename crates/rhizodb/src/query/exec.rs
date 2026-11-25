@@ -7,6 +7,7 @@ use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
 use crate::gql::ast::UnionKind;
 use crate::graph::GraphTx;
+use crate::graph::NodeId;
 use crate::procedure::Procedure;
 use crate::procedure::ValueType;
 use crate::result;
@@ -37,11 +38,13 @@ use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
 use super::plan::MatchClause;
+use super::plan::Pipeline;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
 use super::plan::Slot;
 use super::regex::Patterns;
+use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
@@ -102,29 +105,16 @@ pub(crate) fn run_write<W: WriteTransaction>(
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
     Env::new(&*tx, slots, parameters, now, &graveyard, &patterns).check_closed(&program.closed)?;
-    let rows = run(program, |clauses, rows| match clauses {
-        [Clause::Read(clause), rest @ ..] => {
-            Env::new(&*tx, slots, parameters, now, &graveyard, &patterns).read_clauses(
-                clause,
-                match rest.first() {
-                    Some(Clause::Read(next)) => Some(next),
-                    _ => None,
-                },
-                rows,
-            )
-        }
-        [Clause::Update(clause), ..] => Writer {
-            tx,
-            slots,
-            parameters,
-            now,
-            patterns: &patterns,
-            graveyard: &mut graveyard,
-        }
-        .apply(clause, rows)
-        .map(|rows| (rows, 1)),
-        [] => Ok((rows, 0)),
-    })?;
+    let mut writer = Writer {
+        tx,
+        slots,
+        parameters,
+        now,
+        patterns: &patterns,
+        graveyard: &mut graveyard,
+        tokens: Vec::new(),
+    };
+    let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
@@ -234,6 +224,65 @@ pub(crate) fn counted_label<'q>(
             .iter()
             .all(|(aggregate, _)| aggregate.counts_rows_binding(slot)))
     .then_some(label)
+}
+
+/// The values of a branch's output slots in each row it gave.
+pub(crate) fn branch_rows<C>(branch: &Pipeline<C>, rows: Vec<Row>) -> Vec<Vec<Datum>> {
+    rows.iter()
+        .map(|row| {
+            branch
+                .output
+                .iter()
+                .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+                .collect()
+        })
+        .collect()
+}
+
+/// The rows a `table` call gives from the rows of each branch.
+pub(crate) fn table_rows<C>(
+    call: &CallSubquery<C>,
+    parts: Vec<Vec<Vec<Datum>>>,
+    slots: usize,
+) -> Vec<Row> {
+    if call.outputs.is_empty() {
+        return vec![vec![Datum::Null; slots]];
+    }
+    combine(call.combine, parts)
+        .into_iter()
+        .map(|values| {
+            let mut row = vec![Datum::Null; slots];
+            for (slot, value) in call.outputs.iter().zip(values) {
+                set(&mut row, *slot, value);
+            }
+            row
+        })
+        .collect()
+}
+
+/// Adds to `out` the rows a `CALL` subquery gives for `row`, from the rows of each branch.
+pub(crate) fn extend_row<C>(
+    call: &CallSubquery<C>,
+    row: Row,
+    parts: Vec<Vec<Vec<Datum>>>,
+    out: &mut Vec<Row>,
+) {
+    if call.outputs.is_empty() {
+        out.push(row);
+        return;
+    }
+    let results = combine(call.combine, parts);
+    if results.is_empty() && call.optional {
+        out.push(row);
+        return;
+    }
+    for values in results {
+        let mut next = row.clone();
+        for (slot, value) in call.outputs.iter().zip(values) {
+            set(&mut next, *slot, value);
+        }
+        out.push(next);
+    }
 }
 
 fn materialize<T: ReadTransaction>(
@@ -383,7 +432,22 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn call_subquery(&self, call: &CallSubquery, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    fn call_subquery(
+        &self,
+        call: &CallSubquery<ReadClause>,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
+        if call.table {
+            let mut parts = Vec::new();
+            for branch in &call.branches {
+                let mut inner = rows.clone();
+                for clause in &branch.clauses {
+                    inner = self.read_clause(clause, inner)?;
+                }
+                parts.push(branch_rows(branch, inner));
+            }
+            return Ok(table_rows(call, parts, self.slots));
+        }
         let mut out = Vec::new();
         for row in rows {
             let mut parts = Vec::new();
@@ -392,31 +456,9 @@ impl<T: ReadTransaction> Env<'_, T> {
                 for clause in &branch.clauses {
                     inner = self.read_clause(clause, inner)?;
                 }
-                parts.push(
-                    inner
-                        .iter()
-                        .map(|result| {
-                            branch
-                                .output
-                                .iter()
-                                .map(|slot| result.get(*slot).cloned().unwrap_or(Datum::Null))
-                                .collect()
-                        })
-                        .collect(),
-                );
+                parts.push(branch_rows(branch, inner));
             }
-            let results = combine(call.combine, parts);
-            if results.is_empty() && call.optional {
-                out.push(row);
-                continue;
-            }
-            for values in results {
-                let mut next = row.clone();
-                for (slot, value) in call.outputs.iter().zip(values) {
-                    set(&mut next, *slot, value);
-                }
-                out.push(next);
-            }
+            extend_row(call, row, parts, &mut out);
         }
         Ok(out)
     }
@@ -511,18 +553,39 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
-        for row in rows {
+        for mut row in rows {
             let before = out.len();
-            self.match_patterns(&found.patterns, &row, &mut |matched| {
-                let keep = match &found.filter {
-                    Some(filter) => self.predicate(filter, matched)?,
-                    None => true,
-                };
-                if keep {
-                    out.push(matched.clone());
+            let sought = found.by_id.as_deref().and_then(|by_id| {
+                let value = self.eval(&by_id.value, &row).ok()?;
+                Some((by_id, value))
+            });
+            match sought {
+                Some((by_id, value)) => {
+                    if let (Some(id), [part]) = (seek::id(&value), by_id.clause.patterns.as_slice())
+                    {
+                        let id = NodeId(id);
+                        set(&mut row, part.start.slot, Datum::Node(id));
+                        if part.steps.is_empty()
+                            && part.path.is_none()
+                            && part.start.labels.is_none()
+                            && part.start.properties.is_none()
+                        {
+                            let kept = self.with_labels(id, |_| ())?.is_some()
+                                && match &by_id.clause.filter {
+                                    Some(filter) => self.predicate(filter, &row)?,
+                                    None => true,
+                                };
+                            if kept {
+                                out.push(row);
+                                continue;
+                            }
+                        } else {
+                            self.match_into(&by_id.clause, &row, &mut out)?;
+                        }
+                    }
                 }
-                Ok(true)
-            })?;
+                None => self.match_into(found, &row, &mut out)?,
+            }
             if found.optional && out.len() == before {
                 let mut padded = row;
                 for slot in &found.introduced {
@@ -532,6 +595,19 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
         }
         Ok(out)
+    }
+
+    fn match_into(&self, found: &MatchClause, row: &Row, out: &mut Vec<Row>) -> Result<(), Error> {
+        self.match_patterns(&found.patterns, row, &mut |matched| {
+            let keep = match &found.filter {
+                Some(filter) => self.predicate(filter, matched)?,
+                None => true,
+            };
+            if keep {
+                out.push(matched.clone());
+            }
+            Ok(true)
+        })
     }
 
     fn project(&self, projection: &Projection, rows: Vec<Row>) -> Result<Vec<Row>, Error> {

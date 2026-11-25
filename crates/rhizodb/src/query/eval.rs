@@ -10,7 +10,10 @@ use crate::error::ErrorKind;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::LabelExpr;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::Quantifier;
+use crate::gql::ast::TypeExpr;
+use crate::gql::ast::ValueType;
 use crate::graph::AdjacencyReader;
 use crate::graph::ColumnReader;
 use crate::graph::GraphTx;
@@ -28,10 +31,12 @@ use crate::storage::ReadTransaction;
 use crate::temporal::Clocks;
 
 use super::compare::Comparison;
+use super::compare::Key;
 use super::compare::compare;
 use super::compare::equals;
 use super::datum;
 use super::datum::Datum;
+use super::functions;
 use super::functions::Function;
 use super::parallel::Morsel;
 use super::plan::AggregateFunction;
@@ -48,6 +53,7 @@ use super::regex::Patterns;
 use super::taint;
 use super::taint::Taint;
 use super::temporals;
+use super::types;
 use super::update::Graveyard;
 
 /// One row: a value for every slot of the query.
@@ -464,7 +470,78 @@ impl<T: ReadTransaction> Env<'_, T> {
             Expr::PatternComprehension(query, projection) => {
                 self.pattern_comprehension(query, projection, row)
             }
+            Expr::Typed(operand, types) => self.typed(operand, types, row),
+            Expr::Cast(operand, target) => self.cast_value(operand, target, row),
+            Expr::Truth(operand, truth) => self.truth(operand, *truth, row),
+            Expr::Normalized(operand, form) => self.normalized(operand, *form, row),
+            Expr::Distinct(a, b) => self.distinct(a, b, row),
         }
+    }
+
+    fn typed(&self, operand: &Expr, types: &TypeExpr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (value, taint) = self.tracked(operand, row)?;
+        Ok((
+            Datum::Boolean(types::is_typed(&value, types)),
+            Taint::when(taint.is_tainted()),
+        ))
+    }
+
+    fn cast_value(
+        &self,
+        operand: &Expr,
+        target: &ValueType,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (value, taint) = self.tracked(operand, row)?;
+        let doubtful = taint.is_tainted();
+        settle(self.cast(value, target), doubtful, Taint::when(doubtful))
+    }
+
+    fn distinct(&self, a: &Expr, b: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        let (a, a_taint) = self.tracked(a, row)?;
+        let (b, b_taint) = self.tracked(b, row)?;
+        Ok((
+            Datum::Boolean(Key(vec![a]) != Key(vec![b])),
+            Taint::when(a_taint.is_tainted() || b_taint.is_tainted()),
+        ))
+    }
+
+    fn truth(
+        &self,
+        operand: &Expr,
+        truth: Option<bool>,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (value, taint) = self.tracked(operand, row)?;
+        let doubtful = taint.is_whole();
+        let result = match value {
+            Datum::Null => Ok(Datum::Boolean(truth.is_none())),
+            Datum::Boolean(value) => Ok(Datum::Boolean(truth == Some(value))),
+            other => Err(type_error(format!(
+                "a truth value test takes a boolean, not a {}",
+                other.type_name()
+            ))),
+        };
+        settle(result, doubtful, Taint::when(doubtful))
+    }
+
+    fn normalized(
+        &self,
+        operand: &Expr,
+        form: NormalForm,
+        row: &Row,
+    ) -> Result<(Datum, Taint), Error> {
+        let (value, taint) = self.tracked(operand, row)?;
+        let doubtful = taint.is_whole();
+        let result = match value {
+            Datum::Null => Ok(Datum::Null),
+            Datum::String(text) => Ok(Datum::Boolean(functions::normalized(&text, form) == *text)),
+            other => Err(type_error(format!(
+                "IS NORMALIZED takes a string, not a {}",
+                other.type_name()
+            ))),
+        };
+        settle(result, doubtful, Taint::when(doubtful))
     }
 
     fn list(&self, items: &[Expr], row: &Row) -> Result<(Datum, Taint), Error> {
@@ -810,6 +887,18 @@ impl<T: ReadTransaction> Env<'_, T> {
                     })
                     .collect(),
             )?,
+            SubqueryKind::Value(slot) => match rows.as_mut_slice() {
+                [] => Datum::Null,
+                [row] => row
+                    .get_mut(slot)
+                    .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null)),
+                _ => {
+                    return Err(Error::new(
+                        ErrorKind::CardinalityViolation,
+                        format!("a VALUE subquery returned {} rows", rows.len()),
+                    ));
+                }
+            },
         };
         Ok((value, Taint::Clean))
     }

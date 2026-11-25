@@ -715,9 +715,46 @@ pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId
     nodes
 }
 
+/// Rewrites a database of the current format in the layout of format 13, which kept each
+/// element's posting of a term as its own entry under the element's ID, so a test can open it as
+/// an older version.
+pub(crate) fn store_as_format_thirteen(write: &mut impl WriteTransaction) {
+    let blocks = write.scan_prefix(Table::KeywordPostings, &[]).unwrap();
+    for (key, _) in &blocks {
+        write.delete(Table::KeywordPostings, key).unwrap();
+    }
+    for (key, value) in blocks {
+        let block = keys::parse_posting_block(&key).unwrap();
+        let prefix = &key[..key.len() - 8];
+        for posting in postings::Entries::new(block, &value) {
+            let posting = posting.unwrap();
+            let mut row = posting.frequency.to_be_bytes().to_vec();
+            row.extend_from_slice(&posting.length.to_be_bytes());
+            let mut previous = 0;
+            for position in &posting.positions {
+                crate::value::put_varint(&mut row, usize::try_from(position - previous).unwrap());
+                previous = *position;
+            }
+            let mut element_key = prefix.to_vec();
+            element_key.extend_from_slice(&posting.element.to_be_bytes());
+            write
+                .put(Table::KeywordPostings, &element_key, &row)
+                .unwrap();
+        }
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &13u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
 /// Rewrites a database of the current format in the layout of format 11, which kept each
 /// relationship record as its own entry under its ID, so a test can open it as an older version.
 pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
+    store_as_format_thirteen(write);
     for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
         let chunk = relationships::parse_key(&key).unwrap();
         for entry in ChunkRef::parse(&value).unwrap().entries() {

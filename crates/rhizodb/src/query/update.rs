@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -17,16 +18,23 @@ use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Token;
+use crate::graph::TokenKind;
 use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
 use super::datum::Datum;
 use super::datum::PathIds;
+use super::datum::check_item;
+use super::datum::into_property;
 use super::datum::to_property;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
 use super::eval::type_error;
+use super::exec::branch_rows;
+use super::exec::extend_row;
+use super::exec::table_rows;
+use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::MergeClause;
 use super::plan::NodePattern;
@@ -53,6 +61,7 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) now: &'a Clocks,
     pub(crate) patterns: &'a Patterns,
     pub(crate) graveyard: &'a mut Graveyard,
+    pub(crate) tokens: Vec<(u8, String, u32)>,
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -101,7 +110,57 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 self.delete(*detach, *retain, targets, &rows)?;
                 Ok(rows)
             }
+            UpdateClause::CallSubquery(call) if call.table => {
+                let mut parts = Vec::new();
+                for branch in &call.branches {
+                    let inner = self.run(&branch.clauses, rows.clone())?;
+                    parts.push(branch_rows(branch, inner));
+                }
+                Ok(table_rows(call, parts, self.slots))
+            }
+            UpdateClause::CallSubquery(call) => {
+                let mut out = Vec::new();
+                for row in rows {
+                    let mut parts = Vec::new();
+                    for branch in &call.branches {
+                        let inner = self.run(&branch.clauses, vec![row.clone()])?;
+                        parts.push(branch_rows(branch, inner));
+                    }
+                    extend_row(call, row, parts, &mut out);
+                }
+                Ok(out)
+            }
         }
+    }
+
+    /// Applies the first of `clauses`, with the one after it when a read can fuse the two, and
+    /// says how many it applied.
+    pub(crate) fn step(
+        &mut self,
+        clauses: &[Clause],
+        rows: Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        match clauses {
+            [Clause::Read(clause), rest @ ..] => {
+                let next = match rest.first() {
+                    Some(Clause::Read(next)) => Some(next),
+                    _ => None,
+                };
+                self.env().read_clauses(clause, next, rows)
+            }
+            [Clause::Update(clause), ..] => Ok((self.apply(clause, rows)?, 1)),
+            [] => Ok((rows, 0)),
+        }
+    }
+
+    fn run(&mut self, clauses: &[Clause], mut rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+        let mut clauses = clauses;
+        while !clauses.is_empty() {
+            let (next, applied) = self.step(clauses, rows)?;
+            rows = next;
+            clauses = clauses.get(applied.max(1)..).unwrap_or_default();
+        }
+        Ok(rows)
     }
 
     fn env(&self) -> Env<'_, W> {
@@ -115,6 +174,19 @@ impl<W: WriteTransaction> Writer<'_, W> {
         )
     }
 
+    fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
+        if let Some((_, _, id)) = self
+            .tokens
+            .iter()
+            .find(|(tag, held, _)| *tag == K::TAG && held == name)
+        {
+            return Ok(Token::new(*id));
+        }
+        let token = self.tx.intern_token::<K>(name)?;
+        self.tokens.push((K::TAG, name.to_owned(), token.id()));
+        Ok(token)
+    }
+
     fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
         self.env().eval(expr, row)
     }
@@ -126,13 +198,19 @@ impl<W: WriteTransaction> Writer<'_, W> {
         merging: bool,
     ) -> Result<Properties, Error> {
         let mut properties = Properties::new();
-        let Some(expr) = expr else {
-            return Ok(properties);
+        let entries = match expr {
+            None => return Ok(properties),
+            Some(Expr::Map(entries)) => self.literal_entries(entries, row)?,
+            Some(expr) => self
+                .map_operand(self.eval(expr, row)?)?
+                .into_iter()
+                .map(|(key, value)| (Cow::Owned(key), value))
+                .collect(),
         };
-        for (key, value) in self.map_operand(self.eval(expr, row)?)? {
-            match to_property(&value)? {
+        for (key, value) in entries {
+            match into_property(value)? {
                 Some(value) => {
-                    properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
+                    properties.insert(self.token::<PropertyKey>(&key)?, value);
                 }
                 None if merging => {
                     return Err(Error::new(
@@ -144,6 +222,25 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
         }
         Ok(properties)
+    }
+
+    fn literal_entries<'k>(
+        &self,
+        entries: &'k [(String, Expr)],
+        row: &Row,
+    ) -> Result<Vec<(Cow<'k, str>, Datum)>, Error> {
+        let env = self.env();
+        let mut values = Vec::with_capacity(entries.len());
+        for (key, expr) in entries {
+            values.push((Cow::Borrowed(key.as_str()), env.eval(expr, row)?));
+        }
+        values.reverse();
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        values.dedup_by(|later, earlier| later.0 == earlier.0);
+        for (_, value) in &values {
+            check_item(value)?;
+        }
+        Ok(values)
     }
 
     fn map_operand(&self, value: Datum) -> Result<BTreeMap<String, Datum>, Error> {
@@ -181,9 +278,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             ..NodeRecord::default()
         };
         for label in pattern.labels.iter().flat_map(LabelExpr::names) {
-            record
-                .labels
-                .insert(self.tx.intern_token::<Label>(&label.0)?);
+            record.labels.insert(self.token::<Label>(&label.0)?);
         }
         let id = self.tx.create_node(record)?;
         set(row, pattern.slot, Datum::Node(id));
@@ -192,10 +287,10 @@ impl<W: WriteTransaction> Writer<'_, W> {
 
     fn create(&mut self, part: &PatternPart, row: &mut Row, merging: bool) -> Result<(), Error> {
         let mut current = self.node(&part.start, row, merging)?;
-        let mut trail = PathIds {
+        let mut trail = part.path.map(|_| PathIds {
             nodes: vec![current],
             relationships: Vec::new(),
-        };
+        });
         for step in &part.steps {
             let next = self.node(&step.node, row, merging)?;
             let relationship = &step.relationship;
@@ -208,7 +303,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 | Direction::Undirected => (current, next),
             };
             let rel_type = match &relationship.labels {
-                Some(LabelExpr::Name(name)) => self.tx.intern_token::<RelationshipType>(&name.0)?,
+                Some(LabelExpr::Name(name)) => self.token::<RelationshipType>(&name.0)?,
                 _ => return Err(type_error("a relationship to create needs one type")),
             };
             let record = RelationshipRecord {
@@ -219,11 +314,13 @@ impl<W: WriteTransaction> Writer<'_, W> {
             };
             let id = self.tx.create_relationship(&record)?;
             set(row, relationship.slot, Datum::Relationship(id));
-            trail.relationships.push(id);
-            trail.nodes.push(next);
+            if let Some(trail) = &mut trail {
+                trail.relationships.push(id);
+                trail.nodes.push(next);
+            }
             current = next;
         }
-        if let Some(path) = part.path {
+        if let (Some(path), Some(trail)) = (part.path, trail) {
             set(row, path, Datum::Path(trail));
         }
         Ok(())

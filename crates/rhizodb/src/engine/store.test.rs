@@ -463,15 +463,12 @@ fn a_checkpoint_that_meets_a_damaged_page_reports_corruption_from_then_on() {
     fill(&engine, 3);
     engine.checkpoint().unwrap();
     let extents = engine.extents();
+    let catalog = engine.header().catalog;
     drop(engine);
-    let tree_extent = extents
-        .entries
-        .values()
-        .find(|entry| entry.purpose == crate::engine::extent::Purpose::Tree)
-        .unwrap();
+    let extent = extents.entries[&catalog.extent()];
     let file = fs.open(NAME, block_size().unwrap()).unwrap();
-    for block in 0..tree_extent.written {
-        let at = physical_block(tree_extent.slot, block).unwrap();
+    for block in 0..catalog.block() {
+        let at = physical_block(extent.slot, block).unwrap();
         let mut bytes = vec![0; BLOCK];
         file.read(at, &mut bytes).unwrap();
         bytes[100] ^= 1;

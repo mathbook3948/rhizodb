@@ -80,7 +80,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
-- On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets that refusal waits and tries again as it does for a locked staging file.
+- On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets a refusal of access at any step of creating the database waits and tries again as it does for a locked staging file.
 - Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
@@ -111,15 +111,19 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
 - The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
 - The extent table records each extent's slot, written and live blocks, state, and purpose, and keeps room for a replication scheme and the term that opened it.
-- A checkpoint appends tree pages, runs of keys and values, and the catalog to open extents of their own.
+- A checkpoint appends tree pages, runs of keys and values, and the catalog to one open extent, so a file ends after its live blocks instead of after a mostly empty extent for each kind of block.
+- A block goes to the first open extent with room for it, and when none has room, every open extent is sealed and one new extent is opened.
+- A file of engine format minor 1 may hold an open extent for each kind of block, and checkpoints fill the room left in each of them before the first new extent.
+- Every new extent is recorded with the tree purpose as the first open extent, so the layout needs no new format minor and an earlier build still reads and writes the file.
+- Extents stay 1024 blocks at every file size, since the space a small file lost was the empty room of one open extent per kind of block.
 - The engine tracks each extent's live blocks as pages and runs are written and replaced.
 - A checkpoint drops every sealed extent left with no live block from the extent table, and its slot becomes free.
 - A free slot takes a new extent only in a later checkpoint and only once no reader holds a tree older than the one that dropped it, so neither a durable header nor a snapshot loses a page.
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
 - A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
-- After each checkpoint but a clean close's, the engine compacts the file when it holds more than twice its live data plus 64 MiB and one extent per open extent purpose, and has grown by its live data, or by 64 MiB, since the last compaction.
-- The extent per open purpose in that bound is the space a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
+- After each checkpoint but a clean close's, the engine compacts the file when it holds more than twice its live data plus 64 MiB and one extent, and has grown by its live data, or by 64 MiB, since the last compaction.
+- The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.

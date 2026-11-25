@@ -34,7 +34,6 @@ use super::checkpoint::load_catalog;
 use super::convert;
 use super::error::EngineError;
 use super::extent::ExtentTable;
-use super::extent::Purpose;
 use super::header;
 use super::header::FORMAT_MINOR;
 use super::header::Header;
@@ -282,27 +281,11 @@ fn open_or_create_whole_or_not_at_all<F: FileSystem>(
     let staging = staging_name(name);
     let deadline = Instant::now() + CREATION_WAIT;
     loop {
-        if let Existing::Database(file) = existing_database(fs, name)? {
-            file.lock()?;
-            ignore_missing(fs.remove(&staging))?;
-            return Ok(file);
-        }
-        if let Some(file) = open_or_create_staging(fs, &staging)? {
-            match file.lock() {
-                Ok(()) => {
-                    if let Existing::Database(_) = existing_database(fs, name)? {
-                        drop(file);
-                        ignore_missing(fs.remove(&staging))?;
-                        continue;
-                    }
-                    write_new_database(&file)?;
-                    fs.rename(&staging, name)?;
-                    fs.sync_names()?;
-                    return Ok(file);
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error.into()),
-            }
+        match try_open_or_create(fs, name, &staging) {
+            Ok(Some(file)) => return Ok(file),
+            Ok(None) => {}
+            Err(EngineError::Io(error)) if is_being_removed(&error) => {}
+            Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
             return Err(io::Error::new(
@@ -312,6 +295,36 @@ fn open_or_create_whole_or_not_at_all<F: FileSystem>(
             .into());
         }
         thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn try_open_or_create<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    staging: &str,
+) -> Result<Option<F::File>, EngineError> {
+    if let Existing::Database(file) = existing_database(fs, name)? {
+        file.lock()?;
+        ignore_missing(fs.remove(staging))?;
+        return Ok(Some(file));
+    }
+    let Some(file) = open_or_create_staging(fs, staging)? else {
+        return Ok(None);
+    };
+    match file.lock() {
+        Ok(()) => {
+            if let Existing::Database(_) = existing_database(fs, name)? {
+                drop(file);
+                ignore_missing(fs.remove(staging))?;
+                return Ok(None);
+            }
+            write_new_database(&file)?;
+            fs.rename(staging, name)?;
+            fs.sync_names()?;
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -768,12 +781,12 @@ impl<F: FileSystem + 'static> Shared<F> {
             .sum::<u64>()
             * BLOCK as u64;
         let slack = self.options.reclaim_slack;
-        let open_extents = Purpose::ALL.len() as u64 * u64::from(EXTENT_BLOCKS) * BLOCK as u64;
+        let open_extent = u64::from(EXTENT_BLOCKS) * BLOCK as u64;
         let compacted = self.compacted_bytes.load(Ordering::Relaxed);
         file > live
             .saturating_mul(2)
             .saturating_add(slack)
-            .saturating_add(open_extents)
+            .saturating_add(open_extent)
             && file > compacted.saturating_add(live.max(slack))
     }
 

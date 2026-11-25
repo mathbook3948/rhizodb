@@ -21,6 +21,11 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `CALL { ... }` subqueries with GQL variable scope clauses, `OPTIONAL CALL`, and `UNION` inside, the GQL string and numeric functions, `trim(... FROM ...)`, simple `CASE` branches with lists of tests and comparisons, and `ORDER BY ... NULLS FIRST | LAST`.
 - GQL's `EXCEPT`, `INTERSECT`, each with `ALL` or `DISTINCT`, and `OTHERWISE` between queries and inside `CALL { ... }`.
 - GQL's `||` concatenation of strings and of lists.
+- The functions `randomUUID`, `haversin`, `timestamp`, `ceiling`, `toBooleanList`, `toIntegerList`, `toFloatList`, `toStringList`, `vector.similarity.cosine`, and `vector.similarity.euclidean`, `round` with a precision and a rounding mode, and GQL's `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`, and `LOCAL_TIMESTAMP`.
+- Value type predicates `IS [NOT] TYPED` and `IS [NOT] ::`, `CAST(value AS type)` with the new `ErrorKind::InvalidCast`, `valueType()`, `normalize()`, `IS [NOT] [form] NORMALIZED`, `IS [NOT] TRUE`, `FALSE`, and `UNKNOWN`, and `IS [NOT] DISTINCT FROM`.
+- GQL's `VALUE { ... }` subqueries, and the new `ErrorKind::CardinalityViolation` for one that returns more than one row.
+- GQL's `NEXT` between statements, with `NEXT YIELD`, at the top of a query and inside `CALL { ... }`.
+- Updating `CALL { ... }` subqueries, which run their writes once per incoming row in the enclosing transaction, may end without `RETURN`, and work with scope clauses, `OPTIONAL CALL`, and `UNION`.
 - Explicit read and write transactions through `Database::begin_read` and `Database::begin_write`.
 - Keyword (BM25) and exact vector indexes, kept in the same transaction as the data they index, created with `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryNodes` and `CALL db.index.vector.queryNodes`.
 - Keyword and vector indexes over the properties of relationships of one type, created by passing `IndexTarget::RelationshipType` to `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryRelationships` and `CALL db.index.vector.queryRelationships`, which yield `relationship` and `score`.
@@ -44,7 +49,9 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A procedure body returns `Result<ProcedureOutput, ProcedureError>`, where `ProcedureOutput` is a type of its own built from a `Vec` of rows, by `collect`, or with `push_row`, and `ProcedureError` is `Box<dyn Error + Send + Sync>`.
 - `Database::register_procedure` takes `&self`, so a database shared through an `Arc` can register procedures.
 - The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
+- A keyword index stores the postings of each term in blocks of 128 consecutive element IDs instead of one entry per element, so building and searching one take about half the time. Opening a database of an earlier format moves its postings into blocks without tokenizing its text again, and an earlier build cannot open the result.
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
+- The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
 
 ### Fixed
 
