@@ -587,6 +587,16 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn indexed(&self, base: &Expr, index: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        if let Expr::Parameter(at) = base {
+            let base = self.parameters.get(*at).unwrap_or(&Datum::Null);
+            let (index, index_taint) = self.tracked(index, row)?;
+            let whole = index_taint.is_whole();
+            return settle(
+                self.index(base, index),
+                whole,
+                Taint::when(index_taint.is_tainted()),
+            );
+        }
         let (base, base_taint) = self.tracked(base, row)?;
         let (index, index_taint) = self.tracked(index, row)?;
         let taint = if index_taint.is_tainted() {
@@ -595,7 +605,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             base_taint.at(&base, &index)
         };
         settle(
-            self.index(base, index),
+            self.index(&base, index),
             base_taint.is_whole() || index_taint.is_whole(),
             taint,
         )
@@ -977,7 +987,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn index(&self, base: Datum, index: Datum) -> Result<Datum, Error> {
+    fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error> {
         match (base, index) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::List(items), Datum::Integer(index)) => Ok(list_position(items.len(), index)
@@ -994,7 +1004,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(entries.get(key.as_str()).cloned().unwrap_or(Datum::Null))
             }
             (base @ (Datum::Node(_) | Datum::Relationship(_)), Datum::String(key)) => {
-                self.property(&base, &key)
+                self.property(base, &key)
             }
             (Datum::Map(_) | Datum::Node(_) | Datum::Relationship(_), other) => Err(Error::new(
                 ErrorKind::MapElementAccessByNonString,
