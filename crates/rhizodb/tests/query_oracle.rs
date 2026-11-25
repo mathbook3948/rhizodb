@@ -180,6 +180,12 @@ fn check_filter(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Re
         format!("MATCH (n) WITH collect(n) AS ns UNWIND ns AS n WITH n WHERE {text} RETURN n.k"),
         format!("MATCH (n) WHERE EXISTS {{ MATCH (m) WHERE m = n AND {with_m} }} RETURN n.k"),
         format!("MATCH (m) WITH m AS n WHERE {text} RETURN n.k"),
+        format!("MATCH (n) RETURN n NEXT FILTER {text} RETURN n.k"),
+        format!("MATCH (n) WHERE VALUE {{ RETURN {text} }} RETURN n.k"),
+        format!("MATCH (n) WHERE ({text}) IS TRUE RETURN n.k"),
+        format!("MATCH (n) WHERE ({text}) IS NOT DISTINCT FROM true RETURN n.k"),
+        format!("MATCH (n) WHERE NOT ({text}) IS NOT TRUE RETURN n.k"),
+        format!("MATCH (n) RETURN n, {text} AS keep NEXT YIELD n, keep FILTER keep RETURN n.k"),
     ];
     let variant = choices.pick(&variants);
     expect_bag(runner, variant, yes.clone())?;
@@ -785,15 +791,22 @@ fn check_update(tx: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Result
     let p = expr(Ty::Bool, 2, &scope, choices);
     let text = render(&p, &scope);
     let yes = keys_where(graph, &p, Some(true), None);
-    let set = tx.run(&format!(
-        "MATCH (n) WHERE {text} SET n.flag = true RETURN count(*)"
-    ))?;
+    let set_forms = [
+        format!("MATCH (n) WHERE {text} SET n.flag = true RETURN count(*)"),
+        format!("MATCH (n) WHERE {text} CALL (n) {{ SET n.flag = true }} RETURN count(*)"),
+        format!("MATCH (n) WHERE {text} SET n.flag = true RETURN n NEXT RETURN count(*)"),
+    ];
+    let set = tx.run(choices.pick(&set_forms))?;
     if set != vec![vec![Value::Integer(yes.len() as i64)]] {
         return Err(format!("SET where {text}: got {set:?}, want {}", yes.len()));
     }
     expect_bag(tx, "MATCH (n) WHERE n.flag RETURN n.k", yes.clone())?;
     tx.run("MATCH (n) REMOVE n.flag")?;
-    tx.run(&format!("MATCH (n) WHERE {text} DETACH DELETE n"))?;
+    let delete_forms = [
+        format!("MATCH (n) WHERE {text} DETACH DELETE n"),
+        format!("MATCH (n) WHERE {text} CALL (n) {{ DETACH DELETE n }}"),
+    ];
+    tx.run(choices.pick(&delete_forms))?;
     let left = keys_where(graph, &p, Some(false), None)
         .into_iter()
         .chain(keys_where(graph, &p, None, None))

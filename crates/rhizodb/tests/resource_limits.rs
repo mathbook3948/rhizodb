@@ -208,6 +208,10 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
         format!("MATCH (n) WHERE {}true RETURN n", "NOT ".repeat(depth)),
         format!("RETURN {}", "exists { MATCH (a) WHERE ".repeat(depth)),
         format!("RETURN {}", "COUNT { MATCH (a) WHERE ".repeat(depth)),
+        format!("RETURN {}", "VALUE { RETURN ".repeat(depth)),
+        format!("RETURN {}1", "CAST(".repeat(depth)),
+        format!("RETURN 1 IS :: {}INTEGER", "LIST<".repeat(depth)),
+        format!("RETURN 1{}", " IS NOT TYPED INTEGER".repeat(depth)),
         "CALL { ".repeat(depth),
         format!("RETURN {}", "reduce(a = ".repeat(depth)),
         format!(
@@ -235,6 +239,15 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
             ")".repeat(depth)
         );
         assert_eq!(error_kind(&db, &text), ErrorKind::InvalidRegex);
+    });
+}
+
+#[test]
+fn a_long_chain_of_next_statements_runs_on_a_small_stack() {
+    let db = db();
+    let text = format!("RETURN 0 AS a{}", " NEXT RETURN a + 1 AS a".repeat(20_000));
+    on_small_stack(|| {
+        assert_eq!(single(&db, &text), int(20_000));
     });
 }
 
@@ -301,6 +314,39 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     "{}RETURN 1 AS x{}",
                     "CALL { ".repeat(depth),
                     " } RETURN x".repeat(depth)
+                ),
+                format!(
+                    "{}INSERT (:D){}",
+                    "CALL { ".repeat(depth),
+                    " }".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}1{}",
+                    "VALUE { RETURN ".repeat(depth),
+                    " }".repeat(depth)
+                ),
+                format!(
+                    "RETURN {}1{}",
+                    "CAST(".repeat(depth),
+                    " AS INTEGER)".repeat(depth)
+                ),
+                format!(
+                    "RETURN [1] IS :: {}INTEGER{}",
+                    "LIST<".repeat(depth),
+                    ">".repeat(depth)
+                ),
+                format!("RETURN 1{}", " IS :: ANY".repeat(depth)),
+                format!("RETURN true{}", " IS DISTINCT FROM true".repeat(depth)),
+                format!("RETURN true{}", " IS NOT TRUE".repeat(depth)),
+                format!(
+                    "{}RETURN 1 AS x{}",
+                    "CALL { RETURN 1 AS y NEXT ".repeat(depth),
+                    " } RETURN x".repeat(depth)
+                ),
+                format!(
+                    "UNWIND [1] AS i {}INSERT (:D {{i: i}}) RETURN i AS j{}",
+                    "CALL (i) { ".repeat(depth),
+                    " } RETURN 1 AS k".repeat(depth)
                 ),
                 format!(
                     "RETURN {}0{}",

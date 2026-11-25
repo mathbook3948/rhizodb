@@ -2,6 +2,8 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
@@ -11,13 +13,16 @@ use super::datum::Datum;
 use super::eval::Env;
 use super::eval::arithmetic;
 use super::eval::float_text;
+use super::scalars;
 use super::shape::INSTANT;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
 use super::temporals::Moment;
 use super::temporals::TemporalFunction;
+use super::types;
 use crate::gql::ast::BinaryOp;
+use crate::gql::ast::NormalForm;
 use crate::temporal::arithmetic::Span;
 use crate::temporal::build::Kind;
 
@@ -95,6 +100,17 @@ pub(crate) enum Function {
     ToIntegerOrNull,
     ToFloatOrNull,
     ToBooleanOrNull,
+    Normalize,
+    ValueType,
+    RandomUuid,
+    Haversin,
+    Timestamp,
+    ToBooleanList,
+    ToIntegerList,
+    ToFloatList,
+    ToStringList,
+    CosineSimilarity,
+    EuclideanSimilarity,
     Temporal(TemporalFunction),
 }
 
@@ -176,7 +192,7 @@ const fn between(span: Span) -> Function {
     Function::Temporal(TemporalFunction::Between(span))
 }
 
-const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 109] = [
+const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 121] = [
     ("id", Function::Id, 1, 1, &[ELEMENT]),
     ("labels", Function::Labels, 1, 1, &[NODE]),
     ("type", Function::Type, 1, 1, &[RELATIONSHIP]),
@@ -209,8 +225,9 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 109] = [
     ("abs", Function::Abs, 1, 1, &[NUMBER]),
     ("sign", Function::Sign, 1, 1, &[NUMBER]),
     ("ceil", Function::Ceil, 1, 1, &[NUMBER]),
+    ("ceiling", Function::Ceil, 1, 1, &[NUMBER]),
     ("floor", Function::Floor, 1, 1, &[NUMBER]),
-    ("round", Function::Round, 1, 1, &[NUMBER]),
+    ("round", Function::Round, 1, 3, &[NUMBER, INTEGER, STRING]),
     ("sqrt", Function::Sqrt, 1, 1, &[NUMBER]),
     ("exp", Function::Exp, 1, 1, &[NUMBER]),
     ("log", Function::Log, 1, 2, &[NUMBER]),
@@ -266,6 +283,29 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 109] = [
     ("left", Function::Left, 2, 2, &[STRING, INTEGER]),
     ("right", Function::Right, 2, 2, &[STRING, INTEGER]),
     ("exists", Function::Exists, 1, 1, &[ANY]),
+    ("normalize", Function::Normalize, 1, 2, &[STRING]),
+    ("valuetype", Function::ValueType, 1, 1, &[ANY]),
+    ("randomuuid", Function::RandomUuid, 0, 0, &[]),
+    ("haversin", Function::Haversin, 1, 1, &[NUMBER]),
+    ("timestamp", Function::Timestamp, 0, 0, &[]),
+    ("tobooleanlist", Function::ToBooleanList, 1, 1, &[LIST]),
+    ("tointegerlist", Function::ToIntegerList, 1, 1, &[LIST]),
+    ("tofloatlist", Function::ToFloatList, 1, 1, &[LIST]),
+    ("tostringlist", Function::ToStringList, 1, 1, &[LIST]),
+    (
+        "vector.similarity.cosine",
+        Function::CosineSimilarity,
+        2,
+        2,
+        &[LIST],
+    ),
+    (
+        "vector.similarity.euclidean",
+        Function::EuclideanSimilarity,
+        2,
+        2,
+        &[LIST],
+    ),
     ("date", construct(Kind::Date), 0, 1, &[DATE_SOURCE]),
     (
         "localtime",
@@ -547,7 +587,14 @@ impl<T: ReadTransaction> Env<'_, T> {
         let third = args.next();
         if !matches!(
             function,
-            Function::Pi | Function::E | Function::Rand | Function::Exists | Function::Temporal(_)
+            Function::Pi
+                | Function::E
+                | Function::Rand
+                | Function::Exists
+                | Function::ValueType
+                | Function::RandomUuid
+                | Function::Timestamp
+                | Function::Temporal(_)
         ) && first.is_null()
         {
             return Ok(Datum::Null);
@@ -602,6 +649,71 @@ impl<T: ReadTransaction> Env<'_, T> {
             Function::ToFloatOrNull => Ok(to_float(first).unwrap_or(Datum::Null)),
             Function::ToBooleanOrNull => Ok(to_boolean(first).unwrap_or(Datum::Null)),
             Function::Exists => Ok(Datum::Boolean(!first.is_null())),
+            Function::ValueType => Ok(Datum::String(types::type_name(&first))),
+            Function::RandomUuid => Ok(scalars::random_uuid()),
+            Function::Timestamp => Ok(Datum::Integer(
+                i64::try_from(self.now.statement.epoch_nanos().div_euclid(1_000_000))
+                    .unwrap_or(i64::MAX),
+            )),
+            Function::Haversin => Ok(Datum::Float(
+                (1.0 - float_argument(function, &first)?.cos()) / 2.0,
+            )),
+            Function::ToBooleanList => scalars::convert_list("toBooleanList", first, |item| {
+                to_boolean(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToIntegerList => scalars::convert_list("toIntegerList", first, |item| {
+                to_integer(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToFloatList => scalars::convert_list("toFloatList", first, |item| {
+                to_float(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToStringList => scalars::convert_list("toStringList", first, |item| {
+                to_string(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::CosineSimilarity | Function::EuclideanSimilarity => {
+                let name = function.name();
+                let Some(second) = second.filter(|value| !value.is_null()) else {
+                    return Ok(Datum::Null);
+                };
+                match (
+                    scalars::vector(name, &first)?,
+                    scalars::vector(name, &second)?,
+                ) {
+                    (Some(a), Some(b)) => {
+                        scalars::similarity(name, function == Function::CosineSimilarity, &a, &b)
+                    }
+                    _ => Ok(Datum::Null),
+                }
+            }
+            Function::Round if count > 1 => {
+                let value = float_argument(function, &first)?;
+                let precision = match second {
+                    Some(Datum::Integer(precision)) => precision,
+                    Some(Datum::Null) | None => return Ok(Datum::Null),
+                    Some(other) => return Err(invalid(&other)),
+                };
+                match third {
+                    None => scalars::round(value, precision, None),
+                    Some(Datum::Null) => Ok(Datum::Null),
+                    Some(Datum::String(mode)) => scalars::round(value, precision, Some(&mode)),
+                    Some(other) => Err(invalid(&other)),
+                }
+            }
+            Function::Normalize => {
+                let text = string_argument(function, first)?;
+                let form = match second {
+                    None => NormalForm::Nfc,
+                    Some(Datum::Null) => return Ok(Datum::Null),
+                    Some(Datum::String(name)) => NormalForm::named(&name).ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidArgumentValue,
+                            format!("normalize() knows no normal form `{name}`"),
+                        )
+                    })?,
+                    Some(other) => return Err(invalid(&other)),
+                };
+                Ok(Datum::String(normalized(&text, form)))
+            }
             Function::Pi => Ok(Datum::Float(std::f64::consts::PI)),
             Function::E => Ok(Datum::Float(std::f64::consts::E)),
             Function::Rand => Ok(Datum::Float(random_unit())),
@@ -883,6 +995,16 @@ fn float_argument(function: Function, value: &Datum) -> Result<f64, Error> {
         Datum::Integer(value) => Ok(*value as f64),
         Datum::Float(value) => Ok(*value),
         other => Err(invalid_value(function, other)),
+    }
+}
+
+/// `text` in the Unicode normalization form `form`.
+pub(crate) fn normalized(text: &str, form: NormalForm) -> String {
+    match form {
+        NormalForm::Nfc => text.nfc().collect(),
+        NormalForm::Nfd => text.nfd().collect(),
+        NormalForm::Nfkc => text.nfkc().collect(),
+        NormalForm::Nfkd => text.nfkd().collect(),
     }
 }
 

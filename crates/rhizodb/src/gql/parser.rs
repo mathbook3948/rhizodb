@@ -2,7 +2,9 @@ mod clause;
 mod expression;
 mod label;
 mod pattern;
+mod types;
 
+use super::ast::Block;
 use super::ast::Call;
 use super::ast::Clause;
 use super::ast::Name;
@@ -68,12 +70,36 @@ struct Parser {
 
 impl Parser {
     fn query(&mut self) -> ParseResult<Query> {
-        let query = self.union_query()?;
+        let query = self.next_query()?;
         self.eat_punct(Punct::Semicolon);
         if self.peek().is_some() {
             return Err(self.unexpected());
         }
         Ok(query)
+    }
+
+    fn next_query(&mut self) -> ParseResult<Query> {
+        let first = self.union_query()?;
+        if !self.at_keyword("NEXT") {
+            return Ok(first);
+        }
+        self.deepen()?;
+        let mut blocks = vec![Block {
+            yields: None,
+            query: first,
+        }];
+        while self.eat_keyword("NEXT") {
+            let yields = if self.eat_keyword("YIELD") {
+                Some(self.comma_separated(Self::name)?)
+            } else {
+                None
+            };
+            blocks.push(Block {
+                yields,
+                query: self.union_query()?,
+            });
+        }
+        Ok(Query::Next(blocks))
     }
 
     fn union_query(&mut self) -> ParseResult<Query> {

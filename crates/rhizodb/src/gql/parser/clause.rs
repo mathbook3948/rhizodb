@@ -210,7 +210,7 @@ impl Parser {
             None
         };
         self.expect_punct(Punct::LBrace)?;
-        let body = self.nested(Self::union_query)?;
+        let body = self.nested(Self::next_query)?;
         self.expect_punct(Punct::RBrace)?;
         Ok(Clause::CallSubquery(Box::new(CallSubquery {
             optional,

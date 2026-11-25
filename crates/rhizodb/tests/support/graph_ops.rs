@@ -166,10 +166,12 @@ enum Step {
         first: i64,
         count: i64,
     },
-    /// Sets `p` of every node whose key is a multiple of `stride`.
+    /// Sets `p` of every node whose key is a multiple of `stride`, inside a `CALL` subquery
+    /// per node when `in_call` is set.
     SetEveryP {
         stride: i64,
         p: Option<Number>,
+        in_call: bool,
     },
     AddLabel(i64, &'static str),
     RemoveLabel(i64, &'static str),
@@ -231,8 +233,13 @@ impl Step {
                     ("count", Value::Integer(*count)),
                 ]),
             ),
-            Step::SetEveryP { stride, p } => (
-                "MATCH (n) WHERE n.key % $stride = 0 SET n.p = $p".to_owned(),
+            Step::SetEveryP { stride, p, in_call } => (
+                if *in_call {
+                    "MATCH (n) WHERE n.key % $stride = 0 CALL (n) { SET n.p = $p }"
+                } else {
+                    "MATCH (n) WHERE n.key % $stride = 0 SET n.p = $p"
+                }
+                .to_owned(),
                 parameters(&[
                     ("stride", Value::Integer(*stride)),
                     ("p", optional(p.map(Number::value))),
@@ -356,7 +363,7 @@ impl Step {
                     model.nodes.insert(key, node);
                 }
             }
-            Step::SetEveryP { stride, p } => {
+            Step::SetEveryP { stride, p, .. } => {
                 for (key, node) in &mut model.nodes {
                     if key % stride == 0 {
                         node.p = *p;
@@ -528,6 +535,7 @@ impl Run {
             14 => Step::SetEveryP {
                 stride: 1 + i64::try_from(choices.below(4)).unwrap_or(0),
                 p: Self::number(choices),
+                in_call: choices.below(2) == 0,
             },
             0..=2 => {
                 let key = *next_key;

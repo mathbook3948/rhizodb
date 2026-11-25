@@ -11,11 +11,13 @@ mod keys;
 mod matcher;
 mod plan;
 mod regex;
+mod scalars;
 mod scan;
 mod seek;
 mod shape;
 mod taint;
 mod temporals;
+mod types;
 mod update;
 
 use std::sync::Arc;

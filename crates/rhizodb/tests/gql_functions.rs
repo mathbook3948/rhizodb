@@ -284,3 +284,175 @@ fn a_single_pipe_still_ends_a_comprehension() {
         list([string("a")])
     );
 }
+
+#[test]
+fn random_uuid_gives_a_new_version_four_uuid_each_call() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "RETURN randomUUID() =~ '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' AS shaped, \
+             randomUUID() <> randomUUID() AS fresh"
+        ),
+        [[boolean(true), boolean(true)]]
+    );
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND range(1, 100) AS i WITH collect(randomUUID()) AS ids \
+             RETURN size(ids) = size(COLLECT { UNWIND ids AS id RETURN DISTINCT id }) AS unique"
+        ),
+        boolean(true)
+    );
+}
+
+#[test]
+fn haversin_is_half_of_one_minus_the_cosine() {
+    let db = db();
+    assert_eq!(single(&db, "RETURN haversin(0) AS h"), float(0.0));
+    assert_eq!(
+        single(&db, "RETURN abs(haversin(pi()) - 1.0) < 1e-12 AS h"),
+        boolean(true)
+    );
+    assert_eq!(single(&db, "RETURN haversin(null) AS h"), Value::Null);
+}
+
+#[test]
+fn round_takes_a_precision_and_a_rounding_mode() {
+    let db = db();
+    let rows = run(
+        &db,
+        "RETURN round(1.25, 1), round(-1.25, 1), round(1.25, 1, 'HALF_EVEN'), round(1.35, 1, 'HALF_EVEN'), \
+         round(1.25, 1, 'HALF_DOWN'), round(1.21, 1, 'UP'), round(1.29, 1, 'DOWN'), round(-1.21, 1, 'CEILING'), \
+         round(-1.21, 1, 'FLOOR'), round(9.99, 1), round(5, 2), round(1.005, 2), round(2.5)",
+    );
+    assert_eq!(
+        rows,
+        [[
+            float(1.3),
+            float(-1.3),
+            float(1.2),
+            float(1.4),
+            float(1.2),
+            float(1.3),
+            float(1.2),
+            float(-1.2),
+            float(-1.3),
+            float(10.0),
+            float(5.0),
+            float(1.01),
+            float(3.0)
+        ]]
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN round(1.5, -1) AS r"),
+        ErrorKind::NumberOutOfRange
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN round(1.5, 1, 'SIDEWAYS') AS r"),
+        ErrorKind::InvalidArgumentValue
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN round(1.5, 1.5) AS r"),
+        ErrorKind::InvalidArgumentType
+    );
+}
+
+#[test]
+fn timestamp_reads_the_statement_clock_in_milliseconds() {
+    let db = db();
+    assert_eq!(
+        single(
+            &db,
+            "RETURN timestamp() = timestamp() AND timestamp() = datetime().epochMillis AS same"
+        ),
+        boolean(true)
+    );
+}
+
+#[test]
+fn ceiling_is_ceil() {
+    let db = db();
+    assert_eq!(single(&db, "RETURN ceiling(1.2) AS c"), float(2.0));
+}
+
+#[test]
+fn list_conversions_give_null_for_items_they_cannot_convert() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "RETURN toBooleanList(['true', 'x', null, false]), toIntegerList(['1', 2.5, 'x']), \
+             toFloatList(['1.5', 2]), toStringList([1, true, 2.5]), toIntegerList(null)"
+        ),
+        [[
+            list([boolean(true), Value::Null, Value::Null, boolean(false)]),
+            list([int(1), int(2), Value::Null]),
+            list([float(1.5), float(2.0)]),
+            list([string("1"), string("true"), string("2.5")]),
+            Value::Null
+        ]]
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN toIntegerList(1) AS l"),
+        ErrorKind::InvalidArgumentType
+    );
+}
+
+#[test]
+fn vector_similarities_follow_neo4j() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "RETURN vector.similarity.cosine([1, 0], [2, 0]), vector.similarity.cosine([1, 0], [0, 1]), \
+             vector.similarity.cosine([1, 0], [-1, 0]), vector.similarity.euclidean([1, 2], [1, 2]), \
+             vector.similarity.euclidean([0, 0], [3, 4]), vector.similarity.cosine([0, 0], [1, 1]), \
+             vector.similarity.cosine(null, [1]), vector.similarity.cosine([1, null], [1, 1])"
+        ),
+        [[
+            float(1.0),
+            float(0.5),
+            float(0.0),
+            float(1.0),
+            float(1.0 / 26.0),
+            Value::Null,
+            Value::Null,
+            Value::Null
+        ]]
+    );
+    assert_eq!(
+        error_kind(&db, "RETURN vector.similarity.cosine([1, 2], [1]) AS s"),
+        ErrorKind::InvalidArgumentValue
+    );
+    assert_eq!(
+        error_kind(
+            &db,
+            "UNWIND [['a']] AS v RETURN vector.similarity.euclidean(v, v) AS s"
+        ),
+        ErrorKind::InvalidArgumentValue
+    );
+}
+
+#[test]
+fn gql_current_time_functions_read_the_statement_clock() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "RETURN CURRENT_DATE = date(), CURRENT_TIMESTAMP = datetime(), LOCAL_TIMESTAMP = localdatetime(), \
+             current_time = time(), LOCAL_TIME = localtime()"
+        ),
+        [[
+            boolean(true),
+            boolean(true),
+            boolean(true),
+            boolean(true),
+            boolean(true)
+        ]]
+    );
+    assert_eq!(
+        single(&db, "WITH 1 AS current_date RETURN current_date"),
+        int(1)
+    );
+}
