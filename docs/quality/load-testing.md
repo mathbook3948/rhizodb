@@ -20,6 +20,7 @@ The workload suite times one client at a time, which hides lock contention, over
 - Writes never change an answer that a read checks, so every read is compared with the answer computed from the dataset while the writer runs.
 - After a run, the writer's nodes, names, and edges are read back and compared with what it committed, and the sustained run checks them again after closing and reopening.
 - A wrong answer or an error fails the run, and the report counts both.
+- A mixed run also fails when RhizoDB's median commits per second beside any count of readers fall below half of its median beside one reader, which shows readers starving the writer.
 - Each run starts from a fresh copy of the loaded graph and warms up the read mix for half a second before the clock starts.
 - Repetitions alternate which engine goes first, and the report shows medians over repetitions.
 - Every run reports throughput and the p50, p99, and maximum latency of reads and of commits.

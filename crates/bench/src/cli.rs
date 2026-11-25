@@ -29,6 +29,7 @@ use crate::stress::Scenario;
 use crate::stress::load_json;
 use crate::stress::load_table;
 use crate::stress::run_load;
+use crate::stress::starved_writer;
 use crate::workloads;
 
 /// Seed of the generated dataset. Changing it changes every number.
@@ -392,6 +393,10 @@ fn load_main(arguments: &Arguments) -> ExitCode {
         |name| eprintln!("running {name}"),
     );
     print!("{}", load_table(&reports));
+    let starved = starved_writer(&reports);
+    for problem in &starved {
+        println!("WRITER STARVED {problem}");
+    }
     if let Some(path) = &arguments.out {
         let header = json!({
             "scale": arguments.scale.name(),
@@ -411,6 +416,10 @@ fn load_main(arguments: &Arguments) -> ExitCode {
             eprintln!("cannot write {}: {error}", path.display());
             return ExitCode::FAILURE;
         }
+    }
+    if !starved.is_empty() {
+        eprintln!("readers starved the writer");
+        return ExitCode::FAILURE;
     }
     if reports
         .iter()

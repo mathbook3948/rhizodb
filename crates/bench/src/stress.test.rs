@@ -137,3 +137,47 @@ fn the_longest_read_gap_and_stalls_come_from_read_end_times() {
     assert_eq!(run.stalled_reads, 1);
     assert_eq!(run.reads.count, 3);
 }
+
+fn mixed(readers: usize, commits: u64) -> PointReport {
+    let run = LoadRun {
+        elapsed: Duration::from_secs(1),
+        writes: Latency {
+            count: commits,
+            ..Latency::default()
+        },
+        ..LoadRun::default()
+    };
+    PointReport {
+        point: Point {
+            scenario: Scenario::Mixed,
+            readers,
+        },
+        engines: vec![
+            EngineRuns {
+                engine: EngineKind::Rhizodb,
+                runs: vec![run.clone()],
+                failure: None,
+            },
+            EngineRuns {
+                engine: EngineKind::Ladybugdb,
+                runs: vec![LoadRun {
+                    writes: Latency::default(),
+                    ..run
+                }],
+                failure: None,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_writer_that_keeps_half_its_one_reader_commits_is_not_starved() {
+    let reports = [mixed(1, 2000), mixed(16, 1200), mixed(32, 999)];
+
+    let starved = starved_writer(&reports);
+
+    assert_eq!(starved.len(), 1, "{starved:?}");
+    assert!(starved[0].starts_with("mixed/32-threads"), "{starved:?}");
+    assert!(starved_writer(&reports[..2]).is_empty());
+    assert!(starved_writer(&reports[1..]).is_empty());
+}

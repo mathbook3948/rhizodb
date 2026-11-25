@@ -984,6 +984,45 @@ pub fn run_load(
     reports
 }
 
+/// The least share of its one-reader commit throughput that RhizoDB's writer must keep beside
+/// more readers.
+pub const WRITER_SHARE: f64 = 0.5;
+
+/// Every mixed point where RhizoDB's median commits per second fell below [`WRITER_SHARE`] of
+/// its median beside one reader, which means the readers starve the writer.
+pub fn starved_writer(reports: &[PointReport]) -> Vec<String> {
+    let commits = |report: &PointReport| {
+        report
+            .engines
+            .iter()
+            .find(|series| series.engine == EngineKind::Rhizodb)
+            .and_then(|series| series.median(LoadRun::write_throughput))
+    };
+    let mixed = || {
+        reports
+            .iter()
+            .filter(|report| report.point.scenario == Scenario::Mixed)
+    };
+    let Some(alone) = mixed()
+        .find(|report| report.point.readers == 1)
+        .and_then(commits)
+    else {
+        return Vec::new();
+    };
+    mixed()
+        .filter_map(|report| {
+            let found = commits(report)?;
+            (found < alone * WRITER_SHARE).then(|| {
+                format!(
+                    "{}: rhizodb committed {found:.0}/s, below {:.0}% of {alone:.0}/s beside one reader",
+                    report.point.label(),
+                    WRITER_SHARE * 100.0
+                )
+            })
+        })
+        .collect()
+}
+
 fn micros(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1e6
 }
