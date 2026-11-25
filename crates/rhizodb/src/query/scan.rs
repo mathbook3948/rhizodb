@@ -531,21 +531,20 @@ impl At<'_, '_> {
     }
 
     fn datum(&self, value: &Value) -> Result<Datum, Error> {
-        if let Value::Column(column) = value {
-            match self.group.quick(self.node, *column) {
-                Quick::Absent => return Ok(Datum::Null),
-                Quick::Int(value) => return Ok(Datum::Integer(value)),
-                Quick::Unknown => {}
-            }
-            return match self.group.cell(self.node, *column)? {
+        let column = match value {
+            Value::Column(column) => *column,
+            Value::Node => return Ok(Datum::Node(self.node)),
+            Value::Fixed(value) => return Ok(value.clone()),
+            Value::Row(slot) => return Ok(self.row.get(*slot).cloned().unwrap_or(Datum::Null)),
+        };
+        match self.group.quick(self.node, column) {
+            Quick::Absent => Ok(Datum::Null),
+            Quick::Int(value) => Ok(Datum::Integer(value)),
+            Quick::Unknown => match self.group.cell(self.node, column)? {
                 Some(cell) => cell_datum(cell),
                 None => Ok(Datum::Null),
-            };
+            },
         }
-        Ok(match self.arg(value)? {
-            Arg::Cell(cell) => cell_datum(cell)?,
-            Arg::Datum(datum) => datum.into_owned(),
-        })
     }
 
     #[inline]
