@@ -7,6 +7,7 @@ use super::memtable::Bytes;
 use super::memtable::Lookup;
 use super::memtable::Memtable;
 use super::memtable::Slot;
+use super::tree::Finger;
 use super::tree::Tree;
 use crate::storage::StorageError;
 
@@ -20,15 +21,30 @@ pub(crate) struct Layers {
 }
 
 /// The database as committed at one LSN.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct View {
     pub(crate) snapshot: u64,
     pub(crate) layers: Arc<Layers>,
+    finger: Finger,
+}
+
+impl Clone for View {
+    fn clone(&self) -> Self {
+        View::new(self.snapshot, Arc::clone(&self.layers))
+    }
 }
 
 pub(crate) type Visit<'a, E> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<(), E>;
 
 impl View {
+    pub(crate) fn new(snapshot: u64, layers: Arc<Layers>) -> Self {
+        Self {
+            snapshot,
+            layers,
+            finger: Finger::default(),
+        }
+    }
+
     /// Calls `read` with the value the snapshot holds under `key`.
     pub(crate) fn get_with<T>(
         &self,
@@ -74,7 +90,11 @@ impl View {
         let upper = self.memtable_range(table, start, end);
         merge_over(
             &upper,
-            |lower| self.layers.tree.scan(table, start, end, lower),
+            |lower| {
+                self.layers
+                    .tree
+                    .scan_near(table, start, end, lower, &self.finger)
+            },
             visit,
         )
     }

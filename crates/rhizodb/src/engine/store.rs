@@ -322,10 +322,7 @@ fn replay_into(
     record: super::wal_format::Record,
 ) -> Result<(), EngineError> {
     if let Body::Batch(ops) = record.body {
-        let mut staged = Staged::new(View {
-            snapshot: *last_lsn,
-            layers: Arc::clone(layers),
-        });
+        let mut staged = Staged::new(View::new(*last_lsn, Arc::clone(layers)));
         for op in ops {
             staged.replay(op)?;
         }
@@ -444,10 +441,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             options,
             pages,
             published: Mutex::new(Published {
-                view: View {
-                    snapshot: last_lsn,
-                    layers,
-                },
+                view: View::new(last_lsn, layers),
                 readers: BTreeMap::new(),
             }),
             wal_bytes: AtomicU64::new(wal.size()),
