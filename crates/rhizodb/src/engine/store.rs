@@ -42,7 +42,9 @@ use super::layout::BLOCK;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 use super::layout::TableId;
+use super::memtable::Bytes;
 use super::memtable::Memtable;
+use super::memtable::Slot;
 use super::page::page_seed;
 use super::pages::PageSource;
 use super::pages::Pages;
@@ -548,7 +550,14 @@ impl<F: FileSystem + 'static> Engine<F> {
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
-        layers.active.apply(lsn, staged.into_changes(), horizon);
+        let changes: Vec<(TableId, Bytes, Slot)> = staged.into_changes().collect();
+        let graves: Vec<(TableId, Bytes)> = changes
+            .iter()
+            .filter(|(table, key, slot)| slot.is_none() && !layers.below_may_hold(*table, key))
+            .map(|(table, key, _)| (*table, Arc::clone(key)))
+            .collect();
+        layers.active.apply(lsn, changes, horizon);
+        layers.active.bury(lsn, graves);
         lock(&shared.published).view.snapshot = lsn;
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
         shared.wal_bytes.store(wal_size, Ordering::Relaxed);

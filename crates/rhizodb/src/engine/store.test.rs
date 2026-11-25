@@ -334,6 +334,58 @@ fn readers_keep_their_snapshots_while_background_checkpoints_publish_new_trees()
 }
 
 #[test]
+fn deleted_keys_stay_deleted_whether_or_not_the_file_holds_them() {
+    let engine =
+        Engine::open(Arc::new(SimFs::new()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    let commit = |puts: &[&[u8]], deletes: &[&[u8]]| {
+        let mut write = engine.begin_write().unwrap();
+        for key in puts {
+            write.put(Table::Nodes, key, b"v").unwrap();
+        }
+        for key in deletes {
+            write.delete(Table::Nodes, key).unwrap();
+        }
+        write.commit().unwrap();
+    };
+    commit(&[b"filed"], &[]);
+    engine.checkpoint().unwrap();
+    commit(&[b"fresh"], &[]);
+    let before = engine.begin_read().unwrap();
+    commit(&[], &[b"filed", b"fresh"]);
+    for round in 0..4u8 {
+        commit(&[&[round]], &[]);
+    }
+
+    assert_eq!(
+        before.get(Table::Nodes, b"filed").unwrap().as_deref(),
+        Some(&b"v"[..])
+    );
+    assert_eq!(
+        before.get(Table::Nodes, b"fresh").unwrap().as_deref(),
+        Some(&b"v"[..])
+    );
+    drop(before);
+    for round in 4..8u8 {
+        commit(&[&[round]], &[]);
+    }
+    let now = engine.begin_read().unwrap();
+    assert_eq!(now.get(Table::Nodes, b"filed").unwrap(), None);
+    assert_eq!(now.get(Table::Nodes, b"fresh").unwrap(), None);
+    let keys: Vec<Vec<u8>> = now
+        .scan_prefix(Table::Nodes, &[])
+        .unwrap()
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, (0..8u8).map(|round| vec![round]).collect::<Vec<_>>());
+    drop(now);
+    engine.checkpoint().unwrap();
+    let reread = engine.begin_read().unwrap();
+    assert_eq!(reread.get(Table::Nodes, b"filed").unwrap(), None);
+    assert_eq!(reread.scan_prefix(Table::Nodes, &[]).unwrap().len(), 8);
+}
+
+#[test]
 fn the_engine_opens_on_a_directory_and_in_memory() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.rhizo");

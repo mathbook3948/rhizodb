@@ -86,6 +86,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
 - Every reader registers its snapshot, and a commit drops each version that no registered snapshot or later one can see.
+- A commit's tombstone of a key that neither the frozen memtable nor the tree holds is dropped with its key's versions once every registered snapshot sees the commit.
 - A write transaction keeps its operations in order, for the log, and each written key's value now, for its own reads and for the memtable.
 - A range delete puts a tombstone in the memtable for each key it removes, and replaying its log operation finds the same keys.
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
