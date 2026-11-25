@@ -385,6 +385,112 @@ fn deleted_keys_stay_deleted_whether_or_not_the_file_holds_them() {
     assert_eq!(reread.scan_prefix(Table::Nodes, &[]).unwrap().len(), 8);
 }
 
+#[derive(Clone, Debug)]
+struct RemovalThreads {
+    fs: SimFs,
+    removers: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+impl FileSystem for RemovalThreads {
+    type File = <SimFs as FileSystem>::File;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.create(name, size)
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.open(name, size)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        if name.contains("-wal-") {
+            let thread = std::thread::current().name().map(str::to_owned);
+            self.removers.lock().unwrap().push(thread);
+        }
+        self.fs.remove(name)
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn commits_leave_removing_the_log_a_checkpoint_freed_to_the_checkpoint_thread() {
+    let fs = RemovalThreads {
+        fs: SimFs::new(),
+        removers: Arc::default(),
+    };
+    let engine =
+        Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Background)).unwrap();
+
+    fill(&engine, 60);
+    engine.shared.wait_for_checkpoint();
+    fill(&engine, 1);
+    engine.shared.wait_for_checkpoint();
+    let before_close = fs.removers.lock().unwrap().clone();
+    let committed = everything(&engine).unwrap();
+    engine.close().unwrap();
+
+    let current = std::thread::current().name().map(str::to_owned);
+    assert!(!before_close.is_empty());
+    assert!(
+        before_close.iter().all(|thread| *thread != current),
+        "{before_close:?}"
+    );
+    let reopened = Engine::open(
+        Arc::new(fs.fs.clone()),
+        NAME,
+        tiny(CheckpointMode::Background),
+    )
+    .unwrap();
+    assert_eq!(everything(&reopened).unwrap(), committed);
+}
+
+#[test]
+fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
+    let engine = Engine::open(
+        Arc::new(SimFs::new()),
+        NAME,
+        manual(CheckpointMode::Background),
+    )
+    .unwrap();
+    fill(&engine, 4);
+    engine.start_checkpoint(&mut lock(&engine.shared.writer));
+    let frozen = {
+        let published = lock(&engine.shared.published);
+        Arc::downgrade(published.view.layers.frozen.as_ref().unwrap())
+    };
+    let mut write = engine.begin_write().unwrap();
+    write.put(Table::Nodes, b"late", b"v").unwrap();
+    engine.shared.wait_for_checkpoint();
+
+    write.commit().unwrap();
+
+    assert!(
+        frozen.upgrade().is_some(),
+        "the commit freed the frozen memtable"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while frozen.strong_count() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(frozen.strong_count(), 0);
+    let read = engine.begin_read().unwrap();
+    assert_eq!(
+        read.get(Table::Nodes, b"late").unwrap().as_deref(),
+        Some(&b"v"[..])
+    );
+}
+
 #[test]
 fn the_engine_opens_on_a_directory_and_in_memory() {
     let directory = tempfile::tempdir().unwrap();
