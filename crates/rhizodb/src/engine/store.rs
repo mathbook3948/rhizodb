@@ -119,8 +119,8 @@ pub(crate) struct EngineOptions {
     pub(crate) checkpoint: CheckpointMode,
     /// The pages the block cache holds.
     pub(crate) cache_pages: usize,
-    /// The bytes of free space the file may hold beyond twice its live data before a
-    /// checkpoint compacts it.
+    /// The bytes of free space the file may hold beyond twice its live data and one extent
+    /// before a checkpoint compacts it.
     pub(crate) reclaim_slack: u64,
     /// The fewest blocks a stage of a checkpoint frees before its header is written.
     pub(crate) stage_floor: u64,
@@ -134,7 +134,7 @@ impl Default for EngineOptions {
             wal_limit: 256 << 20,
             checkpoint: CheckpointMode::Background,
             cache_pages: (1 << 30) / BLOCK,
-            reclaim_slack: 64 << 20,
+            reclaim_slack: 0,
             stage_floor: 256,
         }
     }
@@ -818,8 +818,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                 let trimmed = self.trim(&mut lock(&self.durable));
                 if let Err(error) = trimmed {
                     self.poison_with(&error);
-                } else if !clean
-                    && self.holds_too_much_free_space()
+                } else if self.holds_too_much_free_space()
                     && let Err(error) = self.compact()
                 {
                     self.poison_with(&error);
@@ -1134,8 +1133,11 @@ impl<F: FileSystem + 'static> Shared<F> {
         if self.is_poisoned() {
             return;
         }
-        let movable = self.can_move_down(&lock(&self.durable));
-        if movable && let Some(job) = self.freeze(&mut writer) {
+        let unfinished = {
+            let durable = lock(&self.durable);
+            !durable.header.clean || self.can_move_down(&durable)
+        };
+        if unfinished && let Some(job) = self.freeze(&mut writer) {
             self.run_checkpoint(job, true);
             if self.is_poisoned() {
                 return;

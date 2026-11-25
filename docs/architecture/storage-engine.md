@@ -130,7 +130,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
 - A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread, both before it writes and once its header is durable.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
-- After each checkpoint but a clean close's, the engine compacts the file when it holds more than twice its live data plus 64 MiB and one extent, and has grown by its live data, or by 64 MiB, since the last compaction.
+- After each checkpoint, a clean close's included, the engine compacts the file when it holds more than twice its live data plus one extent, and has grown by its live data since the last compaction, so a file that has lost most of its data gives the space back by the time it closes.
+- A clean close that compacted writes one more clean header, so the file it leaves needs no log.
 - The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.

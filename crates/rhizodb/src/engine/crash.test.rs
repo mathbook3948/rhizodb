@@ -685,3 +685,56 @@ fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_da
     });
     assert!(staged > 0, "no power loss came back to a staged header");
 }
+
+#[test]
+fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole() {
+    let load: Vec<Write> = (0..25u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 200_000]))
+        .collect();
+    let keep_one = vec![Write::DeleteRange(Table::NodeColumns, vec![1], vec![30])];
+    let transactions = vec![load, keep_one];
+    let states = states(&transactions);
+    let compacting = EngineOptions {
+        reclaim_slack: 0,
+        stage_floor: u64::MAX,
+        ..by_hand()
+    };
+    let base = SimFs::new();
+    let engine = open(&base, compacting).unwrap();
+    commit(&engine, &transactions[0]).unwrap();
+    engine.checkpoint().unwrap();
+    let loaded = file_blocks(&base);
+    let base = base.crash(Crash::DropUnsynced);
+    drop(engine);
+    let total = {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, compacting).unwrap();
+        commit(&engine, &transactions[1]).unwrap();
+        let before = copy.operations();
+        drop(engine);
+        assert!(
+            file_blocks(&copy) * 10 < loaded,
+            "closing after the delete left {} of {loaded} blocks",
+            file_blocks(&copy)
+        );
+        let reopened = open(&copy, compacting).unwrap();
+        assert_eq!(dump(&reopened), states[2]);
+        copy.operations() - before
+    };
+    assert!(total > 20, "closing ran only {total} operations");
+    for fail_at in 0..=total {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, compacting).unwrap();
+        commit(&engine, &transactions[1]).unwrap();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        drop(engine);
+        for crash in crashes(0) {
+            let reopened = open(&copy.crash(crash), compacting)
+                .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            reopened.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
+            assert_eq!(dump(&reopened), states[2], "fail at {fail_at}, {crash:?}");
+        }
+    }
+}
