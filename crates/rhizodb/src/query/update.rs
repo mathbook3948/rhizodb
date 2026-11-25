@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -23,6 +24,8 @@ use crate::temporal::Clocks;
 
 use super::datum::Datum;
 use super::datum::PathIds;
+use super::datum::check_item;
+use super::datum::into_property;
 use super::datum::to_property;
 use super::eval::Env;
 use super::eval::Row;
@@ -135,11 +138,17 @@ impl<W: WriteTransaction> Writer<'_, W> {
         merging: bool,
     ) -> Result<Properties, Error> {
         let mut properties = Properties::new();
-        let Some(expr) = expr else {
-            return Ok(properties);
+        let entries = match expr {
+            None => return Ok(properties),
+            Some(Expr::Map(entries)) => self.literal_entries(entries, row)?,
+            Some(expr) => self
+                .map_operand(self.eval(expr, row)?)?
+                .into_iter()
+                .map(|(key, value)| (Cow::Owned(key), value))
+                .collect(),
         };
-        for (key, value) in self.map_operand(self.eval(expr, row)?)? {
-            match to_property(&value)? {
+        for (key, value) in entries {
+            match into_property(value)? {
                 Some(value) => {
                     properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
                 }
@@ -153,6 +162,25 @@ impl<W: WriteTransaction> Writer<'_, W> {
             }
         }
         Ok(properties)
+    }
+
+    fn literal_entries<'k>(
+        &self,
+        entries: &'k [(String, Expr)],
+        row: &Row,
+    ) -> Result<Vec<(Cow<'k, str>, Datum)>, Error> {
+        let env = self.env();
+        let mut values = Vec::with_capacity(entries.len());
+        for (key, expr) in entries {
+            values.push((Cow::Borrowed(key.as_str()), env.eval(expr, row)?));
+        }
+        values.reverse();
+        values.sort_by(|left, right| left.0.cmp(&right.0));
+        values.dedup_by(|later, earlier| later.0 == earlier.0);
+        for (_, value) in &values {
+            check_item(value)?;
+        }
+        Ok(values)
     }
 
     fn map_operand(&self, value: Datum) -> Result<BTreeMap<String, Datum>, Error> {
@@ -201,10 +229,10 @@ impl<W: WriteTransaction> Writer<'_, W> {
 
     fn create(&mut self, part: &PatternPart, row: &mut Row, merging: bool) -> Result<(), Error> {
         let mut current = self.node(&part.start, row, merging)?;
-        let mut trail = PathIds {
+        let mut trail = part.path.map(|_| PathIds {
             nodes: vec![current],
             relationships: Vec::new(),
-        };
+        });
         for step in &part.steps {
             let next = self.node(&step.node, row, merging)?;
             let relationship = &step.relationship;
@@ -228,11 +256,13 @@ impl<W: WriteTransaction> Writer<'_, W> {
             };
             let id = self.tx.create_relationship(&record)?;
             set(row, relationship.slot, Datum::Relationship(id));
-            trail.relationships.push(id);
-            trail.nodes.push(next);
+            if let Some(trail) = &mut trail {
+                trail.relationships.push(id);
+                trail.nodes.push(next);
+            }
             current = next;
         }
-        if let Some(path) = part.path {
+        if let (Some(path), Some(trail)) = (part.path, trail) {
             set(row, path, Datum::Path(trail));
         }
         Ok(())

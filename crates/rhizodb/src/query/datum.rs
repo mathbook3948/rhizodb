@@ -121,6 +121,14 @@ pub(crate) fn to_property(value: &Datum) -> Result<Option<PropertyValue>, Error>
     }
 }
 
+/// [`to_property`] of an owned value, which keeps a string's buffer.
+pub(crate) fn into_property(value: Datum) -> Result<Option<PropertyValue>, Error> {
+    match value {
+        Datum::String(value) => Ok(Some(PropertyValue::String(value))),
+        other => to_property(&other),
+    }
+}
+
 fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
     match value {
         Datum::Boolean(value) => Ok(PropertyValue::Boolean(*value)),
