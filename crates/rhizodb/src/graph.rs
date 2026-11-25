@@ -40,6 +40,7 @@ mod value_key;
 pub(crate) use adjacency::AdjacencyReader;
 pub(crate) use columns::Cell;
 pub(crate) use columns::ColumnReader;
+pub(crate) use columns::Quick;
 pub(crate) use columns::Text;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
@@ -808,6 +809,18 @@ impl<T: ReadTransaction> GraphTx<T> {
                         .dictionary()
                         .map(|set| self.carries(Some(set), label))
                         .collect::<Result<Vec<bool>, GraphError>>()?;
+                    if let [true] = carries.as_slice() {
+                        ids.reserve(stored.head().live() as usize);
+                        for (index, word) in stored.alive_words().into_iter().enumerate() {
+                            let mut rest = word;
+                            while rest != 0 {
+                                let slot = index * 64 + rest.trailing_zeros() as usize;
+                                rest &= rest - 1;
+                                ids.push(meta::node_at(group, slot));
+                            }
+                        }
+                        return Ok(());
+                    }
                     for (slot, code) in stored.live_codes() {
                         match carries.get(code) {
                             Some(true) => ids.push(meta::node_at(group, slot)),
@@ -960,21 +973,27 @@ impl<T: ReadTransaction> GraphTx<T> {
         reader: &mut AdjacencyReader,
         side: Side,
         prefix: &[u8],
-        mut visit: impl FnMut(&[u8], &[u8], &mut bool) -> Result<(), GraphError>,
+        mut visit: impl FnMut(&[u8], &[u8], &mut Option<adjacency::Checked>) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
-        let entries = reader.entries(side, prefix, || {
+        let entries = reader.entries(side, prefix, |window| {
             let mut held = Vec::new();
-            self.transaction
-                .visit_prefix(Table::Adjacency, prefix, |key, value| {
+            self.transaction.visit_range(
+                Table::Adjacency,
+                window.start(),
+                &window.end(),
+                |key, value| {
                     if held
                         .last()
                         .is_some_and(|(last, _, _): &adjacency::Verified| **last >= *key)
                     {
                         return Err(ENTRIES_OUT_OF_ORDER);
                     }
-                    held.push((key.into(), value.into(), false));
+                    if window.holds(key) {
+                        held.push((key.into(), value.into(), None));
+                    }
                     Ok::<(), GraphError>(())
-                })?;
+                },
+            )?;
             Ok::<_, GraphError>(held)
         })?;
         match entries {
@@ -987,7 +1006,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             Entries::Stored => {
                 self.transaction
                     .visit_prefix(Table::Adjacency, prefix, |key, value| {
-                        visit(key, value, &mut false)
+                        visit(key, value, &mut None)
                     })
             }
         }

@@ -151,16 +151,29 @@ fn check_with(
     directions: &[Direction],
     types: &[Option<usize>],
 ) -> Result<(), TestCaseError> {
-    for node in &model.nodes {
-        for direction in directions.iter().copied() {
-            for only in types.iter().copied() {
+    for direction in directions.iter().copied() {
+        for only in types.iter().copied() {
+            let mut reader = AdjacencyReader::default();
+            for node in &model.nodes {
+                let expected = expected(model, *node, direction, only);
                 let found = read
                     .adjacent(NodeId(*node), direction, only.map(rel_type))
                     .unwrap();
                 prop_assert_eq!(
-                    found,
-                    expected(model, *node, direction, only),
+                    &found,
+                    &expected,
                     "node {} {:?} {:?}",
+                    node,
+                    direction,
+                    only
+                );
+                let scanned = read
+                    .adjacent_with(&mut reader, NodeId(*node), direction, only.map(rel_type))
+                    .unwrap();
+                prop_assert_eq!(
+                    scanned,
+                    expected,
+                    "node {} {:?} {:?} in a scan",
                     node,
                     direction,
                     only
@@ -321,6 +334,40 @@ proptest! {
     ) {
         run(&ops)?;
     }
+}
+
+#[test]
+fn a_scan_of_many_consecutive_segments_reads_what_each_node_reads_alone() {
+    let fs = SimFs::new();
+    let graph = open(&fs);
+    let mut model = Model::default();
+    let mut write = graph.write().unwrap();
+    let nodes: Vec<u64> = (0..1200)
+        .map(|at| create_node(&mut write, &mut model, 3000 + at))
+        .collect();
+    for (at, node) in nodes.iter().enumerate() {
+        if at % 97 < 40 {
+            continue;
+        }
+        let other = nodes[(at * 31) % nodes.len()];
+        create_rel(&mut write, &mut model, *node, other, at % 2 * 2);
+        if at % 5 == 0 {
+            create_rel(&mut write, &mut model, other, *node, 1);
+        }
+    }
+    write.commit().unwrap();
+    check(&graph.read().unwrap(), &model).unwrap();
+    let mut write = graph.write().unwrap();
+    for node in nodes.iter().step_by(23) {
+        create_rel(&mut write, &mut model, *node, *node, 0);
+    }
+    let doomed: Vec<u64> = model.rels.keys().copied().step_by(11).collect();
+    for id in doomed {
+        delete_rel(&mut write, &mut model, id);
+    }
+    check(&write, &model).unwrap();
+    write.commit().unwrap();
+    check(&graph.read().unwrap(), &model).unwrap();
 }
 
 #[test]

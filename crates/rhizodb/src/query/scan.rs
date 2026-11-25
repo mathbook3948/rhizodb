@@ -17,6 +17,7 @@ use crate::graph::Cell;
 use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
+use crate::graph::Quick;
 use crate::graph::ScanGroup;
 use crate::graph::Target;
 use crate::graph::Text;
@@ -445,6 +446,17 @@ fn ordered(op: ComparisonOp, ordering: Ordering) -> bool {
     }
 }
 
+fn int_order(op: ComparisonOp, stored: i64, fixed: i64, mirrored: bool) -> bool {
+    ordered(
+        op,
+        if mirrored {
+            fixed.cmp(&stored)
+        } else {
+            stored.cmp(&fixed)
+        },
+    )
+}
+
 fn compare_args(op: ComparisonOp, left: &Arg<'_>, right: &Arg<'_>) -> Result<Option<bool>, Error> {
     if let (Arg::Cell(Cell::Int(left)), Arg::Datum(right)) = (left, right)
         && let Datum::Integer(right) = right.as_ref()
@@ -518,19 +530,59 @@ impl At<'_, '_> {
     }
 
     fn datum(&self, value: &Value) -> Result<Datum, Error> {
-        if let Value::Column(column) = value {
-            return match self.group.cell(self.node, *column)? {
+        let column = match value {
+            Value::Column(column) => *column,
+            Value::Node => return Ok(Datum::Node(self.node)),
+            Value::Fixed(value) => return Ok(value.clone()),
+            Value::Row(slot) => return Ok(self.row.get(*slot).cloned().unwrap_or(Datum::Null)),
+        };
+        match self.group.quick(self.node, column) {
+            Quick::Absent => Ok(Datum::Null),
+            Quick::Int(value) => Ok(Datum::Integer(value)),
+            Quick::Unknown => match self.group.cell(self.node, column)? {
                 Some(cell) => cell_datum(cell),
                 None => Ok(Datum::Null),
-            };
+            },
         }
-        Ok(match self.arg(value)? {
-            Arg::Cell(cell) => cell_datum(cell)?,
-            Arg::Datum(datum) => datum.into_owned(),
-        })
     }
 
+    #[inline]
     fn holds(&self, pred: &Pred) -> Result<Option<bool>, Error> {
+        match self.quick(pred) {
+            Some(result) => Ok(result),
+            None => self.evaluate(pred),
+        }
+    }
+
+    #[inline]
+    fn quick(&self, pred: &Pred) -> Option<Option<bool>> {
+        match pred {
+            Pred::Against {
+                column,
+                op,
+                fixed,
+                mirrored,
+            } => match (self.group.quick(self.node, *column), fixed) {
+                (Quick::Int(value), Datum::Integer(fixed)) => {
+                    Some(Some(int_order(*op, value, *fixed, *mirrored)))
+                }
+                (Quick::Absent, fixed) if *mirrored => Some(comparison(*op, fixed, &Datum::Null)),
+                (Quick::Absent, fixed) => Some(comparison(*op, &Datum::Null, fixed)),
+                _ => None,
+            },
+            Pred::IsNull(Value::Column(column), negated) => {
+                match self.group.quick(self.node, *column) {
+                    Quick::Absent => Some(Some(!*negated)),
+                    Quick::Int(_) => Some(Some(*negated)),
+                    Quick::Unknown => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    #[inline(never)]
+    fn evaluate(&self, pred: &Pred) -> Result<Option<bool>, Error> {
         Ok(match pred {
             Pred::Fixed(value) => *value,
             Pred::Against {
@@ -590,14 +642,9 @@ impl At<'_, '_> {
         mirrored: bool,
     ) -> Result<Option<bool>, Error> {
         Ok(match (self.group.cell(self.node, column)?, fixed) {
-            (Some(Cell::Int(value)), Datum::Integer(fixed)) => Some(ordered(
-                op,
-                if mirrored {
-                    fixed.cmp(&value)
-                } else {
-                    value.cmp(fixed)
-                },
-            )),
+            (Some(Cell::Int(value)), Datum::Integer(fixed)) => {
+                Some(int_order(op, value, *fixed, mirrored))
+            }
             (cell, fixed) => {
                 let stored = match cell {
                     Some(cell) => Arg::Cell(cell),
@@ -806,31 +853,35 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(());
         }
         let ids = self.scanned_ids(scan)?;
-        let mut groups: Vec<ScanGroup<'_>> = Vec::new();
+        let mut groups: Vec<(ScanGroup<'_>, usize)> = Vec::new();
         for (input, row) in rows.iter().enumerate() {
+            let mut start = 0;
             let mut held = 0;
-            for node in &ids {
-                if groups.get(held).is_some_and(|group| !group.holds(*node)) {
+            while let Some(first) = ids.get(start) {
+                if groups.len() == held {
                     if rows.len() == 1 {
                         groups.clear();
-                    } else {
-                        held += 1;
+                        held = 0;
+                    }
+                    let group = self.tx.scan_group(*first, tokens)?;
+                    let end = start + ids[start..].partition_point(|node| group.holds(*node));
+                    groups.push((group, end));
+                }
+                let Some((group, end)) = groups.get(held) else {
+                    break;
+                };
+                for node in &ids[start..*end] {
+                    let at = At {
+                        group,
+                        node: *node,
+                        row,
+                    };
+                    if at.keeps(filter)? && !visit(&at, input)? {
+                        return Ok(());
                     }
                 }
-                if groups.len() == held {
-                    groups.push(self.tx.scan_group(*node, tokens)?);
-                }
-                let Some(group) = groups.get(held) else {
-                    continue;
-                };
-                let at = At {
-                    group,
-                    node: *node,
-                    row,
-                };
-                if at.keeps(filter)? && !visit(&at, input)? {
-                    return Ok(());
-                }
+                start = *end;
+                held += 1;
             }
         }
         Ok(())
@@ -1207,11 +1258,22 @@ impl<T: ReadTransaction> Env<'_, T> {
         self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, input| {
             let mut values = None;
             if let Some(outputs) = &outputs {
-                let output = outputs
-                    .iter()
-                    .map(|value| at.arg(value)?.probe())
-                    .collect::<Result<Vec<_>, _>>()?;
-                if !seen.insert_probe(&output)? {
+                let one;
+                let many;
+                let output = match outputs.as_slice() {
+                    [value] => {
+                        one = at.arg(value)?.probe()?;
+                        std::slice::from_ref(&one)
+                    }
+                    _ => {
+                        many = outputs
+                            .iter()
+                            .map(|value| at.arg(value)?.probe())
+                            .collect::<Result<Vec<_>, _>>()?;
+                        many.as_slice()
+                    }
+                };
+                if !seen.insert_probe(output)? {
                     return Ok(true);
                 }
                 if outputs_are_items && !early {

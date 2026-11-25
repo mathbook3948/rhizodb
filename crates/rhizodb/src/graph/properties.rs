@@ -25,6 +25,7 @@ use super::columns::Delta;
 use super::columns::DeltaRef;
 use super::columns::Deltas;
 use super::columns::IndexedColumn;
+use super::columns::Quick;
 use super::columns::SEGMENT_SLOTS;
 use super::columns::Segment;
 use super::columns::SegmentRef;
@@ -107,6 +108,18 @@ impl ScanGroup<'_> {
     /// Whether `node` lies in the row group.
     pub(crate) fn holds(&self, node: NodeId) -> bool {
         meta::locate(node).0 == self.group
+    }
+
+    /// The value of column `column` of the live node `node` where it is absent or a stored
+    /// integer, read without decoding.
+    pub(crate) fn quick(&self, node: NodeId, column: usize) -> Quick {
+        if self.edit.is_some() || !self.deltas.is_empty() {
+            return Quick::Unknown;
+        }
+        match self.columns.get(column) {
+            Some(Some((_, stored))) => stored.quick(meta::locate(node).1),
+            _ => Quick::Absent,
+        }
     }
 
     /// The value of column `column` of the live node `node`, which the group must hold.
