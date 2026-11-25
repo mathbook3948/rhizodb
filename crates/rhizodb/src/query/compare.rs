@@ -165,6 +165,9 @@ pub(crate) fn sort_order(direction: SortDirection, a: &Datum, b: &Datum) -> Orde
 }
 
 pub(crate) fn order(a: &Datum, b: &Datum) -> Ordering {
+    if let (Datum::Integer(a), Datum::Integer(b)) = (a, b) {
+        return a.cmp(b);
+    }
     let rank = rank(a).cmp(&rank(b));
     if rank != Ordering::Equal {
         return rank;

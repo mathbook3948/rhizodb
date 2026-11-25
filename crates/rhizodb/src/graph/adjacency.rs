@@ -1117,9 +1117,9 @@ impl SegmentEdit {
 }
 
 /// The stored entries of the adjacency segments a query read last, one per side, so a scan that
-/// expands consecutive nodes reads each segment from storage once instead of once per node.
-/// A segment is held once it is read twice in a row, or when it follows the segment read
-/// before it, as in a scan.
+/// expands consecutive nodes reads storage once per window of segments instead of once per node.
+/// A window of segments is held once a segment is read twice in a row, or when it follows the
+/// segment read before it, as in a scan, and the window doubles while the scan goes on.
 #[derive(Debug, Default)]
 pub(crate) struct AdjacencyReader {
     sides: [Recent; 2],
@@ -1128,15 +1128,85 @@ pub(crate) struct AdjacencyReader {
 #[derive(Debug, Default)]
 struct Recent {
     prefix: Vec<u8>,
-    entries: Option<Vec<Verified>>,
+    window: Option<Window>,
+    entries: Vec<Verified>,
+    bounds: Vec<usize>,
+    run: u8,
 }
 
 /// A stored entry a reader holds, and whether a read checked its checksum.
 pub(crate) type Verified = (Box<[u8]>, Box<[u8]>, bool);
 
+/// The segments to read in one pass: those of one side, group, and relationship type, or of
+/// every type, from the segment of `first` up to `segments` segments on.
+#[derive(Clone, Debug)]
+pub(crate) struct Window {
+    first: Vec<u8>,
+    segments: u8,
+}
+
+const WINDOW_SEGMENTS: u8 = 16;
+
+impl Window {
+    fn of(prefix: &[u8], segments: u8) -> Option<Self> {
+        let segment = *prefix.get(SEGMENT_AT)?;
+        Some(Self {
+            first: prefix.to_vec(),
+            segments: (u8::MAX - segment).min(segments - 1) + 1,
+        })
+    }
+
+    fn segment(&self, offset: u8) -> u8 {
+        self.first.get(SEGMENT_AT).copied().unwrap_or_default() + offset
+    }
+
+    fn offset(&self, prefix: &[u8]) -> usize {
+        match (self.first.get(SEGMENT_AT), prefix.get(SEGMENT_AT)) {
+            (Some(first), Some(segment)) => usize::from(segment.wrapping_sub(*first)),
+            _ => 0,
+        }
+    }
+
+    fn covers(&self, prefix: &[u8]) -> bool {
+        let (Some(first), Some(segment)) = (self.first.get(SEGMENT_AT), prefix.get(SEGMENT_AT))
+        else {
+            return false;
+        };
+        self.first.len() == prefix.len()
+            && self.first.get(..SEGMENT_AT) == prefix.get(..SEGMENT_AT)
+            && self.first.get(TYPE_AT..) == prefix.get(TYPE_AT..)
+            && segment.wrapping_sub(*first) < self.segments
+    }
+
+    /// The first key the window holds.
+    pub(crate) fn start(&self) -> &[u8] {
+        &self.first
+    }
+
+    /// A key above every key the window holds.
+    pub(crate) fn end(&self) -> Vec<u8> {
+        let mut end = self.first.get(..TYPE_AT).unwrap_or_default().to_vec();
+        if let Some(segment) = end.get_mut(SEGMENT_AT) {
+            *segment += self.segments - 1;
+        }
+        end.extend_from_slice(&[u8::MAX; PART_KEY - TYPE_AT]);
+        end
+    }
+
+    /// Whether the window holds the entry under `key`, which lies between its bounds.
+    pub(crate) fn holds(&self, key: &[u8]) -> bool {
+        match self.first.get(TYPE_AT..) {
+            Some(rel_type) if !rel_type.is_empty() => {
+                key.get(TYPE_AT..TYPED_PREFIX) == Some(rel_type)
+            }
+            _ => true,
+        }
+    }
+}
+
 /// What [`AdjacencyReader::entries`] gives for one read of a prefix.
 pub(crate) enum Entries<'r> {
-    /// The prefix was read before, so its entries are held.
+    /// The prefix lies in the window read before, so its entries are held.
     Held(&'r mut [Verified]),
     /// The prefix was not read just before, so it is read from storage in place.
     Stored,
@@ -1144,30 +1214,54 @@ pub(crate) enum Entries<'r> {
 
 impl AdjacencyReader {
     /// The entries of `prefix` on `side`, held once the prefix is read twice in a row or right
-    /// after the prefix of the segment before it. `load` reads them from storage.
+    /// after the prefix of the segment before it. `load` reads the entries of a window, in key
+    /// order, from storage.
     pub(crate) fn entries<E>(
         &mut self,
         side: Side,
         prefix: &[u8],
-        load: impl FnOnce() -> Result<Vec<Verified>, E>,
+        load: impl FnOnce(&Window) -> Result<Vec<Verified>, E>,
     ) -> Result<Entries<'_>, E> {
         let recent = &mut self.sides[usize::from(side.byte())];
-        if recent.prefix != prefix {
-            let scanning = follows(&recent.prefix, prefix);
-            recent.prefix.clear();
-            recent.prefix.extend_from_slice(prefix);
-            recent.entries = None;
+        let covered = recent
+            .window
+            .as_ref()
+            .is_some_and(|window| window.covers(prefix));
+        let scanning = recent.prefix == prefix || follows(&recent.prefix, prefix);
+        recent.prefix.clear();
+        recent.prefix.extend_from_slice(prefix);
+        if !covered {
+            recent.window = None;
             if !scanning {
+                recent.run = 0;
                 return Ok(Entries::Stored);
             }
+            recent.run = (recent.run * 2).clamp(1, WINDOW_SEGMENTS);
+            let Some(window) = Window::of(prefix, recent.run) else {
+                return Ok(Entries::Stored);
+            };
+            recent.entries = load(&window)?;
+            recent.bounds.clear();
+            let mut at = 0;
+            for offset in 0..window.segments {
+                let segment = window.segment(offset);
+                at += recent.entries[at..]
+                    .partition_point(|(key, _, _)| key.get(SEGMENT_AT) <= Some(&segment));
+                recent.bounds.push(at);
+            }
+            recent.window = Some(window);
         }
-        if recent.entries.is_none() {
-            recent.entries = Some(load()?);
-        }
-        Ok(match &mut recent.entries {
-            Some(entries) => Entries::Held(entries),
-            None => Entries::Stored,
-        })
+        let offset = recent
+            .window
+            .as_ref()
+            .map_or(0, |window| window.offset(prefix));
+        let start = match offset.checked_sub(1) {
+            Some(before) => recent.bounds.get(before).copied().unwrap_or_default(),
+            None => 0,
+        };
+        let end = recent.bounds.get(offset).copied().unwrap_or(start);
+        let entries = &mut recent.entries;
+        Ok(Entries::Held(&mut entries[start..end]))
     }
 }
 
