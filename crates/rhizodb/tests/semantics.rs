@@ -455,8 +455,10 @@ fn reading_a_deleted_element_fails_except_for_the_type_of_a_relationship() {
     run(&db, "CREATE (:L {x: 1})-[:T {y: 2}]->()");
     for query in [
         "MATCH (n:L) DETACH DELETE n RETURN n.x",
+        "MATCH (n:L) DETACH DELETE n RETURN n.never_set",
         "MATCH (n:L) DETACH DELETE n RETURN labels(n)",
         "MATCH ()-[r]->() DELETE r RETURN r.y",
+        "MATCH ()-[r]->() DELETE r RETURN r.never_set",
     ] {
         assert_eq!(
             error_kind(&db, query),
@@ -1431,5 +1433,51 @@ fn both_exists_forms_reject_a_variable_hidden_by_the_projection_next_to_them() {
              ORDER BY EXISTS { MATCH (m) WITH m AS n MATCH (n)-->() } RETURN k"
         ),
         [vec![int(1)]]
+    );
+}
+
+#[test]
+fn a_distinct_aggregate_counts_each_element_and_each_equal_value_once() {
+    let db = db();
+    run(&db, "INSERT (:D)-[:R]->(:D)-[:R]->(:D)");
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (a)-[r]->(b) UNWIND [a, b, r, r, 1, 1.0, 'x', [a]] AS v RETURN count(DISTINCT v)"
+        ),
+        [vec![int(9)]]
+    );
+}
+
+#[test]
+fn sum_and_avg_add_their_numbers_in_order_and_overflow_only_on_integers() {
+    let db = db();
+    let big = "9223372036854775807";
+    assert_eq!(
+        error_kind(&db, &format!("UNWIND [{big}, 1] AS x RETURN sum(x)")),
+        ErrorKind::IntegerOverflow
+    );
+    assert_eq!(
+        single(&db, &format!("UNWIND [{big}, 1, 0.5] AS x RETURN sum(x)")),
+        float(9_223_372_036_854_775_807.0 + 1.0 + 0.5)
+    );
+    assert_eq!(
+        single(&db, &format!("UNWIND [{big}, 1] AS x RETURN avg(x)")),
+        float((9_223_372_036_854_775_807.0 + 1.0) / 2.0)
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1.0e16, 1.0, -1.0e16, 1.0] AS x RETURN sum(x), avg(x)"
+        ),
+        [vec![float(1.0), float(0.25)]]
+    );
+    let rows = run(&db, "UNWIND [-0.0] AS x RETURN sum(x), avg(x)");
+    assert!(
+        matches!(rows.as_slice(), [row] if row.iter().all(|value| matches!(value, Value::Float(f) if f.is_sign_negative())))
+    );
+    assert_eq!(
+        run(&db, "UNWIND [] AS x RETURN sum(x), avg(x)"),
+        [vec![int(0), Value::Null]]
     );
 }

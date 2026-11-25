@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 06469c566010acc193a3ba6d4522d38abd114d3d6d84205b72d91be8024dd234 # shrinks to initial = [0, 0, 0, 0], steps = [Transaction { ops: [], commit: true }]
+cc eaa722d7f1ae8eda55983f48b8f82d5dffc4a6c096e3fefc71b6dce13509f4ef # shrinks to initial = [0, 0, 0, 0], steps = [Transaction { ops: [CreateNode { labels: [false, false], properties: [] }], commit: true }, Transaction { ops: [CreateRelationship { from: 0, to: 0, rel_type: 0, properties: [] }], commit: true }]

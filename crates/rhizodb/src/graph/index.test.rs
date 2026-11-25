@@ -5,6 +5,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::graph::Direction;
+use crate::graph::FORMAT_VERSION;
 use crate::graph::Graph;
 use crate::graph::NodeId;
 use crate::graph::RelationshipId;
@@ -140,6 +141,18 @@ fn create_relationship_indexes(write: &mut GraphTx<impl WriteTransaction>) {
         .unwrap();
 }
 
+fn create_property_indexes(write: &mut GraphTx<impl WriteTransaction>) {
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write
+        .create_property_index("doc at", IndexTarget::Label("Doc"), "at")
+        .unwrap();
+    write
+        .create_property_index("link text", IndexTarget::RelationshipType("LINK"), "text")
+        .unwrap();
+}
+
 fn relationship_ids(write: &GraphTx<impl ReadTransaction>) -> Vec<RelationshipId> {
     let mut ids: Vec<RelationshipId> = write
         .node_ids()
@@ -204,7 +217,7 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             if *labelled {
                 record.labels.insert(names.label);
             }
-            write.create_node(&record).unwrap();
+            write.create_node(record.clone()).unwrap();
         }
         Op::Link {
             from,
@@ -262,11 +275,20 @@ fn apply(write: &mut GraphTx<impl WriteTransaction>, names: &Names, op: &Op) {
             }
         }
         Op::Rebuild => {
-            for name in ["words", "points", "link words", "link points"] {
+            for name in [
+                "words",
+                "points",
+                "link words",
+                "link points",
+                "doc text",
+                "doc at",
+                "link text",
+            ] {
                 write.drop_index(name).unwrap();
             }
             create_indexes(write);
             create_relationship_indexes(write);
+            create_property_indexes(write);
         }
     }
 }
@@ -298,6 +320,7 @@ proptest! {
             if position == indexed_after {
                 create_indexes(&mut write);
                 create_relationship_indexes(&mut write);
+                create_property_indexes(&mut write);
                 write.commit().unwrap();
                 write = graph.write().unwrap();
             }
@@ -332,7 +355,7 @@ fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
         PropertyValue::List(vec![PropertyValue::Float(first), PropertyValue::Float(1.0)])
     };
     let node = write
-        .create_node(&NodeRecord {
+        .create_node(NodeRecord {
             labels: [label].into(),
             properties: Properties::from([(at, vector(0.0))]),
         })
@@ -366,7 +389,7 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("current terms".to_owned())),
@@ -395,6 +418,15 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         for (table, key, value) in index.rows(0, &old_output) {
             stale.put(table, &key, &value).unwrap();
         }
+        let mut block = Block::default();
+        block.insert(0, 0, &[0, 1, 2], 3).unwrap();
+        stale
+            .put(
+                Table::KeywordPostings,
+                &keys::posting_key(0, "stale", 0),
+                block.bytes().unwrap(),
+            )
+            .unwrap();
         stale
             .put(
                 Table::KeywordTotals,
@@ -450,7 +482,7 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("graph store".to_owned())),
@@ -467,6 +499,7 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
         write.commit().unwrap();
 
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         previous
             .put(
@@ -503,6 +536,126 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     );
 }
 
+#[test]
+fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_index() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("five.redb");
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(text, PropertyValue::String("five".to_owned()))]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &5u32.to_be_bytes(),
+            )
+            .unwrap();
+        previous.commit().unwrap();
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let stored = graph
+        .storage
+        .begin_read()
+        .unwrap()
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(FORMAT_VERSION.to_be_bytes().to_vec()));
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    let label = read.lookup_token::<Label>("Doc").unwrap().unwrap();
+    let text = read.lookup_token::<PropertyKey>("text").unwrap().unwrap();
+    let index = read
+        .property_index(Target::Label(label), text)
+        .unwrap()
+        .unwrap();
+    let five = KeyRange::equal_to(&PropertyValue::String("five".to_owned())).unwrap();
+    assert_eq!(read.property_seek(index, &[five]).unwrap().len(), 1);
+}
+
+#[test]
+fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_writes() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let doc = || NodeRecord {
+        labels: [label].into(),
+        properties: Properties::from([(text, PropertyValue::String("a".to_owned()))]),
+    };
+    write.create_node(doc()).unwrap();
+    let target = Target::Label(label);
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    let index = write.property_index(target, text).unwrap().unwrap();
+    write.create_node(doc()).unwrap();
+    let a = KeyRange::equal_to(&PropertyValue::String("a".to_owned())).unwrap();
+    assert_eq!(write.property_seek(index, &[a]).unwrap().len(), 2);
+    assert!(write.drop_index("doc text").unwrap());
+    assert_eq!(write.property_index(target, text).unwrap(), None);
+    write.create_node(doc()).unwrap();
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token::<Label>("Doc").unwrap();
+    let text = write.intern_token::<PropertyKey>("text").unwrap();
+    write.commit().unwrap();
+    let target = Target::Label(label);
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.rollback().unwrap();
+    assert_eq!(
+        graph.read().unwrap().property_index(target, text).unwrap(),
+        None
+    );
+    let mut write = graph.write().unwrap();
+    write
+        .create_property_index("doc text", IndexTarget::Label("Doc"), "text")
+        .unwrap();
+    write.commit().unwrap();
+    assert!(
+        graph
+            .read()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        graph
+            .write()
+            .unwrap()
+            .property_index(target, text)
+            .unwrap()
+            .is_some()
+    );
+}
+
 #[derive(Debug)]
 struct CountingStorage {
     inner: RedbStorage,
@@ -516,7 +669,7 @@ struct CountingWrite {
 
 impl CountingWrite {
     fn count(&self, table: Table) {
-        if ENTRY_TABLES.contains(&table) {
+        if ENTRY_TABLES.contains(&table) && table != Table::KeywordPostings {
             self.entry_writes.set(self.entry_writes.get() + 1);
         }
     }
@@ -536,6 +689,10 @@ impl Storage for CountingStorage {
             entry_writes: Rc::clone(&self.entry_writes),
         })
     }
+
+    fn write_copy(snapshot: &RedbRead, path: &std::path::Path) -> Result<(), StorageError> {
+        RedbStorage::write_copy(snapshot, path)
+    }
 }
 
 impl ReadTransaction for CountingWrite {
@@ -550,6 +707,43 @@ impl ReadTransaction for CountingWrite {
     ) -> Result<Vec<crate::storage::Entry>, StorageError> {
         self.inner.scan_prefix(table, prefix)
     }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, visit)
+    }
 }
 
 impl WriteTransaction for CountingWrite {
@@ -563,6 +757,11 @@ impl WriteTransaction for CountingWrite {
         self.inner.delete(table, key)
     }
 
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete_range(table, start, end)
+    }
+
     fn commit(self) -> Result<(), StorageError> {
         self.inner.commit()
     }
@@ -573,7 +772,7 @@ impl WriteTransaction for CountingWrite {
 }
 
 #[test]
-fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
+fn opening_a_database_of_format_four_keeps_its_keyword_entries_and_moves_its_postings_to_blocks() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("four.redb");
     {
@@ -584,7 +783,7 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
         let text = write.intern_token("text").unwrap();
         let at = write.intern_token("at").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([
                     (text, PropertyValue::String("graph store graph".to_owned())),
@@ -600,6 +799,7 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
             .unwrap();
         write.commit().unwrap();
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         previous
             .put(
@@ -646,7 +846,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
         let label = write.intern_token("Doc").unwrap();
         let text = write.intern_token("text").unwrap();
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: [label].into(),
                 properties: Properties::from([(
                     text,
@@ -657,6 +857,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
         write.commit().unwrap();
 
         let mut previous = graph.storage.begin_write().unwrap();
+        crate::graph::tests::store_as_format_seven(&mut previous);
         store_label_only_definitions(&mut previous);
         for (key, value) in previous.scan_prefix(Table::KeywordPostings, &[]).unwrap() {
             previous
@@ -750,19 +951,66 @@ fn a_definition_reads_back_as_it_was_written() {
     assert_ne!(over_label.encode(), over_type.encode());
 }
 
-#[test]
-fn counts_read_the_frequency_and_length_of_a_posting_without_its_positions() {
-    let posting = encode_posting(&[0, 5, 9], 12);
-    assert_eq!(decode_counts(&posting).unwrap(), (3, 12));
-    assert_eq!(decode_posting(&posting).unwrap().positions, [0, 5, 9]);
+fn row_posting(positions: &[u32], length: u32) -> Vec<u8> {
+    let mut out = u32::try_from(positions.len())
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&length.to_be_bytes());
+    let mut previous = 0;
+    for position in positions {
+        put_varint(&mut out, usize::try_from(position - previous).unwrap());
+        previous = *position;
+    }
+    out
 }
 
 #[test]
-fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
-    let posting = encode_posting(&[0, 5, 9], 12);
-    assert!(decode_counts(&posting[..10]).is_err());
-    assert!(decode_counts(&posting[..8]).is_err());
-    assert!(decode_counts(&posting[..7]).is_err());
+fn a_posting_row_of_format_thirteen_reads_its_positions_and_length() {
+    let posting = row_posting(&[0, 5, 9], 12);
+    assert_eq!(decode_row_posting(&posting).unwrap(), (vec![0, 5, 9], 12));
+}
+
+#[test]
+fn a_posting_row_cut_short_or_left_long_fails_to_decode() {
+    let posting = row_posting(&[0, 5, 9], 12);
+    for end in 0..posting.len() {
+        assert!(decode_row_posting(&posting[..end]).is_err(), "{end}");
+    }
+    let mut long = posting.clone();
+    long.push(1);
+    assert!(decode_row_posting(&long).is_err());
+    assert!(decode_row_posting(&row_posting(&[], 0)).is_err());
+}
+
+#[test]
+fn a_stored_vector_reads_only_at_its_index_dimension() {
+    let bytes: Vec<u8> = [1.5f64, -2.0]
+        .iter()
+        .flat_map(|item| item.to_be_bytes())
+        .collect();
+    let numbers: Vec<f64> = stored_vector(&bytes, 2)
+        .unwrap()
+        .iter()
+        .map(|item| f64::from_be_bytes(*item))
+        .collect();
+    assert_eq!(numbers, [1.5, -2.0]);
+    assert!(matches!(
+        stored_vector(&bytes, 3),
+        Err(DecodeError::UnexpectedEnd)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes[..15], 2),
+        Err(DecodeError::UnexpectedEnd)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes, 1),
+        Err(DecodeError::TrailingBytes)
+    ));
+    assert!(matches!(
+        stored_vector(&bytes[..12], 1),
+        Err(DecodeError::TrailingBytes)
+    ));
 }
 
 #[test]
@@ -774,7 +1022,7 @@ fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone()
     let text = write.intern_token("text").unwrap();
     let mut node = || {
         write
-            .create_node(&NodeRecord {
+            .create_node(NodeRecord {
                 labels: Default::default(),
                 properties: Properties::new(),
             })
@@ -836,7 +1084,7 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
         labels: [label].into(),
         properties: Properties::from([(text, PropertyValue::String("shared".to_owned()))]),
     };
-    let first = write.create_node(&doc).unwrap();
+    let first = write.create_node(doc.clone()).unwrap();
     let relationship = |source| RelationshipRecord {
         rel_type: link,
         source,
@@ -848,7 +1096,7 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
     write
         .create_keyword_index("words", IndexTarget::RelationshipType("LINK"), &["text"])
         .unwrap();
-    let second = write.create_node(&doc).unwrap();
+    let second = write.create_node(doc.clone()).unwrap();
     let linked = write.create_relationship(&relationship(second)).unwrap();
     assert_eq!(words(&write, ElementKind::Relationship), 2);
     write.drop_index("words").unwrap();
@@ -861,11 +1109,11 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
         .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
         .unwrap();
     write.create_relationship(&relationship(second)).unwrap();
-    write.create_node(&doc).unwrap();
+    write.create_node(doc.clone()).unwrap();
     write.remove_node_property(first, text).unwrap();
     assert_eq!(words(&write, ElementKind::Node), 2);
     write.drop_index("words").unwrap();
-    write.create_node(&doc).unwrap();
+    write.create_node(doc.clone()).unwrap();
 
     write
         .create_vector_index(

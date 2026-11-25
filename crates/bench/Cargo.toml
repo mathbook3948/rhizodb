@@ -1,0 +1,44 @@
+[package]
+name = "bench"
+description = "Measures RhizoDB and LadybugDB on the same graph workloads and compares the numbers"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lints.clippy]
+allow_attributes_without_reason = "deny"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[features]
+cozo = ["dep:cozo"]
+duckdb = ["dep:duckdb"]
+
+[dependencies]
+cozo = { version = "=0.7.6", default-features = false, features = ["storage-rocksdb", "rayon"], optional = true }
+duckdb = { version = "=1.20001.0", features = ["bundled"], optional = true }
+falkordb = "=0.11.3"
+lbug = "=0.22.3"
+neo4rs = "=0.8.0"
+rhizodb = { path = "../rhizodb" }
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
+serde_json = "1"
+# The feature set cozo asks of uuid, kept on whether or not cozo is built, so lbug and every other
+# crate that depends on it have one build hash and the C++ library is compiled once.
+uuid = { version = "1", features = ["atomic", "rng", "serde", "std", "v1", "v4"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.package.lbug]
+opt-level = 3
+debug = false
+
+[profile.release]
+codegen-units = 1

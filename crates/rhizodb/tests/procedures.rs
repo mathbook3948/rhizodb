@@ -6,16 +6,17 @@ use rhizodb::Database;
 use rhizodb::ErrorKind;
 use rhizodb::Parameters;
 use rhizodb::Procedure;
+use rhizodb::ProcedureOutput;
 use rhizodb::Value;
 use rhizodb::ValueType;
 use support::*;
 
 fn with_procedures() -> Database {
-    let mut db = db();
+    let db = db();
     db.register_procedure(
         Procedure::new("test.split", |args| {
             let Some(Value::String(text)) = args.first() else {
-                return Ok(Vec::new());
+                return Ok(ProcedureOutput::new());
             };
             Ok(text
                 .split(',')
@@ -29,19 +30,21 @@ fn with_procedures() -> Database {
     )
     .unwrap();
     db.register_procedure(
-        Procedure::new("test.echo", |args| Ok(vec![args.to_vec()]))
+        Procedure::new("test.echo", |args| Ok(vec![args.to_vec()].into()))
             .parameter("value", ValueType::Float)
             .output("value"),
     )
     .unwrap();
-    db.register_procedure(Procedure::new("test.nothing", |_| Ok(vec![Vec::new()])))
-        .unwrap();
+    db.register_procedure(Procedure::new("test.nothing", |_| {
+        Ok(vec![Vec::new()].into())
+    }))
+    .unwrap();
     db.register_procedure(
         Procedure::new("test.fail", |_| Err("the body gave up".into())).output("never"),
     )
     .unwrap();
     db.register_procedure(
-        Procedure::new("test.ragged", |_| Ok(vec![vec![int(1), int(2)]])).output("one"),
+        Procedure::new("test.ragged", |_| Ok(vec![vec![int(1), int(2)]].into())).output("one"),
     )
     .unwrap();
     db
@@ -192,10 +195,44 @@ fn a_failing_body_fails_the_query_and_keeps_its_error_as_the_source() {
 
 #[test]
 fn registering_a_name_again_replaces_the_procedure() {
-    let mut db = with_procedures();
+    let db = with_procedures();
     db.register_procedure(
-        Procedure::new("test.nothing", |_| Ok(vec![vec![int(7)]])).output("seven"),
+        Procedure::new("test.nothing", |_| Ok(vec![vec![int(7)]].into())).output("seven"),
     )
     .unwrap();
     assert_eq!(single(&db, "CALL test.nothing()"), int(7));
+}
+
+#[test]
+fn a_query_run_before_a_procedure_is_replaced_calls_the_new_one() {
+    let db = with_procedures();
+    assert!(run(&db, "CALL test.nothing()").is_empty());
+    db.register_procedure(
+        Procedure::new("test.nothing", |_| Ok(vec![vec![int(7)]].into())).output("seven"),
+    )
+    .unwrap();
+    assert_eq!(single(&db, "CALL test.nothing()"), int(7));
+}
+
+#[test]
+fn a_procedure_registered_through_a_shared_database_is_callable_from_every_thread() {
+    let db = std::sync::Arc::new(db());
+    let call = "CALL test.answer() YIELD answer RETURN answer";
+    let before = db.execute(call, &Parameters::new()).unwrap_err();
+    assert_eq!(before.kind(), ErrorKind::ProcedureNotFound);
+    let registering = std::sync::Arc::clone(&db);
+    std::thread::spawn(move || {
+        registering
+            .register_procedure(
+                Procedure::new("test.answer", |_| Ok(vec![vec![int(42)]].into())).output("answer"),
+            )
+            .unwrap();
+    })
+    .join()
+    .unwrap();
+    let reading = std::sync::Arc::clone(&db);
+    let rows = std::thread::spawn(move || reading.execute(call, &Parameters::new()).unwrap())
+        .join()
+        .unwrap();
+    assert_eq!(rows.rows(), [vec![int(42)]]);
 }

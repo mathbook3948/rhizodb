@@ -1,78 +1,39 @@
-//! An embedded, schemaless property graph database queried with GQL.
-//!
-//! ```
-//! use rhizodb::Database;
-//! use rhizodb::Parameters;
-//! use rhizodb::Value;
-//!
-//! let db = Database::in_memory()?;
-//! db.execute(
-//!     "INSERT (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Grace'})",
-//!     &Parameters::new(),
-//! )?;
-//!
-//! let mut parameters = Parameters::new();
-//! parameters.insert("name".to_owned(), Value::String("Ada".to_owned()));
-//! let result = db.execute(
-//!     "MATCH (a:Person {name: $name})-[:KNOWS]->(b) RETURN b.name AS friend",
-//!     &parameters,
-//! )?;
-//! assert_eq!(result.columns(), ["friend"]);
-//! assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
-//! # Ok::<(), rhizodb::Error>(())
-//! ```
-//!
-//! Each `execute` call on a [`Database`] is its own transaction. A [`WriteTransaction`] makes
-//! several queries take effect together, and a [`ReadTransaction`] reads one snapshot.
-//!
-//! ```
-//! use rhizodb::Database;
-//! use rhizodb::Parameters;
-//! use rhizodb::Value;
-//!
-//! let db = Database::in_memory()?;
-//! db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
-//!
-//! let mut tx = db.begin_write()?;
-//! tx.execute("INSERT (:Person {name: 'Alan'})", &Parameters::new())?;
-//! tx.execute(
-//!     "MATCH (a:Person {name: 'Alan'}), (b:Person {name: 'Ada'}) INSERT (a)-[:KNOWS]->(b)",
-//!     &Parameters::new(),
-//! )?;
-//! tx.commit()?;
-//!
-//! let snapshot = db.begin_read()?;
-//! let result = snapshot.execute(
-//!     "MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k) AS friendships",
-//!     &Parameters::new(),
-//! )?;
-//! assert_eq!(result.rows(), [vec![Value::Integer(1)]]);
-//! # Ok::<(), rhizodb::Error>(())
-//! ```
+#![doc = include_str!("guide.md")]
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![deny(missing_docs)]
 
 mod database;
+mod dump;
+mod engine;
 mod error;
-pub mod gql;
+mod gql;
 mod graph;
 mod procedure;
 mod query;
 mod result;
 mod storage;
 mod temporal;
+#[cfg(test)]
+mod test_scale;
 mod transaction;
 mod value;
 
 pub use database::Database;
+pub use database::DatabaseStats;
+pub use database::OpenOptions;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use gql::parse_for_fuzzing;
 pub use graph::IndexTarget;
 pub use graph::NodeId;
 pub use graph::RelationshipId;
 pub use graph::VectorMetric;
 pub use procedure::Procedure;
+pub use procedure::ProcedureError;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
 pub use result::Node;
@@ -90,3 +51,27 @@ pub use temporal::Temporal;
 pub use temporal::Time;
 pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use value::read_value_for_fuzzing;
+
+/// The README, whose example runs as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+pub struct Readme;
+
+/// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value
+/// encodes to other bytes.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::decode_formats(bytes)
+}
+
+/// Damages a database file of RhizoDB's own engine by `bytes`, opens it, and reads every entry,
+/// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::open_damaged_file(bytes)
+}

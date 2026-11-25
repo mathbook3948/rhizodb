@@ -33,7 +33,46 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Each listed difference in returned rows carries the reason the engines differ.
 - A query that only one engine accepts is listed with the error it raised.
 - Consistency after a forced shutdown is tested.
-- The parser is fuzzed.
+- Every storage backend passes one conformance suite written against the storage trait.
+- Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
+- The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
+- The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
+- Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at each point, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
+- The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
+- A full disk is simulated by a backend that refuses to grow the file, and the database must fail writes as storage errors, keep reads, and open with every acknowledged step once space returns.
+- Node meta is checked against a model of node labels over random sequences of node and label edits, commits, rollbacks, reopens, and power losses.
+- A commit that writes node meta is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
+- Node meta is corrupted byte by byte, in its stored entries and in the database file, and every read must then fail as corrupt data or answer as before.
+- Property columns are checked against a model of typed and mixed property values over random sequences of value, label, and node edits, commits, rollbacks, reopens, and power losses, with every index entry checked against the properties.
+- A commit that writes property column chunks or deltas is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
+- Property column chunks and deltas are corrupted byte by byte, in their encoding, in their stored entries, and in the database file, and every read must then fail as corrupt data or answer as before.
+- Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
+- Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
+- Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
+- CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
+- A failing case a randomized test finds is checked in, and every later run replays it.
+- Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
+- The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
+- A damaged database file must make opening or the query fail with an error, never panic or hang.
+- Every input the fuzzer found a failure with is checked in and replayed by an integration test.
+- The fuzz run fails on any panic that escapes RhizoDB, any hang, and any run out of memory.
+- The damaged file fuzz target replaces libFuzzer's abort on every panic, so a panic that the redb guard catches is not a crash.
+- A panic is injected at each backend operation of a redb commit in turn, and the reopened file must hold the state before or after the commit.
+- The writer slot and the index catalog are explored across thread interleavings with shuttle models that copy each protocol, in a crate of their own, since the library uses `std` primitives.
+- Every call a host can make wrongly, such as opening a file twice, forgetting or moving a transaction, a procedure that panics or calls back into its database, and invalid parameters or index definitions, must fail with an error kind, never panic out of RhizoDB, hang, or corrupt the file.
+- Inputs at and past each resource limit run on a 1 MiB stack, the most a query may use, in debug and release builds, and in a child process where a stack overflow would end the run, so it fails one test instead.
+- Isolation is checked by recording histories of concurrent list-append transactions and requiring their dependencies and real-time order to form no cycle.
+- Durability through the public API is tested by killing a writing child process and checking that the reopened file holds every reported commit whole, nothing uncommitted, and indexes that agree with the data.
+- Backups are tested by killing a child process that writes and backs up in turn, and every backup file it left must open and hold one commit whole.
+- Dumps are checked by exporting random graphs with every value type, importing them, and requiring the same elements, IDs, next IDs, and dump bytes, and an index integrity check that passes.
+- A checked-in dump of each format version must import with known values and export again to its own bytes, and every cut of it must fail to import.
+- Random write transactions through GQL are compared after each transaction with a model of the graph, together with read queries the model answers on its own.
+- Random well-typed queries over a random graph are compared with a reference evaluator of the model, and with rewrites of the same query that must give the same answer.
+- Those queries also run inside a write transaction with uncommitted edits, with property indexes added and dropped, and on a reopened file.
+- Live heap bytes, counted by a global allocator, must level off over long loops of work that keeps no new data.
+- A nightly soak kills a child process that writes large values, so the own engine checkpoints in the background, at random points for twenty minutes, and checks every reopened file against what the child reported.
+- Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
+- The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
 - Code and tests taken from other projects keep their source and license.
 
 ## Open

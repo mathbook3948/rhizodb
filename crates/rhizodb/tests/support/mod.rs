@@ -4,6 +4,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
@@ -78,4 +79,134 @@ pub fn ints(rows: &[Vec<Value>]) -> Vec<i64> {
             other => panic!("expected one integer, got {other:?}"),
         })
         .collect()
+}
+
+/// `fast` cases, the count CI runs, times the scale that `RHIZODB_TEST_SCALE` sets for nightly
+/// runs.
+pub fn cases(fast: u64) -> u64 {
+    let scale = std::env::var("RHIZODB_TEST_SCALE")
+        .ok()
+        .and_then(|scale| scale.parse::<u64>().ok())
+        .unwrap_or(1);
+    fast.saturating_mul(scale.max(1))
+}
+
+/// The seed a randomized test runs with: `RHIZODB_TEST_SEED` when set, so a failure replays,
+/// and otherwise one drawn from the clock. It is written to stderr before the test uses it, past
+/// the test harness's capture, so a test that hangs or aborts still names its seed.
+pub fn seed() -> u64 {
+    let seed = std::env::var("RHIZODB_TEST_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+        });
+    let thread = std::thread::current();
+    let _ = writeln!(
+        std::io::stderr(),
+        "{} runs with RHIZODB_TEST_SEED={seed}",
+        thread.name().unwrap_or("a test")
+    );
+    seed
+}
+
+/// SplitMix64, a small seeded generator, so randomized tests need no extra crate.
+#[derive(Clone, Debug)]
+pub struct Rng(u64);
+
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `0..bound`.
+    pub fn below(&mut self, bound: u64) -> u64 {
+        self.next_u64() % bound
+    }
+
+    /// True with probability `numerator / denominator`.
+    pub fn chance(&mut self, numerator: u64, denominator: u64) -> bool {
+        self.below(denominator) < numerator
+    }
+
+    pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+        &items[self.below(items.len() as u64) as usize]
+    }
+}
+
+const ISOLATED_ENV: &str = "RHIZODB_ISOLATED_TEST";
+
+/// Runs the test named `test` again in a child process, so a stack overflow, an abort, or a hang
+/// in it fails this test instead of ending or stalling the whole run. Returns true in the child,
+/// where the test then does its work, and false in the parent once the child passed.
+pub fn isolated(test: &str, limit: std::time::Duration) -> bool {
+    if std::env::var(ISOLATED_ENV).is_ok_and(|name| name == test) {
+        return true;
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            test,
+            "--exact",
+            "--include-ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ISOLATED_ENV, test)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = std::io::Read::read_to_string(&mut stderr, &mut text);
+        text
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("{test} did not finish within {limit:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stderr = reader.join().unwrap();
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(15)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(status.success(), "{test} ended with {status}:\n{tail}");
+    false
+}
+
+/// Runs `work` on a thread with 1 MiB of stack, the most a query may use, which leaves a host
+/// half of the 2 MiB stack Rust gives a spawned thread by default.
+pub fn on_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn_scoped(scope, work)
+            .unwrap()
+            .join()
+            .unwrap()
+    })
 }

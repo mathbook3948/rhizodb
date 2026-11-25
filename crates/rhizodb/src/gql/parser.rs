@@ -2,7 +2,9 @@ mod clause;
 mod expression;
 mod label;
 mod pattern;
+mod types;
 
+use super::ast::Block;
 use super::ast::Call;
 use super::ast::Clause;
 use super::ast::Name;
@@ -68,27 +70,68 @@ struct Parser {
 
 impl Parser {
     fn query(&mut self) -> ParseResult<Query> {
+        let query = self.next_query()?;
+        self.eat_punct(Punct::Semicolon);
+        if self.peek().is_some() {
+            return Err(self.unexpected());
+        }
+        Ok(query)
+    }
+
+    fn next_query(&mut self) -> ParseResult<Query> {
+        let first = self.union_query()?;
+        if !self.at_keyword("NEXT") {
+            return Ok(first);
+        }
+        self.deepen()?;
+        let mut blocks = vec![Block {
+            yields: None,
+            query: first,
+        }];
+        while self.eat_keyword("NEXT") {
+            let yields = if self.eat_keyword("YIELD") {
+                Some(self.comma_separated(Self::name)?)
+            } else {
+                None
+            };
+            blocks.push(Block {
+                yields,
+                query: self.union_query()?,
+            });
+        }
+        Ok(Query::Next(blocks))
+    }
+
+    fn union_query(&mut self) -> ParseResult<Query> {
         let first = self.single_query()?;
         let mut rest = Vec::new();
         let mut kind = None;
-        while self.at_keyword("UNION") {
+        while ["UNION", "EXCEPT", "INTERSECT", "OTHERWISE"]
+            .iter()
+            .any(|keyword| self.at_keyword(keyword))
+        {
             let union_offset = self.offset();
-            self.pos += 1;
-            let this = if self.eat_keyword("ALL") {
-                UnionKind::All
-            } else {
+            let operator = self.eat_keyword("UNION").then_some("UNION").or_else(|| {
+                ["EXCEPT", "INTERSECT", "OTHERWISE"]
+                    .into_iter()
+                    .find(|keyword| self.eat_keyword(keyword))
+            });
+            let all = operator != Some("OTHERWISE") && self.eat_keyword("ALL");
+            if !all && operator != Some("OTHERWISE") {
                 self.eat_keyword("DISTINCT");
-                UnionKind::Distinct
+            }
+            let this = match operator {
+                Some("UNION") if all => UnionKind::All,
+                Some("UNION") => UnionKind::Distinct,
+                Some("EXCEPT") => UnionKind::Except { all },
+                Some("INTERSECT") => UnionKind::Intersect { all },
+                _ => UnionKind::Otherwise,
             };
             if kind.is_some_and(|earlier| earlier != this) {
                 return Err(SyntaxError::new(union_offset, SyntaxErrorKind::MixedUnion));
             }
             kind = Some(this);
             rest.push(self.single_query()?);
-        }
-        self.eat_punct(Punct::Semicolon);
-        if self.peek().is_some() {
-            return Err(self.unexpected());
         }
         Ok(match kind {
             Some(kind) => Query::Union(Union { kind, first, rest }),
@@ -106,14 +149,17 @@ impl Parser {
                 })
             )
         };
-        let mut clauses = vec![self.clause()?];
-        while self.at_clause_start() {
-            if clauses.iter().any(yields_star) {
+        let mut clauses = Vec::new();
+        let mut star = false;
+        while clauses.is_empty() || self.at_clause_start() {
+            if star {
                 return Err(self.unexpected());
             }
-            clauses.push(self.clause()?);
+            let clause = self.clause()?;
+            star = yields_star(&clause);
+            clauses.push(clause);
         }
-        if clauses.len() > 1 && clauses.iter().any(yields_star) {
+        if clauses.len() > 1 && star {
             let star = self
                 .pos
                 .checked_sub(1)

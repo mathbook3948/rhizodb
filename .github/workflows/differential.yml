@@ -15,6 +15,7 @@ concurrency:
 jobs:
   ladybug:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,4 +24,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/differential
+      - uses: actions/cache@v4
+        with:
+          path: crates/bench/.lbug-extensions
+          key: lbug-extensions-${{ hashFiles('crates/bench/Cargo.toml', 'crates/bench/scripts/lbug-extensions.sh') }}
       - run: mise run differential
+      - run: mise run bench-test
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/crates/differential/target

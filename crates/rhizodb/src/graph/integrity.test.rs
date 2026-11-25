@@ -31,11 +31,11 @@ fn healthy_graph() -> Graph<RedbStorage> {
     alice
         .properties
         .insert(name, PropertyValue::String("Alice".to_owned()));
-    assert_eq!(write.create_node(&alice).unwrap(), ALICE);
+    assert_eq!(write.create_node(alice.clone()).unwrap(), ALICE);
     let mut bob = NodeRecord::default();
     bob.labels.insert(person);
-    assert_eq!(write.create_node(&bob).unwrap(), BOB);
-    assert_eq!(write.create_node(&NodeRecord::default()).unwrap(), CAROL);
+    assert_eq!(write.create_node(bob.clone()).unwrap(), BOB);
+    assert_eq!(write.create_node(NodeRecord::default()).unwrap(), CAROL);
     let friendship = RelationshipRecord {
         rel_type: knows,
         source: ALICE,
@@ -74,10 +74,6 @@ fn assert_caught(edit: impl FnOnce(&mut Write<'_>), expected: IntegrityViolation
     );
 }
 
-fn adjacency_key(node: NodeId, relationship: RelationshipId) -> [u8; 20] {
-    keys::adjacency_key(node, Token::new(KNOWS), relationship)
-}
-
 fn remove_token(write: &mut Write<'_>, tag: u8, id: u32, name: &str) {
     write
         .delete(Table::TokenById, &keys::token_id_key(tag, id))
@@ -97,7 +93,7 @@ fn a_graph_after_edits_and_deletes_passes() {
     let graph = healthy_graph();
     let mut write = graph.write().unwrap();
     let person = Token::<Label>::new(PERSON);
-    let scratch = write.create_node(&NodeRecord::default()).unwrap();
+    let scratch = write.create_node(NodeRecord::default()).unwrap();
     write.add_label(scratch, person).unwrap();
     write.delete_relationship(LOOP).unwrap();
     write.remove_label(BOB, person).unwrap();
@@ -149,11 +145,11 @@ fn a_foreign_format_version_is_caught() {
                 .put(
                     Table::Metadata,
                     keys::FORMAT_VERSION_KEY,
-                    &9u32.to_be_bytes(),
+                    &(FORMAT_VERSION + 1).to_be_bytes(),
                 )
                 .unwrap();
         },
-        IntegrityViolation::FormatVersionMismatch(9),
+        IntegrityViolation::FormatVersionMismatch(FORMAT_VERSION + 1),
     );
 }
 
@@ -161,9 +157,7 @@ fn a_foreign_format_version_is_caught() {
 fn a_relationship_with_a_missing_source_is_caught() {
     assert_caught(
         |write| {
-            write
-                .delete(Table::Nodes, &keys::element_key(ALICE.0))
-                .unwrap();
+            kill(write, ALICE);
         },
         IntegrityViolation::DanglingEndpoint {
             relationship: FRIENDSHIP,
@@ -176,9 +170,7 @@ fn a_relationship_with_a_missing_source_is_caught() {
 fn a_relationship_with_a_missing_target_is_caught() {
     assert_caught(
         |write| {
-            write
-                .delete(Table::Nodes, &keys::element_key(BOB.0))
-                .unwrap();
+            kill(write, BOB);
         },
         IntegrityViolation::DanglingEndpoint {
             relationship: FRIENDSHIP,
@@ -187,16 +179,38 @@ fn a_relationship_with_a_missing_target_is_caught() {
     );
 }
 
+fn put_slot(write: &mut Write<'_>, side: Side, node: NodeId, rel_type: u32, edges: &[Edge]) {
+    let (id, position) = adjacency::locate(side, node, rel_type);
+    let (start, end) = id.range();
+    let mut slots = BTreeMap::new();
+    for (key, value) in write.scan_range(Table::Adjacency, &start, &end).unwrap() {
+        slots.extend(PartRef::parse(&key, &value).unwrap().slots().unwrap());
+    }
+    slots.insert(position, edges.to_vec());
+    slots.retain(|_, edges| !edges.is_empty());
+    let held: Vec<(usize, &[Edge])> = slots
+        .iter()
+        .map(|(position, edges)| (*position, edges.as_slice()))
+        .collect();
+    write.delete_range(Table::Adjacency, &start, &end).unwrap();
+    for (key, bytes) in adjacency::encode_segment(&id, &held).unwrap() {
+        write.put(Table::Adjacency, &key, &bytes).unwrap();
+    }
+}
+
+fn edge(relationship: RelationshipId, other: NodeId) -> Edge {
+    Edge {
+        relationship,
+        other,
+    }
+}
+
 #[test]
 fn a_relationship_missing_its_outgoing_entry_is_caught() {
     assert_caught(
-        |write| {
-            write
-                .delete(Table::Outgoing, &adjacency_key(ALICE, FRIENDSHIP))
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Outgoing, ALICE, KNOWS, &[]),
         IntegrityViolation::MissingAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             relationship: FRIENDSHIP,
         },
     );
@@ -205,13 +219,9 @@ fn a_relationship_missing_its_outgoing_entry_is_caught() {
 #[test]
 fn a_relationship_missing_its_incoming_entry_is_caught() {
     assert_caught(
-        |write| {
-            write
-                .delete(Table::Incoming, &adjacency_key(BOB, FRIENDSHIP))
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Incoming, BOB, KNOWS, &[]),
         IntegrityViolation::MissingAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             relationship: FRIENDSHIP,
         },
     );
@@ -222,16 +232,16 @@ fn an_outgoing_entry_without_a_relationship_record_is_caught() {
     let ghost = RelationshipId(7);
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Outgoing,
-                    &adjacency_key(ALICE, ghost),
-                    &BOB.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Outgoing,
+                ALICE,
+                KNOWS,
+                &[edge(FRIENDSHIP, BOB), edge(ghost, BOB)],
+            );
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             node: ALICE,
             relationship: ghost,
         },
@@ -243,16 +253,16 @@ fn an_incoming_entry_without_a_relationship_record_is_caught() {
     let ghost = RelationshipId(7);
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Incoming,
-                    &adjacency_key(BOB, ghost),
-                    &ALICE.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Incoming,
+                BOB,
+                KNOWS,
+                &[edge(FRIENDSHIP, ALICE), edge(ghost, ALICE)],
+            );
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             node: BOB,
             relationship: ghost,
         },
@@ -263,16 +273,16 @@ fn an_incoming_entry_without_a_relationship_record_is_caught() {
 fn an_adjacency_entry_with_the_wrong_far_node_is_caught() {
     assert_caught(
         |write| {
-            write
-                .put(
-                    Table::Outgoing,
-                    &adjacency_key(ALICE, FRIENDSHIP),
-                    &CAROL.0.to_be_bytes(),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Outgoing,
+                ALICE,
+                KNOWS,
+                &[edge(FRIENDSHIP, CAROL)],
+            )
         },
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Outgoing,
+            side: Side::Outgoing,
             node: ALICE,
             relationship: FRIENDSHIP,
         },
@@ -281,19 +291,10 @@ fn an_adjacency_entry_with_the_wrong_far_node_is_caught() {
 
 #[test]
 fn an_adjacency_entry_under_the_wrong_type_is_caught() {
-    let other_type = Token::<RelationshipType>::new(5);
     assert_caught(
-        |write| {
-            write
-                .put(
-                    Table::Incoming,
-                    &keys::adjacency_key(BOB, other_type, FRIENDSHIP),
-                    &ALICE.0.to_be_bytes(),
-                )
-                .unwrap();
-        },
+        |write| put_slot(write, Side::Incoming, BOB, 5, &[edge(FRIENDSHIP, ALICE)]),
         IntegrityViolation::OrphanAdjacency {
-            table: Table::Incoming,
+            side: Side::Incoming,
             node: BOB,
             relationship: FRIENDSHIP,
         },
@@ -301,57 +302,467 @@ fn an_adjacency_entry_under_the_wrong_type_is_caught() {
 }
 
 #[test]
-fn a_node_label_missing_from_the_label_index_is_caught() {
+fn an_adjacency_entry_under_the_wrong_node_is_caught() {
     assert_caught(
         |write| {
-            write
-                .delete(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), ALICE),
-                )
-                .unwrap();
+            put_slot(
+                write,
+                Side::Outgoing,
+                CAROL,
+                KNOWS,
+                &[edge(FRIENDSHIP, BOB), edge(LOOP, CAROL)],
+            )
         },
-        IntegrityViolation::MissingLabelIndexEntry {
-            label: PERSON,
-            node: ALICE,
-        },
-    );
-}
-
-#[test]
-fn a_label_index_entry_the_node_does_not_carry_is_caught() {
-    assert_caught(
-        |write| {
-            write
-                .put(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), CAROL),
-                    &[],
-                )
-                .unwrap();
-        },
-        IntegrityViolation::OrphanLabelIndexEntry {
-            label: PERSON,
+        IntegrityViolation::OrphanAdjacency {
+            side: Side::Outgoing,
             node: CAROL,
+            relationship: FRIENDSHIP,
         },
     );
 }
 
 #[test]
-fn a_label_index_entry_for_a_missing_node_is_caught() {
+fn an_adjacency_segment_not_split_by_the_longest_span_is_caught() {
+    let (id, _) = adjacency::locate(Side::Outgoing, ALICE, KNOWS);
+    assert_caught(
+        |write| {
+            let (start, end) = id.range();
+            let mut slots = BTreeMap::new();
+            for (key, value) in write.scan_range(Table::Adjacency, &start, &end).unwrap() {
+                slots.extend(PartRef::parse(&key, &value).unwrap().slots().unwrap());
+            }
+            let held: Vec<(usize, &[Edge])> = slots
+                .iter()
+                .map(|(position, edges)| (*position, edges.as_slice()))
+                .collect();
+            write.delete_range(Table::Adjacency, &start, &end).unwrap();
+            for (key, bytes) in adjacency::encode_segment_by(&id, &held, 1) {
+                write.put(Table::Adjacency, &key, &bytes).unwrap();
+            }
+        },
+        IntegrityViolation::NonCanonicalAdjacency(id),
+    );
+}
+
+const PERSON_SET: u32 = 1;
+
+fn person_set_key() -> Vec<u8> {
+    meta::label_set_key(&[Token::new(PERSON)])
+}
+
+#[test]
+fn node_meta_with_wrong_label_counts_is_caught() {
+    assert_caught(
+        |write| {
+            let key = meta::meta_key(0);
+            let mut chunk = write.get(Table::NodeChunks, &key).unwrap().unwrap();
+            meta::miscount_first_label(&mut chunk);
+            write.put(Table::NodeChunks, &key, &chunk).unwrap();
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
+    );
+}
+
+#[test]
+fn unreadable_node_meta_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .put(Table::NodeChunks, &meta::meta_key(0), &[1, 2, 3])
+                .unwrap();
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::NodeChunks,
+            key: meta::meta_key(0).to_vec(),
+        },
+    );
+}
+
+fn put_delta(write: &mut Write<'_>, group: u64, delta: meta::Delta) {
+    write
+        .put(
+            Table::NodeChunks,
+            &meta::delta_key(group, delta.slot),
+            &delta.encode(group),
+        )
+        .unwrap();
+}
+
+fn kill(write: &mut Write<'_>, node: NodeId) {
+    let (group, slot) = meta::locate(node);
+    put_delta(
+        write,
+        group,
+        meta::Delta {
+            slot,
+            before: Some(LabelSetId(PERSON_SET)),
+            after: None,
+        },
+    );
+}
+
+fn put_column_delta(write: &mut Write<'_>, group: u64, slot: usize, value: Option<PropertyValue>) {
+    let key = columns::delta_key(group, slot);
+    let bytes = columns::encode_delta(
+        &key,
+        [(Token::new(NAME), value.as_ref().map(columns::Cell::of))],
+    );
+    write.put(Table::NodeColumns, &key, &bytes).unwrap();
+}
+
+fn put_segment(write: &mut Write<'_>, group: u64, slot: usize, value: &PropertyValue) {
+    let parts = columns::encode_segment(
+        group,
+        Token::new(NAME),
+        slot / columns::SEGMENT_SLOTS,
+        &[(slot % columns::SEGMENT_SLOTS, columns::Cell::of(value))],
+    )
+    .unwrap();
+    for (key, bytes) in parts {
+        write.put(Table::NodeColumns, &key, &bytes).unwrap();
+    }
+}
+
+#[test]
+fn a_node_meta_delta_that_does_not_amend_its_chunk_is_caught() {
+    assert_caught(
+        |write| {
+            put_delta(
+                write,
+                0,
+                meta::Delta {
+                    slot: 0,
+                    before: None,
+                    after: Some(LabelSetId(PERSON_SET)),
+                },
+            );
+        },
+        IntegrityViolation::StrayNodeMetaDelta(ALICE),
+    );
+}
+
+#[test]
+fn a_node_meta_delta_without_a_chunk_is_caught() {
+    assert_caught(
+        |write| {
+            put_delta(
+                write,
+                7,
+                meta::Delta {
+                    slot: 3,
+                    before: None,
+                    after: Some(LabelSetId(PERSON_SET)),
+                },
+            );
+        },
+        IntegrityViolation::StrayNodeMetaDelta(meta::node_at(7, 3)),
+    );
+}
+
+#[test]
+fn a_node_meta_delta_that_changes_nothing_is_caught() {
+    assert_caught(
+        |write| {
+            let chunk = write
+                .get(Table::NodeChunks, &meta::meta_key(0))
+                .unwrap()
+                .unwrap();
+            let state = MetaBytes::parse(0, &chunk).unwrap().label_set(1).unwrap();
+            put_delta(
+                write,
+                0,
+                meta::Delta {
+                    slot: 1,
+                    before: state,
+                    after: state,
+                },
+            );
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
+    );
+}
+
+#[test]
+fn more_node_meta_deltas_than_a_group_keeps_are_caught() {
+    assert_caught(
+        |write| {
+            for slot in 100..100 + meta::MAX_DELTAS + 1 {
+                put_delta(
+                    write,
+                    0,
+                    meta::Delta {
+                        slot,
+                        before: None,
+                        after: Some(LabelSetId(PERSON_SET)),
+                    },
+                );
+            }
+        },
+        IntegrityViolation::NonCanonicalNodeMeta(0),
+    );
+}
+
+#[test]
+fn a_property_of_a_node_that_is_not_live_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 0, 40, Some(PropertyValue::Integer(1))),
+        IntegrityViolation::PropertyOfMissingNode {
+            node: NodeId(40),
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_property_of_a_deleted_node_is_caught() {
+    assert_caught(
+        |write| kill(write, ALICE),
+        IntegrityViolation::PropertyOfMissingNode {
+            node: ALICE,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_delta_entry_that_matches_its_segment_is_caught() {
+    assert_caught(
+        |write| put_segment(write, 0, 0, &PropertyValue::String("Alice".to_owned())),
+        IntegrityViolation::NonCanonicalColumnDelta(ALICE),
+    );
+}
+
+#[test]
+fn a_column_delta_that_removes_an_absent_value_is_caught() {
+    assert_caught(
+        |write| put_column_delta(write, 0, 1, None),
+        IntegrityViolation::NonCanonicalColumnDelta(BOB),
+    );
+}
+
+#[test]
+fn a_segment_value_that_a_delta_overrides_is_not_a_violation() {
+    let graph = healthy_graph();
+    corrupt(&graph, |write| {
+        put_segment(write, 0, 0, &PropertyValue::String("Alicia".to_owned()))
+    });
+    assert_eq!(violations_of(&graph), vec![]);
+}
+
+#[test]
+fn more_column_deltas_than_a_group_keeps_are_caught() {
+    assert_caught(
+        |write| {
+            for slot in 100..101 + columns::MAX_DELTAS {
+                put_column_delta(write, 0, slot, Some(PropertyValue::Integer(1)));
+            }
+        },
+        IntegrityViolation::TooManyColumnDeltas(0),
+    );
+}
+
+#[test]
+fn a_column_segment_in_another_encoding_than_its_values_take_is_caught() {
+    assert_caught(
+        |write| {
+            let mut tagged = Vec::new();
+            PropertyValue::String("Bob".to_owned()).encode_into(&mut tagged);
+            let parts = columns::encode_segment(
+                0,
+                Token::new(NAME),
+                0,
+                &[(1, columns::Cell::Encoded(&tagged))],
+            )
+            .unwrap();
+            for (key, bytes) in parts {
+                write.put(Table::NodeColumns, &key, &bytes).unwrap();
+            }
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn an_unreadable_column_segment_is_caught() {
+    let key = columns::segment_key(0, Token::new(NAME), 0, 0);
+    assert_caught(
+        |write| write.put(Table::NodeColumns, &key, &[0xff]).unwrap(),
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
+fn a_column_segment_stored_under_another_key_is_caught() {
+    let key = columns::segment_key(0, Token::new(NAME), 1, 0);
+    assert_caught(
+        |write| {
+            let parts =
+                columns::encode_segment(0, Token::new(NAME), 0, &[(5, columns::Cell::Int(7))])
+                    .unwrap();
+            write.put(Table::NodeColumns, &key, &parts[0].1).unwrap();
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
+fn an_unreadable_column_delta_is_caught() {
+    let key = columns::delta_key(0, 1);
+    assert_caught(
+        |write| {
+            write
+                .put(Table::NodeColumns, &key, &[1, 0, 0, 0, 0])
+                .unwrap()
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: key.to_vec(),
+        },
+    );
+}
+
+#[test]
+fn a_column_key_of_the_wrong_length_is_caught() {
+    assert_caught(
+        |write| write.put(Table::NodeColumns, &[0; 15], &[]).unwrap(),
+        IntegrityViolation::Undecodable {
+            table: Table::NodeColumns,
+            key: vec![0; 15],
+        },
+    );
+}
+
+#[test]
+fn a_column_segment_beyond_its_group_or_a_part_beyond_its_segment_is_caught() {
+    let mut segment = columns::segment_key(0, Token::new(NAME), 0, 0).to_vec();
+    let at = segment.len() - 2;
+    segment[at] = u8::try_from(columns::SEGMENTS).unwrap();
+    let mut part = columns::segment_key(0, Token::new(NAME), 0, 0).to_vec();
+    let at = part.len() - 1;
+    part[at] = u8::try_from(columns::SEGMENT_SLOTS).unwrap();
+    for key in [segment, part] {
+        assert_caught(
+            |write| write.put(Table::NodeColumns, &key, &[]).unwrap(),
+            IntegrityViolation::Undecodable {
+                table: Table::NodeColumns,
+                key: key.to_vec(),
+            },
+        );
+    }
+}
+
+fn long_names(count: usize) -> Vec<PropertyValue> {
+    (0..count)
+        .map(|at| PropertyValue::String(format!("{at:0>600}")))
+        .collect()
+}
+
+fn put_long_names(write: &mut Write<'_>, names: &[PropertyValue]) -> Vec<columns::Part> {
+    let cells: Vec<(usize, columns::Cell<'_>)> = names
+        .iter()
+        .enumerate()
+        .map(|(at, name)| (at, columns::Cell::of(name)))
+        .collect();
+    let parts = columns::encode_segment(0, Token::new(NAME), 0, &cells).unwrap();
+    for (key, bytes) in &parts {
+        write.put(Table::NodeColumns, key, bytes).unwrap();
+    }
+    parts
+}
+
+#[test]
+fn a_split_column_segment_missing_a_part_is_caught() {
+    assert_caught(
+        |write| {
+            let parts = put_long_names(write, &long_names(2));
+            assert_eq!(parts.len(), 2);
+            write.delete(Table::NodeColumns, &parts[0].0).unwrap();
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_column_segment_kept_whole_beyond_the_part_limit_is_caught() {
+    assert_caught(
+        |write| {
+            let names = long_names(2);
+            for (key, _) in put_long_names(write, &names) {
+                write.delete(Table::NodeColumns, &key).unwrap();
+            }
+            let cells: Vec<(usize, columns::Cell<'_>)> = names
+                .iter()
+                .enumerate()
+                .map(|(at, name)| (at, columns::Cell::of(name)))
+                .collect();
+            let key = columns::segment_key(0, Token::new(NAME), 0, 0);
+            let whole = columns::encode_part(&key, columns::SEGMENT_SLOTS, &cells).unwrap();
+            write.put(Table::NodeColumns, &key, &whole).unwrap();
+        },
+        IntegrityViolation::NonCanonicalColumn {
+            group: 0,
+            key: NAME,
+        },
+    );
+}
+
+#[test]
+fn a_node_whose_label_set_is_gone_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .delete(Table::LabelSets, &PERSON_SET.to_be_bytes())
+                .unwrap();
+            write
+                .delete(Table::LabelSetByTokens, &person_set_key())
+                .unwrap();
+        },
+        IntegrityViolation::UnknownLabelSet {
+            node: ALICE,
+            set: PERSON_SET,
+        },
+    );
+}
+
+#[test]
+fn label_set_tables_that_disagree_are_caught() {
     assert_caught(
         |write| {
             write
                 .put(
-                    Table::LabelIndex,
-                    &keys::label_key(Token::new(PERSON), NodeId(40)),
-                    &[],
+                    Table::LabelSetByTokens,
+                    &person_set_key(),
+                    &7u32.to_be_bytes(),
                 )
                 .unwrap();
         },
-        IntegrityViolation::OrphanLabelIndexEntry {
-            label: PERSON,
-            node: NodeId(40),
+        IntegrityViolation::LabelSetTablesDisagree(PERSON_SET),
+    );
+}
+
+#[test]
+fn a_label_set_counter_behind_its_label_sets_is_caught() {
+    assert_caught(
+        |write| {
+            write
+                .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
+                .unwrap();
+        },
+        IntegrityViolation::CounterNotAboveAllocated {
+            counter: Counter::LabelSetId,
+            highest: u64::from(PERSON_SET),
         },
     );
 }
@@ -533,31 +944,21 @@ fn a_token_counter_that_is_not_above_the_highest_token_is_caught() {
 }
 
 #[test]
-fn an_unreadable_node_record_is_caught() {
-    assert_caught(
-        |write| {
-            write
-                .put(Table::Nodes, &keys::element_key(BOB.0), &[0xff])
-                .unwrap();
-        },
-        IntegrityViolation::Undecodable {
-            table: Table::Nodes,
-            key: keys::element_key(BOB.0).to_vec(),
-        },
-    );
-}
-
-#[test]
 fn an_unreadable_relationship_record_is_caught() {
     assert_caught(
         |write| {
+            let (chunk, _) = relationships::locate(LOOP);
             write
-                .put(Table::Relationships, &keys::element_key(LOOP.0), &[1])
+                .put(
+                    Table::RelationshipChunks,
+                    &relationships::chunk_key(chunk),
+                    &[1],
+                )
                 .unwrap();
         },
         IntegrityViolation::Undecodable {
-            table: Table::Relationships,
-            key: keys::element_key(LOOP.0).to_vec(),
+            table: Table::RelationshipChunks,
+            key: relationships::chunk_key(relationships::locate(LOOP).0).to_vec(),
         },
     );
 }
@@ -569,14 +970,12 @@ fn every_violation_is_reported_not_just_the_first() {
         write
             .delete(Table::Metadata, keys::FORMAT_VERSION_KEY)
             .unwrap();
-        write
-            .delete(Table::Outgoing, &adjacency_key(ALICE, FRIENDSHIP))
-            .unwrap();
+        put_slot(write, Side::Outgoing, ALICE, KNOWS, &[]);
     });
     let violations = violations_of(&graph);
     assert!(violations.contains(&IntegrityViolation::FormatVersionMissing));
     assert!(violations.contains(&IntegrityViolation::MissingAdjacency {
-        table: Table::Outgoing,
+        side: Side::Outgoing,
         relationship: FRIENDSHIP,
     }));
 }
@@ -584,7 +983,7 @@ fn every_violation_is_reported_not_just_the_first() {
 fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error::Error> {
     crate::query::execute(
         graph,
-        &crate::procedure::Procedures::new(),
+        &crate::query::Statements::default(),
         query,
         &crate::result::Parameters::new(),
     )
@@ -594,7 +993,7 @@ fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error
 fn count(graph: &Graph<RedbStorage>, query: &str) -> usize {
     crate::query::execute(
         graph,
-        &crate::procedure::Procedures::new(),
+        &crate::query::Statements::default(),
         query,
         &crate::result::Parameters::new(),
     )
@@ -722,7 +1121,7 @@ fn an_indexed_graph_after_edits_passes() {
 
 #[test]
 fn a_missing_posting_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "alice", ALICE.0);
+    let key = keys::posting_key(NAMES_INDEX, "alice", postings::block_of(ALICE.0));
     assert_index_damage_caught(
         |write| write.delete(Table::KeywordPostings, &key).unwrap(),
         IntegrityViolation::MissingIndexEntry {
@@ -734,7 +1133,7 @@ fn a_missing_posting_is_caught() {
 
 #[test]
 fn a_posting_for_a_term_the_node_lacks_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "zed", ALICE.0);
+    let key = keys::posting_key(NAMES_INDEX, "zed", postings::block_of(ALICE.0));
     assert_index_damage_caught(
         |write| {
             write
@@ -750,11 +1149,13 @@ fn a_posting_for_a_term_the_node_lacks_is_caught() {
 
 #[test]
 fn a_posting_with_the_wrong_positions_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "bobson", BOB.0);
-    let mut moved = 1u32.to_be_bytes().to_vec();
-    moved.extend_from_slice(&2u32.to_be_bytes());
-    moved.push(5);
-    for value in [moved, [0, 0, 0, 1, 0, 0, 0, 2].to_vec()] {
+    let block = postings::block_of(BOB.0);
+    let key = keys::posting_key(NAMES_INDEX, "bobson", block);
+    let mut moved = Block::default();
+    moved.insert(block, BOB.0, &[5], 2).unwrap();
+    let mut longer = Block::default();
+    longer.insert(block, BOB.0, &[0], 3).unwrap();
+    for value in [moved, longer].map(|held| held.bytes().unwrap().to_vec()) {
         let key = key.clone();
         assert_index_damage_caught(
             |write| write.put(Table::KeywordPostings, &key, &value).unwrap(),
@@ -904,7 +1305,11 @@ fn a_graph_with_a_relationship_index_after_edits_and_deletes_passes() {
 fn a_missing_relationship_posting_is_caught() {
     let graph = relationship_indexed_graph();
     assert_eq!(violations_of(&graph), vec![], "graph must start healthy");
-    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
+    let key = keys::posting_key(
+        FRIENDSHIP_NOTES_INDEX,
+        "friends",
+        postings::block_of(FRIENDSHIP.0),
+    );
     corrupt(&graph, |write| {
         write.delete(Table::KeywordPostings, &key).unwrap();
     });
@@ -919,14 +1324,18 @@ fn a_missing_relationship_posting_is_caught() {
 #[test]
 fn a_relationship_index_entry_for_a_relationship_with_nothing_to_index_is_caught() {
     let graph = relationship_indexed_graph();
-    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", LOOP.0);
+    let block = postings::block_of(LOOP.0);
+    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", block);
     corrupt(&graph, |write| {
-        let stored = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
-        let value = write.get(Table::KeywordPostings, &stored).unwrap().unwrap();
-        write.put(Table::KeywordPostings, &key, &value).unwrap();
+        let value = write.get(Table::KeywordPostings, &key).unwrap().unwrap();
+        let mut held = Block::load(block, &value).unwrap();
+        held.insert(block, LOOP.0, &[0], 1).unwrap();
+        write
+            .put(Table::KeywordPostings, &key, held.bytes().unwrap())
+            .unwrap();
     });
     assert!(
-        violations_of(&graph).contains(&IntegrityViolation::UnexpectedIndexEntry {
+        violations_of(&graph).contains(&IntegrityViolation::WrongIndexEntry {
             table: Table::KeywordPostings,
             key,
         })
@@ -1008,5 +1417,47 @@ fn relationship_indexes_stay_consistent_through_every_query_that_writes_relation
     assert_eq!(
         count(&graph, "MATCH ()-[r:R]->() WHERE r.note = 'kept' RETURN r"),
         1
+    );
+}
+
+#[test]
+fn an_adjacency_segment_whose_deltas_remove_every_relationship_is_caught() {
+    let (id, _) = adjacency::locate(Side::Incoming, BOB, KNOWS);
+    assert_caught(
+        |write| {
+            for (node, relationship) in [(BOB, FRIENDSHIP), (CAROL, LOOP)] {
+                let (_, position) = adjacency::locate(Side::Incoming, node, KNOWS);
+                let change = adjacency::Change {
+                    removed: vec![relationship],
+                    added: Vec::new(),
+                };
+                let key = id.delta_key(position);
+                write
+                    .put(Table::Adjacency, &key, &change.encode(&key))
+                    .unwrap();
+            }
+        },
+        IntegrityViolation::NonCanonicalAdjacency(id),
+    );
+}
+
+#[test]
+fn an_adjacency_delta_that_removes_what_its_segment_does_not_hold_is_caught() {
+    let (id, position) = adjacency::locate(Side::Incoming, BOB, KNOWS);
+    let key = id.delta_key(position);
+    assert_caught(
+        |write| {
+            let change = adjacency::Change {
+                removed: vec![LOOP],
+                added: Vec::new(),
+            };
+            write
+                .put(Table::Adjacency, &key, &change.encode(&key))
+                .unwrap();
+        },
+        IntegrityViolation::Undecodable {
+            table: Table::Adjacency,
+            key: key.to_vec(),
+        },
     );
 }

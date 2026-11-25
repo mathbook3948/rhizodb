@@ -3,6 +3,7 @@ use crate::gql::ast::Call;
 use crate::gql::ast::Clause;
 use crate::gql::ast::Delete;
 use crate::gql::ast::Expr;
+use crate::gql::ast::Imports;
 use crate::gql::ast::LabelExpr;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
@@ -344,6 +345,7 @@ fn clauses_keep_their_source_order() {
             Clause::Call(_) => "call",
             Clause::Filter(_) => "filter",
             Clause::Let(_) => "let",
+            Clause::CallSubquery(_) => "call subquery",
         })
         .collect();
     assert_eq!(
@@ -442,15 +444,37 @@ fn clauses_outside_the_supported_set_are_reported_as_unsupported() {
             "{source}"
         );
     }
-    for source in [
-        "MATCH (n) CALL { RETURN 1 AS x } RETURN x",
-        "MATCH (n) CALL (n) { RETURN 1 AS x } RETURN x",
-        "MATCH (n) CALL () { RETURN 1 AS x } RETURN x",
-        "MATCH (n) CALL (*) { RETURN 1 AS x } RETURN x",
+}
+
+#[test]
+fn call_subqueries_take_every_variable_scope_clause() {
+    for (source, optional, imports) in [
+        ("MATCH (n) CALL { RETURN 1 AS x } RETURN x", false, None),
+        (
+            "MATCH (n) CALL (n) { RETURN 1 AS x } RETURN x",
+            false,
+            Some(Imports::Variables(vec![name("n")])),
+        ),
+        (
+            "MATCH (n) CALL () { RETURN 1 AS x } RETURN x",
+            false,
+            Some(Imports::Variables(Vec::new())),
+        ),
+        (
+            "MATCH (n) OPTIONAL CALL (*) { RETURN 1 AS x } RETURN x",
+            true,
+            Some(Imports::All),
+        ),
     ] {
+        let Query::Single(query) = parse(source).unwrap() else {
+            panic!("{source}");
+        };
+        let Clause::CallSubquery(call) = &query.clauses[1] else {
+            panic!("{source}: {:?}", query.clauses[1]);
+        };
         assert_eq!(
-            error(source),
-            (10, SyntaxErrorKind::UnsupportedFeature),
+            (call.optional, &call.imports),
+            (optional, &imports),
             "{source}"
         );
     }

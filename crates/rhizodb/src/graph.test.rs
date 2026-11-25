@@ -40,7 +40,7 @@ fn a_created_node_reads_back_with_its_labels_and_properties() {
     record
         .properties
         .insert(name, PropertyValue::String("Ada".to_owned()));
-    let id = write.create_node(&record).unwrap();
+    let id = write.create_node(record.clone()).unwrap();
     write.commit().unwrap();
 
     let read = graph.read().unwrap();
@@ -53,8 +53,8 @@ fn a_created_relationship_reads_back_and_requires_existing_endpoints() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let record = relationship(knows, a, b);
     let id = write.create_relationship(&record).unwrap();
 
@@ -75,9 +75,9 @@ fn adjacency_is_visible_from_both_ends_and_filters_by_type() {
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
     let likes: Token<RelationshipType> = write.intern_token("LIKES").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
-    let c = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let c = write.create_node(node_with(&[])).unwrap();
     let a_knows_b = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -121,7 +121,7 @@ fn a_self_loop_is_reported_once_when_scanning_both_directions() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
     write
         .create_relationship(&relationship(knows, a, a))
         .unwrap();
@@ -143,9 +143,9 @@ fn the_label_index_follows_label_changes() {
     let mut write = graph.write().unwrap();
     let person: Token<Label> = write.intern_token("Person").unwrap();
     let admin: Token<Label> = write.intern_token("Admin").unwrap();
-    let a = write.create_node(&node_with(&[person])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
-    let c = write.create_node(&node_with(&[person, admin])).unwrap();
+    let a = write.create_node(node_with(&[person])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let c = write.create_node(node_with(&[person, admin])).unwrap();
     write.add_label(b, person).unwrap();
     write.add_label(b, person).unwrap();
     write.remove_label(c, person).unwrap();
@@ -168,8 +168,8 @@ fn a_node_with_relationships_is_not_detached_until_they_are_gone() {
     let graph = memory_graph();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -192,14 +192,8 @@ fn a_node_with_relationships_is_not_detached_until_they_are_gone() {
     write.delete_node(a).unwrap();
     write.delete_node(b).unwrap();
     assert_eq!(write.node_ids().unwrap(), Vec::new());
-    assert!(matches!(
-        write.delete_node(a),
-        Err(GraphError::NodeNotFound(_))
-    ));
-    assert!(matches!(
-        write.delete_relationship(edge),
-        Err(GraphError::RelationshipNotFound(_))
-    ));
+    assert_eq!(write.delete_node(a).unwrap(), None);
+    assert_eq!(write.delete_relationship(edge).unwrap(), None);
 }
 
 #[test]
@@ -208,8 +202,8 @@ fn properties_can_be_set_replaced_and_removed_on_nodes_and_relationships() {
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
     let since: Token<PropertyKey> = write.intern_token("since").unwrap();
-    let a = write.create_node(&node_with(&[])).unwrap();
-    let b = write.create_node(&node_with(&[])).unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, a, b))
         .unwrap();
@@ -292,12 +286,12 @@ fn a_dropped_write_transaction_leaves_no_trace() {
     let graph = memory_graph();
     {
         let mut write = graph.write().unwrap();
-        write.create_node(&node_with(&[])).unwrap();
+        write.create_node(node_with(&[])).unwrap();
     }
 
     let mut write = graph.write().unwrap();
     assert_eq!(write.node_ids().unwrap(), Vec::new());
-    assert_eq!(write.create_node(&node_with(&[])).unwrap(), NodeId(0));
+    assert_eq!(write.create_node(node_with(&[])).unwrap(), NodeId(0));
 }
 
 #[test]
@@ -309,8 +303,8 @@ fn a_file_database_keeps_its_graph_across_reopen() {
         let mut write = graph.write().unwrap();
         let person: Token<Label> = write.intern_token("Person").unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-        let a = write.create_node(&node_with(&[person])).unwrap();
-        let b = write.create_node(&node_with(&[person])).unwrap();
+        let a = write.create_node(node_with(&[person])).unwrap();
+        let b = write.create_node(node_with(&[person])).unwrap();
         let edge = write
             .create_relationship(&relationship(knows, a, b))
             .unwrap();
@@ -337,8 +331,8 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
         let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
         let mut write = graph.write().unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-        let a = write.create_node(&node_with(&[])).unwrap();
-        let b = write.create_node(&node_with(&[])).unwrap();
+        let a = write.create_node(node_with(&[])).unwrap();
+        let b = write.create_node(node_with(&[])).unwrap();
         let edge = write
             .create_relationship(&relationship(knows, a, b))
             .unwrap();
@@ -351,7 +345,7 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
     let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let fresh = write.create_node(&node_with(&[])).unwrap();
+    let fresh = write.create_node(node_with(&[])).unwrap();
     let edge = write
         .create_relationship(&relationship(knows, fresh, fresh))
         .unwrap();
@@ -418,6 +412,72 @@ fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
 }
 
 #[test]
+fn a_version_six_database_reads_its_float_lists_after_the_upgrade() {
+    let storage = RedbStorage::in_memory().unwrap();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &6u32.to_be_bytes(),
+        )
+        .unwrap();
+    let mut record = vec![0, 2, 0, 0, 0, 0, 5, 2, 2];
+    record.extend_from_slice(&0.5f64.to_bits().to_be_bytes());
+    record.push(2);
+    record.extend_from_slice(&(-1.0f64).to_bits().to_be_bytes());
+    record.extend_from_slice(&[0, 0, 0, 1, 1]);
+    record.extend_from_slice(&7i64.to_be_bytes());
+    write
+        .put(Table::Nodes, &keys::element_key(0), &record)
+        .unwrap();
+    write.commit().unwrap();
+
+    let graph = Graph::open(storage).unwrap();
+    let read = graph.read().unwrap();
+    let node = read.node(NodeId(0)).unwrap().unwrap();
+    assert_eq!(
+        node.properties.get(&Token::new(0)),
+        Some(&PropertyValue::List(vec![
+            PropertyValue::Float(0.5),
+            PropertyValue::Float(-1.0)
+        ]))
+    );
+    assert_eq!(
+        node.properties.get(&Token::new(1)),
+        Some(&PropertyValue::Integer(7))
+    );
+}
+
+#[test]
+fn a_property_after_a_list_of_single_precision_floats_reads_back() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let embedding: Token<PropertyKey> = write.intern_token("embedding").unwrap();
+    let age: Token<PropertyKey> = write.intern_token("age").unwrap();
+    let mut record = node_with(&[]);
+    let floats = (0..64).map(|i| PropertyValue::Float(f64::from(i) / 64.0));
+    record
+        .properties
+        .insert(embedding, PropertyValue::List(floats.collect()));
+    record.properties.insert(age, PropertyValue::Integer(41));
+    let node = write.create_node(record.clone()).unwrap();
+    write.commit().unwrap();
+
+    let read = graph.read().unwrap();
+    assert_eq!(read.node(node).unwrap(), Some(record));
+    let found = read
+        .node_property(
+            &mut LabelReader::default(),
+            &mut ColumnReader::default(),
+            node,
+            Some(age),
+        )
+        .unwrap();
+    assert_eq!(found, Some(Some(PropertyValue::Integer(41))));
+}
+
+#[test]
 fn a_newer_format_version_is_rejected_on_open() {
     let storage = RedbStorage::in_memory().unwrap();
     let mut write = storage.begin_write().unwrap();
@@ -435,4 +495,436 @@ fn a_newer_format_version_is_rejected_on_open() {
         Graph::open(storage),
         Err(GraphError::UnsupportedFormatVersion(found)) if found == newer
     ));
+}
+
+#[test]
+fn a_database_of_format_seven_moves_its_labels_to_node_meta_and_passes_the_check() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.redb");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("format-7.redb");
+    std::fs::copy(fixture, &path).unwrap();
+    let before = RedbStorage::open(&path).unwrap();
+    let read = before.begin_read().unwrap();
+    assert_eq!(
+        read.get(Table::Metadata, keys::FORMAT_VERSION_KEY).unwrap(),
+        Some(7u32.to_be_bytes().to_vec())
+    );
+    assert!(!read.scan_prefix(Table::LabelIndex, &[]).unwrap().is_empty());
+    drop(read);
+
+    let graph = Graph::open(before).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction
+            .scan_prefix(Table::LabelIndex, &[])
+            .unwrap(),
+        Vec::new()
+    );
+    let person = read.lookup_token::<Label>("Person").unwrap().unwrap();
+    let people = read.node_ids_with_label(person).unwrap();
+    assert_eq!(people.len(), 6);
+    assert_eq!(read.count_nodes_with_label(person).unwrap(), 6);
+    assert_eq!(people.last(), Some(&NodeId(4209)));
+}
+
+#[test]
+fn a_label_scan_and_count_see_the_writes_of_their_own_transaction_in_id_order() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let person: Token<Label> = write.intern_token("Person").unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..5000 {
+        ids.push(write.create_node(node_with(&[person])).unwrap());
+    }
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    write.delete_node(ids[10]).unwrap();
+    write.remove_label(ids[4500], person).unwrap();
+    let late = write.create_node(node_with(&[person])).unwrap();
+    let mut expected: Vec<NodeId> = ids
+        .iter()
+        .copied()
+        .filter(|id| *id != ids[10] && *id != ids[4500])
+        .collect();
+    expected.push(late);
+    assert_eq!(write.node_ids_with_label(person).unwrap(), expected);
+    assert_eq!(write.count_nodes_with_label(person).unwrap(), 4999);
+    assert_eq!(write.node_ids().unwrap().len(), 5000);
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.node_ids_with_label(person).unwrap(), expected);
+    assert_eq!(read.count_nodes_with_label(person).unwrap(), 4999);
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn a_write_transaction_that_outgrows_its_held_chunks_still_reads_and_commits_its_relationships() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let rel_type = write.intern_token::<RelationshipType>("BIG").unwrap();
+    let key = write.intern_token::<PropertyKey>("text").unwrap();
+    let a = write.create_node(node_with(&[])).unwrap();
+    let b = write.create_node(node_with(&[])).unwrap();
+    let mut expected = BTreeMap::new();
+    let mut held = 0;
+    for index in 0..400usize {
+        let mut record = relationship(rel_type, a, b);
+        record.properties.insert(
+            key,
+            PropertyValue::String(format!("{index}").repeat(16 << 10)),
+        );
+        held += record.encode().len();
+        let id = write.create_relationship(&record).unwrap();
+        expected.insert(id, record);
+    }
+    assert!(held > 2 * HELD_RELATIONSHIP_BYTES);
+    let ids: Vec<RelationshipId> = expected.keys().copied().collect();
+    for (at, id) in ids.into_iter().enumerate() {
+        if at % 3 == 0 {
+            write.delete_relationship(id).unwrap();
+            expected.remove(&id);
+        }
+    }
+    for (id, record) in &expected {
+        assert_eq!(write.relationship(*id).unwrap().as_ref(), Some(record));
+    }
+    let mut visited = Vec::new();
+    write
+        .visit_relationship_records(|id, _| {
+            visited.push(id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited, expected.keys().copied().collect::<Vec<_>>());
+    assert_eq!(write.check_integrity().unwrap(), vec![]);
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    for (id, record) in &expected {
+        assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
+    }
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+}
+
+#[test]
+fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.redb");
+    let mut expected = BTreeMap::new();
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        let types = [
+            write.intern_token::<RelationshipType>("A").unwrap(),
+            write.intern_token::<RelationshipType>("B").unwrap(),
+        ];
+        let key = write.intern_token::<PropertyKey>("k").unwrap();
+        let nodes: Vec<NodeId> = (0..300)
+            .map(|_| write.create_node(node_with(&[])).unwrap())
+            .collect();
+        for index in 0..70_000usize {
+            let mut record = relationship(
+                types[index % 2],
+                nodes[index % nodes.len()],
+                nodes[index * 7 % nodes.len()],
+            );
+            if index % 5 != 0 {
+                record
+                    .properties
+                    .insert(key, PropertyValue::Integer(index as i64));
+            }
+            let id = write.create_relationship(&record).unwrap();
+            if index % 9 == 4 || (40..90).contains(&index) {
+                write.delete_relationship(id).unwrap();
+            } else {
+                expected.insert(id, record);
+            }
+        }
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_eleven(&mut previous);
+        previous.commit().unwrap();
+    }
+    assert!(expected.keys().last().unwrap().0 >= 1 << 16);
+    for _ in 0..2 {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let read = graph.read().unwrap();
+        for (id, record) in &expected {
+            assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
+        }
+        let mut count = 0;
+        read.visit_relationship_records(|_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, expected.len());
+        assert_eq!(
+            read.transaction
+                .scan_prefix(Table::Relationships, &[])
+                .unwrap(),
+            vec![]
+        );
+        assert_eq!(read.check_integrity().unwrap(), vec![]);
+    }
+}
+
+/// Deletes every property column and returns the properties they held, by node.
+pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId, Properties> {
+    let mut values: BTreeMap<(NodeId, Token<PropertyKey>), PropertyValue> = BTreeMap::new();
+    let mut changes = Vec::new();
+    for (key, value) in write.scan_prefix(Table::NodeColumns, &[]).unwrap() {
+        match columns::parse_key(&key).unwrap() {
+            columns::ColumnKey::Segment {
+                group,
+                token,
+                segment,
+                ..
+            } => {
+                let view = columns::SegmentRef::parse(&key, &value).unwrap();
+                for cell in view.cells() {
+                    let (at, cell) = cell.unwrap();
+                    let node = meta::node_at(group, segment * columns::SEGMENT_SLOTS + at);
+                    values.insert((node, token), cell.to_value().unwrap());
+                }
+            }
+            columns::ColumnKey::Delta { group, slot } => {
+                let delta = columns::DeltaRef::parse(&key, &value).unwrap();
+                for entry in delta.entries() {
+                    let (token, cell) = entry.unwrap();
+                    let value = cell.map(|cell| cell.to_value().unwrap());
+                    changes.push(((meta::node_at(group, slot), token), value));
+                }
+            }
+        }
+        write.delete(Table::NodeColumns, &key).unwrap();
+    }
+    for (at, value) in changes {
+        match value {
+            Some(value) => values.insert(at, value),
+            None => values.remove(&at),
+        };
+    }
+    let mut nodes: BTreeMap<NodeId, Properties> = BTreeMap::new();
+    for ((node, token), value) in values {
+        nodes.entry(node).or_default().insert(token, value);
+    }
+    nodes
+}
+
+/// Rewrites a database of the current format in the layout of format 13, which kept each
+/// element's posting of a term as its own entry under the element's ID, so a test can open it as
+/// an older version.
+pub(crate) fn store_as_format_thirteen(write: &mut impl WriteTransaction) {
+    let blocks = write.scan_prefix(Table::KeywordPostings, &[]).unwrap();
+    for (key, _) in &blocks {
+        write.delete(Table::KeywordPostings, key).unwrap();
+    }
+    for (key, value) in blocks {
+        let block = keys::parse_posting_block(&key).unwrap();
+        let prefix = &key[..key.len() - 8];
+        for posting in postings::Entries::new(block, &value) {
+            let posting = posting.unwrap();
+            let mut row = posting.frequency.to_be_bytes().to_vec();
+            row.extend_from_slice(&posting.length.to_be_bytes());
+            let mut previous = 0;
+            for position in &posting.positions {
+                crate::value::put_varint(&mut row, usize::try_from(position - previous).unwrap());
+                previous = *position;
+            }
+            let mut element_key = prefix.to_vec();
+            element_key.extend_from_slice(&posting.element.to_be_bytes());
+            write
+                .put(Table::KeywordPostings, &element_key, &row)
+                .unwrap();
+        }
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &13u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 11, which kept each
+/// relationship record as its own entry under its ID, so a test can open it as an older version.
+pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
+    store_as_format_thirteen(write);
+    for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
+        let chunk = relationships::parse_key(&key).unwrap();
+        for entry in ChunkRef::parse(&value).unwrap().entries() {
+            let (slot, record) = entry.unwrap();
+            let id = relationships::relationship_at(chunk, slot);
+            write
+                .put(Table::Relationships, &keys::element_key(id.0), record)
+                .unwrap();
+        }
+        write.delete(Table::RelationshipChunks, &key).unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &11u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 10, which kept each
+/// relationship record's type and ends at fixed width, so a test can open it as an older version.
+pub(crate) fn store_as_format_ten(write: &mut impl WriteTransaction) {
+    store_as_format_eleven(write);
+    for (key, value) in write.scan_prefix(Table::Relationships, &[]).unwrap() {
+        let record = RelationshipRecord::decode(&value).unwrap();
+        write
+            .put(Table::Relationships, &key, &record.encode_fixed())
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &10u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 9, which kept each
+/// relationship as one entry under its source in the outgoing table and one under its target in
+/// the incoming table, so a test can open it as an older version.
+pub(crate) fn store_as_format_nine(write: &mut impl WriteTransaction) {
+    store_as_format_ten(write);
+    let mut segments: BTreeMap<SegmentId, Vec<adjacency::Stored>> = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::Adjacency, &[]).unwrap() {
+        let (id, _) = adjacency::parse_key(&key).unwrap();
+        write.delete(Table::Adjacency, &key).unwrap();
+        segments.entry(id).or_default().push((key, value));
+    }
+    for (id, stored) in segments {
+        let table = match id.side {
+            Side::Outgoing => Table::Outgoing,
+            Side::Incoming => Table::Incoming,
+        };
+        let edit = SegmentEdit::load(
+            &id,
+            stored
+                .iter()
+                .map(|(key, value)| (key.as_slice(), value.as_slice())),
+        )
+        .unwrap();
+        for (position, edges) in edit.slots().unwrap() {
+            for edge in edges {
+                write
+                    .put(
+                        table,
+                        &keys::adjacency_key(
+                            id.node_at(position),
+                            Token::new(id.rel_type),
+                            edge.relationship,
+                        ),
+                        &edge.other.0.to_be_bytes(),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &9u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 8, which kept each node's
+/// properties in one record under its ID, so a test can open it as an older version.
+pub(crate) fn store_as_format_eight(write: &mut impl WriteTransaction) {
+    store_as_format_nine(write);
+    for (node, properties) in take_columns(write) {
+        let record = NodeRecord {
+            labels: BTreeSet::new(),
+            properties,
+        }
+        .encode();
+        write
+            .put(Table::Nodes, &keys::element_key(node.0), &record)
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &8u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 7, which kept each node's
+/// labels at the front of its record and in a label index, so a test can open it as an older
+/// version.
+pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
+    store_as_format_nine(write);
+    let mut sets = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::LabelSets, &[]).unwrap() {
+        sets.insert(
+            decode_u32(&key).unwrap(),
+            meta::parse_label_set(&value).unwrap(),
+        );
+        write.delete(Table::LabelSets, &key).unwrap();
+        write.delete(Table::LabelSetByTokens, &value).unwrap();
+    }
+    let mut labels = BTreeMap::new();
+    let mut groups = BTreeMap::new();
+    for (key, value) in write.scan_prefix(Table::NodeChunks, &[]).unwrap() {
+        match meta::parse_key(&key).unwrap().unwrap() {
+            (group, meta::Part::Chunk) => {
+                let edit = MetaBytes::parse(group, &value).unwrap().to_edit().unwrap();
+                groups.insert(group, edit);
+            }
+            (group, meta::Part::Delta(_)) => {
+                let delta = meta::Delta::parse(&key, &value).unwrap();
+                let edit: &mut MetaEdit = groups.get_mut(&group).unwrap();
+                edit.set(delta.slot, delta.after);
+            }
+        }
+        write.delete(Table::NodeChunks, &key).unwrap();
+    }
+    for (group, edit) in groups {
+        for (slot, set) in edit.live() {
+            let held = sets.get(&set.0).cloned().unwrap_or_else(|| Arc::from([]));
+            labels.insert(meta::node_at(group, slot), held);
+        }
+    }
+    let mut properties = take_columns(write);
+    for (node, held) in labels {
+        let mut record = Vec::new();
+        crate::value::put_varint(&mut record, held.len());
+        for label in held.iter() {
+            record.extend_from_slice(&label.id().to_be_bytes());
+            write
+                .put(Table::LabelIndex, &keys::label_key(*label, node), &[])
+                .unwrap();
+        }
+        let properties = properties.remove(&node).unwrap_or_default();
+        record.extend_from_slice(
+            &NodeRecord {
+                labels: BTreeSet::new(),
+                properties,
+            }
+            .encode(),
+        );
+        write
+            .put(Table::Nodes, &keys::element_key(node.0), &record)
+            .unwrap();
+    }
+    assert!(properties.is_empty(), "a property column holds a dead node");
+    write
+        .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
+        .unwrap();
 }

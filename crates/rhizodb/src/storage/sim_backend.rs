@@ -1,0 +1,113 @@
+use std::io;
+
+use redb::BackendError;
+use redb::StorageBackend;
+
+use crate::engine::block_file::BlockFile;
+use crate::engine::block_file::BlockSize;
+use crate::engine::block_file::FileSystem;
+use crate::engine::block_file::SECTOR_SIZE;
+use crate::engine::sim_fs::SimFile;
+use crate::engine::sim_fs::SimFs;
+
+use super::StorageError;
+use super::redb_backend::RedbStorage;
+
+const FILE: &str = "graph.redb";
+
+const STAGING: &str = ".graph.redb.creating";
+
+/// A redb file on a [`SimFs`], in blocks of one sector. A write or read that does not cover
+/// whole sectors reads the sectors it touches first, so a torn write tears what redb wrote.
+#[derive(Debug)]
+pub(crate) struct SimBackend {
+    file: SimFile,
+}
+
+fn sector() -> BlockSize {
+    BlockSize::new(SECTOR_SIZE).unwrap()
+}
+
+fn sectors(offset: u64, length: usize) -> io::Result<(u64, usize)> {
+    let sector = SECTOR_SIZE as u64;
+    let end = offset
+        .checked_add(length as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range past u64"))?;
+    let first = offset / sector;
+    let last = end.div_ceil(sector);
+    Ok((first, ((last - first) * sector) as usize))
+}
+
+impl StorageBackend for SimBackend {
+    fn len(&self) -> Result<u64, BackendError> {
+        Ok(self.file.block_count()? * SECTOR_SIZE as u64)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
+        let (first, covered) = sectors(offset, out.len())?;
+        let mut buffer = vec![0; covered];
+        self.file.read(first, &mut buffer)?;
+        let skip = (offset - first * SECTOR_SIZE as u64) as usize;
+        out.copy_from_slice(&buffer[skip..skip + out.len()]);
+        Ok(())
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
+        if !len.is_multiple_of(SECTOR_SIZE as u64) {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidInput, "length is not whole sectors").into(),
+            );
+        }
+        Ok(self.file.set_block_count(len / SECTOR_SIZE as u64)?)
+    }
+
+    fn sync_data(&self) -> Result<(), BackendError> {
+        Ok(self.file.sync()?)
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        let (first, covered) = sectors(offset, data.len())?;
+        let skip = (offset - first * SECTOR_SIZE as u64) as usize;
+        if skip == 0 && covered == data.len() {
+            return Ok(self.file.write(first, data)?);
+        }
+        let mut buffer = vec![0; covered];
+        let present = self.file.block_count()?;
+        let readable = present
+            .saturating_sub(first)
+            .min((covered / SECTOR_SIZE) as u64);
+        self.file
+            .read(first, &mut buffer[..readable as usize * SECTOR_SIZE])?;
+        buffer[skip..skip + data.len()].copy_from_slice(data);
+        Ok(self.file.write(first, &buffer)?)
+    }
+}
+
+/// A redb database on `fs`, created the way `RedbStorage::open` creates a file: under a staging
+/// name that is synced before it is renamed into place.
+pub(crate) fn storage(fs: &SimFs) -> Result<RedbStorage, StorageError> {
+    if needs_creating(fs).map_err(StorageError::new)? {
+        create(fs)?;
+    }
+    let file = fs.open(FILE, sector()).map_err(StorageError::new)?;
+    RedbStorage::with_backend(SimBackend { file })
+}
+
+fn needs_creating(fs: &SimFs) -> io::Result<bool> {
+    match fs.open(FILE, sector()) {
+        Ok(file) => Ok(file.block_count()? == 0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn create(fs: &SimFs) -> Result<(), StorageError> {
+    let io = StorageError::new;
+    if fs.names().map_err(io)?.iter().any(|name| name == STAGING) {
+        fs.remove(STAGING).map_err(io)?;
+    }
+    let staged = fs.create(STAGING, sector()).map_err(io)?;
+    drop(RedbStorage::with_backend(SimBackend { file: staged })?);
+    fs.rename(STAGING, FILE).map_err(io)?;
+    fs.sync_names().map_err(io)
+}

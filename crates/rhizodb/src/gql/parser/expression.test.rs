@@ -1,10 +1,10 @@
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
-use crate::gql::ast::ExistsSubquery;
 use crate::gql::ast::Expr;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::Quantifier;
+use crate::gql::ast::Subquery;
 use crate::gql::error::SyntaxErrorKind;
 use crate::gql::testing::expr;
 use crate::gql::testing::expr_error;
@@ -410,11 +410,11 @@ fn a_list_starting_with_a_parenthesized_expression_is_still_a_list() {
 fn existential_subqueries() {
     assert!(matches!(
         expr("exists { (n)-->() WHERE n.x = 1 }"),
-        Expr::Exists(body) if matches!(*body, ExistsSubquery::Pattern { filter: Some(_), .. })
+        Expr::Exists(body) if matches!(*body, Subquery::Pattern { filter: Some(_), .. })
     ));
     assert!(matches!(
         expr("EXISTS { MATCH (n)-->() RETURN true }"),
-        Expr::Exists(body) if matches!(*body, ExistsSubquery::Query(_))
+        Expr::Exists(body) if matches!(*body, Subquery::Query(_))
     ));
 }
 

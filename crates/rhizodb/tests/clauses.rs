@@ -139,11 +139,11 @@ fn named_paths_alternate_nodes_and_relationships() {
     let names: Vec<_> = path
         .nodes()
         .iter()
-        .map(|node| node.properties["name"].clone())
+        .map(|node| node.properties()["name"].clone())
         .collect();
     assert_eq!(names, [string("Ada"), string("Bob"), string("Cy")]);
     assert_eq!(path.relationships().len(), 2);
-    assert_eq!(path.relationships()[0].start, path.nodes()[0].id);
+    assert_eq!(path.relationships()[0].start(), path.nodes()[0].id());
     assert_eq!(
         single(
             &db,
@@ -238,6 +238,25 @@ fn skip_and_limit_page_through_ordered_rows() {
 }
 
 #[test]
+fn a_limited_order_keeps_rows_with_equal_keys_in_their_order() {
+    let db = db();
+    let rows = run(
+        &db,
+        "UNWIND range(1, 40) AS x RETURN x ORDER BY x % 3 SKIP 2 LIMIT 5",
+    );
+    assert_eq!(ints(&rows), [9, 12, 15, 18, 21]);
+    let rows = run(
+        &db,
+        "UNWIND range(1, 40) AS x RETURN x ORDER BY x % 4 DESC LIMIT 12",
+    );
+    assert_eq!(ints(&rows), [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 2, 6]);
+    let rows = run(&db, "UNWIND range(1, 4) AS x RETURN x ORDER BY -x LIMIT 9");
+    assert_eq!(ints(&rows), [4, 3, 2, 1]);
+    let rows = run(&db, "UNWIND range(1, 4) AS x RETURN x ORDER BY x LIMIT 0");
+    assert_eq!(ints(&rows), Vec::<i64>::new());
+}
+
+#[test]
 fn unwind_expands_lists_and_drops_null() {
     let db = db();
     assert_eq!(ints(&run(&db, "UNWIND [1, 2, 3] AS x RETURN x")), [1, 2, 3]);
@@ -274,6 +293,21 @@ fn insert_is_accepted_as_the_gql_form_of_create() {
     let db = db();
     run(&db, "INSERT (:A {x: 1})");
     assert_eq!(single(&db, "MATCH (n:A) RETURN n.x"), int(1));
+}
+
+#[test]
+fn a_property_key_set_after_a_read_of_it_is_read_back() {
+    let db = db();
+    run(&db, "CREATE ({k: 1}), ({k: 2})");
+    let rows = run(
+        &db,
+        "MATCH (n) WITH n, n.fresh AS before SET n.fresh = n.k * 10 \
+         RETURN before, n.fresh ORDER BY n.fresh",
+    );
+    assert_eq!(
+        rows,
+        [vec![Value::Null, int(10)], vec![Value::Null, int(20)]]
+    );
 }
 
 #[test]
@@ -340,8 +374,8 @@ fn returning_a_deleted_element_commits_the_delete() {
     let [Value::Node(node)] = row.as_slice() else {
         panic!("expected one node, got {row:?}");
     };
-    assert_eq!(node.labels, ["A".to_owned()].into());
-    assert_eq!(node.properties.get("x"), Some(&int(1)));
+    assert_eq!(node.labels(), &["A".to_owned()].into());
+    assert_eq!(node.properties().get("x"), Some(&int(1)));
     assert_eq!(single(&db, "MATCH (n:A) RETURN count(n)"), int(0));
     assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
     assert_eq!(single(&db, "MATCH (n:B) RETURN count(n)"), int(1));
@@ -358,8 +392,8 @@ fn returning_a_deleted_relationship_commits_the_delete() {
     let [Value::Relationship(relationship)] = row.as_slice() else {
         panic!("expected one relationship, got {row:?}");
     };
-    assert_eq!(relationship.rel_type, "R");
-    assert_eq!(relationship.properties.get("w"), Some(&int(2)));
+    assert_eq!(relationship.relationship_type(), "R");
+    assert_eq!(relationship.properties().get("w"), Some(&int(2)));
     assert_eq!(single(&db, "MATCH ()-[r]->() RETURN count(r)"), int(0));
 }
 
@@ -428,6 +462,41 @@ fn aggregates_group_by_the_non_aggregated_items() {
             "MATCH (n:Person) RETURN sum(n.age), avg(n.age), min(n.age), max(n.name)"
         ),
         [vec![int(102), float(34.0), int(25), string("Cy")]]
+    );
+}
+
+#[test]
+fn a_match_aggregates_the_matches_of_every_incoming_row() {
+    let db = people();
+    let rows = run(
+        &db,
+        "UNWIND [20, 30, 40, 50] AS floor MATCH (n:Person) WHERE n.age > floor \
+         RETURN floor, count(*) AS c, collect(n.name) AS names ORDER BY floor",
+    );
+    assert_eq!(
+        rows,
+        [
+            vec![
+                int(20),
+                int(3),
+                list([string("Ada"), string("Bob"), string("Cy")])
+            ],
+            vec![int(30), int(2), list([string("Ada"), string("Cy")])],
+            vec![int(40), int(1), list([string("Cy")])],
+        ]
+    );
+    let rows = run(
+        &db,
+        "UNWIND [30, 50] AS floor OPTIONAL MATCH (n:Person) WHERE n.age > floor \
+         RETURN floor, count(n) AS c ORDER BY floor",
+    );
+    assert_eq!(rows, [vec![int(30), int(2)], vec![int(50), int(0)]]);
+    assert_eq!(
+        single(
+            &db,
+            "UNWIND [1, 2] AS x MATCH (a:Person)-[:KNOWS]->(b) RETURN count(DISTINCT b.name)"
+        ),
+        int(2)
     );
 }
 

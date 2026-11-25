@@ -2,17 +2,24 @@ use super::ParseResult;
 use super::Parser;
 use crate::gql::ast::BinaryOp;
 use crate::gql::ast::Case;
+use crate::gql::ast::Cast;
 use crate::gql::ast::ComparisonOp;
-use crate::gql::ast::ExistsSubquery;
 use crate::gql::ast::Expr;
 use crate::gql::ast::FunctionCall;
+use crate::gql::ast::IsTest;
 use crate::gql::ast::ListComprehension;
 use crate::gql::ast::ListPredicate;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::PatternComprehension;
 use crate::gql::ast::Quantifier;
+use crate::gql::ast::Reduce;
+use crate::gql::ast::SingleQuery;
+use crate::gql::ast::Subquery;
+use crate::gql::ast::Test;
 use crate::gql::ast::UnaryOp;
+use crate::gql::ast::WhenOperand;
 use crate::gql::ast::WhenThen;
 use crate::gql::error::SyntaxError;
 use crate::gql::error::SyntaxErrorKind;
@@ -52,7 +59,7 @@ impl Infix {
             )
             | Self::Is => PREDICATE_PRECEDENCE,
             Self::Comparison(_) => COMPARISON_PRECEDENCE,
-            Self::Binary(BinaryOp::Add | BinaryOp::Subtract, _) => 7,
+            Self::Binary(BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Concat, _) => 7,
             Self::Binary(BinaryOp::Multiply | BinaryOp::Divide | BinaryOp::Modulo, _) => 8,
             Self::Binary(BinaryOp::Power, _) => 9,
         }
@@ -87,6 +94,15 @@ impl Parser {
         parsed
     }
 
+    fn adjacent_pipes(&self) -> bool {
+        match (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)) {
+            (Some(first), Some(second)) => {
+                second.kind == TokenKind::Punct(Punct::Pipe) && first.end == second.start
+            }
+            _ => false,
+        }
+    }
+
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
         self.nested(|parser| parser.binary_chain(min_precedence))
     }
@@ -102,58 +118,128 @@ impl Parser {
             self.deepen()?;
             lhs = match infix {
                 Infix::Is => {
-                    self.pos += 1;
-                    let negated = self.eat_keyword("NOT");
                     in_comparison_chain = false;
-                    if self.eat_keyword("LABELED") {
-                        let test = Expr::HasLabels {
-                            operand: Box::new(lhs),
-                            labels: self.label_expression(self.label_pipe_allowed())?,
-                        };
-                        if negated {
-                            Expr::Unary {
-                                op: UnaryOp::Not,
-                                operand: Box::new(test),
-                            }
-                        } else {
-                            test
-                        }
-                    } else {
-                        self.expect_keyword("NULL")?;
-                        Expr::IsNull {
-                            operand: Box::new(lhs),
-                            negated,
-                        }
-                    }
+                    self.is_suffix(lhs)?
                 }
                 Infix::Comparison(op) => {
-                    self.pos += 1;
-                    let rhs = self.binary(precedence + 1)?;
                     let chained = std::mem::replace(&mut in_comparison_chain, true);
-                    match lhs {
-                        Expr::Comparison { first, mut rest } if chained => {
-                            rest.push((op, rhs));
-                            Expr::Comparison { first, rest }
-                        }
-                        first => Expr::Comparison {
-                            first: Box::new(first),
-                            rest: vec![(op, rhs)],
-                        },
-                    }
+                    self.comparison_rest(op, precedence, lhs, chained)?
                 }
                 Infix::Binary(op, token_count) => {
-                    self.pos += token_count;
-                    let rhs = self.binary(precedence + 1)?;
                     in_comparison_chain = false;
-                    Expr::Binary {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    }
+                    self.binary_rest(op, token_count, precedence, lhs)?
                 }
             };
         }
         Ok(lhs)
+    }
+
+    fn is_suffix(&mut self, lhs: Expr) -> ParseResult<Expr> {
+        self.pos += 1;
+        let negated = self.eat_keyword("NOT");
+        if let Some(test) = self.is_test()? {
+            return Ok(Expr::Is(Box::new(IsTest {
+                operand: lhs,
+                negated,
+                test,
+            })));
+        }
+        if self.eat_keyword("LABELED") {
+            let test = Expr::HasLabels {
+                operand: Box::new(lhs),
+                labels: self.label_expression(self.label_pipe_allowed())?,
+            };
+            Ok(if negated {
+                Expr::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(test),
+                }
+            } else {
+                test
+            })
+        } else {
+            self.expect_keyword("NULL")?;
+            Ok(Expr::IsNull {
+                operand: Box::new(lhs),
+                negated,
+            })
+        }
+    }
+
+    fn is_test(&mut self) -> ParseResult<Option<Test>> {
+        if self.eat_keyword("TYPED") {
+            return Ok(Some(Test::Typed(self.type_expr()?)));
+        }
+        if self.at_punct(Punct::Colon) && self.punct_at(1, Punct::Colon) {
+            self.pos += 2;
+            return Ok(Some(Test::Typed(self.type_expr()?)));
+        }
+        for (keyword, truth) in [
+            ("TRUE", Some(true)),
+            ("FALSE", Some(false)),
+            ("UNKNOWN", None),
+        ] {
+            if self.eat_keyword(keyword) {
+                return Ok(Some(Test::Truth(truth)));
+            }
+        }
+        if self.at_keyword("DISTINCT") && self.keyword_at(1, "FROM") {
+            self.pos += 2;
+            return Ok(Some(Test::DistinctFrom(
+                self.binary(PREDICATE_PRECEDENCE + 1)?,
+            )));
+        }
+        if self.eat_keyword("NORMALIZED") {
+            return Ok(Some(Test::Normalized(NormalForm::Nfc)));
+        }
+        if let Some(TokenKind::Word {
+            text,
+            quoted: false,
+        }) = self.kind_at(0)
+            && let Some(form) = NormalForm::named(text)
+            && self.keyword_at(1, "NORMALIZED")
+        {
+            self.pos += 2;
+            return Ok(Some(Test::Normalized(form)));
+        }
+        Ok(None)
+    }
+
+    fn comparison_rest(
+        &mut self,
+        op: ComparisonOp,
+        precedence: u8,
+        lhs: Expr,
+        chained: bool,
+    ) -> ParseResult<Expr> {
+        self.pos += 1;
+        let rhs = self.binary(precedence + 1)?;
+        Ok(match lhs {
+            Expr::Comparison { first, mut rest } if chained => {
+                rest.push((op, rhs));
+                Expr::Comparison { first, rest }
+            }
+            first => Expr::Comparison {
+                first: Box::new(first),
+                rest: vec![(op, rhs)],
+            },
+        })
+    }
+
+    fn binary_rest(
+        &mut self,
+        op: BinaryOp,
+        token_count: usize,
+        precedence: u8,
+        lhs: Expr,
+    ) -> ParseResult<Expr> {
+        self.pos += token_count;
+        let rhs = self.binary(precedence + 1)?;
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
     }
 
     fn peek_infix(&self) -> Option<Infix> {
@@ -166,6 +252,7 @@ impl Parser {
                 Punct::Percent => Infix::Binary(BinaryOp::Modulo, 1),
                 Punct::Caret => Infix::Binary(BinaryOp::Power, 1),
                 Punct::RegexMatch => Infix::Binary(BinaryOp::RegexMatch, 1),
+                Punct::Pipe if self.adjacent_pipes() => Infix::Binary(BinaryOp::Concat, 2),
                 Punct::Eq => Infix::Comparison(ComparisonOp::Equal),
                 Punct::Neq => Infix::Comparison(ComparisonOp::NotEqual),
                 Punct::Lt => Infix::Comparison(ComparisonOp::Less),
@@ -329,7 +416,7 @@ impl Parser {
             if !self.in_where {
                 return Err(self.unexpected());
             }
-            return Ok(Expr::Pattern(self.pattern_element()?));
+            return Ok(Expr::Pattern(Box::new(self.pattern_element()?)));
         }
         self.pos += 1;
         let inner = self.expression()?;
@@ -402,18 +489,28 @@ impl Parser {
         self.expect_punct(Punct::Pipe)?;
         let projection = Box::new(self.expression()?);
         self.expect_punct(Punct::RBracket)?;
-        Ok(Expr::PatternComprehension(PatternComprehension {
+        Ok(Expr::PatternComprehension(Box::new(PatternComprehension {
             path_variable,
             element,
             filter,
             projection,
-        }))
+        })))
     }
 
-    fn exists_subquery(&mut self) -> ParseResult<Expr> {
+    fn query_in_braces(&mut self) -> ParseResult<SingleQuery> {
+        self.pos += 2;
+        if !self.at_clause_start() {
+            return Err(self.unexpected());
+        }
+        let query = self.nested(Self::single_query)?;
+        self.expect_punct(Punct::RBrace)?;
+        Ok(query)
+    }
+
+    fn subquery_body(&mut self) -> ParseResult<Subquery> {
         self.pos += 2;
         let body = if self.at_clause_start() {
-            ExistsSubquery::Query(self.nested(Self::single_query)?)
+            Subquery::Query(self.nested(Self::single_query)?)
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
@@ -421,10 +518,10 @@ impl Parser {
             } else {
                 None
             };
-            ExistsSubquery::Pattern { patterns, filter }
+            Subquery::Pattern { patterns, filter }
         };
         self.expect_punct(Punct::RBrace)?;
-        Ok(Expr::Exists(Box::new(body)))
+        Ok(body)
     }
 
     fn optional_predicate(&mut self) -> ParseResult<Option<Box<Expr>>> {
@@ -462,8 +559,19 @@ impl Parser {
                 self.pos += 1;
                 return self.pipe_ending(None, Self::case);
             }
-            if is("EXISTS") && self.punct_at(1, Punct::LBrace) {
-                return self.exists_subquery();
+            if self.punct_at(1, Punct::LBrace) {
+                if is("EXISTS") {
+                    return Ok(Expr::Exists(Box::new(self.subquery_body()?)));
+                }
+                if is("COUNT") {
+                    return Ok(Expr::Count(Box::new(self.subquery_body()?)));
+                }
+                if is("COLLECT") {
+                    return Ok(Expr::Collect(Box::new(self.query_in_braces()?)));
+                }
+                if is("VALUE") {
+                    return Ok(Expr::Value(Box::new(self.query_in_braces()?)));
+                }
             }
         }
         if self.at_function_call() {
@@ -510,12 +618,57 @@ impl Parser {
             {
                 return self.list_predicate(quantifier);
             }
+            if name.0.eq_ignore_ascii_case("reduce")
+                && self.at_word()
+                && self.punct_at(1, Punct::Eq)
+            {
+                return self.reduce();
+            }
+            if name.0.eq_ignore_ascii_case("trim")
+                && let Some(call) = self.trim_from()?
+            {
+                return Ok(call);
+            }
             if name.0.eq_ignore_ascii_case("count")
                 && self.at_punct(Punct::Star)
                 && self.punct_at(1, Punct::RParen)
             {
                 self.pos += 2;
                 return Ok(Expr::CountStar);
+            }
+            if name.0.eq_ignore_ascii_case("cast") {
+                let operand = self.expression()?;
+                self.expect_keyword("AS")?;
+                let target = self.value_type()?;
+                self.expect_punct(Punct::RParen)?;
+                return Ok(Expr::Cast(Box::new(Cast { operand, target })));
+            }
+            if name.0.eq_ignore_ascii_case("normalize") && !self.at_punct(Punct::RParen) {
+                let text = self.expression()?;
+                let mut args = vec![text];
+                if self.eat_punct(Punct::Comma) {
+                    let form = match self.kind_at(0) {
+                        Some(TokenKind::Word {
+                            text: word,
+                            quoted: false,
+                        }) if self.punct_at(1, Punct::RParen) => NormalForm::named(word),
+                        _ => None,
+                    };
+                    args.push(match form {
+                        Some(form) => {
+                            self.pos += 1;
+                            Expr::Literal(Literal::String(form.name().to_owned()))
+                        }
+                        None => self.expression()?,
+                    });
+                }
+                self.expect_punct(Punct::RParen)?;
+                return Ok(Expr::Function(Box::new(FunctionCall {
+                    namespace,
+                    name,
+                    distinct: false,
+                    args,
+                })));
             }
         }
         let distinct = self.eat_keyword("DISTINCT");
@@ -525,12 +678,70 @@ impl Parser {
             self.comma_separated(Self::expression)?
         };
         self.expect_punct(Punct::RParen)?;
-        Ok(Expr::Function(FunctionCall {
+        Ok(Expr::Function(Box::new(FunctionCall {
             namespace,
             name,
             distinct,
             args,
-        }))
+        })))
+    }
+
+    fn trim_from(&mut self) -> ParseResult<Option<Expr>> {
+        let start = self.pos;
+        let side = ["LEADING", "TRAILING", "BOTH"]
+            .into_iter()
+            .find(|side| self.eat_keyword(side));
+        if side.is_some() && self.at_punct(Punct::RParen) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let characters = if self.at_keyword("FROM") {
+            None
+        } else {
+            let characters = self.expression()?;
+            if side.is_none() && !self.at_keyword("FROM") {
+                self.pos = start;
+                return Ok(None);
+            }
+            Some(characters)
+        };
+        self.expect_keyword("FROM")?;
+        let source = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        let name = match side {
+            Some("LEADING") => "ltrim",
+            Some("TRAILING") => "rtrim",
+            _ => "btrim",
+        };
+        Ok(Some(Expr::Function(Box::new(FunctionCall {
+            namespace: Vec::new(),
+            name: Name::new(name),
+            distinct: false,
+            args: std::iter::once(source).chain(characters).collect(),
+        }))))
+    }
+
+    fn reduce(&mut self) -> ParseResult<Expr> {
+        let accumulator = self.name()?;
+        self.pos += 1;
+        let init = self.expression()?;
+        self.expect_punct(Punct::Comma)?;
+        if !self.at_word() || !self.keyword_at(1, "IN") {
+            return Err(self.unexpected());
+        }
+        let variable = self.name()?;
+        self.pos += 1;
+        let source = self.expression()?;
+        self.expect_punct(Punct::Pipe)?;
+        let body = self.expression()?;
+        self.expect_punct(Punct::RParen)?;
+        Ok(Expr::Reduce(Box::new(Reduce {
+            accumulator,
+            init,
+            variable,
+            source,
+            body,
+        })))
     }
 
     fn list_predicate(&mut self, quantifier: Quantifier) -> ParseResult<Expr> {
@@ -548,6 +759,32 @@ impl Parser {
         }))
     }
 
+    fn when_operand(&mut self) -> ParseResult<WhenOperand> {
+        let op = match self.kind_at(0) {
+            Some(TokenKind::Punct(Punct::Eq)) => Some(ComparisonOp::Equal),
+            Some(TokenKind::Punct(Punct::Neq)) => Some(ComparisonOp::NotEqual),
+            Some(TokenKind::Punct(Punct::Lt)) => Some(ComparisonOp::Less),
+            Some(TokenKind::Punct(Punct::Le)) => Some(ComparisonOp::LessEqual),
+            Some(TokenKind::Punct(Punct::Gt)) => Some(ComparisonOp::Greater),
+            Some(TokenKind::Punct(Punct::Ge)) => Some(ComparisonOp::GreaterEqual),
+            _ => None,
+        };
+        if let Some(op) = op {
+            self.pos += 1;
+            return Ok(WhenOperand::Compare(
+                op,
+                self.binary(COMPARISON_PRECEDENCE + 1)?,
+            ));
+        }
+        if self.at_keyword("IS") && (self.keyword_at(1, "NULL") || self.keyword_at(1, "NOT")) {
+            self.pos += 1;
+            let negated = self.eat_keyword("NOT");
+            self.expect_keyword("NULL")?;
+            return Ok(WhenOperand::IsNull { negated });
+        }
+        Ok(WhenOperand::Value(self.expression()?))
+    }
+
     fn case(&mut self) -> ParseResult<Expr> {
         let scrutinee = if self.at_keyword("WHEN") {
             None
@@ -556,7 +793,11 @@ impl Parser {
         };
         let mut branches = Vec::new();
         while self.eat_keyword("WHEN") {
-            let when = self.expression()?;
+            let when = if scrutinee.is_some() {
+                self.comma_separated(Self::when_operand)?
+            } else {
+                vec![WhenOperand::Value(self.expression()?)]
+            };
             self.expect_keyword("THEN")?;
             let then = self.expression()?;
             branches.push(WhenThen { when, then });

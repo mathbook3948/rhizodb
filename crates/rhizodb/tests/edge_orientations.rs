@@ -139,3 +139,24 @@ fn merge_still_takes_an_edge_in_either_direction() {
     let rows = run(&db, "MATCH ()-[r]->() RETURN count(r)");
     assert_eq!(ints(&rows), [2]);
 }
+
+#[test]
+fn a_query_that_expands_nodes_again_after_adding_relationships_sees_them() {
+    let db = db();
+    run(
+        &db,
+        "UNWIND range(0, 39) AS i INSERT (:N {k: i})-[:T]->(:M), (:N {k: 100 + i})",
+    );
+    let rows = run(
+        &db,
+        "MATCH (a:N)-[:T]->() WITH a MATCH (b:N {k: a.k + 100}) INSERT (a)-[:T]->(b) \
+         WITH DISTINCT a MATCH (a)-[:T]->(c) MATCH (a)-[]-(d) \
+         RETURN count(c), count(d)",
+    );
+    assert_eq!(rows, [vec![Value::Integer(160), Value::Integer(160)]]);
+    let rows = run(
+        &db,
+        "MATCH (a:N)-[:T]->(c) MATCH (a)-[]-(d) RETURN count(c), count(d)",
+    );
+    assert_eq!(rows, [vec![Value::Integer(160), Value::Integer(160)]]);
+}

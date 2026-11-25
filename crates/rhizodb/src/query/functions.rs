@@ -1,19 +1,28 @@
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
+use std::sync::Arc;
+
+use unicode_normalization::UnicodeNormalization;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
+use super::compare::equals;
 use super::datum::Datum;
 use super::eval::Env;
+use super::eval::arithmetic;
 use super::eval::float_text;
+use super::scalars;
 use super::shape::INSTANT;
 use super::shape::NUMBER;
 use super::shape::Shape;
 use super::shape::admits;
 use super::temporals::Moment;
 use super::temporals::TemporalFunction;
+use super::types;
+use crate::gql::ast::BinaryOp;
+use crate::gql::ast::NormalForm;
 use crate::temporal::arithmetic::Span;
 use crate::temporal::build::Kind;
 
@@ -73,6 +82,35 @@ pub(crate) enum Function {
     Left,
     Right,
     Exists,
+    CharLength,
+    ByteLength,
+    Cardinality,
+    IsEmpty,
+    IsNaN,
+    NullIf,
+    ElementId,
+    Power,
+    Mod,
+    Sinh,
+    Cosh,
+    Tanh,
+    Cot,
+    BTrim,
+    ToStringOrNull,
+    ToIntegerOrNull,
+    ToFloatOrNull,
+    ToBooleanOrNull,
+    Normalize,
+    ValueType,
+    RandomUuid,
+    Haversin,
+    Timestamp,
+    ToBooleanList,
+    ToIntegerList,
+    ToFloatList,
+    ToStringList,
+    CosineSimilarity,
+    EuclideanSimilarity,
     Temporal(TemporalFunction),
 }
 
@@ -90,6 +128,7 @@ const RELATIONSHIP: Accepted = &[Shape::Relationship];
 const ELEMENT: Accepted = &[Shape::Node, Shape::Relationship];
 const ENTITY: Accepted = &[Shape::Node, Shape::Relationship, Shape::Map];
 const LIST_OR_STRING: Accepted = &[Shape::List, Shape::String];
+const LIST_STRING_OR_MAP: Accepted = &[Shape::List, Shape::String, Shape::Map];
 const INTEGER_CONVERTIBLE: Accepted =
     &[Shape::Integer, Shape::Float, Shape::Boolean, Shape::String];
 const FLOAT_CONVERTIBLE: Accepted = &[Shape::Integer, Shape::Float, Shape::String];
@@ -153,7 +192,7 @@ const fn between(span: Span) -> Function {
     Function::Temporal(TemporalFunction::Between(span))
 }
 
-const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
+const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 121] = [
     ("id", Function::Id, 1, 1, &[ELEMENT]),
     ("labels", Function::Labels, 1, 1, &[NODE]),
     ("type", Function::Type, 1, 1, &[RELATIONSHIP]),
@@ -186,11 +225,13 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
     ("abs", Function::Abs, 1, 1, &[NUMBER]),
     ("sign", Function::Sign, 1, 1, &[NUMBER]),
     ("ceil", Function::Ceil, 1, 1, &[NUMBER]),
+    ("ceiling", Function::Ceil, 1, 1, &[NUMBER]),
     ("floor", Function::Floor, 1, 1, &[NUMBER]),
-    ("round", Function::Round, 1, 1, &[NUMBER]),
+    ("round", Function::Round, 1, 3, &[NUMBER, INTEGER, STRING]),
     ("sqrt", Function::Sqrt, 1, 1, &[NUMBER]),
     ("exp", Function::Exp, 1, 1, &[NUMBER]),
-    ("log", Function::Log, 1, 1, &[NUMBER]),
+    ("log", Function::Log, 1, 2, &[NUMBER]),
+    ("ln", Function::Log, 1, 2, &[NUMBER]),
     ("log10", Function::Log10, 1, 1, &[NUMBER]),
     ("sin", Function::Sin, 1, 1, &[NUMBER]),
     ("cos", Function::Cos, 1, 1, &[NUMBER]),
@@ -209,16 +250,62 @@ const SIGNATURES: [(&str, Function, usize, usize, &[Accepted]); 85] = [
     ("nodes", Function::Nodes, 1, 1, &[PATH]),
     ("relationships", Function::Relationships, 1, 1, &[PATH]),
     ("toupper", Function::ToUpper, 1, 1, &[STRING]),
+    ("upper", Function::ToUpper, 1, 1, &[STRING]),
     ("tolower", Function::ToLower, 1, 1, &[STRING]),
-    ("trim", Function::Trim, 1, 1, &[STRING]),
-    ("ltrim", Function::LTrim, 1, 1, &[STRING]),
-    ("rtrim", Function::RTrim, 1, 1, &[STRING]),
+    ("lower", Function::ToLower, 1, 1, &[STRING]),
+    ("trim", Function::Trim, 1, 2, &[STRING]),
+    ("btrim", Function::BTrim, 1, 2, &[STRING]),
+    ("ltrim", Function::LTrim, 1, 2, &[STRING]),
+    ("rtrim", Function::RTrim, 1, 2, &[STRING]),
+    ("char_length", Function::CharLength, 1, 1, &[STRING]),
+    ("character_length", Function::CharLength, 1, 1, &[STRING]),
+    ("byte_length", Function::ByteLength, 1, 1, &[STRING]),
+    ("octet_length", Function::ByteLength, 1, 1, &[STRING]),
+    ("cardinality", Function::Cardinality, 1, 1, &[LIST]),
+    ("path_length", Function::Length, 1, 1, &[PATH]),
+    ("isempty", Function::IsEmpty, 1, 1, &[LIST_STRING_OR_MAP]),
+    ("isnan", Function::IsNaN, 1, 1, &[NUMBER]),
+    ("nullif", Function::NullIf, 2, 2, &[ANY]),
+    ("elementid", Function::ElementId, 1, 1, &[ELEMENT]),
+    ("power", Function::Power, 2, 2, &[NUMBER]),
+    ("mod", Function::Mod, 2, 2, &[NUMBER]),
+    ("sinh", Function::Sinh, 1, 1, &[NUMBER]),
+    ("cosh", Function::Cosh, 1, 1, &[NUMBER]),
+    ("tanh", Function::Tanh, 1, 1, &[NUMBER]),
+    ("cot", Function::Cot, 1, 1, &[NUMBER]),
+    ("tostringornull", Function::ToStringOrNull, 1, 1, &[ANY]),
+    ("tointegerornull", Function::ToIntegerOrNull, 1, 1, &[ANY]),
+    ("tofloatornull", Function::ToFloatOrNull, 1, 1, &[ANY]),
+    ("tobooleanornull", Function::ToBooleanOrNull, 1, 1, &[ANY]),
     ("substring", Function::Substring, 2, 3, &[STRING, INTEGER]),
     ("replace", Function::Replace, 3, 3, &[STRING]),
     ("split", Function::Split, 2, 2, &[STRING]),
     ("left", Function::Left, 2, 2, &[STRING, INTEGER]),
     ("right", Function::Right, 2, 2, &[STRING, INTEGER]),
     ("exists", Function::Exists, 1, 1, &[ANY]),
+    ("normalize", Function::Normalize, 1, 2, &[STRING]),
+    ("valuetype", Function::ValueType, 1, 1, &[ANY]),
+    ("randomuuid", Function::RandomUuid, 0, 0, &[]),
+    ("haversin", Function::Haversin, 1, 1, &[NUMBER]),
+    ("timestamp", Function::Timestamp, 0, 0, &[]),
+    ("tobooleanlist", Function::ToBooleanList, 1, 1, &[LIST]),
+    ("tointegerlist", Function::ToIntegerList, 1, 1, &[LIST]),
+    ("tofloatlist", Function::ToFloatList, 1, 1, &[LIST]),
+    ("tostringlist", Function::ToStringList, 1, 1, &[LIST]),
+    (
+        "vector.similarity.cosine",
+        Function::CosineSimilarity,
+        2,
+        2,
+        &[LIST],
+    ),
+    (
+        "vector.similarity.euclidean",
+        Function::EuclideanSimilarity,
+        2,
+        2,
+        &[LIST],
+    ),
     ("date", construct(Kind::Date), 0, 1, &[DATE_SOURCE]),
     (
         "localtime",
@@ -500,7 +587,14 @@ impl<T: ReadTransaction> Env<'_, T> {
         let third = args.next();
         if !matches!(
             function,
-            Function::Pi | Function::E | Function::Rand | Function::Exists | Function::Temporal(_)
+            Function::Pi
+                | Function::E
+                | Function::Rand
+                | Function::Exists
+                | Function::ValueType
+                | Function::RandomUuid
+                | Function::Timestamp
+                | Function::Temporal(_)
         ) && first.is_null()
         {
             return Ok(Datum::Null);
@@ -508,7 +602,118 @@ impl<T: ReadTransaction> Env<'_, T> {
         let invalid = |value: &Datum| invalid_value(function, value);
         match function {
             Function::Coalesce => Ok(first),
+            Function::NullIf => Ok(match second {
+                Some(other) if equals(&first, &other) == Some(true) => Datum::Null,
+                _ => first,
+            }),
+            Function::ElementId => match first {
+                Datum::Node(id) => Ok(Datum::String(format!("node:{}", id.0))),
+                Datum::Relationship(id) => Ok(Datum::String(format!("relationship:{}", id.0))),
+                other => Err(invalid(&other)),
+            },
+            Function::CharLength => Ok(integer(string_argument(function, first)?.chars().count())),
+            Function::ByteLength => Ok(integer(string_argument(function, first)?.len())),
+            Function::Cardinality => match first {
+                Datum::List(items) => Ok(integer(items.len())),
+                other => Err(invalid(&other)),
+            },
+            Function::IsEmpty => match first {
+                Datum::List(items) => Ok(Datum::Boolean(items.is_empty())),
+                Datum::String(text) => Ok(Datum::Boolean(text.is_empty())),
+                Datum::Map(entries) => Ok(Datum::Boolean(entries.is_empty())),
+                other => Err(invalid(&other)),
+            },
+            Function::IsNaN => match first {
+                Datum::Integer(_) => Ok(Datum::Boolean(false)),
+                Datum::Float(value) => Ok(Datum::Boolean(value.is_nan())),
+                other => Err(invalid(&other)),
+            },
+            Function::Power | Function::Mod => {
+                let Some(second) = second.filter(|value| !value.is_null()) else {
+                    return Ok(Datum::Null);
+                };
+                let op = if function == Function::Power {
+                    BinaryOp::Power
+                } else {
+                    BinaryOp::Modulo
+                };
+                for value in [&first, &second] {
+                    if !matches!(value, Datum::Integer(_) | Datum::Float(_)) {
+                        return Err(invalid(value));
+                    }
+                }
+                arithmetic(op, first, second)
+            }
+            Function::ToStringOrNull => Ok(to_string(first).unwrap_or(Datum::Null)),
+            Function::ToIntegerOrNull => Ok(to_integer(first).unwrap_or(Datum::Null)),
+            Function::ToFloatOrNull => Ok(to_float(first).unwrap_or(Datum::Null)),
+            Function::ToBooleanOrNull => Ok(to_boolean(first).unwrap_or(Datum::Null)),
             Function::Exists => Ok(Datum::Boolean(!first.is_null())),
+            Function::ValueType => Ok(Datum::String(types::type_name(&first))),
+            Function::RandomUuid => Ok(scalars::random_uuid()),
+            Function::Timestamp => Ok(Datum::Integer(
+                i64::try_from(self.now.statement.epoch_nanos().div_euclid(1_000_000))
+                    .unwrap_or(i64::MAX),
+            )),
+            Function::Haversin => Ok(Datum::Float(
+                (1.0 - float_argument(function, &first)?.cos()) / 2.0,
+            )),
+            Function::ToBooleanList => scalars::convert_list("toBooleanList", first, |item| {
+                to_boolean(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToIntegerList => scalars::convert_list("toIntegerList", first, |item| {
+                to_integer(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToFloatList => scalars::convert_list("toFloatList", first, |item| {
+                to_float(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::ToStringList => scalars::convert_list("toStringList", first, |item| {
+                to_string(item).ok().filter(|value| !value.is_null())
+            }),
+            Function::CosineSimilarity | Function::EuclideanSimilarity => {
+                let name = function.name();
+                let Some(second) = second.filter(|value| !value.is_null()) else {
+                    return Ok(Datum::Null);
+                };
+                match (
+                    scalars::vector(name, &first)?,
+                    scalars::vector(name, &second)?,
+                ) {
+                    (Some(a), Some(b)) => {
+                        scalars::similarity(name, function == Function::CosineSimilarity, &a, &b)
+                    }
+                    _ => Ok(Datum::Null),
+                }
+            }
+            Function::Round if count > 1 => {
+                let value = float_argument(function, &first)?;
+                let precision = match second {
+                    Some(Datum::Integer(precision)) => precision,
+                    Some(Datum::Null) | None => return Ok(Datum::Null),
+                    Some(other) => return Err(invalid(&other)),
+                };
+                match third {
+                    None => scalars::round(value, precision, None),
+                    Some(Datum::Null) => Ok(Datum::Null),
+                    Some(Datum::String(mode)) => scalars::round(value, precision, Some(&mode)),
+                    Some(other) => Err(invalid(&other)),
+                }
+            }
+            Function::Normalize => {
+                let text = string_argument(function, first)?;
+                let form = match second {
+                    None => NormalForm::Nfc,
+                    Some(Datum::Null) => return Ok(Datum::Null),
+                    Some(Datum::String(name)) => NormalForm::named(&name).ok_or_else(|| {
+                        Error::new(
+                            ErrorKind::InvalidArgumentValue,
+                            format!("normalize() knows no normal form `{name}`"),
+                        )
+                    })?,
+                    Some(other) => return Err(invalid(&other)),
+                };
+                Ok(Datum::String(normalized(&text, form)))
+            }
             Function::Pi => Ok(Datum::Float(std::f64::consts::PI)),
             Function::E => Ok(Datum::Float(std::f64::consts::E)),
             Function::Rand => Ok(Datum::Float(random_unit())),
@@ -518,12 +723,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Labels => match first {
-                Datum::Node(id) => Ok(Datum::List(
+                Datum::Node(id) => Ok(Datum::List(Arc::new(
                     self.label_names(&self.node(id)?)?
                         .into_iter()
                         .map(Datum::String)
                         .collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
@@ -532,15 +737,17 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
             Function::Keys | Function::Properties => {
                 let entries = match first {
-                    Datum::Node(id) => self.property_map(&self.node(id)?.properties)?,
+                    Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?),
                     Datum::Relationship(id) => {
-                        self.property_map(&self.relationship(id)?.properties)?
+                        Arc::new(self.property_map(&self.relationship(id)?.properties)?)
                     }
                     Datum::Map(entries) => entries,
                     other => return Err(invalid(&other)),
                 };
                 Ok(if function == Function::Keys {
-                    Datum::List(entries.into_keys().map(Datum::String).collect())
+                    Datum::List(Arc::new(
+                        entries.keys().cloned().map(Datum::String).collect(),
+                    ))
                 } else {
                     Datum::Map(entries)
                 })
@@ -555,16 +762,16 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Head | Function::Last | Function::Tail => match first {
-                Datum::List(mut items) => Ok(match function {
-                    Function::Head => items.into_iter().next().unwrap_or(Datum::Null),
-                    Function::Last => items.pop().unwrap_or(Datum::Null),
-                    _ => Datum::List(items.into_iter().skip(1).collect()),
+                Datum::List(items) => Ok(match function {
+                    Function::Head => items.first().cloned().unwrap_or(Datum::Null),
+                    Function::Last => items.last().cloned().unwrap_or(Datum::Null),
+                    _ => Datum::List(Arc::new(items.iter().skip(1).cloned().collect())),
                 }),
                 other => Err(invalid(&other)),
             },
             Function::Reverse => match first {
                 Datum::List(mut items) => {
-                    items.reverse();
+                    Arc::make_mut(&mut items).reverse();
                     Ok(Datum::List(items))
                 }
                 Datum::String(text) => Ok(Datum::String(text.chars().rev().collect())),
@@ -603,6 +810,10 @@ impl<T: ReadTransaction> Env<'_, T> {
             | Function::Exp
             | Function::Log
             | Function::Log10
+            | Function::Sinh
+            | Function::Cosh
+            | Function::Tanh
+            | Function::Cot
             | Function::Sin
             | Function::Cos
             | Function::Tan
@@ -612,6 +823,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             | Function::Degrees
             | Function::Radians => {
                 let value = float_argument(function, &first)?;
+                if function == Function::Log && count == 2 {
+                    return match second {
+                        Some(Datum::Null) | None => Ok(Datum::Null),
+                        Some(argument) => Ok(Datum::Float(
+                            float_argument(function, &argument)?.log(value),
+                        )),
+                    };
+                }
                 Ok(Datum::Float(match function {
                     Function::Ceil => value.ceil(),
                     Function::Floor => value.floor(),
@@ -620,6 +839,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                     Function::Exp => value.exp(),
                     Function::Log => value.ln(),
                     Function::Log10 => value.log10(),
+                    Function::Sinh => value.sinh(),
+                    Function::Cosh => value.cosh(),
+                    Function::Tanh => value.tanh(),
+                    Function::Cot => 1.0 / value.tan(),
                     Function::Sin => value.sin(),
                     Function::Cos => value.cos(),
                     Function::Tan => value.tan(),
@@ -642,34 +865,57 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Nodes => match first {
-                Datum::Path(path) => Ok(Datum::List(
+                Datum::Path(path) => Ok(Datum::List(Arc::new(
                     path.nodes.into_iter().map(Datum::Node).collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
             Function::Relationships => match first {
-                Datum::Path(path) => Ok(Datum::List(
+                Datum::Path(path) => Ok(Datum::List(Arc::new(
                     path.relationships
                         .into_iter()
                         .map(Datum::Relationship)
                         .collect(),
-                )),
+                ))),
                 other => Err(invalid(&other)),
             },
-            Function::ToUpper
-            | Function::ToLower
-            | Function::Trim
-            | Function::LTrim
-            | Function::RTrim => match first {
-                Datum::String(text) => Ok(Datum::String(match function {
-                    Function::ToUpper => text.to_uppercase(),
-                    Function::ToLower => text.to_lowercase(),
-                    Function::Trim => text.trim().to_owned(),
-                    Function::LTrim => text.trim_start().to_owned(),
-                    _ => text.trim_end().to_owned(),
+            Function::ToUpper | Function::ToLower => match first {
+                Datum::String(text) => Ok(Datum::String(if function == Function::ToUpper {
+                    text.to_uppercase()
+                } else {
+                    text.to_lowercase()
                 })),
                 other => Err(invalid(&other)),
             },
+            Function::Trim | Function::BTrim | Function::LTrim | Function::RTrim => {
+                let text = string_argument(function, first)?;
+                let characters = match second {
+                    None => None,
+                    Some(Datum::Null) => return Ok(Datum::Null),
+                    Some(Datum::String(characters)) => Some(characters),
+                    Some(other) => return Err(invalid(&other)),
+                };
+                let trimmed = |text: &str| -> String {
+                    let start = function != Function::RTrim;
+                    let end = function != Function::LTrim;
+                    let strip = |c: char| match &characters {
+                        Some(characters) => characters.contains(c),
+                        None => c.is_whitespace(),
+                    };
+                    let text = if start {
+                        text.trim_start_matches(strip)
+                    } else {
+                        text
+                    };
+                    let text = if end {
+                        text.trim_end_matches(strip)
+                    } else {
+                        text
+                    };
+                    text.to_owned()
+                };
+                Ok(Datum::String(trimmed(&text)))
+            }
             Function::Substring => {
                 let text = string_argument(function, first)?;
                 let Some(start) = integer_argument(function, second)? else {
@@ -724,16 +970,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             Function::Split => {
                 let text = string_argument(function, first)?;
                 match second {
-                    Some(Datum::String(delimiter)) if delimiter.is_empty() => Ok(Datum::List(
-                        text.chars()
-                            .map(|char| Datum::String(char.to_string()))
-                            .collect(),
-                    )),
-                    Some(Datum::String(delimiter)) => Ok(Datum::List(
+                    Some(Datum::String(delimiter)) if delimiter.is_empty() => {
+                        Ok(Datum::List(Arc::new(
+                            text.chars()
+                                .map(|char| Datum::String(char.to_string()))
+                                .collect(),
+                        )))
+                    }
+                    Some(Datum::String(delimiter)) => Ok(Datum::List(Arc::new(
                         text.split(delimiter.as_str())
                             .map(|part| Datum::String(part.to_owned()))
                             .collect(),
-                    )),
+                    ))),
                     Some(Datum::Null) | None => Ok(Datum::Null),
                     Some(other) => Err(invalid(&other)),
                 }
@@ -747,6 +995,16 @@ fn float_argument(function: Function, value: &Datum) -> Result<f64, Error> {
         Datum::Integer(value) => Ok(*value as f64),
         Datum::Float(value) => Ok(*value),
         other => Err(invalid_value(function, other)),
+    }
+}
+
+/// `text` in the Unicode normalization form `form`.
+pub(crate) fn normalized(text: &str, form: NormalForm) -> String {
+    match form {
+        NormalForm::Nfc => text.nfc().collect(),
+        NormalForm::Nfd => text.nfd().collect(),
+        NormalForm::Nfkc => text.nfkc().collect(),
+        NormalForm::Nfkd => text.nfkd().collect(),
     }
 }
 
@@ -823,7 +1081,7 @@ fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum,
         .map_while(|index| i64::try_from(i128::from(start) + index * i128::from(step)).ok())
         .map(Datum::Integer)
         .collect();
-    Ok(Datum::List(items))
+    Ok(Datum::List(Arc::new(items)))
 }
 
 fn to_integer(value: Datum) -> Result<Datum, Error> {

@@ -19,11 +19,22 @@ pub(crate) struct Span {
 pub(crate) enum Query {
     Single(SingleQuery),
     Union(Union),
+    /// Statements joined by `NEXT`, each fed the rows the one before it returns. Holds two or
+    /// more blocks, none of them a `Next`, and the first block has no `YIELD`.
+    Next(Vec<Block>),
 }
 
-/// Two or more single queries joined by one kind of `UNION`.
+/// One statement of a `NEXT` chain: `NEXT YIELD a, b query`, where `yields` is `None` without
+/// `YIELD`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Block {
+    pub yields: Option<Vec<Name>>,
+    pub query: Query,
+}
+
+/// Two or more single queries joined by one set operator.
 ///
-/// `rest` is never empty. Mixing `UNION` and `UNION ALL` is a syntax error.
+/// `rest` is never empty. Mixing operators, or `UNION` and `UNION ALL`, is a syntax error.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Union {
     pub kind: UnionKind,
@@ -35,6 +46,16 @@ pub(crate) struct Union {
 pub(crate) enum UnionKind {
     Distinct,
     All,
+    /// The rows of the first operand that the second lacks, as a multiset with `ALL`.
+    Except {
+        all: bool,
+    },
+    /// The rows in both operands, as a multiset with `ALL`.
+    Intersect {
+        all: bool,
+    },
+    /// The first operand's rows, or the second's when the first gives none.
+    Otherwise,
 }
 
 /// Clauses in source order. Never empty.
@@ -60,6 +81,24 @@ pub(crate) enum Clause {
     Filter(Expr),
     /// `LET a = value, b = value`. Never empty.
     Let(Vec<(Name, Expr)>),
+    CallSubquery(Box<CallSubquery>),
+}
+
+/// `[OPTIONAL] CALL [(variables)] { query }`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CallSubquery {
+    pub optional: bool,
+    /// The variable scope clause, or `None` when the body imports with a leading `WITH`.
+    pub imports: Option<Imports>,
+    pub body: Query,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Imports {
+    /// `(*)`
+    All,
+    /// `(a, b)`, possibly empty.
+    Variables(Vec<Name>),
 }
 
 /// `CALL name(args) YIELD items WHERE filter`. `args` is `None` when the parentheses are left
@@ -145,9 +184,13 @@ pub(crate) struct SortItem {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum SortDirection {
+    /// Nulls last.
     #[default]
     Ascending,
+    /// Nulls first.
     Descending,
+    AscendingNullsFirst,
+    DescendingNullsLast,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -375,15 +418,134 @@ pub(crate) enum Expr {
         operand: Box<Expr>,
         negated: bool,
     },
-    Function(FunctionCall),
+    Function(Box<FunctionCall>),
     CountStar,
     Case(Case),
     ListComprehension(ListComprehension),
     ListPredicate(ListPredicate),
     /// A pattern used as a boolean expression, as in `WHERE (a)-->(b)`.
-    Pattern(PatternElement),
-    PatternComprehension(PatternComprehension),
-    Exists(Box<ExistsSubquery>),
+    Pattern(Box<PatternElement>),
+    PatternComprehension(Box<PatternComprehension>),
+    Exists(Box<Subquery>),
+    /// `COUNT { ... }`: how many rows the subquery gives.
+    Count(Box<Subquery>),
+    /// `COLLECT { query }`: the values of the single column the query returns.
+    Collect(Box<SingleQuery>),
+    /// `VALUE { query }`: the value of the single column in the one row the query returns.
+    Value(Box<SingleQuery>),
+    /// `operand IS [NOT] ...` for the tests after `IS` other than `NULL` and `LABELED`.
+    Is(Box<IsTest>),
+    /// `CAST(operand AS target)`.
+    Cast(Box<Cast>),
+    Reduce(Box<Reduce>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IsTest {
+    pub operand: Expr,
+    pub negated: bool,
+    pub test: Test,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Test {
+    /// `IS TYPED type` and `IS :: type`.
+    Typed(TypeExpr),
+    /// `IS TRUE`, `IS FALSE`, and `IS UNKNOWN` as `None`.
+    Truth(Option<bool>),
+    /// `IS [form] NORMALIZED`.
+    Normalized(NormalForm),
+    /// `IS DISTINCT FROM other`.
+    DistinctFrom(Expr),
+}
+
+/// A Unicode normalization form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NormalForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
+}
+
+impl NormalForm {
+    /// The form named by `name`, in any letter case.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        [
+            ("NFC", Self::Nfc),
+            ("NFD", Self::Nfd),
+            ("NFKC", Self::Nfkc),
+            ("NFKD", Self::Nfkd),
+        ]
+        .into_iter()
+        .find(|(held, _)| held.eq_ignore_ascii_case(name))
+        .map(|(_, form)| form)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Nfc => "NFC",
+            Self::Nfd => "NFD",
+            Self::Nfkc => "NFKC",
+            Self::Nfkd => "NFKD",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Cast {
+    pub operand: Expr,
+    pub target: ValueType,
+}
+
+/// A union of value types, any of which a value may belong to. Never empty.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TypeExpr {
+    pub members: Vec<TypeMember>,
+}
+
+/// One type of a union. Null belongs to it unless `not_null` is set.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TypeMember {
+    pub value_type: ValueType,
+    pub not_null: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ValueType {
+    /// Every value.
+    Any,
+    /// No value, not even null.
+    Nothing,
+    /// Only null.
+    Null,
+    Boolean,
+    String,
+    Integer,
+    Float,
+    Date,
+    LocalTime,
+    ZonedTime,
+    LocalDateTime,
+    ZonedDateTime,
+    Duration,
+    Bytes,
+    Map,
+    Node,
+    Relationship,
+    Path,
+    /// A list whose every item belongs to the union.
+    List(Box<TypeExpr>),
+}
+
+/// `reduce(accumulator = init, variable IN source | body)`
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Reduce {
+    pub accumulator: Name,
+    pub init: Expr,
+    pub variable: Name,
+    pub source: Expr,
+    pub body: Expr,
 }
 
 /// `[path = pattern WHERE filter | projection]`
@@ -395,9 +557,9 @@ pub(crate) struct PatternComprehension {
     pub projection: Box<Expr>,
 }
 
-/// The body of `EXISTS { ... }`.
+/// The body of `EXISTS { ... }` and `COUNT { ... }`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ExistsSubquery {
+pub(crate) enum Subquery {
     Pattern {
         patterns: Vec<PatternPart>,
         filter: Option<Expr>,
@@ -438,6 +600,8 @@ pub(crate) enum BinaryOp {
     EndsWith,
     Contains,
     RegexMatch,
+    /// GQL's `||`, on two strings or two lists.
+    Concat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -468,8 +632,29 @@ pub(crate) struct Case {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct WhenThen {
-    pub when: Expr,
+    /// One condition in the searched form, and one or more tests of the scrutinee in the simple
+    /// form, any of which takes the branch.
+    pub when: Vec<WhenOperand>,
     pub then: Expr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum WhenOperand {
+    /// The condition of a searched branch, or a value the scrutinee must equal.
+    Value(Expr),
+    /// `WHEN < value` and the other comparisons.
+    Compare(ComparisonOp, Expr),
+    /// `WHEN IS NULL` and `WHEN IS NOT NULL`.
+    IsNull { negated: bool },
+}
+
+impl WhenOperand {
+    pub(crate) fn expr(&self) -> Option<&Expr> {
+        match self {
+            Self::Value(expr) | Self::Compare(_, expr) => Some(expr),
+            Self::IsNull { .. } => None,
+        }
+    }
 }
 
 /// `[variable IN source WHERE filter | projection]`

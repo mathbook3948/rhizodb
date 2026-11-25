@@ -11,10 +11,10 @@ use crate::temporal::Time;
 
 pub(crate) const MAX_DEPTH: usize = 64;
 
-const TAG_BOOLEAN: u8 = 0;
-const TAG_INTEGER: u8 = 1;
-const TAG_FLOAT: u8 = 2;
-const TAG_STRING: u8 = 3;
+pub(crate) const TAG_BOOLEAN: u8 = 0;
+pub(crate) const TAG_INTEGER: u8 = 1;
+pub(crate) const TAG_FLOAT: u8 = 2;
+pub(crate) const TAG_STRING: u8 = 3;
 const TAG_BYTES: u8 = 4;
 const TAG_LIST: u8 = 5;
 const TAG_DATE: u8 = 6;
@@ -24,6 +24,8 @@ const TAG_LOCAL_DATETIME: u8 = 9;
 const TAG_OFFSET_DATETIME: u8 = 10;
 const TAG_ZONED_DATETIME: u8 = 11;
 const TAG_DURATION: u8 = 12;
+const TAG_SINGLE_FLOATS: u8 = 13;
+const TAG_VARINT_INTEGER: u8 = 14;
 
 /// A stored property value. Null is never stored: setting a property to null removes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +68,18 @@ impl fmt::Display for DecodeError {
 
 impl Error for DecodeError {}
 
+fn single_floats(items: &[PropertyValue]) -> Option<impl Iterator<Item = f32>> {
+    let single = |item: &PropertyValue| match item {
+        PropertyValue::Float(value) => {
+            let narrow = *value as f32;
+            (f64::from(narrow).to_bits() == value.to_bits()).then_some(narrow)
+        }
+        _ => None,
+    };
+    (!items.is_empty() && items.iter().all(|item| single(item).is_some()))
+        .then(|| items.iter().filter_map(single))
+}
+
 impl PropertyValue {
     #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -98,14 +112,35 @@ impl PropertyValue {
                 put_varint(out, value.len());
                 out.extend_from_slice(value);
             }
-            Self::List(items) => {
-                out.push(TAG_LIST);
-                put_varint(out, items.len());
-                for item in items {
-                    item.encode_into(out);
+            Self::List(items) => match single_floats(items) {
+                Some(floats) => {
+                    out.push(TAG_SINGLE_FLOATS);
+                    put_varint(out, items.len());
+                    for float in floats {
+                        out.extend_from_slice(&float.to_bits().to_be_bytes());
+                    }
                 }
-            }
+                None => {
+                    out.push(TAG_LIST);
+                    put_varint(out, items.len());
+                    for item in items {
+                        item.encode_into(out);
+                    }
+                }
+            },
             Self::Temporal(value) => encode_temporal(value, out),
+        }
+    }
+
+    /// The value as `encode_into` writes it, except that an integer whose zigzag varint fits in
+    /// eight bytes takes that varint instead, so the value is never longer.
+    pub(crate) fn encode_compact_into(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Integer(value) if zigzag(*value) < 1 << 56 => {
+                out.push(TAG_VARINT_INTEGER);
+                put_varint_u64(out, zigzag(*value));
+            }
+            other => other.encode_into(out),
         }
     }
 
@@ -165,13 +200,56 @@ fn encode_temporal(value: &Temporal, out: &mut Vec<u8>) {
     }
 }
 
+fn zigzag(value: i64) -> u64 {
+    ((value << 1) ^ (value >> 63)) as u64
+}
+
+fn unzigzag(value: u64) -> i64 {
+    (value >> 1) as i64 ^ -((value & 1) as i64)
+}
+
+fn fixed_width(tag: u8) -> Option<usize> {
+    match tag {
+        TAG_BOOLEAN => Some(1),
+        TAG_INTEGER | TAG_FLOAT | TAG_DATE | TAG_LOCAL_TIME => Some(8),
+        TAG_TIME => Some(12),
+        TAG_LOCAL_DATETIME | TAG_OFFSET_DATETIME => Some(16),
+        TAG_DURATION => Some(28),
+        _ => None,
+    }
+}
+
 pub(crate) fn put_varint(out: &mut Vec<u8>, value: usize) {
-    let mut rest = value as u64;
+    put_varint_u64(out, value as u64);
+}
+
+pub(crate) fn put_varint_u64(out: &mut Vec<u8>, value: u64) {
+    let mut rest = value;
     while rest >= 0x80 {
         out.push((rest & 0x7f) as u8 | 0x80);
         rest >>= 7;
     }
     out.push(rest as u8);
+}
+
+/// Reads one stored property value from the start of `bytes` both by decoding it and by
+/// skipping it. Returns the decoded value encoded again with how many bytes decoding took, and
+/// how many bytes skipping took. Only the fuzz targets call it.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn read_value_for_fuzzing(bytes: &[u8]) -> (Option<(Vec<u8>, usize)>, Option<usize>) {
+    let mut decoding = Reader::new(bytes);
+    let decoded = decoding.value().ok().map(|value| {
+        let mut encoded = Vec::new();
+        value.encode_into(&mut encoded);
+        (encoded, bytes.len() - decoding.bytes.len())
+    });
+    let mut skipping = Reader::new(bytes);
+    let skipped = skipping
+        .skip_value()
+        .ok()
+        .map(|()| bytes.len() - skipping.bytes.len());
+    (decoded, skipped)
 }
 
 #[derive(Clone, Debug)]
@@ -182,6 +260,11 @@ pub(crate) struct Reader<'a> {
 impl<'a> Reader<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
+    }
+
+    /// The bytes not read yet.
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len()
     }
 
     pub(crate) fn finish(&self) -> Result<(), DecodeError> {
@@ -219,6 +302,10 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn varint(&mut self) -> Result<usize, DecodeError> {
+        usize::try_from(self.varint_u64()?).map_err(|_| DecodeError::LengthOverflow)
+    }
+
+    pub(crate) fn varint_u64(&mut self) -> Result<u64, DecodeError> {
         let mut result: u64 = 0;
         for shift in (0..64).step_by(7) {
             let byte = self.u8()?;
@@ -229,7 +316,7 @@ impl<'a> Reader<'a> {
             }
             result |= shifted;
             if byte & 0x80 == 0 {
-                return usize::try_from(result).map_err(|_| DecodeError::LengthOverflow);
+                return Ok(result);
             }
         }
         Err(DecodeError::LengthOverflow)
@@ -247,6 +334,7 @@ impl<'a> Reader<'a> {
                 other => Err(DecodeError::InvalidBoolean(other)),
             },
             TAG_INTEGER => Ok(PropertyValue::Integer(self.u64()? as i64)),
+            TAG_VARINT_INTEGER => Ok(PropertyValue::Integer(unzigzag(self.varint_u64()?))),
             TAG_FLOAT => Ok(PropertyValue::Float(f64::from_bits(self.u64()?))),
             TAG_STRING => {
                 let length = self.varint()?;
@@ -269,9 +357,87 @@ impl<'a> Reader<'a> {
                 }
                 Ok(PropertyValue::List(items))
             }
+            TAG_SINGLE_FLOATS => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                let count = self.varint()?;
+                let bytes = self.take(count.checked_mul(4).ok_or(DecodeError::LengthOverflow)?)?;
+                Ok(PropertyValue::List(
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|chunk| {
+                            PropertyValue::Float(f64::from(f32::from_bits(u32::from_be_bytes(
+                                *chunk,
+                            ))))
+                        })
+                        .collect(),
+                ))
+            }
             tag @ TAG_DATE..=TAG_DURATION => self.temporal(tag).map(PropertyValue::Temporal),
             tag => Err(DecodeError::UnknownTag(tag)),
         }
+    }
+
+    /// Moves past one value without building it.
+    pub(crate) fn skip_value(&mut self) -> Result<(), DecodeError> {
+        self.skip_at_depth(0)
+    }
+
+    fn skip_at_depth(&mut self, depth: usize) -> Result<(), DecodeError> {
+        let tag = self.u8()?;
+        let width = match fixed_width(tag) {
+            Some(width) => width,
+            None => match tag {
+                TAG_STRING | TAG_BYTES => self.varint()?,
+                TAG_VARINT_INTEGER => {
+                    self.varint_u64()?;
+                    0
+                }
+                TAG_ZONED_DATETIME => {
+                    self.take(12)?;
+                    self.varint()?
+                }
+                TAG_LIST => {
+                    if depth >= MAX_DEPTH {
+                        return Err(DecodeError::NestingTooDeep);
+                    }
+                    let mut remaining = self.varint()?;
+                    while remaining > 0 {
+                        let Some((tag, width)) = self
+                            .bytes
+                            .first()
+                            .and_then(|tag| Some((*tag, fixed_width(*tag)?)))
+                        else {
+                            self.skip_at_depth(depth + 1)?;
+                            remaining -= 1;
+                            continue;
+                        };
+                        let stride = 1 + width;
+                        let mut run = 1;
+                        while run < remaining && self.bytes.get(run * stride) == Some(&tag) {
+                            run += 1;
+                        }
+                        self.take(run * stride)?;
+                        remaining -= run;
+                    }
+                    0
+                }
+                TAG_SINGLE_FLOATS => {
+                    if depth >= MAX_DEPTH {
+                        return Err(DecodeError::NestingTooDeep);
+                    }
+                    self.varint()?
+                        .checked_mul(4)
+                        .ok_or(DecodeError::LengthOverflow)?
+                }
+                tag => return Err(DecodeError::UnknownTag(tag)),
+            },
+        };
+        self.take(width)?;
+        Ok(())
     }
 
     fn i64(&mut self) -> Result<i64, DecodeError> {
@@ -322,4 +488,4 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 #[path = "value.test.rs"]
-mod tests;
+pub(crate) mod tests;

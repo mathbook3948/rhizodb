@@ -1,11 +1,14 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::UnionKind;
 use crate::graph::GraphTx;
+use crate::graph::NodeId;
 use crate::procedure::Procedure;
 use crate::procedure::ValueType;
 use crate::result;
@@ -15,33 +18,43 @@ use crate::storage::ReadTransaction;
 use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
-use super::compare::Key;
-use super::compare::order;
+use super::aggregate::Groups;
+use super::compare::sort_order;
 use super::datum::Datum;
+use super::datum::PathIds;
+use super::datum::dismantle;
 use super::datum::from_parameter;
 use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::keys::KeyIndex;
+use super::keys::KeySet;
+use super::matcher::counted_nodes;
 use super::plan::CallClause;
+use super::plan::CallSubquery;
 use super::plan::Callee;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
 use super::plan::MatchClause;
+use super::plan::Pipeline;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
 use super::regex::Patterns;
+use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
 use super::update::Graveyard;
+use super::update::Writer;
 
 /// Runs a read-only program. It only needs a read transaction.
 pub(crate) fn run_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
+    parameters: &[Datum],
     now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
@@ -49,13 +62,24 @@ pub(crate) fn run_read<T: ReadTransaction>(
     let env = Env {
         tx,
         slots: program.slot_count,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        columns: RefCell::default(),
+        keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     };
     env.check_closed(&program.closed)?;
-    let rows = run(program, |clause, rows| env.read_clause(clause, rows))?;
+    let rows = run(program, |clauses, rows| match clauses {
+        [first, rest @ ..] => env.read_clauses(first, rest.first(), rows),
+        [] => Ok((rows, 0)),
+    })?;
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
@@ -63,6 +87,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
 pub(crate) fn run_write<W: WriteTransaction>(
     tx: &mut GraphTx<W>,
     program: &Program<Clause>,
+    parameters: &[Datum],
     now: &Clocks,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
@@ -71,67 +96,198 @@ pub(crate) fn run_write<W: WriteTransaction>(
     Env {
         tx: &*tx,
         slots,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        columns: RefCell::default(),
+        keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     }
     .check_closed(&program.closed)?;
-    let rows = run(program, |clause, rows| match clause {
-        Clause::Read(clause) => Env {
-            tx: &*tx,
-            slots,
-            now,
-            graveyard: &graveyard,
-            patterns: &patterns,
-            check: None,
-        }
-        .read_clause(clause, rows),
-        Clause::Update(clause) => {
-            super::update::apply(tx, slots, now, &patterns, &mut graveyard, clause, rows)
-        }
-    })?;
+    let mut writer = Writer {
+        tx,
+        slots,
+        parameters,
+        now,
+        patterns: &patterns,
+        graveyard: &mut graveyard,
+        tokens: Vec::new(),
+    };
+    let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
     let env = Env {
         tx: &*tx,
         slots,
+        parameters,
         now,
         graveyard: &graveyard,
         patterns: &patterns,
         check: None,
+        columns: RefCell::default(),
+        keys: RefCell::default(),
+        labels: RefCell::default(),
+        label_tokens: RefCell::default(),
+        property_indexes: RefCell::default(),
+        adjacency: RefCell::default(),
+        rel_type_tokens: RefCell::default(),
     };
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
 fn run<C>(
     program: &Program<C>,
-    mut apply: impl FnMut(&C, Vec<Row>) -> Result<Vec<Row>, Error>,
+    mut apply: impl FnMut(&[C], Vec<Row>) -> Result<(Vec<Row>, usize), Error>,
 ) -> Result<Vec<Vec<Datum>>, Error> {
     let mut results = Vec::new();
     for part in &program.parts {
+        let mut part_rows = Vec::new();
         let mut rows = vec![vec![Datum::Null; program.slot_count]];
-        for clause in &part.clauses {
-            rows = apply(clause, rows)?;
+        let mut clauses = part.clauses.as_slice();
+        while !clauses.is_empty() {
+            let (next, applied) = apply(clauses, rows)?;
+            rows = next;
+            clauses = clauses.get(applied.max(1)..).unwrap_or_default();
         }
         if part.output.is_empty() {
             continue;
         }
         for row in rows {
-            results.push(
+            part_rows.push(
                 part.output
                     .iter()
                     .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
                     .collect(),
             );
         }
+        results.push(part_rows);
     }
-    if program.distinct {
-        let mut seen = BTreeSet::new();
-        results.retain(|row: &Vec<Datum>| seen.insert(Key(row.clone())));
+    Ok(combine(program.combine, results))
+}
+
+fn combine(kind: UnionKind, parts: Vec<Vec<Vec<Datum>>>) -> Vec<Vec<Datum>> {
+    let mut parts = parts.into_iter();
+    let mut rows = parts.next().unwrap_or_default();
+    for next in parts {
+        rows = match kind {
+            UnionKind::All | UnionKind::Distinct => {
+                rows.extend(next);
+                rows
+            }
+            UnionKind::Otherwise if rows.is_empty() => next,
+            UnionKind::Otherwise => rows,
+            UnionKind::Except { .. } | UnionKind::Intersect { .. } => {
+                let mut index = KeyIndex::default();
+                let mut counts: Vec<usize> = Vec::new();
+                for row in next {
+                    match index.get(&row) {
+                        Some(at) => counts[at] += 1,
+                        None => {
+                            index.insert(row, counts.len());
+                            counts.push(1);
+                        }
+                    }
+                }
+                let keep_found = matches!(kind, UnionKind::Intersect { .. });
+                let multiset = matches!(
+                    kind,
+                    UnionKind::Except { all: true } | UnionKind::Intersect { all: true }
+                );
+                rows.retain(|row| {
+                    let Some(at) = index.get(row) else {
+                        return !keep_found;
+                    };
+                    if !multiset {
+                        return keep_found;
+                    }
+                    match counts[at].checked_sub(1) {
+                        Some(left) => {
+                            counts[at] = left;
+                            keep_found
+                        }
+                        None => !keep_found,
+                    }
+                });
+                rows
+            }
+        };
     }
-    Ok(results)
+    if matches!(
+        kind,
+        UnionKind::Distinct
+            | UnionKind::Except { all: false }
+            | UnionKind::Intersect { all: false }
+    ) {
+        let mut seen = KeySet::default();
+        rows.retain(|row| seen.insert(row));
+    }
+    rows
+}
+
+/// The values of a branch's output slots in each row it gave.
+pub(crate) fn branch_rows<C>(branch: &Pipeline<C>, rows: Vec<Row>) -> Vec<Vec<Datum>> {
+    rows.iter()
+        .map(|row| {
+            branch
+                .output
+                .iter()
+                .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+                .collect()
+        })
+        .collect()
+}
+
+/// The rows a `table` call gives from the rows of each branch.
+pub(crate) fn table_rows<C>(
+    call: &CallSubquery<C>,
+    parts: Vec<Vec<Vec<Datum>>>,
+    slots: usize,
+) -> Vec<Row> {
+    if call.outputs.is_empty() {
+        return vec![vec![Datum::Null; slots]];
+    }
+    combine(call.combine, parts)
+        .into_iter()
+        .map(|values| {
+            let mut row = vec![Datum::Null; slots];
+            for (slot, value) in call.outputs.iter().zip(values) {
+                set(&mut row, *slot, value);
+            }
+            row
+        })
+        .collect()
+}
+
+/// Adds to `out` the rows a `CALL` subquery gives for `row`, from the rows of each branch.
+pub(crate) fn extend_row<C>(
+    call: &CallSubquery<C>,
+    row: Row,
+    parts: Vec<Vec<Vec<Datum>>>,
+    out: &mut Vec<Row>,
+) {
+    if call.outputs.is_empty() {
+        out.push(row);
+        return;
+    }
+    let results = combine(call.combine, parts);
+    if results.is_empty() && call.optional {
+        out.push(row);
+        return;
+    }
+    for values in results {
+        let mut next = row.clone();
+        for (slot, value) in call.outputs.iter().zip(values) {
+            set(&mut next, *slot, value);
+        }
+        out.push(next);
+    }
 }
 
 fn materialize<T: ReadTransaction>(
@@ -152,6 +308,80 @@ fn materialize<T: ReadTransaction>(
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
+    /// Applies `clause`, and `next` with it when a match feeds an aggregating projection, which
+    /// then aggregates each match without collecting the matched rows. Says how many clauses it
+    /// applied.
+    pub(crate) fn read_clauses(
+        &self,
+        clause: &ReadClause,
+        next: Option<&ReadClause>,
+        rows: Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        if let (ReadClause::Match(found), Some(ReadClause::Project(projection))) = (clause, next)
+            && !found.optional
+            && let Items::Aggregate {
+                keys,
+                aggregates,
+                finals,
+            } = &projection.items
+        {
+            let mut groups = Groups::new(keys, aggregates);
+            if let Some((slot, label)) = counted_nodes(found)
+                && keys.is_empty()
+                && aggregates
+                    .iter()
+                    .all(|(aggregate, _)| aggregate.counts_rows_binding(slot))
+            {
+                let count = match label {
+                    None => self.tx.count_nodes()?,
+                    Some(label) => match self.label_token(label)? {
+                        Some(label) => self.tx.count_nodes_with_label(label)?,
+                        None => 0,
+                    },
+                };
+                let count = usize::try_from(count).unwrap_or(usize::MAX);
+                groups.count_rows(count.saturating_mul(rows.len()));
+                let rows = groups.finish(self, finals)?;
+                return Ok((self.arrange(projection, rows)?, 2));
+            }
+            if let Some(scan) = self.node_scan(found)?
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
+            if let Some(rows) = self.hop_aggregate(found, projection, &rows)? {
+                return Ok((rows, 2));
+            }
+            for row in &rows {
+                self.match_patterns(&found.patterns, row, &mut |matched| {
+                    let keep = match &found.filter {
+                        Some(filter) => self.predicate(filter, matched)?,
+                        None => true,
+                    };
+                    if keep {
+                        groups.add(self, matched)?;
+                    }
+                    Ok(true)
+                })?;
+            }
+            let rows = groups.finish(self, finals)?;
+            return Ok((self.arrange(projection, rows)?, 2));
+        }
+        if let ReadClause::Match(found) = clause
+            && let Some(scan) = self.node_scan(found)?
+        {
+            if let Some(ReadClause::Project(projection)) = next
+                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
+            {
+                return Ok((rows, 2));
+            }
+            if let Some(rows) = self.scan_match(scan, found, &rows)? {
+                return Ok((rows, 1));
+            }
+        }
+        Ok((self.read_clause(clause, rows)?, 1))
+    }
+
     pub(crate) fn read_clause(
         &self,
         clause: &ReadClause,
@@ -163,13 +393,13 @@ impl<T: ReadTransaction> Env<'_, T> {
                 let mut out = Vec::new();
                 for row in rows {
                     let items = match self.eval(expr, &row)? {
-                        Datum::Null => Vec::new(),
+                        Datum::Null => Arc::default(),
                         Datum::List(items) => items,
-                        other => vec![other],
+                        other => Arc::new(vec![other]),
                     };
-                    for item in items {
+                    for item in items.iter() {
                         let mut next = row.clone();
-                        set(&mut next, *slot, item);
+                        set(&mut next, *slot, item.clone());
                         out.push(next);
                     }
                 }
@@ -186,6 +416,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
                 Ok(kept)
             }
+            ReadClause::CallSubquery(call) => self.call_subquery(call, rows),
             ReadClause::Let(bindings) => rows
                 .into_iter()
                 .map(|mut row| {
@@ -197,6 +428,37 @@ impl<T: ReadTransaction> Env<'_, T> {
                 })
                 .collect(),
         }
+    }
+
+    fn call_subquery(
+        &self,
+        call: &CallSubquery<ReadClause>,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
+        if call.table {
+            let mut parts = Vec::new();
+            for branch in &call.branches {
+                let mut inner = rows.clone();
+                for clause in &branch.clauses {
+                    inner = self.read_clause(clause, inner)?;
+                }
+                parts.push(branch_rows(branch, inner));
+            }
+            return Ok(table_rows(call, parts, self.slots));
+        }
+        let mut out = Vec::new();
+        for row in rows {
+            let mut parts = Vec::new();
+            for branch in &call.branches {
+                let mut inner = vec![row.clone()];
+                for clause in &branch.clauses {
+                    inner = self.read_clause(clause, inner)?;
+                }
+                parts.push(branch_rows(branch, inner));
+            }
+            extend_row(call, row, parts, &mut out);
+        }
+        Ok(out)
     }
 
     fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
@@ -268,33 +530,60 @@ impl<T: ReadTransaction> Env<'_, T> {
             .into_iter()
             .map(|arg| self.value(arg, self.graveyard))
             .collect::<Result<Vec<_>, _>>()?;
-        let results = (procedure.body)(&args).map_err(|source| {
-            Error::caused_by(
-                ErrorKind::ProcedureFailed,
-                format!("procedure `{}` failed: {source}", procedure.signature.name),
-                source,
-            )
-        })?;
-        Ok(results
+        let results = (procedure.body)(&args)
+            .map_err(|source| {
+                Error::caused_by(
+                    ErrorKind::ProcedureFailed,
+                    format!("procedure `{}` failed: {source}", procedure.signature.name),
+                    source,
+                )
+            })?
+            .into_rows();
+        let rows: Result<Vec<Vec<Datum>>, Error> = results
             .iter()
             .map(|result| result.iter().map(from_parameter).collect())
-            .collect())
+            .collect();
+        if rows.is_err() {
+            dismantle(results.into_iter().flatten().collect());
+        }
+        rows
     }
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
-        for row in rows {
+        for mut row in rows {
             let before = out.len();
-            self.match_patterns(&found.patterns, &row, &mut |matched| {
-                let keep = match &found.filter {
-                    Some(filter) => self.predicate(filter, matched)?,
-                    None => true,
-                };
-                if keep {
-                    out.push(matched.clone());
+            let sought = found.by_id.as_deref().and_then(|by_id| {
+                let value = self.eval(&by_id.value, &row).ok()?;
+                Some((by_id, value))
+            });
+            match sought {
+                Some((by_id, value)) => {
+                    if let (Some(id), [part]) = (seek::id(&value), by_id.clause.patterns.as_slice())
+                    {
+                        let id = NodeId(id);
+                        set(&mut row, part.start.slot, Datum::Node(id));
+                        if part.steps.is_empty()
+                            && part.path.is_none()
+                            && part.start.labels.is_none()
+                            && part.start.properties.is_none()
+                        {
+                            let kept = self.with_labels(id, |_| ())?.is_some()
+                                && match &by_id.clause.filter {
+                                    Some(filter) => self.predicate(filter, &row)?,
+                                    None => true,
+                                };
+                            if kept {
+                                out.push(row);
+                                continue;
+                            }
+                        } else {
+                            self.match_into(&by_id.clause, &row, &mut out)?;
+                        }
+                    }
                 }
-                Ok(true)
-            })?;
+                None => self.match_into(found, &row, &mut out)?,
+            }
             if found.optional && out.len() == before {
                 let mut padded = row;
                 for slot in &found.introduced {
@@ -306,8 +595,21 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(out)
     }
 
+    fn match_into(&self, found: &MatchClause, row: &Row, out: &mut Vec<Row>) -> Result<(), Error> {
+        self.match_patterns(&found.patterns, row, &mut |matched| {
+            let keep = match &found.filter {
+                Some(filter) => self.predicate(filter, matched)?,
+                None => true,
+            };
+            if keep {
+                out.push(matched.clone());
+            }
+            Ok(true)
+        })
+    }
+
     fn project(&self, projection: &Projection, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
-        let mut rows = match &projection.items {
+        let rows = match &projection.items {
             Items::Plain(items) => {
                 let mut rows = rows;
                 for row in &mut rows {
@@ -324,26 +626,43 @@ impl<T: ReadTransaction> Env<'_, T> {
                 finals,
             } => self.aggregate(rows, keys, aggregates, finals)?,
         };
+        self.arrange(projection, rows)
+    }
+
+    pub(crate) fn arrange(
+        &self,
+        projection: &Projection,
+        mut rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         if projection.distinct {
-            let mut seen = BTreeSet::new();
+            let mut seen = KeySet::default();
             rows.retain(|row| {
-                seen.insert(Key(projection
-                    .outputs
-                    .iter()
-                    .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
-                    .collect()))
+                seen.insert(
+                    &projection
+                        .outputs
+                        .iter()
+                        .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+                        .collect::<Vec<_>>(),
+                )
             });
         }
+        let empty = || vec![Datum::Null; self.slots];
+        let skip = match &projection.skip {
+            Some(skip) => self.count(skip, &empty(), "SKIP")?,
+            None => 0,
+        };
+        let limit = match &projection.limit {
+            Some(limit) => Some(self.count(limit, &empty(), "LIMIT")?),
+            None => None,
+        };
         if !projection.order_by.is_empty() {
-            rows = self.sort(rows, &projection.order_by)?;
+            let kept = limit.map(|limit| skip.saturating_add(limit));
+            rows = self.sort(rows, &projection.order_by, kept)?;
         }
-        let empty = vec![Datum::Null; self.slots];
-        if let Some(skip) = &projection.skip {
-            let skip = self.count(skip, &empty, "SKIP")?;
+        if skip > 0 {
             rows = rows.into_iter().skip(skip).collect();
         }
-        if let Some(limit) = &projection.limit {
-            let limit = self.count(limit, &empty, "LIMIT")?;
+        if let Some(limit) = limit {
             rows.truncate(limit);
         }
         if let Some(filter) = &projection.filter {
@@ -363,10 +682,18 @@ impl<T: ReadTransaction> Env<'_, T> {
         let checker = Env {
             tx: self.tx,
             slots: self.slots,
+            parameters: self.parameters,
             now: self.now,
             graveyard: self.graveyard,
             patterns: self.patterns,
             check: Some(&check),
+            columns: RefCell::default(),
+            keys: RefCell::default(),
+            labels: RefCell::default(),
+            label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
+            adjacency: RefCell::default(),
+            rel_type_tokens: RefCell::default(),
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
@@ -380,7 +707,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(())
     }
 
-    fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
+    pub(crate) fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
         match self.eval(expr, row)? {
             Datum::Integer(value) if value < 0 => Err(Error::new(
                 ErrorKind::NegativeIntegerArgument,
@@ -394,29 +721,43 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn sort(&self, rows: Vec<Row>, order_by: &[(Expr, SortDirection)]) -> Result<Vec<Row>, Error> {
+    fn sort(
+        &self,
+        rows: Vec<Row>,
+        order_by: &[(Expr, SortDirection)],
+        kept: Option<usize>,
+    ) -> Result<Vec<Row>, Error> {
         let mut keyed = Vec::with_capacity(rows.len());
-        for row in rows {
+        for (position, row) in rows.into_iter().enumerate() {
             let keys = order_by
                 .iter()
                 .map(|(expr, _)| self.eval(expr, &row))
                 .collect::<Result<Vec<_>, _>>()?;
-            keyed.push((keys, row));
+            keyed.push((keys, position, row));
         }
-        keyed.sort_by(|(a, _), (b, _)| {
+        let compare = |(a, a_position, _): &(Vec<Datum>, usize, Row),
+                       (b, b_position, _): &(Vec<Datum>, usize, Row)| {
             for ((x, y), (_, direction)) in a.iter().zip(b).zip(order_by) {
-                let ordering = order(x, y);
-                let ordering = match direction {
-                    SortDirection::Ascending => ordering,
-                    SortDirection::Descending => ordering.reverse(),
-                };
+                let ordering = sort_order(*direction, x, y);
                 if ordering != Ordering::Equal {
                     return ordering;
                 }
             }
-            Ordering::Equal
-        });
-        Ok(keyed.into_iter().map(|(_, row)| row).collect())
+            a_position.cmp(b_position)
+        };
+        if let Some(kept) = kept
+            && kept < keyed.len()
+        {
+            match kept.checked_sub(1) {
+                Some(last) => {
+                    keyed.select_nth_unstable_by(last, compare);
+                    keyed.truncate(kept);
+                }
+                None => keyed.clear(),
+            }
+        }
+        keyed.sort_unstable_by(compare);
+        Ok(keyed.into_iter().map(|(_, _, row)| row).collect())
     }
 
     /// Turns a runtime value into a public value, reading graph elements as they are now and
@@ -430,26 +771,24 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
             Datum::Temporal(value) => Value::Temporal(value),
-            Datum::List(items) => Value::List(
-                items
-                    .into_iter()
-                    .map(|item| self.value(item, graveyard))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Datum::Map(entries) => Value::Map(self.map_value(entries, graveyard)?),
+            Datum::List(items) => {
+                Value::List(self.list_value(Arc::unwrap_or_clone(items), graveyard)?)
+            }
+            Datum::Map(entries) => {
+                Value::Map(self.map_value(Arc::unwrap_or_clone(entries), graveyard)?)
+            }
             Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
             Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
-            Datum::Path(path) => Value::Path(result::Path::new(
-                path.nodes
-                    .into_iter()
-                    .map(|id| self.node_value(id, graveyard))
-                    .collect::<Result<_, _>>()?,
-                path.relationships
-                    .into_iter()
-                    .map(|id| self.relationship_value(id, graveyard))
-                    .collect::<Result<_, _>>()?,
-            )),
+            Datum::Path(path) => Value::Path(self.path_value(path, graveyard)?),
         })
+    }
+
+    fn list_value(&self, items: Vec<Datum>, graveyard: &Graveyard) -> Result<Vec<Value>, Error> {
+        let mut values = Vec::with_capacity(items.len());
+        for item in items {
+            values.push(self.value(item, graveyard)?);
+        }
+        Ok(values)
     }
 
     fn map_value(
@@ -457,10 +796,24 @@ impl<T: ReadTransaction> Env<'_, T> {
         entries: BTreeMap<String, Datum>,
         graveyard: &Graveyard,
     ) -> Result<BTreeMap<String, Value>, Error> {
-        entries
-            .into_iter()
-            .map(|(key, value)| Ok((key, self.value(value, graveyard)?)))
-            .collect()
+        let mut values = BTreeMap::new();
+        for (key, value) in entries {
+            values.insert(key, self.value(value, graveyard)?);
+        }
+        Ok(values)
+    }
+
+    fn path_value(&self, path: PathIds, graveyard: &Graveyard) -> Result<result::Path, Error> {
+        Ok(result::Path::new(
+            path.nodes
+                .into_iter()
+                .map(|id| self.node_value(id, graveyard))
+                .collect::<Result<_, _>>()?,
+            path.relationships
+                .into_iter()
+                .map(|id| self.relationship_value(id, graveyard))
+                .collect::<Result<_, _>>()?,
+        ))
     }
 
     fn node_value(
@@ -490,7 +843,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Relationship {
             id,
-            rel_type: self.tx.token_name(record.rel_type)?,
+            relationship_type: self.tx.token_name(record.rel_type)?,
             start: record.source,
             end: record.target,
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,

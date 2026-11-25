@@ -9,13 +9,49 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rhizodb = { path = "../crates/rhizodb" }
+rhizodb = { path = "../crates/rhizodb", features = ["fuzzing"] }
+tempfile = "3.27.0"
 
 [workspace]
 
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_decode"
+path = "fuzz_targets/value_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "db_file"
+path = "fuzz_targets/db_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_ops"
+path = "fuzz_targets/graph_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_formats"
+path = "fuzz_targets/engine_formats.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_file"
+path = "fuzz_targets/engine_file.rs"
 test = false
 doc = false
 bench = false

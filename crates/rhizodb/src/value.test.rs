@@ -57,7 +57,7 @@ fn temporal() -> impl Strategy<Value = Temporal> {
     ]
 }
 
-fn property_value() -> impl Strategy<Value = PropertyValue> {
+pub(crate) fn property_value() -> impl Strategy<Value = PropertyValue> {
     let leaf = prop_oneof![
         any::<bool>().prop_map(PropertyValue::Boolean),
         any::<i64>().prop_map(PropertyValue::Integer),
@@ -71,7 +71,7 @@ fn property_value() -> impl Strategy<Value = PropertyValue> {
     })
 }
 
-fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
+pub(crate) fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
     match (left, right) {
         (PropertyValue::Float(a), PropertyValue::Float(b)) => a.to_bits() == b.to_bits(),
         (PropertyValue::List(a), PropertyValue::List(b)) => {
@@ -81,11 +81,70 @@ fn same_bits(left: &PropertyValue, right: &PropertyValue) -> bool {
     }
 }
 
+fn compact(value: &PropertyValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    value.encode_compact_into(&mut out);
+    out
+}
+
+#[test]
+fn a_compact_integer_takes_its_zigzag_varint_until_that_is_as_long_as_the_fixed_width() {
+    for (value, length) in [
+        (0, 2),
+        (-1, 2),
+        (63, 2),
+        (-64, 2),
+        (64, 3),
+        (1998, 3),
+        ((1 << 55) - 1, 9),
+        (-(1 << 55), 9),
+        (1 << 55, 9),
+        (i64::MAX, 9),
+        (i64::MIN, 9),
+    ] {
+        let encoded = compact(&PropertyValue::Integer(value));
+        assert_eq!(encoded.len(), length, "{value}");
+        assert_eq!(
+            PropertyValue::decode(&encoded).unwrap(),
+            PropertyValue::Integer(value)
+        );
+    }
+}
+
 proptest! {
+    #[test]
+    fn every_value_round_trips_bit_exactly_in_its_compact_form(value in property_value()) {
+        let encoded = compact(&value);
+        prop_assert!(encoded.len() <= value.encode().len());
+        prop_assert!(same_bits(&value, &PropertyValue::decode(&encoded).unwrap()));
+        let mut reader = Reader::new(&encoded);
+        reader.skip_value().unwrap();
+        prop_assert_eq!(reader.remaining(), 0);
+    }
+
     #[test]
     fn every_value_round_trips_bit_exactly(value in property_value()) {
         let decoded = PropertyValue::decode(&value.encode()).unwrap();
         prop_assert!(same_bits(&value, &decoded));
+    }
+
+    #[test]
+    fn skipping_a_list_of_runs_of_one_type_lands_on_the_next_value(
+        runs in prop::collection::vec((property_value(), 1usize..12), 0..6),
+        cut in any::<prop::sample::Index>(),
+    ) {
+        let items = runs
+            .into_iter()
+            .flat_map(|(value, count)| std::iter::repeat_n(value, count))
+            .collect();
+        let mut bytes = PropertyValue::List(items).encode();
+        let list_end = bytes.len();
+        PropertyValue::Integer(7).encode_into(&mut bytes);
+        let mut reader = Reader::new(&bytes);
+        reader.skip_value().unwrap();
+        prop_assert_eq!(reader.value(), Ok(PropertyValue::Integer(7)));
+        let mut truncated = Reader::new(&bytes[..cut.index(list_end)]);
+        prop_assert_eq!(truncated.skip_value(), Err(DecodeError::UnexpectedEnd));
     }
 
     #[test]
@@ -119,6 +178,48 @@ fn unknown_tag_is_rejected() {
     assert_eq!(
         PropertyValue::decode(&[99]),
         Err(DecodeError::UnknownTag(99))
+    );
+}
+
+proptest! {
+    #[test]
+    fn a_list_of_single_precision_floats_round_trips_bit_exactly(
+        bits in prop::collection::vec(any::<u32>(), 0..80),
+    ) {
+        let value = PropertyValue::List(
+            bits.iter()
+                .map(|bits| PropertyValue::Float(f64::from(f32::from_bits(*bits))))
+                .collect(),
+        );
+        let decoded = PropertyValue::decode(&value.encode()).unwrap();
+        prop_assert!(same_bits(&value, &decoded));
+    }
+}
+
+#[test]
+fn a_list_of_single_precision_floats_takes_four_bytes_a_float() {
+    let floats = |values: &[f64]| {
+        PropertyValue::List(values.iter().copied().map(PropertyValue::Float).collect())
+    };
+    let embedding: Vec<f64> = (0..64).map(|i| f64::from(i - 32) / 64.0).collect();
+    assert_eq!(floats(&embedding).encode().len(), 2 + 64 * 4);
+    let mut mixed = embedding.clone();
+    mixed.push(0.1);
+    assert_eq!(floats(&mixed).encode().len(), 2 + 65 * 9);
+}
+
+#[test]
+fn a_list_of_floats_stored_one_by_one_still_reads() {
+    let mut bytes = vec![TAG_LIST, 2, TAG_FLOAT];
+    bytes.extend_from_slice(&0.5f64.to_bits().to_be_bytes());
+    bytes.push(TAG_FLOAT);
+    bytes.extend_from_slice(&(-2.0f64).to_bits().to_be_bytes());
+    assert_eq!(
+        PropertyValue::decode(&bytes),
+        Ok(PropertyValue::List(vec![
+            PropertyValue::Float(0.5),
+            PropertyValue::Float(-2.0)
+        ]))
     );
 }
 

@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc da3bd3585f04ccb5882536f7fa14db4acb926228db840b4f3e4c2f151b67cd96 # shrinks to (stored, value) = ([List([Float(-2.293263330030002e-208)]), List([List([Bytes([0, 1]), String("é\0é")])]), List([])], List([Float(-3.34193463843442e-309)])), fill_on_create = true
+cc 632235dbaf117838d0f08dee9a85908983a47c1cbdddba67731881bc85c4d2be # shrinks to (stored, value) = ([Temporal(DateTime(DateTime { epoch_second: 1709254800, nanosecond: 0, offset: -3600, zone: None }))], Temporal(DateTime(DateTime { epoch_second: 1709254800, nanosecond: 0, offset: 3600, zone: None }))), fill_on_create = false
+cc f07ecc4231e4d14706826234e2c5a2858c7f719c6e4eee92357960a595e140b9 # shrinks to (stored, value) = ([Temporal(Time(Time { time: LocalTime { nanos: 0 }, offset: -3600 }))], Temporal(Time(Time { time: LocalTime { nanos: 3600000000000 }, offset: 0 }))), fill_on_create = false
+cc c7d8790e6087913b5f442bc07c63aed340a75f147b12dd9ff252ed6702ce8200 # shrinks to (stored, value) = ([Temporal(DateTime(DateTime { epoch_second: 1709254800, nanosecond: 0, offset: -3600, zone: None }))], Temporal(DateTime(DateTime { epoch_second: 1709254800, nanosecond: 0, offset: 3600, zone: None }))), fill_on_create = false
+cc 9239050805977b0c3c006709830da4d205a1e396f2cebd0514763d9a43f128a4 # shrinks to (stored, value) = ([Float(-1.5)], Integer(-1)), fill_on_create = false
+cc df995c9ca72e4bcf3e9141dd7d80f1872ea61aa320134255b7a45ee23e84671b # shrinks to (stored, value) = ([String("")], String("\0")), fill_on_create = false
+cc f897a72dd80c99b331a40c1b4fa32bf462a1cb0170682f28538b95690df3d4d2 # shrinks to (stored, value) = ([Integer(-1)], Float(-1.0)), fill_on_create = false

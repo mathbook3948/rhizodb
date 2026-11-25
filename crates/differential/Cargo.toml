@@ -23,3 +23,7 @@ name = "differential"
 harness = false
 
 [workspace]
+
+[profile.dev.package.lbug]
+opt-level = 3
+debug = false

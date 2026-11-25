@@ -10,6 +10,7 @@ use super::ids::Token;
 pub(crate) const FORMAT_VERSION_KEY: &[u8] = b"format_version";
 pub(crate) const NEXT_NODE_ID_KEY: &[u8] = b"next_node_id";
 pub(crate) const NEXT_RELATIONSHIP_ID_KEY: &[u8] = b"next_relationship_id";
+pub(crate) const NEXT_LABEL_SET_KEY: &[u8] = b"next_label_set";
 
 pub(crate) fn next_token_key(tag: u8) -> [u8; 11] {
     let mut key = *b"next_token\0";
@@ -34,15 +35,8 @@ pub(crate) fn element_key(id: u64) -> [u8; 8] {
     id.to_be_bytes()
 }
 
-pub(crate) fn adjacency_prefix(node: NodeId, rel_type: Option<Token<RelationshipType>>) -> Vec<u8> {
-    let mut key = Vec::with_capacity(12);
-    key.extend_from_slice(&node.0.to_be_bytes());
-    if let Some(rel_type) = rel_type {
-        key.extend_from_slice(&rel_type.id().to_be_bytes());
-    }
-    key
-}
-
+/// A key of the adjacency tables of format versions before adjacency segments.
+#[cfg(test)]
 pub(crate) fn adjacency_key(
     node: NodeId,
     rel_type: Token<RelationshipType>,
@@ -55,19 +49,17 @@ pub(crate) fn adjacency_key(
     key
 }
 
+/// The node, relationship type, and relationship of a key of the adjacency tables of format
+/// versions before adjacency segments.
 pub(crate) fn parse_adjacency_key(
     key: &[u8],
-) -> Result<(Token<RelationshipType>, RelationshipId), DecodeError> {
+) -> Result<(NodeId, Token<RelationshipType>, RelationshipId), DecodeError> {
     let mut reader = Reader::new(key);
-    reader.u64()?;
+    let node = NodeId(reader.u64()?);
     let rel_type = Token::new(reader.u32()?);
     let relationship = RelationshipId(reader.u64()?);
     reader.finish()?;
-    Ok((rel_type, relationship))
-}
-
-pub(crate) fn label_prefix(label: Token<Label>) -> [u8; 4] {
-    label.id().to_be_bytes()
+    Ok((node, rel_type, relationship))
 }
 
 pub(crate) fn label_key(label: Token<Label>, node: NodeId) -> [u8; 12] {
@@ -75,14 +67,6 @@ pub(crate) fn label_key(label: Token<Label>, node: NodeId) -> [u8; 12] {
     key[..4].copy_from_slice(&label.id().to_be_bytes());
     key[4..].copy_from_slice(&node.0.to_be_bytes());
     key
-}
-
-pub(crate) fn parse_label_key(key: &[u8]) -> Result<NodeId, DecodeError> {
-    let mut reader = Reader::new(key);
-    reader.u32()?;
-    let node = NodeId(reader.u64()?);
-    reader.finish()?;
-    Ok(node)
 }
 
 pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";
@@ -128,10 +112,22 @@ pub(crate) fn term_prefix(index: u32, prefix: &str) -> Vec<u8> {
     key
 }
 
-pub(crate) fn posting_key(index: u32, term: &str, element: u64) -> Vec<u8> {
-    let mut key = posting_prefix(index, term);
-    key.extend_from_slice(&element.to_be_bytes());
+#[cfg(test)]
+/// The key of the posting block `block` of `term` in the keyword index `index`. Before format
+/// version 14 the same layout keyed one element's posting by its element ID.
+pub(crate) fn posting_key(index: u32, term: &str, block: u64) -> Vec<u8> {
+    let mut key = Vec::new();
+    put_posting_key(&mut key, index, term, block);
     key
+}
+
+/// Writes [`posting_key`] into `key` in place of what it held.
+pub(crate) fn put_posting_key(key: &mut Vec<u8>, index: u32, term: &str, block: u64) {
+    key.clear();
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(term.as_bytes());
+    key.push(0);
+    key.extend_from_slice(&block.to_be_bytes());
 }
 
 pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
@@ -143,7 +139,33 @@ pub(crate) fn parse_posting_term(key: &[u8]) -> Result<&str, DecodeError> {
     std::str::from_utf8(term).map_err(|_| DecodeError::InvalidUtf8)
 }
 
-pub(crate) fn parse_posting_element(key: &[u8]) -> Result<u64, DecodeError> {
+pub(crate) fn parse_posting_block(key: &[u8]) -> Result<u64, DecodeError> {
+    let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
+    let mut reader = Reader::new(&key[start..]);
+    let block = reader.u64()?;
+    reader.finish()?;
+    Ok(block)
+}
+
+/// The key of a property index entry: the index, the value's key, and the element, so the
+/// entries of one value, or of a range of values, are one run of keys.
+pub(crate) fn property_entry_key(index: u32, value: &[u8], element: u64) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + value.len() + 8);
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(value);
+    key.extend_from_slice(&element.to_be_bytes());
+    key
+}
+
+/// The bound of a run of property index entries whose value keys start at `value`.
+pub(crate) fn property_entry_bound(index: u32, value: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(4 + value.len());
+    key.extend_from_slice(&index.to_be_bytes());
+    key.extend_from_slice(value);
+    key
+}
+
+pub(crate) fn parse_property_entry_element(key: &[u8]) -> Result<u64, DecodeError> {
     let start = key.len().checked_sub(8).ok_or(DecodeError::UnexpectedEnd)?;
     let mut reader = Reader::new(&key[start..]);
     let element = reader.u64()?;

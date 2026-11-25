@@ -7,6 +7,26 @@ use crate::graph::GraphError;
 use crate::storage::StorageError;
 
 /// The condition that made a query fail. Callers branch on this, never on the message.
+///
+/// New kinds may be added in any release, so a match needs a catch-all arm. The crate's guide
+/// lists the kinds a host may retry.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+/// use rhizodb::SyntaxErrorKind;
+///
+/// let db = Database::in_memory()?;
+/// let kind = db.execute("MATCH (n RETURN n", &Parameters::new()).unwrap_err().kind();
+/// assert!(matches!(kind, ErrorKind::Syntax(SyntaxErrorKind::UnexpectedToken)));
+/// let retry = match kind {
+///     ErrorKind::Storage | ErrorKind::TransactionAborted | ErrorKind::Io => true,
+///     _ => false,
+/// };
+/// assert!(!retry);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -90,6 +110,9 @@ pub enum ErrorKind {
     ListElementAccessByNonInteger,
     /// A map was indexed with something that is not a string.
     MapElementAccessByNonString,
+    /// A list or map nests deeper than a value in a query may: a parameter, a value a procedure
+    /// returned, or a value the query builds.
+    NestingTooDeep,
     /// A value cannot be stored as a property: a map, a graph element, a list holding null, or a
     /// list nested past the stored limit.
     InvalidPropertyType,
@@ -101,6 +124,11 @@ pub enum ErrorKind {
     InvalidRegex,
     /// A numeric argument outside the range the function accepts.
     NumberOutOfRange,
+    /// A `VALUE { ... }` subquery returned more than one row.
+    CardinalityViolation,
+    /// `CAST` got a value it cannot convert to the target type, such as text that does not read
+    /// as a number, or a value of a type with no conversion to the target.
+    InvalidCast,
     /// A temporal value that cannot be built or read: a malformed date or duration string, a
     /// component out of range, an unknown time zone, or a result past the supported years.
     InvalidTemporalValue,
@@ -125,16 +153,42 @@ pub enum ErrorKind {
     InvalidIndexDefinition,
     /// A host procedure was registered in the `db` namespace, which built-in procedures reserve.
     ReservedProcedureName,
-    /// A feature this version does not support.
-    Unsupported,
     /// The storage engine failed.
     Storage,
-    /// Stored data does not decode or breaks an invariant.
+    /// Stored data does not decode, breaks an invariant, or makes the storage engine fail. Once
+    /// the storage engine panics on a damaged file, every later operation on that [`Database`]
+    /// fails this way until the file is opened again.
+    ///
+    /// [`Database`]: crate::Database
     CorruptData,
     /// The database was written in a format version this build cannot read.
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
+    /// [`OpenOptions::open`](crate::OpenOptions::open) found no database file at the path, and
+    /// its settings do not create one.
+    DatabaseNotFound,
+    /// The database file is already open, in this process or another, so it cannot be opened
+    /// again until that `Database` is dropped.
+    DatabaseAlreadyOpen,
+    /// [`Database::backup_to`](crate::Database::backup_to) found a file or directory at the
+    /// path, which a backup never replaces.
+    BackupTargetExists,
+    /// The reader or writer the host passed to [`Database::import`] or [`Database::export`]
+    /// failed.
+    ///
+    /// [`Database::import`]: crate::Database::import
+    /// [`Database::export`]: crate::Database::export
+    Io,
+    /// A dump given to [`Database::import`](crate::Database::import) is malformed: a line that
+    /// is not the JSON the format defines, lines out of order, an ID out of order, a
+    /// relationship to a node the dump has not created, or a dump cut short before its end line.
+    InvalidDump,
+    /// A dump was written in a format version newer than this build reads.
+    UnsupportedDumpVersion,
+    /// A dump was imported into a database that holds an index or has ever held a node or a
+    /// relationship.
+    DatabaseNotEmpty,
 }
 
 impl ErrorKind {
@@ -155,7 +209,20 @@ impl ErrorKind {
     }
 }
 
-/// A failed query or database operation.
+/// A failed query or database operation. Its `Display` is a message for people, and
+/// [`Error::kind`] is what code branches on.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let error = db.execute("RETURN $missing", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::MissingParameter);
+/// assert!(!error.to_string().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
@@ -235,7 +302,7 @@ impl From<SyntaxError> for Error {
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
         Self {
-            kind: ErrorKind::Storage,
+            kind: error.kind(),
             message: error.to_string(),
             source: Some(Box::new(error)),
             rejects_type: false,
@@ -246,7 +313,7 @@ impl From<StorageError> for Error {
 impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
         let kind = match &error {
-            GraphError::Storage(_) => ErrorKind::Storage,
+            GraphError::Storage(error) => error.kind(),
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,
             GraphError::IdSpaceExhausted => ErrorKind::IdSpaceExhausted,

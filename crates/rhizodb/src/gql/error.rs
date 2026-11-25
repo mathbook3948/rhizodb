@@ -1,7 +1,20 @@
 use std::error::Error;
 use std::fmt;
 
-/// Why the query text was rejected by the parser.
+/// Why the query text was rejected by the parser, carried by
+/// [`ErrorKind::Syntax`](crate::ErrorKind::Syntax).
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+/// use rhizodb::SyntaxErrorKind;
+///
+/// let db = Database::in_memory()?;
+/// let error = db.execute("MATCH (n", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::Syntax(SyntaxErrorKind::UnexpectedEnd));
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SyntaxErrorKind {
@@ -31,7 +44,7 @@ pub enum SyntaxErrorKind {
     UnterminatedComment,
     /// Length bounds on a relationship without the `*` before them, or a negative bound.
     InvalidRelationshipPattern,
-    /// `UNION` and `UNION ALL` in one query.
+    /// `UNION` and `UNION ALL`, or two different set operators, in one query.
     MixedUnion,
     /// Syntax that is recognized but not supported.
     UnsupportedFeature,
@@ -55,7 +68,7 @@ impl SyntaxErrorKind {
             Self::UnterminatedQuotedName => "unterminated quoted name",
             Self::UnterminatedComment => "unterminated comment",
             Self::InvalidRelationshipPattern => "invalid relationship length",
-            Self::MixedUnion => "UNION and UNION ALL cannot be mixed",
+            Self::MixedUnion => "one query cannot mix set operators or UNION and UNION ALL",
             Self::UnsupportedFeature => "unsupported feature",
             Self::NestingTooDeep => "query is nested too deeply",
         }

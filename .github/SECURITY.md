@@ -4,7 +4,7 @@ RhizoDB runs inside the program that embeds it and reads queries and database fi
 
 ## Supported versions
 
-RhizoDB has no release yet. Security fixes go to the `main` branch and into the next release.
+Below 1.0, security fixes go to the `main` branch and into the next release, and only the latest release is supported.
 
 ## Report a vulnerability
 
@@ -24,6 +24,7 @@ The maintainer replies in the advisory, and you can follow the fix there.
 - A query that makes RhizoDB panic, hang, or use memory without bound.
 - A database file that makes RhizoDB panic, hang, or read outside the file when it is opened.
 - Committed data that is lost or changed after a crash or a power loss.
+- A damaged database file that reads back as wrong data instead of failing as corrupt data.
 - A query that reads or changes data outside what it names, such as a parameter that escapes into the query text.
 
 ## Out of scope

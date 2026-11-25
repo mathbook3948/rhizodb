@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 libtest-mimic = "0.8"
 rhizodb = { path = "../rhizodb" }
+tempfile = "3.27.0"
 
 [[test]]
 name = "tck"
@@ -19,4 +20,8 @@ harness = false
 
 [[test]]
 name = "gql"
+harness = false
+
+[[test]]
+name = "kuzu"
 harness = false

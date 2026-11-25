@@ -43,3 +43,42 @@ MATCH (p:Person) WHERE exists { MATCH (p)-[:KNOWS]->(:Person) } RETURN count(*) 
 MATCH (p:Person) RETURN p.id AS id, abs(p.age - 50) AS d
 MATCH (p:Person) RETURN p.id AS id, substring(p.name, 1, 2) AS s
 MATCH (p:Person) RETURN p.id AS id, coalesce(p.age, 0) + 1 AS a
+MATCH (p:Person) RETURN p.id AS id, COUNT { MATCH (p)-[:KNOWS]->(q:Person) } AS c ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, COUNT { MATCH (p)-[:KNOWS]->(q:Person) WHERE q.age > 30 } AS c ORDER BY id
+MATCH (p:Person) WHERE COUNT { MATCH (p)-[:KNOWS]-(:Person) } > 1 RETURN p.id AS id
+MATCH (c:City) RETURN c.name AS city, COUNT { MATCH (c)<-[:LIVES_IN]-(p:Person) RETURN DISTINCT p.name } AS names
+MATCH (p:Person) RETURN p.id AS id, COUNT { (p)-[:KNOWS]->() } AS c ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, COLLECT { MATCH (p)-[:KNOWS]->(q:Person) RETURN q.id ORDER BY q.id } AS l ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, reduce(acc = 0, x IN range(1, p.id) | acc + x) AS s ORDER BY id
+MATCH (p:Person) CALL (p) { MATCH (p)-[:KNOWS]->(q:Person) RETURN count(q) AS c } RETURN p.id AS id, c ORDER BY id
+MATCH (p:Person) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
+MATCH (p:Person) OPTIONAL CALL (p) { MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name AS city } RETURN p.id AS id, city
+CALL { MATCH (p:Person) RETURN p.id AS id UNION MATCH (c:City) RETURN c.population AS id } RETURN count(id) AS n
+MATCH (p:Person) RETURN p.id AS id, upper(p.name) AS u, lower(p.name) AS l ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, char_length(p.name) AS n ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, ltrim(p.name) AS l, rtrim(p.name) AS r, trim(p.name) AS t ORDER BY id
+MATCH (c:City) RETURN c.name AS city, ln(c.population) AS l, power(c.population, 2) AS p ORDER BY city
+MATCH (p:Person) RETURN p.id AS id, nullif(p.age, 30) AS a ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, CASE p.age WHEN 20, 30 THEN 'round' WHEN > 50 THEN 'old' ELSE 'other' END AS band ORDER BY id
+MATCH (p:Person) RETURN p.age AS age ORDER BY age NULLS FIRST
+MATCH (p:Person) RETURN p.age AS age ORDER BY age DESC NULLS LAST
+MATCH (p:Person) RETURN p.id AS id, isEmpty(p.name) AS e ORDER BY id
+RETURN mod(7, 3) AS m, cot(1.0) AS c, sinh(1.0) AS s
+MATCH (c:City) RETURN c.name AS city, ln(c.population) AS l, cot(1.0) AS c ORDER BY city
+MATCH (p:Person) RETURN p.id AS id, p.name || '!' AS n ORDER BY id
+MATCH (p:Person) WHERE p.id < 0 CALL (p) { SET p.flag = true } RETURN count(*) AS n
+RETURN 1 AS a NEXT RETURN a + 1 AS b
+MATCH (p:Person) RETURN p.age AS age NEXT RETURN count(age) AS n
+MATCH (p:Person) RETURN p.id AS id, VALUE { MATCH (p)-[:LIVES_IN]->(c:City) RETURN c.name } AS city ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, p.age IS :: INTEGER AS typed, valueType(p.name) AS t ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, CAST(p.age AS STRING) AS s, CAST(p.id AS DOUBLE) AS f ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, p.age IS DISTINCT FROM 30 AS d, (p.age > 30) IS TRUE AS t ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, normalize(p.name) AS n, p.name IS NORMALIZED AS z ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, round(p.age / 7.0, 2) AS r, haversin(p.id) AS h ORDER BY id
+MATCH (p:Person) RETURN p.id AS id, size(randomUUID()) AS n ORDER BY id
+RETURN toIntegerList(['1', '2']) AS l, ceiling(1.5) AS c
+RETURN vector.similarity.cosine([1.0, 0.0], [1.0, 1.0]) AS c, vector.similarity.euclidean([1.0, 0.0], [0.0, 1.0]) AS e
+MATCH (p:Person) RETURN p.id AS id, round(p.age / 7.0, 2) AS r ORDER BY id
+RETURN ceiling(1.5) AS c, round(2.345, 2) AS r
+RETURN CAST('12' AS INTEGER) AS i, CAST(2 AS FLOAT) AS f, CAST(1.5 AS STRING) AS s
+MATCH (p:Person) RETURN p.id AS id, normalize(p.name) AS n ORDER BY id

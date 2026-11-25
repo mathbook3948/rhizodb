@@ -4,8 +4,13 @@ use crate::gql::ast::BinaryOp;
 use crate::gql::ast::ComparisonOp;
 use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
+use crate::gql::ast::NormalForm;
 use crate::gql::ast::Quantifier;
 use crate::gql::ast::SortDirection;
+use crate::gql::ast::TypeExpr;
+use crate::gql::ast::UnionKind;
+use crate::gql::ast::ValueType;
+use crate::graph::Bound;
 use crate::procedure::Procedure;
 use crate::procedure::Signature;
 
@@ -23,17 +28,29 @@ pub(crate) enum Plan {
     Updating(Program<Clause>),
 }
 
+impl Plan {
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) fn parameters(&self) -> &[String] {
+        match self {
+            Self::ReadOnly(program) => &program.parameters,
+            Self::Updating(program) => &program.parameters,
+        }
+    }
+}
+
 /// One or more pipelines whose results are concatenated, as `UNION` does.
 #[derive(Clone, Debug)]
 pub(crate) struct Program<C> {
     pub(crate) parts: Vec<Pipeline<C>>,
-    pub(crate) distinct: bool,
+    pub(crate) combine: UnionKind,
     pub(crate) columns: Vec<String>,
     pub(crate) slot_count: usize,
     /// The unconditionally evaluated expressions that read no row, no parameter, and match no
     /// pattern. Each is evaluated once before the first clause runs, so a type error in the
     /// query text is reported whatever the data.
     pub(crate) closed: Vec<Expr>,
+    /// The names of the parameters the query reads, in the order it first reads them.
+    pub(crate) parameters: Vec<String>,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.
@@ -62,6 +79,23 @@ pub(crate) enum ReadClause {
     Filter(Expr),
     /// Extends each row with the value of each expression in its slot.
     Let(Vec<(Expr, Slot)>),
+    CallSubquery(Box<CallSubquery<ReadClause>>),
+}
+
+/// `CALL { ... }`: runs every branch from each row and extends the row with each row the
+/// branches return, in `outputs`. Without `outputs`, the branches end without `RETURN` and each
+/// row is kept once.
+///
+/// A statement after `NEXT` is a `table` call instead: every branch runs once on all the rows,
+/// and the rows the branches return, in `outputs`, replace them. Without `outputs` they become
+/// one row.
+#[derive(Clone, Debug)]
+pub(crate) struct CallSubquery<C> {
+    pub(crate) optional: bool,
+    pub(crate) table: bool,
+    pub(crate) combine: UnionKind,
+    pub(crate) branches: Vec<Pipeline<C>>,
+    pub(crate) outputs: Vec<Slot>,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +109,8 @@ pub(crate) enum UpdateClause {
         targets: Vec<Expr>,
         retain: bool,
     },
+    /// A `CALL { ... }` whose query updates the graph.
+    CallSubquery(Box<CallSubquery<Clause>>),
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +120,16 @@ pub(crate) struct MatchClause {
     pub(crate) filter: Option<Expr>,
     /// Slots the clause binds, set to null when an optional match finds nothing.
     pub(crate) introduced: Vec<Slot>,
+    pub(crate) by_id: Option<Box<IdStart>>,
+}
+
+/// How a match of one pattern part runs when the ID lookup of its start node succeeds: `value`
+/// gives the ID, and `clause` matches from that node, bound, with the equality that the lookup
+/// served read as true.
+#[derive(Clone, Debug)]
+pub(crate) struct IdStart {
+    pub(crate) value: Expr,
+    pub(crate) clause: MatchClause,
 }
 
 /// A procedure call. Each row gets one row per result, with output `index` of the result in
@@ -124,6 +170,43 @@ pub(crate) struct PatternPart {
     pub(crate) path: Option<Slot>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<Step>,
+    /// Ways to find the start nodes without reading every node of the label, tried in order.
+    pub(crate) seeks: Vec<Seek>,
+}
+
+/// Conditions that every match puts on one value of the start node or of the first
+/// relationship, which an ID lookup or a property index turns into the start nodes to try.
+#[derive(Clone, Debug)]
+pub(crate) struct Seek {
+    pub(crate) element: SeekElement,
+    pub(crate) key: SeekKey,
+    /// Each holds for every match, and none reads a variable that the pattern part or a later
+    /// one binds.
+    pub(crate) tests: Vec<SeekTest>,
+    /// Whether the first test is the equality of the pattern's property map entry for the key.
+    pub(crate) map_entry: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeekElement {
+    Start,
+    FirstRelationship,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SeekKey {
+    Id,
+    Property(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SeekTest {
+    /// The value equals the expression.
+    Equal(Expr),
+    /// The value equals an item of the list the expression gives.
+    In(Expr),
+    /// The value compares to the expression as the bound says.
+    Compare(Bound, Expr),
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +229,8 @@ pub(crate) struct NodePattern {
 pub(crate) struct RelationshipPattern {
     pub(crate) slot: Slot,
     pub(crate) bound: bool,
+    /// Set when no variable names the relationship, so nothing reads its slot.
+    pub(crate) anonymous: bool,
     /// In a pattern that creates, a single name.
     pub(crate) labels: Option<LabelExpr>,
     pub(crate) direction: Direction,
@@ -218,6 +303,20 @@ pub(crate) struct Aggregate {
     pub(crate) extra: Option<Expr>,
 }
 
+impl Aggregate {
+    /// Whether the aggregate counts rows in which `slot` is never null: `count(*)`, or
+    /// `count(x)` without `DISTINCT` when `x` is that slot.
+    pub(crate) fn counts_rows_binding(&self, slot: Slot) -> bool {
+        self.function == AggregateFunction::Count
+            && !self.distinct
+            && match &self.argument {
+                None => true,
+                Some(Expr::Slot(held)) => *held == slot,
+                Some(_) => false,
+            }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AggregateFunction {
     Count,
@@ -235,9 +334,9 @@ pub(crate) enum AggregateFunction {
 #[derive(Clone, Debug)]
 pub(crate) enum Expr {
     Constant(Datum),
-    /// A supplied parameter's value. It is data, not query text, so it never makes an
-    /// expression closed.
-    Parameter(Datum),
+    /// The value of the supplied parameter that [`Program::parameters`] names at this index. It
+    /// is data, not query text, so it never makes an expression closed.
+    Parameter(usize),
     Slot(Slot),
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
@@ -262,10 +361,23 @@ pub(crate) enum Expr {
     Quantified(Box<Quantified>),
     /// A pattern used as a predicate: true when it matches at least once.
     Exists(Box<PatternQuery>),
-    /// `EXISTS { query }`: true when the clauses, run from the current row, give a row.
-    Subquery(Vec<ReadClause>),
+    /// `COUNT { pattern }`: how many times the patterns match.
+    CountMatches(Box<PatternQuery>),
+    /// `EXISTS`, `COUNT`, or `COLLECT` over the rows the clauses give from the current row.
+    Subquery(SubqueryKind, Vec<ReadClause>),
+    Reduce(Box<Reduce>),
     /// `[pattern WHERE filter | projection]`: one value per match.
     PatternComprehension(Box<PatternQuery>, Box<Expr>),
+    /// Whether the value belongs to one of the types.
+    Typed(Box<Expr>, Box<TypeExpr>),
+    /// `CAST(value AS type)`.
+    Cast(Box<Expr>, Box<ValueType>),
+    /// `IS TRUE`, `IS FALSE`, or `IS UNKNOWN` as `None`, of a boolean or null.
+    Truth(Box<Expr>, Option<bool>),
+    /// `IS form NORMALIZED`, null for null.
+    Normalized(Box<Expr>, NormalForm),
+    /// `IS DISTINCT FROM`, which treats two nulls as the same and never gives null.
+    Distinct(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Debug)]
@@ -273,6 +385,25 @@ pub(crate) struct Case {
     pub(crate) scrutinee: Option<Expr>,
     pub(crate) branches: Vec<(Expr, Expr)>,
     pub(crate) otherwise: Option<Expr>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SubqueryKind {
+    Exists,
+    Count,
+    /// The values of this slot, one per row.
+    Collect(Slot),
+    /// The value of this slot in the one row, or null without rows.
+    Value(Slot),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Reduce {
+    pub(crate) accumulator: Slot,
+    pub(crate) init: Expr,
+    pub(crate) slot: Slot,
+    pub(crate) source: Expr,
+    pub(crate) body: Expr,
 }
 
 #[derive(Clone, Debug)]

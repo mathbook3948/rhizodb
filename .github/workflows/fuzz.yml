@@ -13,17 +13,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  parse:
+  fuzz:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [parse, value_decode, graph_ops]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --locked
-      - run: cargo +nightly fuzz run parse -- -max_total_time=60
+      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts

@@ -40,6 +40,16 @@ The checks enforce these rules, so you do not need to remember them:
 - Files in the repository do not use en dashes, em dashes, middle dots, or CJK angle and corner brackets.
 - Each file in `docs/` follows the template in `docs/CLAUDE.md`. After you add or rename a document, run `mise run docs` to rebuild the index.
 
+## Deeper test tiers
+
+| Command | What it runs | When |
+| --- | --- | --- |
+| `mise run storage-deep` | Storage, engine, crash, dump, node meta, and property column tests at 100 times the random cases | Changes to storage, the graph layer, or the dump format |
+| `mise run random-deep` | Isolation history check, kill-and-reopen, random transaction model, damaged files, concurrency, resource limits, killed backups, and snapshot stress, at 100 times the cases | Changes to transactions, durability, or concurrency |
+| `mise run fuzz 600` | Every fuzz target for the given seconds each; needs nightly Rust and cargo-fuzz | Changes to the parser, decoders, or file handling |
+
+The nightly workflow runs these tiers and the fuzzers. A failing random case is checked in so every later run replays it.
+
 ## Write commits
 
 - Write each commit subject as a [Conventional Commit](https://www.conventionalcommits.org), for example `fix(parser): reject a trailing comma in a property map`.

@@ -1,24 +1,35 @@
 [package]
 name = "rhizodb"
-description = "An embedded, schemaless property graph database with a GQL query layer"
+description = "An embedded, schemaless property graph database for Rust, queried with GQL"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 readme = "../../README.md"
+documentation = "https://docs.rs/rhizodb"
 keywords = ["graph", "database", "gql", "cypher", "embedded"]
-categories = ["database-implementations"]
+categories = ["database-implementations", "database"]
+
+[features]
+# Exposes the decoders and the parser to the fuzz targets in `fuzz/`. Not part of the public API.
+fuzzing = []
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 proptest = "1.12.0"
+self_cell = "1.3"
 tempfile = "3.27.0"
 
 [dependencies]
+crc32fast = "1.5.5"
+twox-hash = { version = "2.1.5", default-features = false, features = ["std", "xxhash3_64"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
+memchr = "2.8.3"
 redb = "5.0.0"
 regex-automata = "0.4.18"
 regex-syntax = "0.8.11"

@@ -150,11 +150,11 @@ fn write_iteration(graph: &Graph<RedbStorage>, iteration: u64) {
             .unwrap();
     }
     assert_eq!(
-        write.create_node(&head_record(&tokens, iteration)).unwrap(),
+        write.create_node(head_record(&tokens, iteration)).unwrap(),
         head_id(iteration)
     );
     assert_eq!(
-        write.create_node(&tail_record(&tokens, iteration)).unwrap(),
+        write.create_node(tail_record(&tokens, iteration)).unwrap(),
         tail_id(iteration)
     );
     assert_eq!(
@@ -370,7 +370,9 @@ fn the_oracle_accepts_whole_iterations_and_continues_the_sequence() {
 #[test]
 fn the_oracle_rejects_a_partially_applied_iteration() {
     let tear_down: [Damage; 5] = [
-        |write, _| write.delete_relationship(link_id(2)).unwrap(),
+        |write, _| {
+            write.delete_relationship(link_id(2)).unwrap();
+        },
         |write, tokens| {
             write
                 .set_node_property(head_id(1), tokens.next_key, integer(99))
@@ -379,10 +381,10 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
         |write, tokens| {
             write.remove_label(head_id(1), tokens.done_label).unwrap();
         },
-        |write, _| {
+        |write, tokens| {
+            let (group, slot) = crate::graph::meta::locate(tail_id(2));
             write
-                .transaction
-                .delete(Table::Nodes, &keys::element_key(tail_id(2).0))
+                .set_column_value((group, tokens.at_key), slot, None)
                 .unwrap();
         },
         |write, _| {

@@ -1,7 +1,14 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -14,14 +21,27 @@ use crate::value::DecodeError;
 use crate::value::PropertyValue;
 use crate::value::Reader;
 
+mod adjacency;
+mod columns;
+mod dump;
 mod ids;
 mod index;
 #[cfg(test)]
 pub(crate) mod integrity;
 mod keys;
+mod meta;
+mod postings;
+mod properties;
 mod records;
+mod relationships;
 mod tokenize;
+mod value_key;
 
+pub(crate) use adjacency::AdjacencyReader;
+pub(crate) use columns::Cell;
+pub(crate) use columns::ColumnReader;
+pub(crate) use columns::Quick;
+pub(crate) use columns::Text;
 pub(crate) use ids::Label;
 pub use ids::NodeId;
 pub(crate) use ids::PropertyKey;
@@ -30,18 +50,56 @@ pub(crate) use ids::RelationshipType;
 pub(crate) use ids::Token;
 pub(crate) use ids::TokenKind;
 pub(crate) use index::ElementKind;
+pub(crate) use index::IndexDefinition;
+pub(crate) use index::IndexKind;
 pub use index::IndexTarget;
+pub(crate) use index::Target;
 pub use index::VectorMetric;
+pub(crate) use meta::LabelReader;
+pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
+pub(crate) use value_key::Bound;
+pub(crate) use value_key::Compared;
+pub(crate) use value_key::KeyRange;
+pub(crate) use value_key::compared;
 
+use adjacency::Edge;
+use adjacency::Entries;
+use adjacency::SegmentEdit;
+use adjacency::SegmentId;
+use adjacency::Side;
+use adjacency::SlotRead;
+use columns::ColumnsEdit;
 use index::Element;
+use meta::Delta;
+use meta::Flush;
+use meta::GroupEdit;
+use meta::LabelSetCache;
+use meta::LabelSetId;
+use meta::Meta;
+use meta::MetaBytes;
+use meta::MetaEdit;
+use meta::MetaHead;
+use meta::Part;
+use meta::Slot;
+use relationships::ChunkEdit;
+use relationships::ChunkRef;
 
-const FORMAT_VERSION: u32 = 5;
+const FORMAT_VERSION: u32 = 14;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
+const NODE_META_FORMAT_VERSION: u32 = 8;
+const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
+const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
+const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
+const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
+const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
+const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
+const ENTRIES_OUT_OF_ORDER: GraphError =
+    GraphError::Corrupt("the adjacency entries of a segment are out of order");
 
 #[derive(Debug)]
 pub(crate) enum GraphError {
@@ -134,6 +192,36 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writer: Arc<Mutex<Option<ThreadId>>>,
+    committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    committed_tokens: Arc<CommittedTokens>,
+    committed_label_sets: Arc<LabelSetCache>,
+    committed_column_deltas: Arc<ColumnDeltas>,
+}
+
+type ColumnDeltas = Mutex<BTreeMap<u64, usize>>;
+
+/// The tokens of every name space by name, as committed. A committed token never changes, and
+/// no element of a snapshot taken before a token was committed refers to it.
+#[derive(Debug, Default)]
+pub(crate) struct CommittedTokens {
+    by_name: RwLock<[HashMap<String, u32>; 3]>,
+}
+
+impl CommittedTokens {
+    fn get<K: TokenKind>(&self, name: &str) -> Option<Token<K>> {
+        let by_name = self.by_name.read().unwrap_or_else(PoisonError::into_inner);
+        by_name
+            .get(usize::from(K::TAG))?
+            .get(name)
+            .map(|id| Token::new(*id))
+    }
+
+    fn insert<K: TokenKind>(&self, name: &str, token: Token<K>) {
+        let mut by_name = self.by_name.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(names) = by_name.get_mut(usize::from(K::TAG)) {
+            names.insert(name.to_owned(), token.id());
+        }
+    }
 }
 
 impl<S: Storage> Graph<S> {
@@ -144,10 +232,7 @@ impl<S: Storage> Graph<S> {
     /// in the same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
-            let mut tx = GraphTx {
-                transaction: storage.begin_write()?,
-                _writer: None,
-            };
+            let mut tx = GraphTx::bare(storage.begin_write()?);
             let found = match tx
                 .transaction
                 .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
@@ -162,8 +247,27 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
+            if let Some(found) = found
+                && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
+            {
+                tx.move_relationships_to_chunks(found < VARINT_RELATIONSHIPS_FORMAT_VERSION)?;
+            }
             if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
                 tx.tag_index_targets()?;
+            }
+            if found.is_some_and(|found| found < NODE_META_FORMAT_VERSION) {
+                tx.move_labels_to_node_meta()?;
+            }
+            if found.is_some_and(|found| found < NODE_COLUMNS_FORMAT_VERSION) {
+                tx.move_properties_to_columns()?;
+            }
+            if found.is_some_and(|found| found < ADJACENCY_SEGMENTS_FORMAT_VERSION) {
+                tx.move_adjacency_to_segments()?;
+            }
+            let stale_postings =
+                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
+            if !stale_postings && found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
+                tx.move_postings_to_blocks()?;
             }
             if upgrade {
                 tx.transaction.put(
@@ -172,27 +276,71 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            let stale_postings =
-                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
             if tx.adopt_current_tokenizer(stale_postings)? || upgrade {
                 tx.commit()?;
             }
         }
+        let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
         Ok(Self {
             storage,
             writer: Arc::default(),
+            committed_index_definitions: Arc::new(Mutex::new(definitions)),
+            committed_tokens: Arc::default(),
+            committed_label_sets: Arc::default(),
+            committed_column_deltas: Arc::default(),
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &S {
+        &self.storage
+    }
+
+    /// Copies the committed graph, as one read snapshot sees it, into a new database file at
+    /// `path`, which opens as this graph.
+    pub(crate) fn backup_to(&self, path: &std::path::Path) -> Result<(), GraphError> {
+        Ok(crate::storage::backup::write(&self.storage, path)?)
+    }
+
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        let catalog = lock(&self.committed_index_definitions);
+        let transaction = self.storage.begin_read()?;
         Ok(GraphTx {
-            transaction: self.storage.begin_read()?,
+            transaction,
             _writer: None,
+            index_definitions: OnceLock::from(Arc::clone(&catalog)),
+            catalog: None,
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: true,
+            own_tokens: CommittedTokens::default(),
+            label_sets: Arc::clone(&self.committed_label_sets),
+            own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
+            meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
+            labels: LabelReader::default(),
+            column_deltas: None,
+            own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
+            postings: postings::Held::default(),
+            counters: Vec::new(),
         })
     }
 
     /// Opens the one write transaction, waiting for another thread's to end. Fails instead of
     /// waiting forever when the calling thread already holds it.
+    /// Runs `work` on the storage, which may take the storage's writer itself, and fails when
+    /// this thread holds the write transaction that work would wait for.
+    pub(crate) fn maintain<R>(&self, work: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
+        if *lock(&self.writer) == Some(thread::current().id()) {
+            return Err(GraphError::WriterOnThisThread);
+        }
+        Ok(work(&self.storage))
+    }
+
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
         let current = thread::current().id();
         if *lock(&self.writer) == Some(current) {
@@ -200,9 +348,35 @@ impl<S: Storage> Graph<S> {
         }
         let transaction = self.storage.begin_write()?;
         *lock(&self.writer) = Some(current);
+        let definitions = Arc::clone(&lock(&self.committed_index_definitions));
         Ok(GraphTx {
             transaction,
-            _writer: Some(WriterClaim(Arc::clone(&self.writer))),
+            _writer: Some(WriterClaim {
+                slot: Arc::clone(&self.writer),
+                owner: current,
+            }),
+            index_definitions: OnceLock::from(definitions),
+            catalog: Some(Catalog {
+                shared: Arc::clone(&self.committed_index_definitions),
+                changed: false,
+            }),
+            tokens: Arc::clone(&self.committed_tokens),
+            reads_committed_tokens: false,
+            own_tokens: CommittedTokens::default(),
+            label_sets: Arc::clone(&self.committed_label_sets),
+            own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
+            meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
+            labels: LabelReader::default(),
+            column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
+            own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
+            postings: postings::Held::default(),
+            counters: Vec::new(),
         })
     }
 }
@@ -212,19 +386,78 @@ impl<S: Storage> Graph<S> {
 pub(crate) struct GraphTx<T> {
     transaction: T,
     _writer: Option<WriterClaim>,
+    index_definitions: OnceLock<Arc<[Vec<u8>]>>,
+    catalog: Option<Catalog>,
+    tokens: Arc<CommittedTokens>,
+    reads_committed_tokens: bool,
+    own_tokens: CommittedTokens,
+    label_sets: Arc<LabelSetCache>,
+    own_label_sets: LabelSetCache,
+    new_label_sets: BTreeMap<LabelSetId, (Vec<u8>, usize)>,
+    meta: BTreeMap<u64, GroupEdit>,
+    columns: BTreeMap<u64, ColumnsEdit>,
+    reader: ColumnReader,
+    labels: LabelReader,
+    column_deltas: Option<Arc<ColumnDeltas>>,
+    own_column_deltas: BTreeMap<u64, usize>,
+    adjacency: BTreeMap<SegmentId, SegmentEdit>,
+    relationship_chunks: BTreeMap<u64, ChunkEdit>,
+    relationship_bytes: usize,
+    postings: postings::Held,
+    counters: Vec<(Vec<u8>, u64)>,
 }
 
-#[derive(Debug)]
-struct WriterClaim(Arc<Mutex<Option<ThreadId>>>);
-
-impl Drop for WriterClaim {
-    fn drop(&mut self) {
-        *lock(&self.0) = None;
+impl<T> GraphTx<T> {
+    fn bare(transaction: T) -> Self {
+        Self {
+            transaction,
+            _writer: None,
+            index_definitions: OnceLock::new(),
+            catalog: None,
+            tokens: Arc::default(),
+            reads_committed_tokens: false,
+            own_tokens: CommittedTokens::default(),
+            label_sets: Arc::default(),
+            own_label_sets: LabelSetCache::default(),
+            new_label_sets: BTreeMap::new(),
+            meta: BTreeMap::new(),
+            columns: BTreeMap::new(),
+            reader: ColumnReader::default(),
+            labels: LabelReader::default(),
+            column_deltas: None,
+            own_column_deltas: BTreeMap::new(),
+            adjacency: BTreeMap::new(),
+            relationship_chunks: BTreeMap::new(),
+            relationship_bytes: 0,
+            postings: postings::Held::default(),
+            counters: Vec::new(),
+        }
     }
 }
 
-fn lock(writer: &Mutex<Option<ThreadId>>) -> std::sync::MutexGuard<'_, Option<ThreadId>> {
-    writer
+#[derive(Debug)]
+struct Catalog {
+    shared: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    changed: bool,
+}
+
+#[derive(Debug)]
+struct WriterClaim {
+    slot: Arc<Mutex<Option<ThreadId>>>,
+    owner: ThreadId,
+}
+
+impl Drop for WriterClaim {
+    fn drop(&mut self) {
+        let mut slot = lock(&self.slot);
+        if *slot == Some(self.owner) {
+            *slot = None;
+        }
+    }
+}
+
+fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+    value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -244,42 +477,436 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
+    #[cfg(test)]
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
-        let bytes = self
-            .transaction
-            .get(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(bytes.map(|bytes| NodeRecord::decode(&bytes)).transpose()?)
+        let Some(labels) = self.node_labels(id)? else {
+            return Ok(None);
+        };
+        let properties = self.live_node_properties(&mut ColumnReader::default(), id)?;
+        Ok(Some(NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        }))
+    }
+
+    /// One property of a relationship, decoding none of the others. The outer `None` means the
+    /// relationship does not exist.
+    pub(crate) fn relationship_property(
+        &self,
+        id: RelationshipId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::property(bytes, key)?))
     }
 
     pub(crate) fn relationship(
         &self,
         id: RelationshipId,
     ) -> Result<Option<RelationshipRecord>, GraphError> {
-        let bytes = self
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
+    }
+
+    fn with_relationship<R>(
+        &self,
+        id: RelationshipId,
+        read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        if let Some(edit) = self.relationship_chunks.get(&chunk) {
+            return edit.get(slot).map(read).transpose();
+        }
+        Ok(self
             .transaction
-            .get(Table::Relationships, &keys::element_key(id.0))?;
-        Ok(bytes
-            .map(|bytes| RelationshipRecord::decode(&bytes))
-            .transpose()?)
+            .get_with(
+                Table::RelationshipChunks,
+                &relationships::chunk_key(chunk),
+                |bytes| ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
+            )?
+            .flatten())
+    }
+
+    /// Calls `visit` with every relationship's ID and stored record, in ascending ID order, as
+    /// this transaction has left them.
+    pub(crate) fn visit_relationship_records(
+        &self,
+        mut visit: impl FnMut(RelationshipId, &[u8]) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let mut held = self.relationship_chunks.iter().peekable();
+        self.transaction
+            .visit_prefix(Table::RelationshipChunks, &[], |key, value| {
+                let chunk = relationships::parse_key(key)?;
+                while let Some((&at, edit)) = held.next_if(|(at, _)| **at <= chunk) {
+                    visit_held(at, edit, &mut visit)?;
+                    if at == chunk {
+                        return Ok(());
+                    }
+                }
+                for entry in ChunkRef::parse(value)?.entries() {
+                    let (slot, record) = entry?;
+                    visit(relationships::relationship_at(chunk, slot), record)?;
+                }
+                Ok::<(), GraphError>(())
+            })?;
+        held.try_for_each(|(&chunk, edit)| visit_held(chunk, edit, &mut visit))
+    }
+
+    /// The labels of the label set `set`.
+    pub(crate) fn label_set(&self, set: LabelSetId) -> Result<Arc<[Token<Label>]>, GraphError> {
+        if set == LabelSetId::EMPTY {
+            return Ok(Arc::from([]));
+        }
+        if let Some(labels) = self
+            .label_sets
+            .labels(set)
+            .or_else(|| self.own_label_sets.labels(set))
+        {
+            return Ok(labels);
+        }
+        let labels = self
+            .transaction
+            .get_with(
+                Table::LabelSets,
+                &set.0.to_be_bytes(),
+                meta::parse_label_set,
+            )?
+            .ok_or(GraphError::Corrupt(
+                "a node has a label set that does not exist",
+            ))?;
+        if self.reads_committed_tokens {
+            self.label_sets.insert(set, Arc::clone(&labels));
+        } else {
+            self.own_label_sets.insert(set, Arc::clone(&labels));
+        }
+        Ok(labels)
+    }
+
+    fn visit_meta(
+        &self,
+        check_deltas: bool,
+        mut visit: impl FnMut(Meta<'_>) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let mut edits = self.meta.iter().peekable();
+        let mut edited_group = None;
+        let mut chunk_group = None;
+        let mut chunk = Vec::new();
+        self.transaction
+            .visit_prefix(Table::NodeChunks, &[], |key, value| {
+                let Some((group, part)) = meta::parse_key(key)? else {
+                    return Ok(());
+                };
+                if edited_group == Some(group) {
+                    return Ok(());
+                }
+                while let Some((edited, edit)) = edits.next_if(|(edited, _)| **edited < group) {
+                    visit(Meta::Edited {
+                        group: *edited,
+                        edit: edit.view()?,
+                    })?;
+                }
+                if let Some((_, edit)) = edits.next_if(|(edited, _)| **edited == group) {
+                    edited_group = Some(group);
+                    return visit(Meta::Edited {
+                        group,
+                        edit: edit.view()?,
+                    });
+                }
+                match part {
+                    Part::Chunk => {
+                        chunk_group = Some(group);
+                        if check_deltas {
+                            chunk.clear();
+                            chunk.extend_from_slice(value);
+                        }
+                        visit(Meta::Chunk {
+                            group,
+                            bytes: value,
+                        })
+                    }
+                    Part::Delta(slot) if chunk_group == Some(group) => {
+                        let delta = Delta::parse(key, value)?;
+                        if check_deltas
+                            && MetaBytes::trusted(&chunk)?.label_set(slot)? != delta.before
+                        {
+                            return Err(GraphError::Corrupt(
+                                "a node meta delta does not amend its chunk",
+                            ));
+                        }
+                        visit(Meta::Delta { group, delta })
+                    }
+                    Part::Delta(_) => Err(GraphError::Corrupt("a node meta delta has no chunk")),
+                }
+            })?;
+        for (group, edit) in edits {
+            visit(Meta::Edited {
+                group: *group,
+                edit: edit.view()?,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The label set of the node with ID `id`, or `None` when there is no such node.
+    pub(crate) fn node_label_set(&self, id: NodeId) -> Result<Option<LabelSetId>, GraphError> {
+        let (group, slot) = meta::locate(id);
+        if let Some(edit) = self.meta.get(&group) {
+            return edit.label_set(slot);
+        }
+        let key = meta::delta_key(group, slot);
+        let delta = self
+            .transaction
+            .get_with(Table::NodeChunks, &key, |bytes| Delta::parse(&key, bytes))?;
+        let chunk =
+            self.transaction
+                .get_with(Table::NodeChunks, &meta::meta_key(group), |bytes| {
+                    MetaBytes::parse(group, bytes)?.label_set(slot)
+                })?;
+        match (chunk, delta) {
+            (Some(state), None) => Ok(state),
+            (Some(state), Some(delta)) if delta.before == state => Ok(delta.after),
+            (Some(_), Some(_)) => Err(GraphError::Corrupt(
+                "a node meta delta does not amend its chunk",
+            )),
+            (None, Some(_)) => Err(GraphError::Corrupt("a node meta delta has no chunk")),
+            (None, None) => {
+                let mut stray = false;
+                self.transaction.visit_prefix(
+                    Table::NodeChunks,
+                    &meta::group_prefix(group),
+                    |_, _| {
+                        stray = true;
+                        Ok::<(), GraphError>(())
+                    },
+                )?;
+                if stray {
+                    return Err(GraphError::Corrupt("a node meta delta has no chunk"));
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) fn node_labels(
+        &self,
+        id: NodeId,
+    ) -> Result<Option<Arc<[Token<Label>]>>, GraphError> {
+        self.node_label_set(id)?
+            .map(|set| self.label_set(set))
+            .transpose()
+    }
+
+    /// Calls `read` with the labels of the node with ID `id`, if there is such a node, reading
+    /// its group's node meta through `reader`.
+    pub(crate) fn with_labels<R>(
+        &self,
+        reader: &mut LabelReader,
+        id: NodeId,
+        read: impl FnOnce(&[Token<Label>]) -> R,
+    ) -> Result<Option<R>, GraphError> {
+        let (group, slot) = meta::locate(id);
+        if self.meta.contains_key(&group) {
+            return Ok(self.node_labels(id)?.map(|labels| read(&labels)));
+        }
+        reader.with_labels(group, slot, || self.load_meta(group), read)
+    }
+
+    fn stored_group(&self, group: u64) -> Result<Option<meta::StoredGroup>, GraphError> {
+        let mut chunk: Option<Box<[u8]>> = None;
+        let mut deltas = Vec::new();
+        self.transaction.visit_prefix(
+            Table::NodeChunks,
+            &meta::group_prefix(group),
+            |key, value| {
+                match meta::parse_key(key)? {
+                    Some((_, Part::Chunk)) => {
+                        MetaBytes::parse(group, value)?;
+                        chunk = Some(value.into());
+                    }
+                    Some((_, Part::Delta(_))) => {
+                        let delta = Delta::parse(key, value)?;
+                        let Some(bytes) = &chunk else {
+                            return Err(GraphError::Corrupt("a node meta delta has no chunk"));
+                        };
+                        if MetaBytes::trusted(bytes)?.label_set(delta.slot)? != delta.before {
+                            return Err(GraphError::Corrupt(
+                                "a node meta delta does not amend its chunk",
+                            ));
+                        }
+                        deltas.push(delta);
+                    }
+                    None => {}
+                }
+                Ok::<(), GraphError>(())
+            },
+        )?;
+        Ok(chunk.map(|chunk| (chunk, deltas)))
+    }
+
+    fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
+        let Some((bytes, deltas)) = self.stored_group(group)? else {
+            return Ok(None);
+        };
+        let sets = MetaBytes::trusted(&bytes)?
+            .head()
+            .dictionary()
+            .map(|set| self.label_set(set))
+            .collect::<Result<_, _>>()?;
+        let deltas = deltas
+            .into_iter()
+            .map(|delta| {
+                let labels = delta.after.map(|set| self.label_set(set)).transpose()?;
+                Ok((delta.slot, labels))
+            })
+            .collect::<Result<_, GraphError>>()?;
+        Ok(Some((bytes, sets, deltas)))
+    }
+
+    fn carries(&self, state: Slot, label: Token<Label>) -> Result<bool, GraphError> {
+        match state {
+            None => Ok(false),
+            Some(set) => Ok(self.label_set(set)?.binary_search(&label).is_ok()),
+        }
     }
 
     pub(crate) fn node_ids(&self) -> Result<Vec<NodeId>, GraphError> {
-        self.transaction
-            .scan_prefix(Table::Nodes, &[])?
-            .iter()
-            .map(|(key, _)| Ok(NodeId(decode_u64(key)?)))
-            .collect()
+        let mut ids = Vec::new();
+        self.visit_meta(true, |entry| {
+            match entry {
+                Meta::Chunk { group, bytes } => ids.extend(
+                    MetaBytes::parse(group, bytes)?
+                        .live_codes()
+                        .map(|(slot, _)| meta::node_at(group, slot)),
+                ),
+                Meta::Delta { group, delta } => amend(
+                    &mut ids,
+                    meta::node_at(group, delta.slot),
+                    delta.before.is_some(),
+                    delta.after.is_some(),
+                )?,
+                Meta::Edited { group, edit } => {
+                    ids.extend(edit.live().map(|(slot, _)| meta::node_at(group, slot)));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(ids)
     }
 
+    /// The nodes that carry `label`, in ascending ID order.
     pub(crate) fn node_ids_with_label(
         &self,
         label: Token<Label>,
     ) -> Result<Vec<NodeId>, GraphError> {
-        self.transaction
-            .scan_prefix(Table::LabelIndex, &keys::label_prefix(label))?
-            .iter()
-            .map(|(key, _)| Ok(keys::parse_label_key(key)?))
-            .collect()
+        let mut ids = Vec::new();
+        self.visit_meta(true, |entry| {
+            match entry {
+                Meta::Chunk { group, bytes } => {
+                    let stored = MetaBytes::parse(group, bytes)?;
+                    if stored.head().label_count(label) == 0 {
+                        return Ok(());
+                    }
+                    let carries = stored
+                        .head()
+                        .dictionary()
+                        .map(|set| self.carries(Some(set), label))
+                        .collect::<Result<Vec<bool>, GraphError>>()?;
+                    if let [true] = carries.as_slice() {
+                        ids.reserve(stored.head().live() as usize);
+                        for (index, word) in stored.alive_words().into_iter().enumerate() {
+                            let mut rest = word;
+                            while rest != 0 {
+                                let slot = index * 64 + rest.trailing_zeros() as usize;
+                                rest &= rest - 1;
+                                ids.push(meta::node_at(group, slot));
+                            }
+                        }
+                        return Ok(());
+                    }
+                    for (slot, code) in stored.live_codes() {
+                        match carries.get(code) {
+                            Some(true) => ids.push(meta::node_at(group, slot)),
+                            Some(false) => {}
+                            None => {
+                                return Err(GraphError::Corrupt(
+                                    "a node meta code is outside its dictionary",
+                                ));
+                            }
+                        }
+                    }
+                }
+                Meta::Delta { group, delta } => amend(
+                    &mut ids,
+                    meta::node_at(group, delta.slot),
+                    self.carries(delta.before, label)?,
+                    self.carries(delta.after, label)?,
+                )?,
+                Meta::Edited { group, edit } => {
+                    let mut carrying = BTreeSet::new();
+                    for (set, _) in edit.uses() {
+                        if self.carries(Some(set), label)? {
+                            carrying.insert(set);
+                        }
+                    }
+                    if carrying.is_empty() {
+                        return Ok(());
+                    }
+                    for (slot, set) in edit.live() {
+                        if carrying.contains(&set) {
+                            ids.push(meta::node_at(group, slot));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        Ok(ids)
+    }
+
+    /// How many nodes there are, from the live count each group keeps. Like a label count, it
+    /// checks only the head of each chunk and trusts each delta's state in the chunk.
+    pub(crate) fn count_nodes(&self) -> Result<u64, GraphError> {
+        let mut count = 0u64;
+        self.visit_meta(false, |entry| {
+            count = match entry {
+                Meta::Chunk { group, bytes } => count + MetaHead::parse(group, bytes)?.live(),
+                Meta::Delta { delta, .. } => (count + u64::from(delta.after.is_some()))
+                    .checked_sub(u64::from(delta.before.is_some()))
+                    .ok_or(GraphError::Corrupt(
+                        "a node meta delta does not amend its chunk",
+                    ))?,
+                Meta::Edited { edit, .. } => count + edit.live().count() as u64,
+            };
+            Ok(())
+        })?;
+        Ok(count)
+    }
+
+    /// How many nodes carry `label`, from the label counts each group keeps. A count checks only
+    /// the head of each chunk and trusts each delta's state in the chunk.
+    pub(crate) fn count_nodes_with_label(&self, label: Token<Label>) -> Result<u64, GraphError> {
+        let mut count = 0u64;
+        self.visit_meta(false, |entry| {
+            count = match entry {
+                Meta::Chunk { group, bytes } => {
+                    count + MetaHead::parse(group, bytes)?.label_count(label)
+                }
+                Meta::Delta { delta, .. } => (count + u64::from(self.carries(delta.after, label)?))
+                    .checked_sub(u64::from(self.carries(delta.before, label)?))
+                    .ok_or(GraphError::Corrupt(
+                        "a node meta delta does not amend its chunk",
+                    ))?,
+                Meta::Edited { edit, .. } => {
+                    let mut carrying = count;
+                    for (set, uses) in edit.uses() {
+                        if self.carries(Some(set), label)? {
+                            carrying += u64::from(uses);
+                        }
+                    }
+                    carrying
+                }
+            };
+            Ok(())
+        })?;
+        Ok(count)
     }
 
     /// Fails with `NodeHasRelationships` while any relationship still touches the node.
@@ -291,47 +918,187 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
     }
 
-    /// The relationships touching `node`, optionally of one type. A self-loop is reported once under `Both`.
+    /// The relationships touching `node`, optionally of one type, outgoing ones first, each
+    /// side by type and then by ID. A self-loop is reported once under `Both`.
     pub(crate) fn adjacent(
         &self,
         node: NodeId,
         direction: Direction,
         rel_type: Option<Token<RelationshipType>>,
     ) -> Result<Vec<Adjacent>, GraphError> {
+        self.adjacent_with(&mut AdjacencyReader::default(), node, direction, rel_type)
+    }
+
+    /// [`adjacent`](Self::adjacent) through `reader`, which holds the segments a scan of
+    /// consecutive nodes reads again.
+    pub(crate) fn adjacent_with(
+        &self,
+        reader: &mut AdjacencyReader,
+        node: NodeId,
+        direction: Direction,
+        rel_type: Option<Token<RelationshipType>>,
+    ) -> Result<Vec<Adjacent>, GraphError> {
         let mut found = Vec::new();
-        if direction != Direction::Incoming {
-            found.extend(self.adjacency_entries(Table::Outgoing, node, rel_type)?);
-        }
-        if direction != Direction::Outgoing {
-            let incoming = self.adjacency_entries(Table::Incoming, node, rel_type)?;
-            let skip_self_loops = direction == Direction::Both;
-            found.extend(
-                incoming
-                    .into_iter()
-                    .filter(|adjacent| !(skip_self_loops && adjacent.other == node)),
-            );
-        }
+        self.adjacent_into(reader, node, direction, rel_type, &mut found)?;
         Ok(found)
     }
 
-    fn adjacency_entries(
+    /// Appends to `found` what [`GraphTx::adjacent_with`] returns.
+    pub(crate) fn adjacent_into(
         &self,
-        table: Table,
+        reader: &mut AdjacencyReader,
+        node: NodeId,
+        direction: Direction,
+        rel_type: Option<Token<RelationshipType>>,
+        found: &mut Vec<Adjacent>,
+    ) -> Result<(), GraphError> {
+        if direction != Direction::Incoming {
+            self.visit_adjacency(reader, Side::Outgoing, node, rel_type, &mut |adjacent| {
+                found.push(adjacent);
+            })?;
+        }
+        if direction != Direction::Outgoing {
+            let skip_self_loops = direction == Direction::Both;
+            self.visit_adjacency(reader, Side::Incoming, node, rel_type, &mut |adjacent| {
+                if !(skip_self_loops && adjacent.other == node) {
+                    found.push(adjacent);
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn visit_adjacency_prefix(
+        &self,
+        reader: &mut AdjacencyReader,
+        side: Side,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8], &mut Option<adjacency::Checked>) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let entries = reader.entries(side, prefix, |window| {
+            let mut held = Vec::new();
+            self.transaction.visit_range(
+                Table::Adjacency,
+                window.start(),
+                &window.end(),
+                |key, value| {
+                    if held
+                        .last()
+                        .is_some_and(|(last, _, _): &adjacency::Verified| **last >= *key)
+                    {
+                        return Err(ENTRIES_OUT_OF_ORDER);
+                    }
+                    if window.holds(key) {
+                        held.push((key.into(), value.into(), None));
+                    }
+                    Ok::<(), GraphError>(())
+                },
+            )?;
+            Ok::<_, GraphError>(held)
+        })?;
+        match entries {
+            Entries::Held(entries) => {
+                for (key, value, verified) in entries {
+                    visit(key, value, verified)?;
+                }
+                Ok(())
+            }
+            Entries::Stored => {
+                self.transaction
+                    .visit_prefix(Table::Adjacency, prefix, |key, value| {
+                        visit(key, value, &mut None)
+                    })
+            }
+        }
+    }
+
+    fn visit_adjacency(
+        &self,
+        reader: &mut AdjacencyReader,
+        side: Side,
         node: NodeId,
         rel_type: Option<Token<RelationshipType>>,
-    ) -> Result<Vec<Adjacent>, GraphError> {
-        self.transaction
-            .scan_prefix(table, &keys::adjacency_prefix(node, rel_type))?
-            .iter()
-            .map(|(key, value)| {
-                let (rel_type, relationship) = keys::parse_adjacency_key(key)?;
-                Ok(Adjacent {
-                    relationship,
-                    rel_type,
-                    other: NodeId(decode_u64(value)?),
-                })
-            })
-            .collect()
+        emit: &mut impl FnMut(Adjacent),
+    ) -> Result<(), GraphError> {
+        let (first, position) = adjacency::locate(side, node, 0);
+        if let Some(rel_type) = rel_type {
+            let id = SegmentId {
+                rel_type: rel_type.id(),
+                ..first
+            };
+            return self.visit_typed_adjacency(reader, &id, position, emit);
+        }
+        let last = SegmentId {
+            rel_type: u32::MAX,
+            ..first
+        };
+        let mut edits = self.adjacency.range(first..=last).peekable();
+        let mut current: Option<(u32, SlotRead)> = None;
+        let mut edited = None;
+        self.visit_adjacency_prefix(
+            reader,
+            side,
+            &adjacency::segment_prefix(side, first.group, first.segment),
+            |key, value, verified| {
+                let (id, entry) = adjacency::parse_key(key)?;
+                if edited == Some(id.rel_type) {
+                    return Ok(());
+                }
+                if current
+                    .as_ref()
+                    .is_none_or(|(held, _)| *held != id.rel_type)
+                {
+                    if let Some((held, read)) = current.take() {
+                        read.finish(&mut typed(held, emit))?;
+                    }
+                    while let Some((edit_id, edit)) =
+                        edits.next_if(|(edit_id, _)| edit_id.rel_type <= id.rel_type)
+                    {
+                        edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+                        if edit_id.rel_type == id.rel_type {
+                            edited = Some(id.rel_type);
+                            return Ok(());
+                        }
+                    }
+                    current = Some((id.rel_type, SlotRead::default()));
+                }
+                match &mut current {
+                    Some((held, read)) => read.visit(
+                        entry,
+                        position,
+                        (key, value, verified),
+                        &mut typed(*held, emit),
+                    ),
+                    None => Ok(()),
+                }
+            },
+        )?;
+        if let Some((held, read)) = current {
+            read.finish(&mut typed(held, emit))?;
+        }
+        for (edit_id, edit) in edits {
+            edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+        }
+        Ok(())
+    }
+
+    fn visit_typed_adjacency(
+        &self,
+        reader: &mut AdjacencyReader,
+        id: &SegmentId,
+        position: usize,
+        emit: &mut impl FnMut(Adjacent),
+    ) -> Result<(), GraphError> {
+        let mut emit = typed(id.rel_type, emit);
+        if let Some(edit) = self.adjacency.get(id) {
+            return edit.visit(position, &mut emit);
+        }
+        let mut read = SlotRead::default();
+        self.visit_adjacency_prefix(reader, id.side, &id.prefix(), |key, value, verified| {
+            let (_, entry) = adjacency::parse_key(key)?;
+            read.visit(entry, position, (key, value, verified), &mut emit)
+        })?;
+        read.finish(&mut emit)
     }
 
     /// Looks a name up without creating it, so a read never writes.
@@ -339,12 +1106,23 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        if let Some(token) = self.tokens.get(name).or_else(|| self.own_tokens.get(name)) {
+            return Ok(Some(token));
+        }
         let bytes = self
             .transaction
             .get(Table::TokenByName, &keys::token_name_key(K::TAG, name))?;
-        Ok(bytes
+        let token = bytes
             .map(|bytes| decode_u32(&bytes).map(Token::new))
-            .transpose()?)
+            .transpose()?;
+        if let Some(token) = token {
+            if self.reads_committed_tokens {
+                self.tokens.insert(name, token);
+            } else {
+                self.own_tokens.insert(name, token);
+            }
+        }
+        Ok(token)
     }
 
     pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<String, GraphError> {
@@ -357,12 +1135,423 @@ impl<T: ReadTransaction> GraphTx<T> {
 }
 
 impl<T: WriteTransaction> GraphTx<T> {
-    pub(crate) fn commit(self) -> Result<(), GraphError> {
-        Ok(self.transaction.commit()?)
+    pub(crate) fn commit(mut self) -> Result<(), GraphError> {
+        self.flush()?;
+        let definitions = match &self.catalog {
+            Some(Catalog {
+                shared,
+                changed: true,
+            }) => Some((shared, self.index_definitions()?)),
+            _ => None,
+        };
+        let mut current = definitions
+            .as_ref()
+            .map(|(shared, definitions)| (lock(shared), definitions));
+        let mut counts = self.column_deltas.as_ref().map(|shared| lock(shared));
+        let committed = self.transaction.commit();
+        if let Some(counts) = &mut counts {
+            if committed.is_ok() {
+                counts.extend(std::mem::take(&mut self.own_column_deltas));
+            } else {
+                counts.clear();
+            }
+        }
+        committed?;
+        if let Some((current, definitions)) = &mut current {
+            **current = Arc::clone(definitions);
+        }
+        Ok(())
     }
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {
         Ok(self.transaction.rollback()?)
+    }
+
+    fn flush(&mut self) -> Result<(), GraphError> {
+        for (set, (key, users)) in std::mem::take(&mut self.new_label_sets) {
+            if users > 0 {
+                self.store_label_set(set, &key)?;
+            }
+        }
+        for (key, next) in std::mem::take(&mut self.counters) {
+            self.transaction
+                .put(Table::Metadata, &key, &next.to_be_bytes())?;
+        }
+        self.flush_postings()?;
+        self.flush_columns()?;
+        self.flush_adjacency()?;
+        self.flush_relationships()?;
+        for (group, edit) in std::mem::take(&mut self.meta) {
+            match edit.flush()? {
+                Flush::Rewrite { view, stale } => {
+                    let key = meta::meta_key(group);
+                    match view.encode(group, |set| self.label_set(set))? {
+                        Some(chunk) => self.transaction.put(Table::NodeChunks, &key, &chunk)?,
+                        None => self.transaction.delete(Table::NodeChunks, &key)?,
+                    }
+                    for slot in stale {
+                        self.transaction
+                            .delete(Table::NodeChunks, &meta::delta_key(group, slot))?;
+                    }
+                }
+                Flush::Deltas { put, delete } => {
+                    for delta in put {
+                        self.transaction.put(
+                            Table::NodeChunks,
+                            &meta::delta_key(group, delta.slot),
+                            &delta.encode(group),
+                        )?;
+                    }
+                    for slot in delete {
+                        self.transaction
+                            .delete(Table::NodeChunks, &meta::delta_key(group, slot))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_adjacency(&mut self) -> Result<(), GraphError> {
+        for (id, edit) in std::mem::take(&mut self.adjacency) {
+            let flush = edit.flush(&id)?;
+            for key in flush.delete {
+                self.transaction.delete(Table::Adjacency, &key)?;
+            }
+            for (key, bytes) in flush.put {
+                self.transaction.put(Table::Adjacency, &key, &bytes)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_relationships(&mut self) -> Result<(), GraphError> {
+        for (chunk, edit) in std::mem::take(&mut self.relationship_chunks) {
+            let key = relationships::chunk_key(chunk);
+            match edit.encode() {
+                Some(bytes) => self
+                    .transaction
+                    .put(Table::RelationshipChunks, &key, &bytes)?,
+                None => self.transaction.delete(Table::RelationshipChunks, &key)?,
+            }
+        }
+        self.relationship_bytes = 0;
+        Ok(())
+    }
+
+    fn store_relationship(
+        &mut self,
+        id: RelationshipId,
+        record: Option<&RelationshipRecord>,
+    ) -> Result<(), GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        let edit = match self.relationship_chunks.entry(chunk) {
+            btree_map::Entry::Occupied(held) => held.into_mut(),
+            btree_map::Entry::Vacant(vacant) => {
+                let edit = self
+                    .transaction
+                    .get_with(
+                        Table::RelationshipChunks,
+                        &relationships::chunk_key(chunk),
+                        ChunkEdit::load,
+                    )?
+                    .unwrap_or_default();
+                self.relationship_bytes += edit.bytes();
+                vacant.insert(edit)
+            }
+        };
+        let before = edit.bytes();
+        edit.set(slot, record.map(RelationshipRecord::encode));
+        self.relationship_bytes = self.relationship_bytes - before + edit.bytes();
+        if self.relationship_bytes > HELD_RELATIONSHIP_BYTES {
+            self.flush_relationships()?;
+        }
+        Ok(())
+    }
+
+    fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
+        match self.adjacency.entry(id) {
+            btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
+            btree_map::Entry::Vacant(vacant) => {
+                let (start, end) = id.range();
+                let mut entries = Vec::new();
+                self.transaction
+                    .visit_range(Table::Adjacency, &start, &end, |key, value| {
+                        entries.push((key.to_vec(), value.to_vec()));
+                        Ok::<(), GraphError>(())
+                    })?;
+                let edit = SegmentEdit::load(
+                    &id,
+                    entries
+                        .iter()
+                        .map(|(key, value)| (key.as_slice(), value.as_slice())),
+                )?;
+                Ok(vacant.insert(edit))
+            }
+        }
+    }
+
+    fn move_relationships_to_chunks(&mut self, fixed: bool) -> Result<(), GraphError> {
+        const BATCH_SHIFT: u32 = 16;
+        let mut batches = BTreeSet::new();
+        self.transaction
+            .visit_prefix(Table::Relationships, &[], |key, _| {
+                batches.insert(decode_u64(key)? >> BATCH_SHIFT);
+                Ok::<(), GraphError>(())
+            })?;
+        for batch in batches {
+            let start = keys::element_key(batch << BATCH_SHIFT);
+            let end = batch
+                .checked_add(1)
+                .and_then(|next| next.checked_mul(1 << BATCH_SHIFT))
+                .map_or([0xff; 9].to_vec(), |next| keys::element_key(next).to_vec());
+            let mut chunks: BTreeMap<u64, ChunkEdit> = BTreeMap::new();
+            self.transaction
+                .visit_range(Table::Relationships, &start, &end, |key, value| {
+                    let record = if fixed {
+                        RelationshipRecord::decode_fixed(value)?
+                    } else {
+                        RelationshipRecord::decode(value)?
+                    };
+                    let (chunk, slot) = relationships::locate(RelationshipId(decode_u64(key)?));
+                    chunks
+                        .entry(chunk)
+                        .or_default()
+                        .set(slot, Some(record.encode()));
+                    Ok::<(), GraphError>(())
+                })?;
+            for (chunk, edit) in chunks {
+                if let Some(bytes) = edit.encode() {
+                    self.transaction.put(
+                        Table::RelationshipChunks,
+                        &relationships::chunk_key(chunk),
+                        &bytes,
+                    )?;
+                }
+            }
+            self.transaction
+                .delete_range(Table::Relationships, &start, &end)?;
+        }
+        Ok(())
+    }
+
+    fn move_adjacency_to_segments(&mut self) -> Result<(), GraphError> {
+        for (side, table) in [
+            (Side::Outgoing, Table::Outgoing),
+            (Side::Incoming, Table::Incoming),
+        ] {
+            let mut groups = BTreeSet::new();
+            self.transaction.visit_prefix(table, &[], |key, _| {
+                let (node, _, _) = keys::parse_adjacency_key(key)?;
+                groups.insert(meta::locate(node).0);
+                Ok::<(), GraphError>(())
+            })?;
+            for group in groups {
+                let start = keys::element_key(meta::node_at(group, 0).0);
+                let end = group
+                    .checked_add(1)
+                    .and_then(|after| after.checked_mul(meta::SLOTS as u64))
+                    .map_or([0xff; 9].to_vec(), |after| {
+                        keys::element_key(after).to_vec()
+                    });
+                let mut segments: BTreeMap<SegmentId, Vec<(usize, Vec<Edge>)>> = BTreeMap::new();
+                for (key, value) in self.transaction.scan_range(table, &start, &end)? {
+                    let (node, rel_type, relationship) = keys::parse_adjacency_key(&key)?;
+                    let edge = Edge {
+                        relationship,
+                        other: NodeId(decode_u64(&value)?),
+                    };
+                    let (id, position) = adjacency::locate(side, node, rel_type.id());
+                    let slots = segments.entry(id).or_default();
+                    match slots.last_mut() {
+                        Some((held, edges)) if *held == position => edges.push(edge),
+                        _ => slots.push((position, vec![edge])),
+                    }
+                }
+                for (id, slots) in segments {
+                    let borrowed: Vec<(usize, &[Edge])> = slots
+                        .iter()
+                        .map(|(position, edges)| (*position, edges.as_slice()))
+                        .collect();
+                    for (key, bytes) in adjacency::encode_segment(&id, &borrowed)? {
+                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
+                    }
+                }
+                self.transaction.delete_range(table, &start, &end)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn meta_edit(&mut self, group: u64) -> Result<&mut GroupEdit, GraphError> {
+        if !self.meta.contains_key(&group) {
+            let edit = match self.stored_group(group)? {
+                Some((chunk, deltas)) => GroupEdit::load(Some(chunk), deltas)?,
+                None => GroupEdit::load(None, Vec::new())?,
+            };
+            self.meta.insert(group, edit);
+        }
+        self.meta
+            .get_mut(&group)
+            .ok_or(GraphError::Corrupt("a node meta edit vanished"))
+    }
+
+    fn intern_label_set(
+        &mut self,
+        labels: &BTreeSet<Token<Label>>,
+    ) -> Result<LabelSetId, GraphError> {
+        if labels.is_empty() {
+            return Ok(LabelSetId::EMPTY);
+        }
+        let labels: Arc<[Token<Label>]> = labels.iter().copied().collect();
+        let key = meta::label_set_key(&labels);
+        if let Some(set) = self
+            .label_sets
+            .id(&key)
+            .or_else(|| self.own_label_sets.id(&key))
+        {
+            return Ok(set);
+        }
+        let stored = self
+            .transaction
+            .get(Table::LabelSetByTokens, &key)?
+            .map(|bytes| decode_u32(&bytes))
+            .transpose()?;
+        let set = match stored {
+            Some(id) => LabelSetId(id),
+            None => {
+                let mut id = self.next_counter(keys::NEXT_LABEL_SET_KEY)?;
+                if id == u64::from(LabelSetId::EMPTY.0) {
+                    id = self.next_counter(keys::NEXT_LABEL_SET_KEY)?;
+                }
+                let id = u32::try_from(id).map_err(|_| GraphError::IdSpaceExhausted)?;
+                let set = LabelSetId(id);
+                self.new_label_sets.insert(set, (key, 0));
+                set
+            }
+        };
+        self.own_label_sets.insert(set, labels);
+        Ok(set)
+    }
+
+    fn set_node_label_set(
+        &mut self,
+        group: u64,
+        slot: usize,
+        state: Option<LabelSetId>,
+    ) -> Result<(), GraphError> {
+        let edit = self.meta_edit(group)?;
+        let was = edit.label_set(slot)?;
+        edit.set(slot, state)?;
+        if let Some(set) = state
+            && let Some((_, users)) = self.new_label_sets.get_mut(&set)
+        {
+            *users += 1;
+        }
+        if let Some(set) = was
+            && let Some((_, users)) = self.new_label_sets.get_mut(&set)
+        {
+            *users -= 1;
+            if *users == 0 {
+                self.new_label_sets.remove(&set);
+                self.own_label_sets.remove(set);
+            }
+        }
+        Ok(())
+    }
+
+    fn store_label_set(&mut self, set: LabelSetId, key: &[u8]) -> Result<(), GraphError> {
+        self.transaction
+            .put(Table::LabelSets, &set.0.to_be_bytes(), key)?;
+        self.transaction
+            .put(Table::LabelSetByTokens, key, &set.0.to_be_bytes())?;
+        Ok(())
+    }
+
+    fn move_labels_to_node_meta(&mut self) -> Result<(), GraphError> {
+        let mut groups = BTreeSet::new();
+        self.transaction.visit_prefix(Table::Nodes, &[], |key, _| {
+            groups.insert(meta::locate(NodeId(decode_u64(key)?)).0);
+            Ok::<(), GraphError>(())
+        })?;
+        for group in groups {
+            let start = keys::element_key(meta::node_at(group, 0).0);
+            let end = group
+                .checked_add(1)
+                .and_then(|after| after.checked_mul(meta::SLOTS as u64))
+                .map_or([0xff; 9].to_vec(), |after| {
+                    keys::element_key(after).to_vec()
+                });
+            let mut edit = MetaEdit::default();
+            for (key, value) in self.transaction.scan_range(Table::Nodes, &start, &end)? {
+                let id = NodeId(decode_u64(&key)?);
+                let record = NodeRecord::decode_with_labels(&value)?;
+                for label in &record.labels {
+                    self.transaction
+                        .delete(Table::LabelIndex, &keys::label_key(*label, id))?;
+                }
+                self.transaction.put(Table::Nodes, &key, &record.encode())?;
+                let set = self.intern_label_set(&record.labels)?;
+                if let Some((key, _)) = self.new_label_sets.remove(&set) {
+                    self.store_label_set(set, &key)?;
+                }
+                edit.put(meta::locate(id).1, set);
+            }
+            if let Some(chunk) = edit.encode(group, |set| self.label_set(set))? {
+                self.transaction
+                    .put(Table::NodeChunks, &meta::meta_key(group), &chunk)?;
+            }
+        }
+        for (key, _) in self.transaction.scan_prefix(Table::LabelIndex, &[])? {
+            self.transaction.delete(Table::LabelIndex, &key)?;
+        }
+        Ok(())
+    }
+
+    fn move_properties_to_columns(&mut self) -> Result<(), GraphError> {
+        let mut group: Option<u64> = None;
+        let mut values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>> = BTreeMap::new();
+        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
+            let (at, slot) = meta::locate(NodeId(decode_u64(&key)?));
+            if group.is_some_and(|group| group != at) {
+                self.put_columns(group, std::mem::take(&mut values))?;
+            }
+            group = Some(at);
+            for (token, value) in NodeRecord::decode_properties(&value)? {
+                values.entry(token).or_default().push((slot, value));
+            }
+            self.transaction.delete(Table::Nodes, &key)?;
+        }
+        self.put_columns(group, values)
+    }
+
+    fn put_columns(
+        &mut self,
+        group: Option<u64>,
+        values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>>,
+    ) -> Result<(), GraphError> {
+        let Some(group) = group else {
+            return Ok(());
+        };
+        for (token, values) in values {
+            let mut start = 0;
+            while start < values.len() {
+                let segment = values[start].0 / columns::SEGMENT_SLOTS;
+                let end = values[start..]
+                    .iter()
+                    .position(|(slot, _)| slot / columns::SEGMENT_SLOTS != segment)
+                    .map_or(values.len(), |offset| start + offset);
+                let cells: Vec<(usize, columns::Cell<'_>)> = values[start..end]
+                    .iter()
+                    .map(|(slot, value)| (slot % columns::SEGMENT_SLOTS, columns::Cell::of(value)))
+                    .collect();
+                for (key, bytes) in columns::encode_segment(group, token, segment, &cells)? {
+                    self.transaction.put(Table::NodeColumns, &key, &bytes)?;
+                }
+                start = end;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn intern_token<K: TokenKind>(
@@ -384,18 +1573,18 @@ impl<T: WriteTransaction> GraphTx<T> {
             &keys::token_id_key(K::TAG, id),
             name.as_bytes(),
         )?;
-        Ok(Token::new(id))
+        let token = Token::new(id);
+        self.own_tokens.insert(name, token);
+        Ok(token)
     }
 
-    pub(crate) fn create_node(&mut self, record: &NodeRecord) -> Result<NodeId, GraphError> {
+    pub(crate) fn create_node(&mut self, record: NodeRecord) -> Result<NodeId, GraphError> {
         let id = NodeId(self.next_counter(keys::NEXT_NODE_ID_KEY)?);
-        self.transaction
-            .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
-        for label in &record.labels {
-            self.transaction
-                .put(Table::LabelIndex, &keys::label_key(*label, id), &[])?;
-        }
-        self.reindex(id.0, None, Some(Element::Node(record)))?;
+        let set = self.intern_label_set(&record.labels)?;
+        let (group, slot) = meta::locate(id);
+        self.set_node_label_set(group, slot, Some(set))?;
+        self.reindex(id.0, None, Some(Element::Node(&record)))?;
+        self.create_column_node(group, slot, record.properties)?;
         Ok(id)
     }
 
@@ -406,21 +1595,20 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.require_node(record.source)?;
         self.require_node(record.target)?;
         let id = RelationshipId(self.next_counter(keys::NEXT_RELATIONSHIP_ID_KEY)?);
-        self.transaction.put(
-            Table::Relationships,
-            &keys::element_key(id.0),
-            &record.encode(),
-        )?;
-        self.transaction.put(
-            Table::Outgoing,
-            &keys::adjacency_key(record.source, record.rel_type, id),
-            &record.target.0.to_be_bytes(),
-        )?;
-        self.transaction.put(
-            Table::Incoming,
-            &keys::adjacency_key(record.target, record.rel_type, id),
-            &record.source.0.to_be_bytes(),
-        )?;
+        self.store_relationship(id, Some(record))?;
+        for (side, node, other) in [
+            (Side::Outgoing, record.source, record.target),
+            (Side::Incoming, record.target, record.source),
+        ] {
+            let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
+            self.adjacency_edit(segment)?.add(
+                position,
+                Edge {
+                    relationship: id,
+                    other,
+                },
+            );
+        }
         self.reindex(id.0, None, Some(Element::Relationship(record)))?;
         Ok(id)
     }
@@ -431,9 +1619,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         key: Token<PropertyKey>,
         value: PropertyValue,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.properties.insert(key, value);
-        })
+        self.write_node_property(node, key, Some(value))
     }
 
     pub(crate) fn remove_node_property(
@@ -441,9 +1627,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         node: NodeId,
         key: Token<PropertyKey>,
     ) -> Result<(), GraphError> {
-        self.edit_node(node, |record| {
-            record.properties.remove(&key);
-        })
+        self.write_node_property(node, key, None)
     }
 
     pub(crate) fn set_relationship_property(
@@ -467,86 +1651,202 @@ impl<T: WriteTransaction> GraphTx<T> {
         })
     }
 
+    /// Sets each property of `changes` on the relationship, or removes it with `None`, in one
+    /// write of its record.
+    pub(crate) fn set_relationship_properties(
+        &mut self,
+        relationship: RelationshipId,
+        changes: Vec<(Token<PropertyKey>, Option<PropertyValue>)>,
+    ) -> Result<(), GraphError> {
+        self.edit_relationship(relationship, |record| {
+            for (key, value) in changes {
+                match value {
+                    Some(value) => record.properties.insert(key, value),
+                    None => record.properties.remove(&key),
+                };
+            }
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn add_label(
         &mut self,
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        let added = self.edit_node(node, |record| record.labels.insert(label))?;
-        if added {
-            self.transaction
-                .put(Table::LabelIndex, &keys::label_key(label, node), &[])?;
-        }
-        Ok(())
+        self.relabel(node, &[label], true)
     }
 
+    /// Adds every label of `labels` to the node, interning only the label set it ends with.
+    pub(crate) fn add_labels(
+        &mut self,
+        node: NodeId,
+        labels: &[Token<Label>],
+    ) -> Result<(), GraphError> {
+        self.relabel(node, labels, true)
+    }
+
+    /// Removes every label of `labels` from the node, interning only the label set it ends with.
+    pub(crate) fn remove_labels(
+        &mut self,
+        node: NodeId,
+        labels: &[Token<Label>],
+    ) -> Result<(), GraphError> {
+        self.relabel(node, labels, false)
+    }
+
+    #[cfg(test)]
     pub(crate) fn remove_label(
         &mut self,
         node: NodeId,
         label: Token<Label>,
     ) -> Result<(), GraphError> {
-        let removed = self.edit_node(node, |record| record.labels.remove(&label))?;
-        if removed {
-            self.transaction
-                .delete(Table::LabelIndex, &keys::label_key(label, node))?;
+        self.relabel(node, &[label], false)
+    }
+
+    /// Removes the relationship and returns its record, or returns `None` when it does not exist.
+    pub(crate) fn delete_relationship(
+        &mut self,
+        id: RelationshipId,
+    ) -> Result<Option<RelationshipRecord>, GraphError> {
+        let Some(record) = self.relationship(id)? else {
+            return Ok(None);
+        };
+        self.store_relationship(id, None)?;
+        for (side, node) in [
+            (Side::Outgoing, record.source),
+            (Side::Incoming, record.target),
+        ] {
+            let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
+            self.adjacency_edit(segment)?.remove(position, id)?;
         }
-        Ok(())
+        self.reindex(id.0, Some(Element::Relationship(&record)), None)?;
+        Ok(Some(record))
     }
 
-    pub(crate) fn delete_relationship(&mut self, id: RelationshipId) -> Result<(), GraphError> {
-        let record = self
-            .relationship(id)?
-            .ok_or(GraphError::RelationshipNotFound(id))?;
-        self.transaction
-            .delete(Table::Relationships, &keys::element_key(id.0))?;
-        self.transaction.delete(
-            Table::Outgoing,
-            &keys::adjacency_key(record.source, record.rel_type, id),
-        )?;
-        self.transaction.delete(
-            Table::Incoming,
-            &keys::adjacency_key(record.target, record.rel_type, id),
-        )?;
-        self.reindex(id.0, Some(Element::Relationship(&record)), None)
-    }
-
-    /// Removes the node with its label and property index entries. Relationships that touch it
-    /// are left alone, so the caller must delete them or reject the transaction, which
-    /// `ensure_detached` checks.
-    pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<(), GraphError> {
-        let record = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
+    /// Removes the node with its label and property index entries and returns its record, or
+    /// returns `None` when it does not exist. Relationships that touch it are left alone, so the
+    /// caller must delete them or reject the transaction, which `ensure_detached` checks.
+    pub(crate) fn delete_node(&mut self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
+        let Some(labels) = self.node_labels(id)? else {
+            return Ok(None);
+        };
+        let properties = self.with_reader(|tx, reader| tx.live_node_properties(reader, id))?;
+        let record = NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        };
         self.reindex(id.0, Some(Element::Node(&record)), None)?;
-        for label in record.labels {
-            self.transaction
-                .delete(Table::LabelIndex, &keys::label_key(label, id))?;
+        let (group, slot) = meta::locate(id);
+        for key in record.properties.keys() {
+            self.set_column_value((group, *key), slot, None)?;
         }
-        self.transaction
-            .delete(Table::Nodes, &keys::element_key(id.0))?;
-        Ok(())
+        self.set_node_label_set(group, slot, None)?;
+        Ok(Some(record))
     }
 
     fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
-        self.node(id)?
+        self.node_label_set(id)?
             .map(|_| ())
             .ok_or(GraphError::NodeNotFound(id))
     }
 
-    fn edit_node<R>(
+    fn partial_record(
         &mut self,
         id: NodeId,
-        edit: impl FnOnce(&mut NodeRecord) -> R,
-    ) -> Result<R, GraphError> {
-        let before = self.node(id)?.ok_or(GraphError::NodeNotFound(id))?;
-        let mut record = before.clone();
-        let result = edit(&mut record);
-        self.transaction
-            .put(Table::Nodes, &keys::element_key(id.0), &record.encode())?;
-        self.reindex(
-            id.0,
-            Some(Element::Node(&before)),
-            Some(Element::Node(&record)),
-        )?;
-        Ok(result)
+        labels: &[Token<Label>],
+        keys: &BTreeSet<Token<PropertyKey>>,
+    ) -> Result<NodeRecord, GraphError> {
+        let (group, slot) = meta::locate(id);
+        let mut properties = Properties::new();
+        for key in keys {
+            if let Some(value) =
+                self.with_reader(|tx, reader| tx.column_value(reader, group, slot, *key))?
+            {
+                properties.insert(*key, value);
+            }
+        }
+        Ok(NodeRecord {
+            labels: labels.iter().copied().collect(),
+            properties,
+        })
+    }
+
+    fn read_labels(&mut self, id: NodeId) -> Result<Option<Arc<[Token<Label>]>>, GraphError> {
+        let mut reader = std::mem::take(&mut self.labels);
+        let labels = self.with_labels(&mut reader, id, |labels| Arc::from(labels));
+        self.labels = reader;
+        labels
+    }
+
+    fn write_node_property(
+        &mut self,
+        id: NodeId,
+        key: Token<PropertyKey>,
+        value: Option<PropertyValue>,
+    ) -> Result<(), GraphError> {
+        let labels = self.read_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let indexed =
+            self.node_index_keys(|label, keys| labels.contains(&label) && keys.contains(&key))?;
+        let (group, slot) = meta::locate(id);
+        if !indexed.is_empty() {
+            let before = self.partial_record(id, &labels, &indexed)?;
+            let mut after = before.clone();
+            match &value {
+                Some(value) => after.properties.insert(key, value.clone()),
+                None => after.properties.remove(&key),
+            };
+            self.reindex(
+                id.0,
+                Some(Element::Node(&before)),
+                Some(Element::Node(&after)),
+            )?;
+        } else if value.is_none()
+            && self
+                .with_reader(|tx, reader| tx.column_value(reader, group, slot, key))?
+                .is_none()
+        {
+            return Ok(());
+        }
+        self.set_column_value((group, key), slot, value)
+    }
+
+    fn relabel(
+        &mut self,
+        id: NodeId,
+        labels: &[Token<Label>],
+        add: bool,
+    ) -> Result<(), GraphError> {
+        let current = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let changed: BTreeSet<Token<Label>> = labels
+            .iter()
+            .copied()
+            .filter(|label| current.binary_search(label).is_ok() != add)
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let indexed = self.node_index_keys(|covered, _| changed.contains(&covered))?;
+        let before = self.partial_record(id, &current, &indexed)?;
+        let mut after = before.clone();
+        for label in &changed {
+            if add {
+                after.labels.insert(*label);
+            } else {
+                after.labels.remove(label);
+            }
+        }
+        let set = self.intern_label_set(&after.labels)?;
+        let (group, slot) = meta::locate(id);
+        self.set_node_label_set(group, slot, Some(set))?;
+        if !indexed.is_empty() {
+            self.reindex(
+                id.0,
+                Some(Element::Node(&before)),
+                Some(Element::Node(&after)),
+            )?;
+        }
+        Ok(())
     }
 
     fn edit_relationship<R>(
@@ -559,11 +1859,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             .ok_or(GraphError::RelationshipNotFound(id))?;
         let mut record = before.clone();
         let result = edit(&mut record);
-        self.transaction.put(
-            Table::Relationships,
-            &keys::element_key(id.0),
-            &record.encode(),
-        )?;
+        self.store_relationship(id, Some(&record))?;
         self.reindex(
             id.0,
             Some(Element::Relationship(&before)),
@@ -573,13 +1869,20 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn next_counter(&mut self, key: &[u8]) -> Result<u64, GraphError> {
-        let current = match self.transaction.get(Table::Metadata, key)? {
-            Some(bytes) => decode_u64(&bytes)?,
-            None => 0,
+        let index = match self.counters.iter().position(|(held, _)| held == key) {
+            Some(index) => index,
+            None => {
+                let stored = match self.transaction.get(Table::Metadata, key)? {
+                    Some(bytes) => decode_u64(&bytes)?,
+                    None => 0,
+                };
+                self.counters.push((key.to_vec(), stored));
+                self.counters.len() - 1
+            }
         };
-        let next = current.checked_add(1).ok_or(GraphError::IdSpaceExhausted)?;
-        self.transaction
-            .put(Table::Metadata, key, &next.to_be_bytes())?;
+        let held = &mut self.counters[index].1;
+        let current = *held;
+        *held = current.checked_add(1).ok_or(GraphError::IdSpaceExhausted)?;
         Ok(current)
     }
 }
@@ -595,3 +1898,74 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "graph/maintenance.test.rs"]
 mod maintenance_tests;
+
+#[cfg(test)]
+#[path = "graph/node_meta.test.rs"]
+mod node_meta_tests;
+
+#[cfg(test)]
+#[path = "graph/node_meta_crash.test.rs"]
+mod node_meta_crash_tests;
+
+#[cfg(test)]
+#[path = "graph/node_meta_corrupt.test.rs"]
+mod node_meta_corrupt_tests;
+
+#[cfg(test)]
+#[path = "graph/upgrade.test.rs"]
+mod upgrade_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_model.test.rs"]
+mod columns_model_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_crash.test.rs"]
+mod columns_crash_tests;
+
+#[cfg(test)]
+#[path = "graph/columns_corrupt.test.rs"]
+mod columns_corrupt_tests;
+
+#[cfg(test)]
+#[path = "graph/adjacency_model.test.rs"]
+mod adjacency_model_tests;
+
+#[cfg(test)]
+#[path = "graph/adjacency_crash.test.rs"]
+mod adjacency_crash_tests;
+
+fn visit_held(
+    chunk: u64,
+    edit: &ChunkEdit,
+    visit: &mut impl FnMut(RelationshipId, &[u8]) -> Result<(), GraphError>,
+) -> Result<(), GraphError> {
+    edit.entries()
+        .try_for_each(|(slot, record)| visit(relationships::relationship_at(chunk, slot), record))
+}
+
+fn typed(rel_type: u32, emit: &mut impl FnMut(Adjacent)) -> impl FnMut(Edge) + '_ {
+    move |edge| {
+        emit(Adjacent {
+            relationship: edge.relationship,
+            rel_type: Token::new(rel_type),
+            other: edge.other,
+        });
+    }
+}
+
+fn amend(ids: &mut Vec<NodeId>, node: NodeId, was: bool, is: bool) -> Result<(), GraphError> {
+    match (ids.binary_search(&node), was, is) {
+        (Ok(at), true, false) => {
+            ids.remove(at);
+        }
+        (Err(at), false, true) => ids.insert(at, node),
+        (Ok(_), true, true) | (Err(_), false, false) => {}
+        _ => {
+            return Err(GraphError::Corrupt(
+                "a node meta delta does not amend its chunk",
+            ));
+        }
+    }
+    Ok(())
+}

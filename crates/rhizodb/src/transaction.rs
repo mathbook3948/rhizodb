@@ -1,33 +1,50 @@
 use std::fmt;
+use std::marker::PhantomData;
 
+use crate::database::Backend;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::GraphTx;
-use crate::procedure::Procedures;
 use crate::query;
+use crate::query::Statements;
 use crate::result::Parameters;
 use crate::result::QueryResult;
-use crate::storage::redb_backend::RedbRead;
-use crate::storage::redb_backend::RedbWrite;
+use crate::storage::Storage;
 use crate::temporal;
 use crate::temporal::DateTime;
 
 /// A snapshot of the graph that several queries read, begun with
 /// [`Database::begin_read`](crate::Database::begin_read). Commits made after it began stay out of
 /// its view. Dropping it ends it.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let snapshot = db.begin_read()?;
+/// let error = snapshot.execute("INSERT ()", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::ReadOnlyTransaction);
+/// assert!(snapshot.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct ReadTransaction<'db> {
-    tx: GraphTx<RedbRead>,
+    tx: GraphTx<<Backend as Storage>::Read<'db>>,
     began: DateTime,
-    procedures: &'db Procedures,
+    statements: &'db Statements,
 }
 
 impl<'db> ReadTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbRead>, procedures: &'db Procedures) -> Self {
+    pub(crate) fn new(
+        tx: GraphTx<<Backend as Storage>::Read<'db>>,
+        statements: &'db Statements,
+    ) -> Self {
         Self {
             tx,
             began: temporal::now(),
-            procedures,
+            statements,
         }
     }
 
@@ -35,7 +52,7 @@ impl<'db> ReadTransaction<'db> {
     /// fails with [`ErrorKind::ReadOnlyTransaction`] before it reads data. A failed query leaves
     /// the transaction usable.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        query::execute_read(&self.tx, &self.began, self.procedures, query, parameters)
+        query::execute_read(&self.tx, &self.began, self.statements, query, parameters)
     }
 }
 
@@ -43,18 +60,50 @@ impl<'db> ReadTransaction<'db> {
 /// [`Database::begin_write`](crate::Database::begin_write). Its queries see its own writes, and
 /// other transactions see them only after [`WriteTransaction::commit`]. Dropping it without a
 /// commit rolls it back.
+///
+/// It stays on the thread that began it, so a second write begun on that thread can fail
+/// instead of waiting for itself. A host that holds a write across `.await` points runs it on
+/// one thread, for example in `spawn_blocking`.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::ErrorKind;
+/// use rhizodb::Parameters;
+///
+/// let db = Database::in_memory()?;
+/// let mut tx = db.begin_write()?;
+/// tx.execute("INSERT (:Kept)", &Parameters::new())?;
+/// assert!(tx.execute("RETURN 1 / 0", &Parameters::new()).is_err());
+/// let error = tx.execute("INSERT (:Lost)", &Parameters::new()).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::TransactionAborted);
+/// tx.rollback()?;
+/// assert!(db.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
+///
+/// ```compile_fail
+/// fn send<T: Send>(_: T) {}
+/// let db = rhizodb::Database::in_memory()?;
+/// send(db.begin_write()?);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 pub struct WriteTransaction<'db> {
-    tx: Option<GraphTx<RedbWrite>>,
+    tx: Option<GraphTx<<Backend as Storage>::Write<'db>>>,
     began: DateTime,
-    procedures: &'db Procedures,
+    statements: &'db Statements,
+    on_its_thread: PhantomData<*const ()>,
 }
 
 impl<'db> WriteTransaction<'db> {
-    pub(crate) fn new(tx: GraphTx<RedbWrite>, procedures: &'db Procedures) -> Self {
+    pub(crate) fn new(
+        tx: GraphTx<<Backend as Storage>::Write<'db>>,
+        statements: &'db Statements,
+    ) -> Self {
         Self {
             tx: Some(tx),
             began: temporal::now(),
-            procedures,
+            statements,
+            on_its_thread: PhantomData,
         }
     }
 
@@ -62,7 +111,7 @@ impl<'db> WriteTransaction<'db> {
     /// the whole transaction, so every later call fails with [`ErrorKind::TransactionAborted`].
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         let tx = self.tx.as_mut().ok_or_else(aborted)?;
-        let result = query::execute_write(tx, &self.began, self.procedures, query, parameters);
+        let result = query::execute_write(tx, &self.began, self.statements, query, parameters);
         if result.is_err() {
             self.tx = None;
         }

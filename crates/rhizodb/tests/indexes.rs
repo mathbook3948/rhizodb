@@ -6,6 +6,7 @@ use rhizodb::ErrorKind;
 use rhizodb::IndexTarget;
 use rhizodb::Parameters;
 use rhizodb::Procedure;
+use rhizodb::ProcedureOutput;
 use rhizodb::Value;
 use rhizodb::VectorMetric;
 use support::*;
@@ -555,20 +556,20 @@ fn a_standalone_search_returns_every_output() {
 
 #[test]
 fn the_db_namespace_is_reserved_for_built_in_procedures() {
-    let mut db = db();
+    let db = db();
     let error = db
         .register_procedure(Procedure::new("db.index.keyword.queryNodes", |_| {
-            Ok(Vec::new())
+            Ok(ProcedureOutput::new())
         }))
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::ReservedProcedureName);
     assert_eq!(
-        db.register_procedure(Procedure::new("db", |_| Ok(Vec::new())))
+        db.register_procedure(Procedure::new("db", |_| Ok(ProcedureOutput::new())))
             .unwrap_err()
             .kind(),
         ErrorKind::ReservedProcedureName
     );
-    db.register_procedure(Procedure::new("dbx.tool", |_| Ok(Vec::new())))
+    db.register_procedure(Procedure::new("dbx.tool", |_| Ok(ProcedureOutput::new())))
         .unwrap();
     assert_eq!(
         error_kind(&db, "CALL db.index.unknown()"),
@@ -1068,6 +1069,34 @@ proptest! {
         }
         let found = vector(&db, "v", &query, limit as i64);
         prop_assert_eq!(found, brute_force(&vectors, &query, metric, limit));
+    }
+
+    #[test]
+    fn vector_search_scores_match_the_brute_force_bit_for_bit(
+        (vectors, query) in (1usize..=8).prop_flat_map(|dimension| (
+            prop::collection::vec(prop::collection::vec(-6i8..=6, dimension), 0..40),
+            prop::collection::vec(-6i8..=6, dimension),
+        )),
+        metric in metric(),
+        limit in 0usize..50,
+    ) {
+        let thirds = |vector: &[i8]| vector.iter().map(|item| f64::from(*item) / 3.0).collect::<Vec<_>>();
+        let vectors: Vec<Vec<f64>> = vectors.iter().map(|vector| thirds(vector)).collect();
+        let query = thirds(&query);
+        prop_assume!(metric != VectorMetric::Cosine || query.iter().any(|item| *item != 0.0));
+        let db = db();
+        db.create_vector_index("v", IndexTarget::Label("V"), "at", query.len(), metric).unwrap();
+        for (position, vector) in vectors.iter().enumerate() {
+            let mut parameters = Parameters::new();
+            parameters.insert("name".to_owned(), string(&position.to_string()));
+            parameters.insert("at".to_owned(), list(vector.iter().map(|item| float(*item))));
+            db.execute("INSERT (:V {name: $name, at: $at})", &parameters).unwrap();
+        }
+        let bits = |hits: Vec<(String, f64)>| {
+            hits.into_iter().map(|(name, score)| (name, score.to_bits())).collect::<Vec<_>>()
+        };
+        let found = vector(&db, "v", &query, limit as i64);
+        prop_assert_eq!(bits(found), bits(brute_force(&vectors, &query, metric, limit)));
     }
 
     #[test]
