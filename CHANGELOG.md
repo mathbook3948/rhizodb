@@ -53,6 +53,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 - The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
 - A scan that starts in the page where the previous scan of the same transaction started reads that page without searching down from the root, so traversals and aggregates over relationships read storage with fewer comparisons.
+- Writing a batch of rows takes fewer allocations: the maps of a parameter share their keys, an index into a list parameter reads the item in place, and a relationship's record is encoded once into a buffer the transaction keeps, so a bulk load of a medium graph runs about a fifth fewer instructions.
 
 ### Fixed
 

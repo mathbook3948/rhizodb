@@ -29,6 +29,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - Each engine is also measured on its own best path.
 - LadybugDB loads with `COPY FROM`, DuckDB loads from the CSV files, and SQLite loads in one transaction with prepared inserts and builds its secondary indexes afterwards.
 - CozoDB loads in one transaction of large batches, and RhizoDB loads in one write transaction with node handles from the creating query.
+- RhizoDB's bulk path passes each batch of edges as lists of integers, one per column, that index the handles of the creating query.
 - A server creates an index or constraint on the node ids before loading, and loads in large `UNWIND` batches.
 - Every engine's input for its bulk path is built before the clock starts.
 - The path every engine shares, a statement per batch of rows, is reported beside the tuned one as its own row.

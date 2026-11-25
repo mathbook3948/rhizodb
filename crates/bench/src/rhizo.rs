@@ -28,8 +28,8 @@ const FILE_NAME: &str = "graph.rhizodb";
 const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN id(p)";
 const CREATE_CITIES: &str =
     "UNWIND $rows AS r CREATE (c:City {id: r.id, name: r.name}) RETURN id(c)";
-const CREATE_KNOWS: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = $persons[r.a] MATCH (b) WHERE id(b) = $persons[r.b] CREATE (a)-[:KNOWS {since: r.since}]->(b)";
-const CREATE_LIVES_IN: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = $persons[r.a] MATCH (b) WHERE id(b) = $cities[r.b] CREATE (a)-[:LIVES_IN]->(b)";
+const CREATE_KNOWS: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $persons[$from[i]] MATCH (b) WHERE id(b) = $persons[$to[i]] CREATE (a)-[:KNOWS {since: $since[i]}]->(b)";
+const CREATE_LIVES_IN: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $persons[$from[i]] MATCH (b) WHERE id(b) = $cities[$to[i]] CREATE (a)-[:LIVES_IN]->(b)";
 
 /// RhizoDB, opened as a file.
 #[derive(Clone, Copy, Debug)]
@@ -114,30 +114,19 @@ impl Instance for RhizoInstance {
                 .knows
                 .chunks(EDGE_BATCH)
                 .map(|batch| {
-                    rows_parameter(
-                        batch
-                            .iter()
-                            .map(|edge| {
-                                vec![
-                                    ("a", index(edge.from)),
-                                    ("b", index(edge.to)),
-                                    ("since", Value::Integer(edge.since)),
-                                ]
-                            })
-                            .collect(),
-                    )
+                    Parameters::new()
+                        .with("from", column(batch, |edge| index(edge.from)))
+                        .with("to", column(batch, |edge| index(edge.to)))
+                        .with("since", column(batch, |edge| Value::Integer(edge.since)))
                 })
                 .collect(),
             lives_in: data
                 .lives_in
                 .chunks(EDGE_BATCH)
                 .map(|batch| {
-                    rows_parameter(
-                        batch
-                            .iter()
-                            .map(|edge| vec![("a", index(edge.person)), ("b", index(edge.city))])
-                            .collect(),
-                    )
+                    Parameters::new()
+                        .with("from", column(batch, |edge| index(edge.person)))
+                        .with("to", column(batch, |edge| index(edge.city)))
                 })
                 .collect(),
         };
@@ -350,6 +339,10 @@ fn rows_parameter(rows: Vec<Vec<(&'static str, Value)>>) -> Parameters {
         })
         .collect();
     Parameters::from([("rows", Value::List(rows))])
+}
+
+fn column<T>(batch: &[T], value: impl Fn(&T) -> Value) -> Value {
+    Value::List(batch.iter().map(value).collect())
 }
 
 fn create_nodes(
