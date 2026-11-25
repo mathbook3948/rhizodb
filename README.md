@@ -77,7 +77,31 @@ Every run checks that both engines return the same rows, and bulk load uses each
 The suite and every query are in [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench), and `mise run bench-readme` measures again and rewrites this table.
 
 <!-- bench-table:start -->
+Measured on 2026-11-25 on 4 CPUs (Intel(R) Xeon(R) Processor @ 2.10GHz), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is within noise.
+
+| Workload | RhizoDB | LadybugDB | Faster |
+| --- | ---: | ---: | --- |
+| Point lookup by id | 0.405 | 0.989 | RhizoDB 2.4x |
+| Filtered scan | 1.07 | 0.748 | LadybugDB 1.4x |
+| `ORDER BY ... LIMIT` | 2.22 | 1.33 | LadybugDB 1.7x |
+| 1-hop neighbours | 0.586 | 1.19 | RhizoDB 2.0x |
+| 2-hop distinct | 0.821 | 14.9 | RhizoDB 18.2x |
+| 3-hop distinct | 5.82 | 51.7 | RhizoDB 8.9x |
+| Variable length `*1..3` | 5.59 | 42.6 | RhizoDB 7.6x |
+| Group by city | 5.90 | 3.86 | LadybugDB 1.5x |
+| Substring scan of a text property | 49.3 | 37.3 | LadybugDB 1.3x |
+| Keyword search | 103 | 752 | RhizoDB 7.3x |
+| Vector search | 320 | 512 | RhizoDB 1.6x |
+| Small commits | 115 | 284 | RhizoDB 2.5x |
+| Bulk update | 16.5 | 16.1 | within noise |
+| Detach delete | 330 | 465 | RhizoDB 1.4x |
+| Bulk load | 1535 | 1070 | LadybugDB 1.4x |
+| File size after bulk load | 20.0 MiB | 13.0 MiB | LadybugDB 1.5x smaller |
 <!-- bench-table:end -->
+
+A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
+RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
+LadybugDB is faster at bulk load, scans, sorting, and grouping, and keeps a smaller file.
 
 ## Development
 

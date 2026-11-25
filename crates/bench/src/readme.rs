@@ -12,7 +12,7 @@ pub const END: &str = "<!-- bench-table:end -->";
 pub const OTHER: &str = "ladybugdb";
 
 /// The workloads README.md shows, in order, each with the label of its row.
-pub const ROWS: [(&str, &str); 14] = [
+pub const ROWS: [(&str, &str); 15] = [
     ("read/point-lookup", "Point lookup by id"),
     ("read/filter-scan", "Filtered scan"),
     ("read/order-limit", "`ORDER BY ... LIMIT`"),
@@ -21,6 +21,10 @@ pub const ROWS: [(&str, &str); 14] = [
     ("traverse/3-hop-distinct", "3-hop distinct"),
     ("traverse/variable-length-1..3", "Variable length `*1..3`"),
     ("aggregate/group-by-city", "Group by city"),
+    (
+        "scan/bio-contains-term",
+        "Substring scan of a text property",
+    ),
     ("index/keyword-search", "Keyword search"),
     ("index/vector-search", "Vector search"),
     ("write/small-commits", "Small commits"),
@@ -50,21 +54,40 @@ fn milliseconds(value: f64) -> String {
     }
 }
 
-fn cell(row: Option<&Value>) -> (String, Option<f64>) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Timing {
+    median: f64,
+    min: f64,
+    max: f64,
+}
+
+fn cell(row: Option<&Value>) -> (String, Option<Timing>) {
     let Some(row) = row else {
         return ("not run".to_owned(), None);
     };
-    match row["median_ms"].as_f64() {
-        Some(median) if row["status"].as_str() == Some("measured") => {
-            (milliseconds(median), Some(median))
+    let timing = (|| {
+        Some(Timing {
+            median: row["median_ms"].as_f64()?,
+            min: row["min_ms"].as_f64()?,
+            max: row["max_ms"].as_f64()?,
+        })
+    })();
+    match timing {
+        Some(timing) if row["status"].as_str() == Some("measured") => {
+            (milliseconds(timing.median), Some(timing))
         }
         _ => (row["status"].as_str().unwrap_or("failed").to_owned(), None),
     }
 }
 
-fn faster(rhizodb: Option<f64>, other: Option<f64>) -> String {
+fn faster(rhizodb: Option<Timing>, other: Option<Timing>) -> String {
     match (rhizodb, other) {
-        (Some(ours), Some(theirs)) if ours > 0.0 && theirs > 0.0 => {
+        (Some(ours), Some(theirs)) if ours.min <= theirs.max && theirs.min <= ours.max => {
+            "within noise".to_owned()
+        }
+        (Some(Timing { median: ours, .. }), Some(Timing { median: theirs, .. }))
+            if ours > 0.0 && theirs > 0.0 =>
+        {
             if ours <= theirs {
                 format!("RhizoDB {:.1}x", theirs / ours)
             } else {
@@ -107,7 +130,7 @@ pub fn render(document: &Value, machine: &str, date: &str) -> Result<String, Str
     let knows = document["knows"].as_u64().unwrap_or(0);
     let cities = document["cities"].as_u64().unwrap_or(0);
     let mut text = format!(
-        "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better.\n\n"
+        "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is within noise.\n\n"
     );
     text.push_str("| Workload | RhizoDB | LadybugDB | Faster |\n");
     text.push_str("| --- | ---: | ---: | --- |\n");
