@@ -8,11 +8,26 @@ use std::io::Write;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
+use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Value;
 
+/// The settings every test database opens with. With `RHIZODB_TEST_PARALLEL` set, a read query
+/// splits any match of two or more start nodes across four threads.
+pub fn options() -> OpenOptions {
+    match std::env::var_os("RHIZODB_TEST_PARALLEL") {
+        Some(_) => parallel_options(),
+        None => OpenOptions::new(),
+    }
+}
+
+/// Settings that split every read query that can be split.
+pub fn parallel_options() -> OpenOptions {
+    OpenOptions::new().threads(4).parallel_threshold(2)
+}
+
 pub fn db() -> Database {
-    Database::in_memory().unwrap()
+    options().in_memory().unwrap()
 }
 
 pub fn run(db: &Database, query: &str) -> Vec<Vec<Value>> {

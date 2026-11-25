@@ -38,6 +38,7 @@ use super::eval::set;
 use super::keys::KeySet;
 use super::keys::Probe;
 use super::matcher::HopRead;
+use super::plan::Aggregate;
 use super::plan::Expr;
 use super::plan::Items;
 use super::plan::MatchClause;
@@ -145,7 +146,7 @@ impl Hasher for IdHasher {
 type ById<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
 
 #[cfg(not(test))]
-fn row_at_a_time() -> bool {
+pub(crate) fn row_at_a_time() -> bool {
     false
 }
 
@@ -790,7 +791,7 @@ impl<'d> Chosen<'d> {
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
-    fn seek_possible(&self, part: &PatternPart) -> Result<bool, Error> {
+    pub(crate) fn seek_possible(&self, part: &PatternPart) -> Result<bool, Error> {
         for seek in &part.seeks {
             let SeekKey::Property(key) = &seek.key else {
                 return Ok(true);
@@ -830,6 +831,9 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn scanned_ids(&self, scan: &NodeScan<'_>) -> Result<Vec<NodeId>, Error> {
+        if let Some(ids) = self.morsel_of(scan.part) {
+            return Ok(ids.to_vec());
+        }
         Ok(match scan.label {
             Some(label) => match self.label_token(label)? {
                 Some(token) => self.tx.node_ids_with_label(token)?,
@@ -945,9 +949,9 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(Some(out))
     }
 
-    /// `MATCH` over `scan` fed straight into the projection after it, which reads only the columns
-    /// it needs from each node and builds a row only for each node it keeps. `None` when the filter
-    /// or the projection has another form.
+    /// `MATCH` over `scan` fed straight into the plain projection after it, which reads only the
+    /// columns it needs from each node and builds a row only for each node it keeps. `None` when
+    /// the filter or the projection has another form.
     pub(crate) fn scan_project(
         &self,
         scan: NodeScan<'_>,
@@ -955,75 +959,83 @@ impl<T: ReadTransaction> Env<'_, T> {
         projection: &Projection,
         rows: &[Row],
     ) -> Result<Option<Vec<Row>>, Error> {
+        let Items::Plain(items) = &projection.items else {
+            return Ok(None);
+        };
         let mut compiler = Compiler::new(self, scan.slot);
         let Some(filter) = self.scan_filter(&mut compiler, &scan, found)? else {
             return Ok(None);
         };
-        match &projection.items {
-            Items::Plain(items) => self.scan_plain(scan, compiler, filter, projection, items, rows),
-            Items::Aggregate {
-                keys,
-                aggregates,
-                finals,
-            } => {
-                let Some(key_values) = compiler.values(keys.iter().map(|(expr, _)| expr))? else {
-                    return Ok(None);
-                };
-                let mut arguments = Vec::with_capacity(aggregates.len());
-                let mut extras = Vec::with_capacity(aggregates.len());
-                for (aggregate, _) in aggregates {
-                    let argument = match &aggregate.argument {
-                        Some(argument) => match compiler.value(argument)? {
-                            Some(value) => Some(value),
-                            None => return Ok(None),
-                        },
-                        None => None,
-                    };
-                    let extra = match &aggregate.extra {
-                        Some(extra) => match compiler.value(extra)? {
-                            Some(value) => Some(value),
-                            None => return Ok(None),
-                        },
-                        None => None,
-                    };
-                    arguments.push(argument);
-                    extras.push(extra);
-                }
-                let mut groups = Groups::new(keys, aggregates);
-                let counts_only = keys.is_empty()
-                    && aggregates
-                        .iter()
-                        .all(|(aggregate, _)| aggregate.counts_rows_binding(scan.slot));
-                let tokens = compiler.tokens;
-                if counts_only {
-                    let mut count = 0usize;
-                    self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |_, _| {
-                        count += 1;
-                        Ok(true)
-                    })?;
-                    groups.count_rows(count);
-                } else {
-                    self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, _| {
-                        groups.add_with(|part, _| {
-                            let value = match part {
-                                Part::Key(index) => key_values.get(index),
-                                Part::Argument(index) => {
-                                    arguments.get(index).and_then(Option::as_ref)
-                                }
-                                Part::Extra(index) => extras.get(index).and_then(Option::as_ref),
-                            };
-                            match value {
-                                Some(value) => at.datum(value),
-                                None => Ok(Datum::Null),
-                            }
-                        })?;
-                        Ok(true)
-                    })?;
-                }
-                let rows = groups.finish(self, finals)?;
-                Ok(Some(self.arrange(projection, rows)?))
-            }
+        self.scan_plain(scan, compiler, filter, projection, items, rows)
+    }
+
+    /// The groups of the aggregating projection after a `MATCH` over `scan`, which reads its keys
+    /// and arguments from the scan. `None` when the filter or the projection has another form.
+    pub(crate) fn scan_groups<'p>(
+        &self,
+        scan: NodeScan<'_>,
+        found: &MatchClause,
+        keys: &'p [(Expr, Slot)],
+        aggregates: &'p [(Aggregate, Slot)],
+        rows: &[Row],
+    ) -> Result<Option<Groups<'p>>, Error> {
+        let mut compiler = Compiler::new(self, scan.slot);
+        let Some(filter) = self.scan_filter(&mut compiler, &scan, found)? else {
+            return Ok(None);
+        };
+        let Some(key_values) = compiler.values(keys.iter().map(|(expr, _)| expr))? else {
+            return Ok(None);
+        };
+        let mut arguments = Vec::with_capacity(aggregates.len());
+        let mut extras = Vec::with_capacity(aggregates.len());
+        for (aggregate, _) in aggregates {
+            let argument = match &aggregate.argument {
+                Some(argument) => match compiler.value(argument)? {
+                    Some(value) => Some(value),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            let extra = match &aggregate.extra {
+                Some(extra) => match compiler.value(extra)? {
+                    Some(value) => Some(value),
+                    None => return Ok(None),
+                },
+                None => None,
+            };
+            arguments.push(argument);
+            extras.push(extra);
         }
+        let mut groups = self.groups(keys, aggregates);
+        let counts_only = keys.is_empty()
+            && aggregates
+                .iter()
+                .all(|(aggregate, _)| aggregate.counts_rows_binding(scan.slot));
+        let tokens = compiler.tokens;
+        if counts_only {
+            let mut count = 0usize;
+            self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |_, _| {
+                count += 1;
+                Ok(true)
+            })?;
+            groups.count_rows(count);
+        } else {
+            self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, _| {
+                groups.add_with(|part, _| {
+                    let value = match part {
+                        Part::Key(index) => key_values.get(index),
+                        Part::Argument(index) => arguments.get(index).and_then(Option::as_ref),
+                        Part::Extra(index) => extras.get(index).and_then(Option::as_ref),
+                    };
+                    match value {
+                        Some(value) => at.datum(value),
+                        None => Ok(Datum::Null),
+                    }
+                })?;
+                Ok(true)
+            })?;
+        }
+        Ok(Some(groups))
     }
 
     /// `MATCH (a)-[r]->(b)`, one hop of fixed length with no property map on `r` or `b`, fed
@@ -1032,21 +1044,14 @@ impl<T: ReadTransaction> Env<'_, T> {
     /// matched row. A node `b` is tested against its pattern once, and when the keys read only
     /// `b` and values fixed for the input row, each `b` finds its group once. `None` when the
     /// clause or the projection has another form, or an index or ID lookup may serve `a`.
-    pub(crate) fn hop_aggregate(
+    pub(crate) fn hop_groups<'p>(
         &self,
         found: &MatchClause,
-        projection: &Projection,
+        keys: &'p [(Expr, Slot)],
+        aggregates: &'p [(Aggregate, Slot)],
         rows: &[Row],
-    ) -> Result<Option<Vec<Row>>, Error> {
+    ) -> Result<Option<Groups<'p>>, Error> {
         let Some(hop) = HopScan::of(found) else {
-            return Ok(None);
-        };
-        let Items::Aggregate {
-            keys,
-            aggregates,
-            finals,
-        } = &projection.items
-        else {
             return Ok(None);
         };
         if self.check.is_some() || self.seek_possible(hop.scan.part)? {
@@ -1093,7 +1098,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             HopValue::Row(_) => false,
         });
         let tokens = compiler.tokens;
-        let mut groups = Groups::new(keys, aggregates);
+        let mut groups = self.groups(keys, aggregates);
         let mut positions: ById<(usize, NodeId), usize> = ById::default();
         let mut fits: ById<NodeId, bool> = ById::default();
         let mut row = Vec::new();
@@ -1101,8 +1106,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let mut adjacent = Vec::new();
         let read = self.hop_read(relationship)?;
         if matches!(read, HopRead::Nothing) {
-            let rows = groups.finish(self, finals)?;
-            return Ok(Some(self.arrange(projection, rows)?));
+            return Ok(Some(groups));
         }
         self.scan(
             &hop.scan,
@@ -1177,8 +1181,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(true)
             },
         )?;
-        let rows = groups.finish(self, finals)?;
-        Ok(Some(self.arrange(projection, rows)?))
+        Ok(Some(groups))
     }
 
     fn scan_plain(
