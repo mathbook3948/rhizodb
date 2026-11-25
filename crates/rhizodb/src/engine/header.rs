@@ -14,7 +14,7 @@ pub(crate) const MAGIC: [u8; 8] = *b"RHIZODB\0";
 
 /// The engine format this build writes. A file of another major or a newer minor is refused.
 pub(crate) const FORMAT_MAJOR: u16 = 1;
-pub(crate) const FORMAT_MINOR: u16 = 1;
+pub(crate) const FORMAT_MINOR: u16 = 2;
 
 /// The open extents whose written lengths the header records. A checkpoint keeps one, and a file
 /// of engine format minor 1 may hold one per kind of block.

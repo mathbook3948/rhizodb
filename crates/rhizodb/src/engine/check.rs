@@ -8,6 +8,7 @@ use super::blob::RunRef;
 use super::blob::decode_run;
 use super::catalog::Root;
 use super::error::EngineError;
+use super::extent::Blocks;
 use super::extent::ExtentTable;
 use super::header::Header;
 use super::layout::BlockRef;
@@ -45,13 +46,53 @@ fn problem(message: String) -> EngineError {
 /// Walks every tree from the durable header and fails on the first broken invariant: a page or
 /// run that fails its checks, keys out of order or outside their parent's range, a table whose
 /// entry count differs from its root's, a block reached twice or past its extent's written
-/// length, or an extent whose live count differs from the blocks reached in it.
+/// length, or an extent whose live blocks differ from the blocks reached in it.
 pub(crate) fn check(
     header: &Header,
     extents: &ExtentTable,
     catalog: &[RunRef],
     tree: &Tree,
 ) -> Result<CheckReport, EngineError> {
+    let (mut reached, mut report) = walk(header, extents, catalog, tree)?;
+    for (id, entry) in &extents.entries {
+        let found = reached.remove(id).unwrap_or_default();
+        if found != entry.used {
+            return Err(problem(format!(
+                "extent {} records {} live blocks at {:?} but {} at {:?} are reachable",
+                id.0,
+                entry.live(),
+                entry.used,
+                found.count(),
+                found
+            )));
+        }
+        report.live_blocks += u64::from(found.count());
+    }
+    if let Some(id) = reached.keys().next() {
+        return Err(problem(format!(
+            "blocks of extent {} are reachable but it is not in the table",
+            id.0
+        )));
+    }
+    Ok(report)
+}
+
+/// The blocks of each extent that the durable header reaches, found by the walk [`check`] makes.
+pub(crate) fn reachable(
+    header: &Header,
+    extents: &ExtentTable,
+    catalog: &[RunRef],
+    tree: &Tree,
+) -> Result<BTreeMap<ExtentId, Blocks>, EngineError> {
+    Ok(walk(header, extents, catalog, tree)?.0)
+}
+
+fn walk(
+    header: &Header,
+    extents: &ExtentTable,
+    catalog: &[RunRef],
+    tree: &Tree,
+) -> Result<(BTreeMap<ExtentId, Blocks>, CheckReport), EngineError> {
     let mut checker = Checker {
         source: &*tree.source,
         header,
@@ -65,27 +106,12 @@ pub(crate) fn check(
     for (table, root) in &tree.roots {
         checker.table(*table, root)?;
     }
-    let mut live: BTreeMap<ExtentId, u32> = BTreeMap::new();
+    let mut reached: BTreeMap<ExtentId, Blocks> = BTreeMap::new();
     for at in &checker.reached {
-        *live.entry(at.extent()).or_default() += 1;
+        let blocks = reached.entry(at.extent()).or_default();
+        *blocks = blocks.with(&Blocks::range(at.block(), 1));
     }
-    for (id, entry) in &extents.entries {
-        let reached = live.remove(id).unwrap_or(0);
-        if reached != entry.live {
-            return Err(problem(format!(
-                "extent {} counts {} live blocks but {reached} are reachable",
-                id.0, entry.live
-            )));
-        }
-    }
-    if let Some((id, _)) = live.into_iter().next() {
-        return Err(problem(format!(
-            "blocks of extent {} are reachable but it is not in the table",
-            id.0
-        )));
-    }
-    checker.report.live_blocks = checker.reached.len() as u64;
-    Ok(checker.report)
+    Ok((reached, checker.report))
 }
 
 impl Checker<'_> {

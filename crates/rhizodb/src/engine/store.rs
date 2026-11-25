@@ -33,6 +33,7 @@ use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
 use super::convert;
 use super::error::EngineError;
+use super::extent::Blocks;
 use super::extent::ExtentTable;
 use super::header;
 use super::header::FORMAT_MINOR;
@@ -176,6 +177,7 @@ struct Shared<F: FileSystem> {
     failure: Mutex<Option<(bool, String)>>,
     trees: Mutex<Vec<Weak<Tree>>>,
     quarantine: Mutex<BTreeMap<u64, u64>>,
+    freed: Mutex<BTreeMap<u64, Vec<(ExtentId, Blocks)>>>,
     poisoned: AtomicBool,
     wal_bytes: AtomicU64,
     compacted_bytes: AtomicU64,
@@ -328,6 +330,32 @@ fn try_open_or_create<F: FileSystem>(
     }
 }
 
+fn find_live_blocks(
+    header: &Header,
+    extents: &mut ExtentTable,
+    counts: &BTreeMap<ExtentId, u32>,
+    catalog: &[RunRef],
+    tree: &Tree,
+) -> Result<(), EngineError> {
+    let mut reached = check::reachable(header, extents, catalog, tree)?;
+    for (id, entry) in &mut extents.entries {
+        let used = reached.remove(id).unwrap_or_default();
+        if Some(&used.count()) != counts.get(id) {
+            return Err(EngineError::corrupt(format!(
+                "extent {} counts other live blocks than its trees reach",
+                id.0
+            )));
+        }
+        entry.used = used;
+    }
+    if !reached.is_empty() {
+        return Err(EngineError::corrupt(
+            "a tree reaches an extent that is not in the table",
+        ));
+    }
+    Ok(())
+}
+
 fn replay_into(
     layers: &Arc<Layers>,
     last_lsn: &mut u64,
@@ -399,7 +427,11 @@ impl<F: FileSystem + 'static> Engine<F> {
                 pages.place_extent(*id, entry.slot);
             }
             let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
-            (tree, catalog.extents, runs)
+            let mut extents = catalog.extents;
+            if let Some(counts) = catalog.live_counts {
+                find_live_blocks(&header, &mut extents, &counts, &runs, &tree)?;
+            }
+            (tree, extents, runs)
         };
         let tree = Arc::new(tree);
         let layers = Arc::new(Layers {
@@ -475,6 +507,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             finished: Condvar::new(),
             failure: Mutex::new(None),
             quarantine: Mutex::new(BTreeMap::new()),
+            freed: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
         });
@@ -751,7 +784,10 @@ impl<F: FileSystem + 'static> Shared<F> {
                 });
                 drop(published);
                 *lock(&self.droppable) = Some(job.first_segment);
-                if !clean
+                let trimmed = self.trim(&mut lock(&self.durable));
+                if let Err(error) = trimmed {
+                    self.poison_with(&error);
+                } else if !clean
                     && self.holds_too_much_free_space()
                     && let Err(error) = self.compact()
                 {
@@ -771,7 +807,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             .extents
             .entries
             .values()
-            .map(|entry| u64::from(entry.live))
+            .map(|entry| u64::from(entry.live()))
             .sum::<u64>()
             * BLOCK as u64;
         let slack = self.options.reclaim_slack;
@@ -788,7 +824,8 @@ impl<F: FileSystem + 'static> Shared<F> {
         let mut durable = lock(&self.durable);
         self.trim(&mut durable)?;
         let changes = job.frozen.newest();
-        if changes.is_empty() && !durable.header.catalog.is_null() {
+        if changes.is_empty() && !durable.header.catalog.is_null() && !self.can_move_down(&durable)
+        {
             let header = Header {
                 generation: durable.header.generation + 1,
                 checkpoint_lsn: job.lsn,
@@ -864,6 +901,19 @@ impl<F: FileSystem + 'static> Shared<F> {
             quarantine.insert(slot, generation);
         }
         drop(quarantine);
+        let freed: Vec<(ExtentId, Blocks)> = durable
+            .extents
+            .entries
+            .iter()
+            .filter_map(|(id, before)| {
+                let after = finished.extents.entries.get(id)?;
+                let freed = before.used.without(&after.used);
+                (!freed.is_empty()).then_some((*id, freed))
+            })
+            .collect();
+        if !freed.is_empty() {
+            lock(&self.freed).insert(generation, freed);
+        }
         *durable = Durable {
             header,
             extents: finished.extents,
@@ -883,8 +933,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             .unwrap_or(u64::MAX)
     }
 
-    fn reusable_slots(&self, extents: &ExtentTable) -> BTreeSet<u64> {
-        let oldest = self.oldest_tree();
+    fn reusable_slots(&self, extents: &ExtentTable, oldest: u64) -> BTreeSet<u64> {
         let mut quarantine = lock(&self.quarantine);
         quarantine.retain(|_, dropped| *dropped > oldest);
         extents
@@ -894,14 +943,46 @@ impl<F: FileSystem + 'static> Shared<F> {
             .collect()
     }
 
+    fn reusable_holes(&self, extents: &ExtentTable, oldest: u64) -> Vec<(ExtentId, Blocks)> {
+        let mut freed = lock(&self.freed);
+        freed.retain(|generation, _| *generation > oldest);
+        let mut held: BTreeMap<ExtentId, Blocks> = BTreeMap::new();
+        for (id, blocks) in freed.values().flatten() {
+            let all = held.entry(*id).or_default();
+            *all = all.with(blocks);
+        }
+        drop(freed);
+        let mut holes: Vec<(u64, ExtentId, Blocks)> = extents
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let free = entry
+                    .free()
+                    .without(&held.get(id).copied().unwrap_or_default());
+                (!free.is_empty()).then_some((entry.slot, *id, free))
+            })
+            .collect();
+        holes.sort_unstable_by_key(|(slot, _, _)| *slot);
+        holes.into_iter().map(|(_, id, free)| (id, free)).collect()
+    }
+
+    fn can_move_down(&self, durable: &Durable) -> bool {
+        let mut extents = self.extents_to_place(&durable.extents);
+        let open = extents.open;
+        extents.move_down();
+        extents.open != open
+    }
+
     fn extents_to_place(&self, extents: &ExtentTable) -> ExtentTable {
+        let oldest = self.oldest_tree();
         let mut extents = extents.clone();
-        extents.reusable = self.reusable_slots(&extents);
+        extents.reusable = self.reusable_slots(&extents, oldest);
+        extents.holes = self.reusable_holes(&extents, oldest);
         extents
     }
 
     fn trim(&self, durable: &mut Durable) -> Result<(), EngineError> {
-        let removable = self.reusable_slots(&durable.extents);
+        let removable = self.reusable_slots(&durable.extents, self.oldest_tree());
         if let Some((slot, written)) = durable.extents.trim(&removable) {
             self.pages.truncate_after(slot, written)?;
             let top = durable.extents.next_slot;
@@ -972,6 +1053,13 @@ impl<F: FileSystem + 'static> Shared<F> {
         self.run_checkpoint(job, true);
         if self.is_poisoned() {
             return;
+        }
+        let movable = self.can_move_down(&lock(&self.durable));
+        if movable && let Some(job) = self.freeze(&mut writer) {
+            self.run_checkpoint(job, true);
+            if self.is_poisoned() {
+                return;
+            }
         }
         if let Some(wal) = writer.wal.take() {
             let _ = wal.remove_all();
@@ -1077,7 +1165,7 @@ impl<F: FileSystem + 'static> Maintenance for Engine<F> {
             let entries = &durable.extents.entries;
             let live = entries
                 .values()
-                .map(|entry| u64::from(entry.live))
+                .map(|entry| u64::from(entry.live()))
                 .sum::<u64>();
             (entries.len() as u64, live)
         };

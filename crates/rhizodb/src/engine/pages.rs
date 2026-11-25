@@ -124,6 +124,9 @@ impl<B: BlockFile> Pages<B> {
         let blocks = u32::try_from(bytes.len() / BLOCK).map_err(|_| EngineError::TooLarge)?;
         let first = self.physical(at, blocks)?;
         self.file.write(first, bytes)?;
+        for offset in 0..blocks {
+            self.cache.remove(at.offset(offset)?);
+        }
         Ok(())
     }
 
