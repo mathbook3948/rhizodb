@@ -1,0 +1,12 @@
+MATCH (n) RETURN count(*), sum(n.i)
+  [[Integer(2997), Integer(4495470)]]
+MATCH (n:Item) WHERE n.i % 10 = 0 RETURN count(*), sum(size(n.text)), min(n.text STARTS WITH 'long'), max(n.text ENDS WITH '9')
+  [[Integer(299), Integer(335211), Boolean(true), Boolean(false)]]
+MATCH (n:Item {i: 2990}) RETURN n.i, size(n.text), substring(n.text, 0, 12)
+  [[Integer(2990), Integer(1209), String("long 2991299")]]
+MATCH ()-[r:NEXT]->() RETURN count(*), sum(r.w), min(r.w), max(r.w)
+  [[Integer(937), Integer(437786), Integer(-1000), Integer(1997)]]
+MATCH (a:Item)-[:NEXT]->(b:Item) WHERE a.i >= 1500 AND a.i < 1505 RETURN a.i, b.i ORDER BY a.i
+  [[Integer(1503), Integer(1504)]]
+MATCH (n:Item) WHERE n.i % 7 = 3 RETURN count(*), sum(n.age)
+  [[Integer(429), Integer(1287858)]]
