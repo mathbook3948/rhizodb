@@ -35,7 +35,7 @@ fn random_transactions_in_memory_match_the_model() {
     for offset in 0..cases(FAST_RUNS) {
         let seed = base.wrapping_add(offset);
         let mut rng = Rng::new(seed);
-        let mut run = Run::new(Database::in_memory().unwrap());
+        let mut run = Run::new(db());
         for _ in 0..TRANSACTIONS_PER_RUN {
             if let Err(reason) = run.transaction(&mut rng) {
                 fail(seed, &run, &reason);
@@ -74,7 +74,7 @@ fn checked_in_fuzzer_inputs_match_the_model() {
         let path = entry.unwrap().path();
         let bytes = std::fs::read(&path).unwrap();
         let mut choices = ByteChoices::new(&bytes);
-        let mut run = Run::new(Database::in_memory().unwrap());
+        let mut run = Run::new(db());
         while !choices.exhausted() {
             if let Err(reason) = run.transaction(&mut choices) {
                 panic!("{}: {reason}\nstatements:\n{}", path.display(), run.log());

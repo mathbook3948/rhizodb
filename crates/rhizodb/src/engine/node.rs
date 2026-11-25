@@ -403,7 +403,11 @@ fn lower_bound(
 /// Orders byte strings as slices do, deciding most pairs from their first eight bytes without
 /// a call to `memcmp`.
 pub(crate) fn compare_bytes(left: &[u8], right: &[u8]) -> Ordering {
-    match leading_word(left).cmp(&leading_word(right)) {
+    compare_with_word(left, right, leading_word(right))
+}
+
+fn compare_with_word(left: &[u8], right: &[u8], right_word: u64) -> Ordering {
+    match leading_word(left).cmp(&right_word) {
         Ordering::Equal if left.len() <= 8 || right.len() <= 8 => left.len().cmp(&right.len()),
         Ordering::Equal => left[8..].cmp(&right[8..]),
         order => order,
@@ -411,12 +415,19 @@ pub(crate) fn compare_bytes(left: &[u8], right: &[u8]) -> Ordering {
 }
 
 fn leading_word(bytes: &[u8]) -> u64 {
-    match bytes.first_chunk::<8>() {
-        Some(word) => u64::from_be_bytes(*word),
-        None => bytes.iter().enumerate().fold(0, |word, (at, byte)| {
-            word | u64::from(*byte) << (56 - 8 * at)
-        }),
+    let length = bytes.len();
+    if let Some(word) = bytes.first_chunk::<8>() {
+        return u64::from_be_bytes(*word);
     }
+    if let (Some(head), Some(tail)) = (bytes.first_chunk::<4>(), bytes.last_chunk::<4>()) {
+        return u64::from(u32::from_be_bytes(*head)) << 32
+            | u64::from(u32::from_be_bytes(*tail)) << (8 * (8 - length));
+    }
+    if let (Some(head), Some(tail)) = (bytes.first_chunk::<2>(), bytes.last_chunk::<2>()) {
+        return u64::from(u16::from_be_bytes(*head)) << 48
+            | u64::from(u16::from_be_bytes(*tail)) << (8 * (8 - length));
+    }
+    bytes.first().map_or(0, |byte| u64::from(*byte) << 56)
 }
 
 fn compare_parts(prefix: &[u8], suffix: &[u8], target: &[u8]) -> Ordering {
@@ -723,6 +734,7 @@ impl<'a> Node<'a> {
             Ordering::Equal => {}
         }
         let rest = &target[self.prefix.len()..];
+        let rest_word = leading_word(rest);
         let first = usize::from(!leaf);
         let (low, exact) = match self.layout {
             Layout::Fixed {
@@ -733,12 +745,12 @@ impl<'a> Node<'a> {
             } => lower_bound(first, cells, |index| {
                 let start = index * key_stride;
                 keys.get(start..start + suffix)
-                    .map(|stored| compare_bytes(stored, rest))
+                    .map(|stored| compare_with_word(stored, rest, rest_word))
                     .ok_or_else(|| bad(self.header))
             })?,
             Layout::Variable { offsets } => lower_bound(first, cells, |index| {
                 match self.inline_key_range(offsets, index) {
-                    Some(range) => Ok(compare_bytes(&self.page[range], rest)),
+                    Some(range) => Ok(compare_with_word(&self.page[range], rest, rest_word)),
                     None => self.key(index)?.compare(target, load),
                 }
             })?,

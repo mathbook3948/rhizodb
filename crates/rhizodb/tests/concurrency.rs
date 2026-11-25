@@ -42,7 +42,7 @@ fn committer(db: &Arc<Database>, stop: &Arc<AtomicBool>) -> thread::JoinHandle<(
 
 #[test]
 fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_committed() {
-    let db = Arc::new(Database::in_memory().unwrap());
+    let db = Arc::new(db());
     let stop = Arc::new(AtomicBool::new(false));
     let other = committer(&db, &stop);
     let rounds = Arc::new(AtomicU64::new(0));
@@ -81,7 +81,7 @@ fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_co
 
 #[test]
 fn writers_on_many_threads_each_commit_whole_and_none_waits_forever() {
-    let db = Arc::new(Database::in_memory().unwrap());
+    let db = Arc::new(db());
     let threads = 8;
     let rounds = cases(40);
     let shared = Arc::clone(&db);
@@ -137,7 +137,7 @@ fn writers_on_many_threads_each_commit_whole_and_none_waits_forever() {
 #[test]
 fn a_waiting_writer_proceeds_when_the_holder_rolls_back_fails_or_is_dropped() {
     for ending in ["rollback", "failed query", "drop"] {
-        let db = Arc::new(Database::in_memory().unwrap());
+        let db = Arc::new(db());
         let mut holder = db.begin_write().unwrap();
         holder
             .execute("INSERT (:Held)", &Parameters::new())
@@ -181,7 +181,7 @@ fn a_waiting_writer_proceeds_when_the_holder_rolls_back_fails_or_is_dropped() {
 
 #[test]
 fn readers_keep_their_snapshot_while_writers_on_other_threads_commit_and_drop_indexes() {
-    let db = Arc::new(Database::in_memory().unwrap());
+    let db = Arc::new(db());
     db.create_property_index("by_i", rhizodb::IndexTarget::Label("N"), "i")
         .unwrap();
     run(&db, "UNWIND range(1, 50) AS i INSERT (:N {i: i})");
@@ -244,7 +244,7 @@ fn readers_keep_their_snapshot_while_writers_on_other_threads_commit_and_drop_in
 
 #[test]
 fn readers_see_whole_adjacency_snapshots_while_a_writer_moves_relationships_in_small_commits() {
-    let db = Arc::new(Database::in_memory().unwrap());
+    let db = Arc::new(db());
     run(&db, "INSERT (:Hub)");
     run(&db, "UNWIND range(1, 200) AS i INSERT (:N {i: i})");
     run(

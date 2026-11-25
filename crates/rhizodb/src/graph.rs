@@ -56,6 +56,7 @@ pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use meta::LabelReader;
+pub(crate) use meta::row_group;
 pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;

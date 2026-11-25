@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast;
 use crate::gql::ast::Direction;
+use crate::procedure::Procedure;
 use crate::procedure::Procedures;
 use crate::result::Parameters;
 use crate::temporal::build::Kind as TemporalKind;
@@ -73,6 +75,7 @@ pub(crate) fn bind(
         parameter_reads: 0,
         parameter_names: Vec::new(),
         type_error: None,
+        calls_host: false,
         updates_allowed: true,
     };
     let BoundQuery {
@@ -94,6 +97,7 @@ pub(crate) fn bind(
     let slot_count = binder.slot_count;
     let closed = binder.closed;
     let parameters = binder.parameter_names;
+    let calls_host = binder.calls_host;
     let updating = parts.iter().any(|part| {
         part.clauses
             .iter()
@@ -107,6 +111,7 @@ pub(crate) fn bind(
             slot_count,
             closed,
             parameters,
+            calls_host,
         }));
     }
     let parts = parts
@@ -130,6 +135,7 @@ pub(crate) fn bind(
         slot_count,
         closed,
         parameters,
+        calls_host,
     }))
 }
 
@@ -323,6 +329,7 @@ struct Binder<'a> {
     parameter_reads: usize,
     parameter_names: Vec<String>,
     type_error: Option<Error>,
+    calls_host: bool,
     updates_allowed: bool,
 }
 
@@ -825,6 +832,16 @@ impl Binder<'_> {
         Ok(Clause::Update(UpdateClause::Remove(actions)))
     }
 
+    fn host_procedure(&mut self, name: &str) -> Result<Arc<Procedure>, Error> {
+        self.calls_host = true;
+        self.procedures.get(name).cloned().ok_or_else(|| {
+            error(
+                ErrorKind::ProcedureNotFound,
+                format!("procedure `{name}` is not registered"),
+            )
+        })
+    }
+
     fn call(
         &mut self,
         call: &ast::Call,
@@ -834,12 +851,7 @@ impl Binder<'_> {
         let name = names(&call.name).join(".");
         let callee = match Builtin::named(&name) {
             Some(builtin) => Callee::Builtin(builtin),
-            None => Callee::Host(self.procedures.get(&name).cloned().ok_or_else(|| {
-                error(
-                    ErrorKind::ProcedureNotFound,
-                    format!("procedure `{name}` is not registered"),
-                )
-            })?),
+            None => Callee::Host(self.host_procedure(&name)?),
         };
         let signature = callee.signature();
         let args = match &call.args {

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
+use std::ops::RangeBounds;
 
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -12,6 +13,7 @@ use crate::engine::header::Header;
 use crate::engine::layout::ExtentId;
 use crate::engine::mem_fs::MemFile;
 use crate::engine::mem_fs::MemFs;
+use crate::engine::tree::Finger;
 use crate::engine::tree::Tree;
 use crate::storage::StorageError;
 use crate::test_scale;
@@ -322,8 +324,79 @@ fn batches() -> impl Strategy<Value = (Keys, Vec<Batch>)> {
     )
 }
 
+fn scan_bound(keys: &[Vec<u8>], kind: u8, pick: usize, between: bool) -> Bound<Vec<u8>> {
+    let mut key = keys[pick % keys.len()].clone();
+    if between {
+        key.push(0);
+    }
+    match kind {
+        0 => Bound::Unbounded,
+        1 => Bound::Included(key),
+        _ => Bound::Excluded(key),
+    }
+}
+
+type Scan = (u8, u16, bool, u8, u16, bool);
+
+fn deep_store(long_keys: bool) -> (Store, Model) {
+    let mut store = Store::new();
+    let mut model = Model::new();
+    let changes: BTreeMap<_, _> = (0..3000u32)
+        .map(|index| {
+            let mut key = (index * 2).to_be_bytes().to_vec();
+            if long_keys && index % 97 == 0 {
+                key.extend(std::iter::repeat_n(b'x', 1100));
+            }
+            (key, Some(value((index % 7) as usize * 150, index as u8)))
+        })
+        .collect();
+    apply(&mut model, &changes);
+    store.checkpoint(&changes);
+    (store, model)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(24)))]
+
+    #[test]
+    fn scans_that_start_near_the_last_one_find_what_the_map_holds(
+        long_keys in any::<bool>(),
+        scans in vec((0u8..3, any::<u16>(), any::<bool>(), 0u8..3, 0u16..40, any::<bool>()), 1..80),
+    ) {
+        let (store, model) = deep_store(long_keys);
+        prop_assert!(store.roots[&TABLE].level >= 2, "{:?}", store.roots[&TABLE]);
+        let tree = store.tree();
+        let keys: Vec<Vec<u8>> = model.keys().cloned().collect();
+        let finger = Finger::default();
+        let mut pick = 0usize;
+        for (start_kind, step, start_between, end_kind, width, end_between) in scans {
+            let scan: Scan = (start_kind, step, start_between, end_kind, width, end_between);
+            pick = pick.wrapping_add(usize::from(step % 64));
+            if step % 9 == 0 {
+                pick = usize::from(step);
+            }
+            let start = scan_bound(&keys, start_kind, pick, start_between);
+            let end = scan_bound(&keys, end_kind, pick + usize::from(width), end_between);
+            let expected: Vec<(Vec<u8>, Vec<u8>)> = model
+                .iter()
+                .filter(|(key, _)| (start.clone(), end.clone()).contains(*key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let mut scanned = Vec::new();
+            tree.scan_near::<StorageError>(
+                TABLE,
+                start.as_ref().map(Vec::as_slice),
+                end.as_ref().map(Vec::as_slice),
+                &mut |key, value| {
+                    scanned.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                },
+                &finger,
+            )
+            .unwrap();
+            prop_assert_eq!(scanned, expected, "{:?}", scan);
+        }
+    }
 
     #[test]
     fn checkpoints_of_random_changes_match_a_map((keys, batches) in batches()) {
