@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use super::blob::BlobRef;
@@ -43,6 +44,103 @@ struct Pinned {
 
 fn lift<E: From<StorageError>>(error: EngineError) -> E {
     E::from(StorageError::from(error))
+}
+
+/// The leaf the last scan of one view started in, with the bounds of the keys it may hold, so
+/// a scan that starts within them skips the descent.
+#[derive(Debug, Default)]
+pub(crate) struct Finger(Mutex<Option<Leaf>>);
+
+#[derive(Debug)]
+struct Leaf {
+    table: TableId,
+    page: CachedPage,
+    bounds: Bounds,
+}
+
+#[derive(Debug, Default)]
+struct Bounds {
+    low: Vec<u8>,
+    high: Vec<u8>,
+    capped: bool,
+}
+
+impl Bounds {
+    fn covers(&self, target: &[u8]) -> bool {
+        self.low.as_slice() <= target && (!self.capped || target < self.high.as_slice())
+    }
+
+    fn high(&self) -> Option<&[u8]> {
+        self.capped.then_some(self.high.as_slice())
+    }
+}
+
+#[derive(Debug)]
+struct Seek {
+    bounds: Bounds,
+    leaf: Option<CachedPage>,
+    exact: bool,
+}
+
+fn set_key(out: &mut Vec<u8>, key: CellKey<'_>) -> bool {
+    match key {
+        CellKey::Inline { prefix, suffix } => {
+            out.clear();
+            out.extend_from_slice(prefix);
+            out.extend_from_slice(suffix);
+            true
+        }
+        CellKey::Long { .. } => false,
+    }
+}
+
+impl Seek {
+    fn reusing(leaf: Option<Leaf>) -> Self {
+        let mut bounds = leaf.map(|leaf| leaf.bounds).unwrap_or_default();
+        bounds.low.clear();
+        bounds.capped = false;
+        Self {
+            bounds,
+            leaf: None,
+            exact: true,
+        }
+    }
+
+    fn narrow(&mut self, node: &Node<'_>, index: usize) -> Result<(), EngineError> {
+        if index > 0 && !set_key(&mut self.bounds.low, node.key(index)?) {
+            self.exact = false;
+        }
+        if index + 1 < node.cells() {
+            self.bounds.capped = true;
+            if !set_key(&mut self.bounds.high, node.key(index + 1)?) {
+                self.exact = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn into_leaf(self, table: TableId) -> Option<Leaf> {
+        let page = self.leaf.filter(|_| self.exact)?;
+        Some(Leaf {
+            table,
+            page,
+            bounds: self.bounds,
+        })
+    }
+}
+
+fn ends_before(end: Bound<&[u8]>, key: &[u8]) -> bool {
+    match end {
+        Bound::Unbounded => false,
+        Bound::Included(end) => end < key,
+        Bound::Excluded(end) => end <= key,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Range<'a> {
+    start: Bound<&'a [u8]>,
+    end: Bound<&'a [u8]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,9 +299,93 @@ impl Tree {
         let Some(root) = self.roots.get(&table) else {
             return Ok(());
         };
+        self.descend(
+            table,
+            root,
+            Range { start, end },
+            visit,
+            &mut Vec::new(),
+            None,
+        )
+    }
+
+    /// [`Tree::scan`], starting from the leaf `finger` holds when the start lies within it, and
+    /// leaving in `finger` the leaf the start lay in.
+    pub(crate) fn scan_near<E: From<StorageError>>(
+        &self,
+        table: TableId,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        visit: Visit<'_, E>,
+        finger: &Finger,
+    ) -> Result<(), E> {
+        let Some(root) = self.roots.get(&table) else {
+            return Ok(());
+        };
         let mut key = Vec::new();
-        self.scan_node(table, root.page, root.level, start, end, visit, &mut key)
-            .map(|_| ())
+        let Ok(mut held) = finger.0.try_lock() else {
+            return self.descend(table, root, Range { start, end }, visit, &mut key, None);
+        };
+        let target = match start {
+            Bound::Included(target) | Bound::Excluded(target) => Some(target),
+            Bound::Unbounded => None,
+        };
+        let mut resume = None;
+        if let Some(leaf) = held
+            .as_ref()
+            .filter(|leaf| leaf.table == table && target.is_some_and(|t| leaf.bounds.covers(t)))
+        {
+            let range = Range { start, end };
+            if self.scan_page(table, &leaf.page, 0, None, range, visit, &mut key, None)?
+                == Flow::Done
+            {
+                return Ok(());
+            }
+            match leaf.bounds.high() {
+                Some(high) if !ends_before(end, high) => resume = Some(high.to_vec()),
+                _ => return Ok(()),
+            }
+        }
+        let start = resume.as_deref().map_or(start, Bound::Included);
+        let mut seek = Seek::reusing(held.take());
+        let outcome = self.descend(
+            table,
+            root,
+            Range { start, end },
+            visit,
+            &mut key,
+            Some(&mut seek),
+        );
+        *held = seek.into_leaf(table);
+        outcome
+    }
+
+    fn descend<E: From<StorageError>>(
+        &self,
+        table: TableId,
+        root: &Root,
+        range: Range<'_>,
+        visit: Visit<'_, E>,
+        key: &mut Vec<u8>,
+        seek: Option<&mut Seek>,
+    ) -> Result<(), E> {
+        match self.pinned(table, root).map_err(lift)? {
+            Some(pinned) => self.scan_page(
+                table,
+                &pinned.root,
+                root.level,
+                Some(pinned),
+                range,
+                visit,
+                key,
+                seek,
+            ),
+            None => {
+                let page = fetch(&*self.source, table, root.page, root.level).map_err(lift)?;
+                self.scan_page(table, &page, root.level, None, range, visit, key, seek)
+            }
+        }
+        .map(|_| ())
     }
 
     fn past_end(&self, key: &CellKey<'_>, end: Bound<&[u8]>) -> Result<bool, EngineError> {
@@ -219,18 +401,19 @@ impl Tree {
         clippy::too_many_arguments,
         reason = "the recursion carries the scan's whole state"
     )]
-    fn scan_node<E: From<StorageError>>(
+    fn scan_page<E: From<StorageError>>(
         &self,
         table: TableId,
-        page: ChildRef,
+        cached: &CachedPage,
         level: u8,
-        start: Bound<&[u8]>,
-        end: Bound<&[u8]>,
+        pinned: Option<&Pinned>,
+        range: Range<'_>,
         visit: Visit<'_, E>,
         key: &mut Vec<u8>,
+        seek: Option<&mut Seek>,
     ) -> Result<Flow, E> {
+        let Range { start, end } = range;
         let load = self.load_key();
-        let cached = fetch(&*self.source, table, page, level).map_err(lift)?;
         let node = Node::parse(&cached.header, &cached.bytes, table).map_err(lift)?;
         let first = match start {
             Bound::Unbounded => 0,
@@ -239,6 +422,9 @@ impl Tree {
             }
         };
         if node.is_leaf() {
+            if let Some(seek) = seek {
+                seek.leaf = Some(Arc::clone(cached));
+            }
             for index in first..node.cells() {
                 let cell = node.key(index).map_err(lift)?;
                 if let Bound::Excluded(start) = start
@@ -267,6 +453,7 @@ impl Tree {
             }
             return Ok(Flow::Continue);
         }
+        let mut seek = seek;
         for index in first..node.cells() {
             if index > first
                 && self
@@ -276,12 +463,34 @@ impl Tree {
                 return Ok(Flow::Done);
             }
             let child = node.child(index).map_err(lift)?;
-            let from = if index == first {
-                start
-            } else {
-                Bound::Unbounded
+            let from = Range {
+                start: if index == first {
+                    start
+                } else {
+                    Bound::Unbounded
+                },
+                end,
             };
-            if self.scan_node(table, child, level - 1, from, end, visit, key)? == Flow::Done {
+            let mut child_seek = seek.take();
+            if let Some(seek) = child_seek.as_deref_mut() {
+                seek.narrow(&node, index).map_err(lift)?;
+            }
+            let held = match pinned {
+                Some(pinned) => self
+                    .pinned_child(pinned, table, index, child, level - 1)
+                    .map_err(lift)?,
+                None => None,
+            };
+            let flow = match held {
+                Some(page) => {
+                    self.scan_page(table, page, level - 1, None, from, visit, key, child_seek)?
+                }
+                None => {
+                    let page = fetch(&*self.source, table, child, level - 1).map_err(lift)?;
+                    self.scan_page(table, &page, level - 1, None, from, visit, key, child_seek)?
+                }
+            };
+            if flow == Flow::Done {
                 return Ok(Flow::Done);
             }
         }

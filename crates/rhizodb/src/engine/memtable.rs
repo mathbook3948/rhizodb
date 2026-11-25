@@ -269,7 +269,7 @@ impl Memtable {
         end: Bound<&[u8]>,
         snapshot: u64,
     ) -> Vec<(Bytes, Slot)> {
-        if !bounds_are_ordered(start, end) {
+        if self.bytes() == 0 || !bounds_are_ordered(start, end) {
             return Vec::new();
         }
         let chains = self.read();
