@@ -325,6 +325,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
         })
@@ -375,6 +376,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
         })
@@ -403,6 +405,7 @@ pub(crate) struct GraphTx<T> {
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
+    record_buffer: Vec<u8>,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
 }
@@ -429,6 +432,7 @@ impl<T> GraphTx<T> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
         }
@@ -1261,7 +1265,12 @@ impl<T: WriteTransaction> GraphTx<T> {
             }
         };
         let before = edit.bytes();
-        edit.set(slot, record.map(RelationshipRecord::encode));
+        let encoded = record.map(|record| {
+            self.record_buffer.clear();
+            record.encode_into(&mut self.record_buffer);
+            self.record_buffer.as_slice()
+        });
+        edit.set(slot, encoded);
         self.relationship_bytes = self.relationship_bytes - before + edit.bytes();
         if self.relationship_bytes > HELD_RELATIONSHIP_BYTES {
             self.flush_relationships()?;
@@ -1317,7 +1326,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                     chunks
                         .entry(chunk)
                         .or_default()
-                        .set(slot, Some(record.encode()));
+                        .set(slot, Some(&record.encode()));
                     Ok::<(), GraphError>(())
                 })?;
             for (chunk, edit) in chunks {

@@ -1,6 +1,8 @@
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::RwLock;
@@ -149,8 +151,29 @@ pub(crate) fn parse_label_set(bytes: &[u8]) -> Result<Arc<[Token<Label>]>, Graph
 /// can be shared by every transaction.
 #[derive(Debug, Default)]
 pub(crate) struct LabelSetCache {
-    by_id: RwLock<HashMap<u32, Arc<[Token<Label>]>>>,
+    by_id: RwLock<SetsById>,
     by_key: RwLock<HashMap<Vec<u8>, u32>>,
+}
+
+type SetsById = HashMap<u32, Arc<[Token<Label>]>, BuildHasherDefault<SetIdHasher>>;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SetIdHasher(u64);
+
+impl Hasher for SetIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.0 = (self.0 ^ u64::from(value)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
 }
 
 impl LabelSetCache {
