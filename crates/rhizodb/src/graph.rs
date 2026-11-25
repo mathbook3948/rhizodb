@@ -950,19 +950,25 @@ impl<T: ReadTransaction> GraphTx<T> {
         prefix: &[u8],
         mut visit: impl FnMut(&[u8], &[u8], &mut bool) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
-        let entries = reader.entries(side, prefix, || {
+        let entries = reader.entries(side, prefix, |window| {
             let mut held = Vec::new();
-            self.transaction
-                .visit_prefix(Table::Adjacency, prefix, |key, value| {
+            self.transaction.visit_range(
+                Table::Adjacency,
+                window.start(),
+                &window.end(),
+                |key, value| {
                     if held
                         .last()
                         .is_some_and(|(last, _, _): &adjacency::Verified| **last >= *key)
                     {
                         return Err(ENTRIES_OUT_OF_ORDER);
                     }
-                    held.push((key.into(), value.into(), false));
+                    if window.holds(key) {
+                        held.push((key.into(), value.into(), false));
+                    }
                     Ok::<(), GraphError>(())
-                })?;
+                },
+            )?;
             Ok::<_, GraphError>(held)
         })?;
         match entries {

@@ -17,6 +17,7 @@ Node properties are stored as typed columns per row group, but the executor eval
 - An aggregating projection right after a scan reads its keys and arguments from the scan when each is the node, one of its properties, or a value fixed for the input row.
 - A `MATCH` of one hop of fixed length from such a node pattern, with no property map on the relationship or the far node, that feeds an aggregating projection reads its start node as a scan and follows the hop from each node the scan keeps.
 - Such a hop takes its filter only when the filter reads neither the relationship nor the far node, and evaluates whatever the scan cannot read on the matched row.
+- Expanding consecutive nodes reads their adjacency segments from storage in one pass per window of segments, which starts at one segment and doubles up to 16 while the reads stay consecutive, so a traversal that only now and then reads the next segment reads no more than before.
 - The far node of such a hop is tested against its pattern once, and when every group key reads only the far node or values fixed for the input row, each far node finds its group once.
 - A plain projection right after a scan whose items, sort keys, and distinct columns are of that kind is computed on the scan.
 - `ORDER BY` with `LIMIT` on a scan keeps the best `SKIP` plus `LIMIT` nodes by their sort keys in a bounded heap, ties broken by scan order, and evaluates the other items only for the nodes it keeps.
