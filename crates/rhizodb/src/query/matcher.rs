@@ -258,18 +258,42 @@ impl<T: ReadTransaction> Env<'_, T> {
             };
             return Ok((sought.nodes, known));
         }
-        let nodes = match pattern.labels.as_ref().and_then(LabelExpr::required) {
-            Some(label) => match self.label_token(&label.0)? {
-                Some(token) => self.tx.node_ids_with_label(token)?,
-                None => Vec::new(),
-            },
-            None => self.tx.node_ids()?,
+        let nodes = match self.morsel_of(part) {
+            Some(ids) => ids.to_vec(),
+            None => self.scanned_nodes(pattern)?,
         };
         let known = Known {
             labels: labels_known,
             served: None,
         };
         Ok((nodes, known))
+    }
+
+    /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts.
+    pub(crate) fn scanned_count(&self, pattern: &NodePattern) -> Result<u64, Error> {
+        Ok(
+            match pattern.labels.as_ref().and_then(LabelExpr::required) {
+                Some(label) => match self.label_token(&label.0)? {
+                    Some(token) => self.tx.count_nodes_with_label(token)?,
+                    None => 0,
+                },
+                None => self.tx.count_nodes()?,
+            },
+        )
+    }
+
+    /// The nodes a pattern starts from when no seek serves it: those of its required label, or
+    /// every node, in ascending ID order.
+    pub(crate) fn scanned_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeId>, Error> {
+        Ok(
+            match pattern.labels.as_ref().and_then(LabelExpr::required) {
+                Some(label) => match self.label_token(&label.0)? {
+                    Some(token) => self.tx.node_ids_with_label(token)?,
+                    None => Vec::new(),
+                },
+                None => self.tx.node_ids()?,
+            },
+        )
     }
 
     /// Whether node `id` has what `pattern` asks for, its labels and properties read in full.

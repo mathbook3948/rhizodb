@@ -580,7 +580,7 @@ fn most_generated_queries_take_the_scan() {
 }
 
 fn db_with(query: &str) -> Database {
-    let db = Database::in_memory().unwrap();
+    let db = crate::OpenOptions::new().threads(1).in_memory().unwrap();
     db.execute(query, &Parameters::new()).unwrap();
     db
 }

@@ -38,6 +38,7 @@ use super::datum;
 use super::datum::Datum;
 use super::functions;
 use super::functions::Function;
+use super::parallel::Morsel;
 use super::plan::AggregateFunction;
 use super::plan::Case;
 use super::plan::Expr;
@@ -91,6 +92,37 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) adjacency: RefCell<AdjacencyReader>,
     /// The relationship types looked up so far that have a token.
     pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
+    /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
+    pub(crate) morsel: Option<&'a Morsel<'a>>,
+}
+
+impl<'a, T: ReadTransaction> Env<'a, T> {
+    pub(crate) fn new(
+        tx: &'a GraphTx<T>,
+        slots: usize,
+        parameters: &'a [Datum],
+        now: &'a Clocks,
+        graveyard: &'a Graveyard,
+        patterns: &'a Patterns,
+    ) -> Self {
+        Self {
+            tx,
+            slots,
+            parameters,
+            now,
+            graveyard,
+            patterns,
+            check: None,
+            columns: RefCell::default(),
+            keys: RefCell::default(),
+            labels: RefCell::default(),
+            label_tokens: RefCell::default(),
+            property_indexes: RefCell::default(),
+            adjacency: RefCell::default(),
+            rel_type_tokens: RefCell::default(),
+            morsel: None,
+        }
+    }
 }
 
 /// The state of an evaluation that only looks for the type errors the query text fixes. A step

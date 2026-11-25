@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -31,6 +30,7 @@ use super::eval::set;
 use super::keys::KeyIndex;
 use super::keys::KeySet;
 use super::matcher::counted_nodes;
+use super::plan::Aggregate;
 use super::plan::CallClause;
 use super::plan::CallSubquery;
 use super::plan::Callee;
@@ -42,6 +42,7 @@ use super::plan::Pipeline;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
+use super::plan::Slot;
 use super::regex::Patterns;
 use super::seek;
 use super::shape::Shape;
@@ -57,27 +58,37 @@ pub(crate) fn run_read<T: ReadTransaction>(
     parameters: &[Datum],
     now: &Clocks,
 ) -> Result<QueryResult, Error> {
+    read_program(tx, program, parameters, now, |env, clause, next, rows| {
+        env.read_clauses(clause, next, rows)
+    })
+}
+
+/// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does.
+pub(crate) fn read_program<T: ReadTransaction>(
+    tx: &GraphTx<T>,
+    program: &Program<ReadClause>,
+    parameters: &[Datum],
+    now: &Clocks,
+    read: impl Fn(
+        &Env<'_, T>,
+        &ReadClause,
+        Option<&ReadClause>,
+        Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error>,
+) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    let env = Env {
+    let env = Env::new(
         tx,
-        slots: program.slot_count,
+        program.slot_count,
         parameters,
         now,
-        graveyard: &graveyard,
-        patterns: &patterns,
-        check: None,
-        columns: RefCell::default(),
-        keys: RefCell::default(),
-        labels: RefCell::default(),
-        label_tokens: RefCell::default(),
-        property_indexes: RefCell::default(),
-        adjacency: RefCell::default(),
-        rel_type_tokens: RefCell::default(),
-    };
+        &graveyard,
+        &patterns,
+    );
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
-        [first, rest @ ..] => env.read_clauses(first, rest.first(), rows),
+        [first, rest @ ..] => read(&env, first, rest.first(), rows),
         [] => Ok((rows, 0)),
     })?;
     materialize(&env, &graveyard, &program.columns, rows)
@@ -93,23 +104,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
     let slots = program.slot_count;
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    Env {
-        tx: &*tx,
-        slots,
-        parameters,
-        now,
-        graveyard: &graveyard,
-        patterns: &patterns,
-        check: None,
-        columns: RefCell::default(),
-        keys: RefCell::default(),
-        labels: RefCell::default(),
-        label_tokens: RefCell::default(),
-        property_indexes: RefCell::default(),
-        adjacency: RefCell::default(),
-        rel_type_tokens: RefCell::default(),
-    }
-    .check_closed(&program.closed)?;
+    Env::new(&*tx, slots, parameters, now, &graveyard, &patterns).check_closed(&program.closed)?;
     let mut writer = Writer {
         tx,
         slots,
@@ -123,22 +118,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
-    let env = Env {
-        tx: &*tx,
-        slots,
-        parameters,
-        now,
-        graveyard: &graveyard,
-        patterns: &patterns,
-        check: None,
-        columns: RefCell::default(),
-        keys: RefCell::default(),
-        labels: RefCell::default(),
-        label_tokens: RefCell::default(),
-        property_indexes: RefCell::default(),
-        adjacency: RefCell::default(),
-        rel_type_tokens: RefCell::default(),
-    };
+    let env = Env::new(&*tx, slots, parameters, now, &graveyard, &patterns);
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
@@ -229,6 +209,21 @@ fn combine(kind: UnionKind, parts: Vec<Vec<Vec<Datum>>>) -> Vec<Vec<Datum>> {
         rows.retain(|row| seen.insert(row));
     }
     rows
+}
+
+/// The label whose nodes `found` counts, or none for every node, when the aggregates only count
+/// the rows of a match that reads nothing but the count of those nodes.
+pub(crate) fn counted_label<'q>(
+    found: &'q MatchClause,
+    keys: &[(Expr, Slot)],
+    aggregates: &[(Aggregate, Slot)],
+) -> Option<Option<&'q str>> {
+    let (slot, label) = counted_nodes(found)?;
+    (keys.is_empty()
+        && aggregates
+            .iter()
+            .all(|(aggregate, _)| aggregate.counts_rows_binding(slot)))
+    .then_some(label)
 }
 
 /// The values of a branch's output slots in each row it gave.
@@ -325,45 +320,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 finals,
             } = &projection.items
         {
-            let mut groups = Groups::new(keys, aggregates);
-            if let Some((slot, label)) = counted_nodes(found)
-                && keys.is_empty()
-                && aggregates
-                    .iter()
-                    .all(|(aggregate, _)| aggregate.counts_rows_binding(slot))
-            {
-                let count = match label {
-                    None => self.tx.count_nodes()?,
-                    Some(label) => match self.label_token(label)? {
-                        Some(label) => self.tx.count_nodes_with_label(label)?,
-                        None => 0,
-                    },
-                };
-                let count = usize::try_from(count).unwrap_or(usize::MAX);
-                groups.count_rows(count.saturating_mul(rows.len()));
-                let rows = groups.finish(self, finals)?;
-                return Ok((self.arrange(projection, rows)?, 2));
-            }
-            if let Some(scan) = self.node_scan(found)?
-                && let Some(rows) = self.scan_project(scan, found, projection, &rows)?
-            {
-                return Ok((rows, 2));
-            }
-            if let Some(rows) = self.hop_aggregate(found, projection, &rows)? {
-                return Ok((rows, 2));
-            }
-            for row in &rows {
-                self.match_patterns(&found.patterns, row, &mut |matched| {
-                    let keep = match &found.filter {
-                        Some(filter) => self.predicate(filter, matched)?,
-                        None => true,
-                    };
-                    if keep {
-                        groups.add(self, matched)?;
-                    }
-                    Ok(true)
-                })?;
-            }
+            let groups = self.match_groups(found, keys, aggregates, &rows)?;
             let rows = groups.finish(self, finals)?;
             return Ok((self.arrange(projection, rows)?, 2));
         }
@@ -380,6 +337,51 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
         }
         Ok((self.read_clause(clause, rows)?, 1))
+    }
+
+    /// The groups of the aggregating projection with `keys` and `aggregates` over the matches of
+    /// `found` from each of `rows`.
+    pub(crate) fn match_groups<'p>(
+        &self,
+        found: &MatchClause,
+        keys: &'p [(Expr, Slot)],
+        aggregates: &'p [(Aggregate, Slot)],
+        rows: &[Row],
+    ) -> Result<Groups<'p>, Error> {
+        let mut groups = self.groups(keys, aggregates);
+        if let Some(label) = counted_label(found, keys, aggregates) {
+            let count = match label {
+                None => self.tx.count_nodes()?,
+                Some(label) => match self.label_token(label)? {
+                    Some(label) => self.tx.count_nodes_with_label(label)?,
+                    None => 0,
+                },
+            };
+            let count = usize::try_from(count).unwrap_or(usize::MAX);
+            groups.count_rows(count.saturating_mul(rows.len()));
+            return Ok(groups);
+        }
+        if let Some(scan) = self.node_scan(found)?
+            && let Some(groups) = self.scan_groups(scan, found, keys, aggregates, rows)?
+        {
+            return Ok(groups);
+        }
+        if let Some(groups) = self.hop_groups(found, keys, aggregates, rows)? {
+            return Ok(groups);
+        }
+        for row in rows {
+            self.match_patterns(&found.patterns, row, &mut |matched| {
+                let keep = match &found.filter {
+                    Some(filter) => self.predicate(filter, matched)?,
+                    None => true,
+                };
+                if keep {
+                    groups.add(self, matched)?;
+                }
+                Ok(true)
+            })?;
+        }
+        Ok(groups)
     }
 
     pub(crate) fn read_clause(
@@ -680,20 +682,15 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn check_closed(&self, closed: &[Expr]) -> Result<(), Error> {
         let check = Check::default();
         let checker = Env {
-            tx: self.tx,
-            slots: self.slots,
-            parameters: self.parameters,
-            now: self.now,
-            graveyard: self.graveyard,
-            patterns: self.patterns,
             check: Some(&check),
-            columns: RefCell::default(),
-            keys: RefCell::default(),
-            labels: RefCell::default(),
-            label_tokens: RefCell::default(),
-            property_indexes: RefCell::default(),
-            adjacency: RefCell::default(),
-            rel_type_tokens: RefCell::default(),
+            ..Env::new(
+                self.tx,
+                self.slots,
+                self.parameters,
+                self.now,
+                self.graveyard,
+                self.patterns,
+            )
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {

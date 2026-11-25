@@ -571,11 +571,7 @@ fn check(db: Arc<Database>, seed: u64, per_thread: u64) -> BTreeMap<i64, Vec<i64
 #[test]
 fn concurrent_transactions_in_memory_are_strictly_serializable() {
     let seed = seed();
-    let _ = check(
-        Arc::new(Database::in_memory().unwrap()),
-        seed,
-        cases(FAST_TRANSACTIONS_PER_THREAD),
-    );
+    let _ = check(Arc::new(db()), seed, cases(FAST_TRANSACTIONS_PER_THREAD));
 }
 
 #[test]
