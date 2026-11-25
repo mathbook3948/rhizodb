@@ -53,6 +53,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 - The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
 - A scan that starts in the page where the previous scan of the same transaction started reads that page without searching down from the root, so traversals and aggregates over relationships read storage with fewer comparisons.
+- The threads that `OpenOptions::threads` sets are a budget the database's read queries share: a query splits its start nodes only across threads that other read queries leave idle. Concurrent queries no longer each spawn a full set of helpers onto the same cores, so four readers of the load benchmark read 1.8 times as fast and eight readers 3 times as fast as with a full set per query.
 - A commit that deletes a key no checkpoint has written drops its tombstone once every open snapshot sees the delete, so reads beside a steady writer no longer slow down with every commit until the next checkpoint. Beside one writer, a mix of lookups, scans, and traversals reads twice as fast as before at the medium benchmark scale.
 
 ### Fixed

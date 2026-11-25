@@ -30,6 +30,8 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - `OpenOptions::parallel_threshold` sets the start nodes a match needs before it splits, defaulting to 8192, which is two row groups.
 - Consecutive row groups join one morsel up to a quarter of a thread's share of the start nodes.
 - Threads are scoped to the query and spawned per split clause, with no pool.
+- Each database counts the threads running its read queries, callers and helpers alike, and a clause splits only when that count leaves some of `threads` idle, taking at most the idle ones as helpers.
+- A clause that finds no idle thread runs on the calling thread without collecting its start nodes for morsels.
 - Tests compare every split query with the serial path on random graphs, and the whole suite and the reference evaluator also run with splitting forced at a threshold of two.
 
 ## Open
