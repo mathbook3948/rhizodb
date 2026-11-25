@@ -20,7 +20,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - Functions that only the fuzz targets call exist only with the non-default `fuzzing` feature and are not part of the API.
 - A storage failure that a host handles differently from the rest, such as a file already open elsewhere or a backup target that exists, has an error kind of its own, and every other storage failure stays `ErrorKind::Storage`.
 - `Error` implements `std::error::Error` and is `Send`, `Sync`, and `'static`.
-- Every public type is `Send` and `Sync`, except that `ReadTransaction` is only `Send` and `WriteTransaction` is neither, and a test asserts it.
+- `Error::byte_offset` returns the position of a syntax error in the query text and is `Some` exactly when the kind is `ErrorKind::Syntax`.- Every public type is `Send` and `Sync`, except that `ReadTransaction` is only `Send` and `WriteTransaction` is neither, and a test asserts it.
 - No public signature names a type that hosts cannot name.
 
 ## Open

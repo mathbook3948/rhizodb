@@ -229,6 +229,7 @@ pub struct Error {
     message: String,
     source: Option<Box<dyn StdError + Send + Sync>>,
     rejects_type: bool,
+    byte_offset: Option<usize>,
 }
 
 impl Error {
@@ -238,6 +239,7 @@ impl Error {
             message: message.into(),
             source: None,
             rejects_type: false,
+            byte_offset: None,
         }
     }
 
@@ -273,9 +275,38 @@ impl Error {
         self.kind
     }
 
-    /// The same failure, classified as `kind` instead.
+    /// The byte offset into the query text where the parser noticed a syntax error, so a host
+    /// can point at the bad spot. It is `Some` exactly when [`Error::kind`] is
+    /// [`ErrorKind::Syntax`], and `None` for every other failure.
+    ///
+    /// The offset counts bytes of the UTF-8 text, not characters, and may equal the length of
+    /// the query when the query ends too soon. It always falls on a character boundary.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    ///
+    /// let db = Database::in_memory()?;
+    /// let query = "RETURN 'é' +";
+    /// let error = db.execute(query, &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.byte_offset(), Some(query.len()));
+    ///
+    /// let error = db.execute("RETURN $missing", &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.byte_offset(), None);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn byte_offset(&self) -> Option<usize> {
+        self.byte_offset
+    }
+
+    /// The same failure, classified as `kind` instead. A failure reclassified away from a syntax
+    /// error loses its offset, and no failure is reclassified into one.
     pub(crate) fn with_kind(self, kind: ErrorKind) -> Self {
-        Self { kind, ..self }
+        Self {
+            kind,
+            byte_offset: None,
+            ..self
+        }
     }
 }
 
@@ -295,7 +326,10 @@ impl StdError for Error {
 
 impl From<SyntaxError> for Error {
     fn from(error: SyntaxError) -> Self {
-        Self::new(ErrorKind::Syntax(error.kind), error.to_string())
+        Self {
+            byte_offset: Some(error.offset),
+            ..Self::new(ErrorKind::Syntax(error.kind), error.to_string())
+        }
     }
 }
 
@@ -306,6 +340,7 @@ impl From<StorageError> for Error {
             message: error.to_string(),
             source: Some(Box::new(error)),
             rejects_type: false,
+            byte_offset: None,
         }
     }
 }
@@ -332,6 +367,7 @@ impl From<GraphError> for Error {
             message: error.to_string(),
             source: Some(Box::new(error)),
             rejects_type: false,
+            byte_offset: None,
         }
     }
 }
