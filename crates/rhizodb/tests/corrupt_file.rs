@@ -165,6 +165,46 @@ fn a_truncated_file_fails_to_open_or_reads_without_a_panic() {
     assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }
 
+#[test]
+fn a_file_cut_short_of_its_recorded_length_fails_to_open_as_corrupt_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cut.rhizodb");
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "UNWIND range(1, 3000) AS i INSERT (:Item {i: i, text: 'word ' + toString(i)})",
+        );
+    }
+    let whole = std::fs::read(&path).unwrap();
+    let mut cuts: Vec<usize> = [8192, 12288, 98_304, whole.len() / 2, whole.len() - 1]
+        .into_iter()
+        .filter(|&cut| cut > 4096 && cut < whole.len())
+        .collect();
+    cuts.dedup();
+    assert!(cuts.len() >= 3, "the file is {} bytes", whole.len());
+    for cut in cuts {
+        std::fs::write(&path, &whole[..cut]).unwrap();
+        match Database::open(&path) {
+            Ok(db) => {
+                let failure = db
+                    .execute("MATCH (n:Item) RETURN n.text", &rhizodb::Parameters::new())
+                    .err()
+                    .map(|error| error.kind());
+                assert!(
+                    failure.is_none_or(|kind| kind == ErrorKind::CorruptData),
+                    "cut at {cut}: {failure:?}"
+                );
+            }
+            Err(error) => assert_eq!(
+                error.kind(),
+                ErrorKind::CorruptData,
+                "cut at {cut}: {error}"
+            ),
+        }
+    }
+}
+
 /// Flips one bit of the first copy of `needle` in the file and returns whether there was one.
 fn flip_inside(file: &mut [u8], needle: &[u8]) -> bool {
     let Some(at) = file

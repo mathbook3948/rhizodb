@@ -33,6 +33,7 @@ impl EngineError {
         match self {
             Self::Corrupt(_) | Self::WalMissing => true,
             Self::Storage(error) => error.is_corrupt(),
+            Self::Io(error) => error.kind() == io::ErrorKind::UnexpectedEof,
             _ => false,
         }
     }
