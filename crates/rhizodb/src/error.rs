@@ -140,8 +140,11 @@ pub enum ErrorKind {
     ReadOnlyTransaction,
     /// A write transaction was used after a query that failed in it rolled it back.
     TransactionAborted,
-    /// A write was started on a thread that already holds the open write transaction, which
-    /// would otherwise wait for itself forever.
+    /// A call that begins a write, or that runs upkeep such as [`Database::compact`], ran on a
+    /// thread that already holds the open write transaction, which it would otherwise wait for
+    /// forever.
+    ///
+    /// [`Database::compact`]: crate::Database::compact
     WriteTransactionOnThisThread,
     /// An index search names an index that does not exist, one of another kind, or one over the
     /// other kind of element.
@@ -211,6 +214,9 @@ impl ErrorKind {
 
 /// A failed query or database operation. Its `Display` is a message for people, and
 /// [`Error::kind`] is what code branches on.
+///
+/// A method's docs name the [`ErrorKind`]s it adds to the ones every call can fail with, which
+/// the [Errors section of the crate guide](crate#errors) lists.
 ///
 /// ```
 /// use rhizodb::Database;

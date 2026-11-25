@@ -48,9 +48,13 @@ impl<'db> ReadTransaction<'db> {
         }
     }
 
-    /// Runs one GQL query on the snapshot and returns its rows. A query that updates the graph
-    /// fails with [`ErrorKind::ReadOnlyTransaction`] before it reads data. A failed query leaves
-    /// the transaction usable.
+    /// Runs one GQL query on the snapshot and returns its rows. A failed query leaves the
+    /// transaction usable.
+    ///
+    /// Fails with the kind that names what is wrong with the query, such as a syntax, binding,
+    /// type, or value error, and with
+    /// [`ErrorKind::ReadOnlyTransaction`](crate::ErrorKind::ReadOnlyTransaction) for a query that
+    /// updates the graph, before it reads data.
     pub fn execute(&self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         query::execute_read(&self.tx, &self.began, self.statements, query, parameters)
     }
@@ -108,7 +112,12 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// Runs one GQL query in the transaction and returns its rows. A query that fails rolls back
-    /// the whole transaction, so every later call fails with [`ErrorKind::TransactionAborted`].
+    /// the whole transaction.
+    ///
+    /// Fails with the kind that names what is wrong with the query, such as a syntax, binding,
+    /// type, or value error, and with
+    /// [`ErrorKind::TransactionAborted`](crate::ErrorKind::TransactionAborted) on every call
+    /// after a query in the transaction has failed.
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
         let tx = self.tx.as_mut().ok_or_else(aborted)?;
         let result = query::execute_write(tx, &self.began, self.statements, query, parameters);
@@ -119,12 +128,18 @@ impl<'db> WriteTransaction<'db> {
     }
 
     /// Makes the transaction's writes durable and visible to transactions that begin after it.
+    ///
+    /// Fails with [`ErrorKind::TransactionAborted`](crate::ErrorKind::TransactionAborted) when a
+    /// query in the transaction failed, which rolled it back. A commit that fails with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage) may or may not have taken effect, as
+    /// the crate guide describes.
     pub fn commit(self) -> Result<(), Error> {
         Ok(self.tx.ok_or_else(aborted)?.commit()?)
     }
 
     /// Discards the transaction's writes. Rolling back a transaction that a failed query already
-    /// rolled back succeeds.
+    /// rolled back succeeds. It adds no [`ErrorKind`]s of its own to the ones every call can fail
+    /// with.
     pub fn rollback(self) -> Result<(), Error> {
         match self.tx {
             Some(tx) => Ok(tx.rollback()?),
