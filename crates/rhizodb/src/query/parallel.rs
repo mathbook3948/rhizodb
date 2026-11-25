@@ -1,12 +1,17 @@
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::ptr;
+use std::sync::Condvar;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::error::Error;
 use crate::graph::GraphTx;
@@ -54,11 +59,27 @@ impl Default for Parallelism {
     }
 }
 
+const WRITING: Duration = Duration::from_millis(10);
+
 /// The threads running read queries of one database, its callers and their helpers, so a split
-/// takes helpers only from the cores those threads leave idle.
-#[derive(Debug, Default)]
+/// takes helpers only from the cores those threads leave idle. While writes flow, a read query
+/// starts only while fewer read threads than cores run, so a committing writer never queues for
+/// a core behind more readers than the machine can run at once.
+#[derive(Debug)]
 pub(crate) struct Workers {
     busy: AtomicUsize,
+    waiting: AtomicUsize,
+    gate: Mutex<()>,
+    freed: Condvar,
+    cores: usize,
+    epoch: Instant,
+    wrote_at: AtomicU64,
+}
+
+impl Default for Workers {
+    fn default() -> Self {
+        Self::with_cores(thread::available_parallelism().map_or(1, NonZeroUsize::get))
+    }
 }
 
 /// Threads counted as busy in [`Workers`] until it drops.
@@ -70,18 +91,84 @@ pub(crate) struct Busy<'w> {
 
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
-        self.workers.busy.fetch_sub(self.threads, Ordering::Relaxed);
+        if self.threads == 0 {
+            return;
+        }
+        self.workers.busy.fetch_sub(self.threads, Ordering::SeqCst);
+        if self.workers.waiting.load(Ordering::SeqCst) > 0 {
+            let _gate = self.workers.lock_gate();
+            for _ in 0..self.threads {
+                self.workers.freed.notify_one();
+            }
+        }
     }
 }
 
 impl Workers {
-    /// Counts the calling thread as busy while it runs a read query.
+    pub(crate) fn with_cores(cores: usize) -> Self {
+        Self {
+            busy: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            gate: Mutex::new(()),
+            freed: Condvar::new(),
+            cores: cores.max(1),
+            epoch: Instant::now(),
+            wrote_at: AtomicU64::new(0),
+        }
+    }
+
+    fn since_epoch(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// Records that a write transaction begins, so read queries take turns for the cores for a
+    /// while.
+    pub(crate) fn writing(&self) {
+        self.wrote_at
+            .store(self.since_epoch().max(1), Ordering::Relaxed);
+    }
+
+    fn writes_flow(&self) -> bool {
+        let wrote_at = self.wrote_at.load(Ordering::Relaxed);
+        wrote_at != 0 && self.since_epoch().saturating_sub(wrote_at) < WRITING.as_nanos() as u64
+    }
+
+    fn lock_gate(&self) -> MutexGuard<'_, ()> {
+        self.gate.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn try_take_one(&self) -> bool {
+        self.busy
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |busy| {
+                (busy < self.cores).then_some(busy + 1)
+            })
+            .is_ok()
+    }
+
+    /// Counts the calling thread as busy while it runs a read query, first waiting, in turn
+    /// with the other waiting queries, until fewer threads than cores are busy.
     pub(crate) fn enter(&self) -> Busy<'_> {
-        self.busy.fetch_add(1, Ordering::Relaxed);
-        Busy {
+        let taken = Busy {
             workers: self,
             threads: 1,
+        };
+        if !self.writes_flow() {
+            self.busy.fetch_add(1, Ordering::SeqCst);
+            return taken;
         }
+        if self.waiting.load(Ordering::SeqCst) == 0 && self.try_take_one() {
+            return taken;
+        }
+        let mut gate = self.lock_gate();
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        while !self.try_take_one() {
+            gate = self
+                .freed
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        taken
     }
 
     /// Takes up to `wanted` helper threads, as many as keep the busy threads within `threads`.
@@ -133,10 +220,13 @@ pub(crate) fn run_read<T: ReadTransaction>(
 where
     GraphTx<T>: Sync,
 {
-    if parallelism.threads < 2 || program.calls_host {
+    if program.calls_host {
         return exec::run_read(tx, program, parameters, now);
     }
     let _running = workers.enter();
+    if parallelism.threads < 2 {
+        return exec::run_read(tx, program, parameters, now);
+    }
     exec::read_program(
         tx,
         program,

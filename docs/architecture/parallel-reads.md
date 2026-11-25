@@ -33,6 +33,9 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - Threads are scoped to the query and spawned per split clause, with no pool.
 - Each database counts the threads running its read queries, callers and helpers alike, and a clause splits only when that count leaves some of `threads` idle, taking at most the idle ones as helpers.
 - A clause that finds no idle thread runs on the calling thread without collecting its start nodes for morsels.
+- For 10 ms after any write transaction begins, a read query starts only while fewer of the database's read threads run than the machine has cores, and otherwise waits its turn, so more client threads than cores never leave a committing writer queued for a core behind them.
+- Without writes, read queries start at once, since only a writer needs the cores they would crowd.
+- Updating queries and queries that call a host procedure never wait for a turn, so a procedure that queries the database cannot wait for its own caller.
 - Tests compare every split query with the serial path on random graphs, and the whole integration suite, the reference evaluator among it, also runs with splitting forced at a threshold of two in `mise run random-deep`.
 
 ## Open

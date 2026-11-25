@@ -61,6 +61,11 @@ pub(crate) struct Statements {
 }
 
 impl Statements {
+    /// Records that a write transaction begins.
+    pub(crate) fn writing(&self) {
+        self.workers.writing();
+    }
+
     pub(crate) fn new(parallelism: Parallelism) -> Self {
         Self {
             parallelism,
@@ -133,6 +138,7 @@ where
             &statements.workers,
         ),
         Plan::Updating(program) => {
+            statements.writing();
             let mut tx = graph.write()?;
             let result =
                 exec::run_write(&mut tx, program, &values, &Clocks::for_own_transaction())?;

@@ -297,6 +297,7 @@ impl Database {
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     pub fn begin_write(&self) -> Result<WriteTransaction<'_>, Error> {
+        self.statements.writing();
         Ok(WriteTransaction::new(self.graph.write()?, &self.statements))
     }
 
