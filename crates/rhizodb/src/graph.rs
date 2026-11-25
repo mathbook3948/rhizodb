@@ -313,6 +313,7 @@ impl<S: Storage> Graph<S> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            labels: LabelReader::default(),
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
@@ -361,6 +362,7 @@ impl<S: Storage> Graph<S> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            labels: LabelReader::default(),
             column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
@@ -387,6 +389,7 @@ pub(crate) struct GraphTx<T> {
     meta: BTreeMap<u64, GroupEdit>,
     columns: BTreeMap<u64, ColumnsEdit>,
     reader: ColumnReader,
+    labels: LabelReader,
     column_deltas: Option<Arc<ColumnDeltas>>,
     own_column_deltas: BTreeMap<u64, usize>,
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
@@ -411,6 +414,7 @@ impl<T> GraphTx<T> {
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
+            labels: LabelReader::default(),
             column_deltas: None,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
@@ -1739,13 +1743,20 @@ impl<T: WriteTransaction> GraphTx<T> {
         })
     }
 
+    fn read_labels(&mut self, id: NodeId) -> Result<Option<Arc<[Token<Label>]>>, GraphError> {
+        let mut reader = std::mem::take(&mut self.labels);
+        let labels = self.with_labels(&mut reader, id, |labels| Arc::from(labels));
+        self.labels = reader;
+        labels
+    }
+
     fn write_node_property(
         &mut self,
         id: NodeId,
         key: Token<PropertyKey>,
         value: Option<PropertyValue>,
     ) -> Result<(), GraphError> {
-        let labels = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let labels = self.read_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
         let indexed =
             self.node_index_keys(|label, keys| labels.contains(&label) && keys.contains(&key))?;
         let (group, slot) = meta::locate(id);
