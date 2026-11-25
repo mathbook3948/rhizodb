@@ -19,6 +19,7 @@ use super::plan::Case;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Hops;
+use super::plan::IdStart;
 use super::plan::Items;
 use super::plan::ListComprehension;
 use super::plan::MatchClause;
@@ -799,11 +800,32 @@ impl Binder<'_> {
         for (part, first) in patterns.iter_mut().zip(firsts) {
             part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
         }
+        let by_id = match patterns.as_slice() {
+            [part] => {
+                seek::start_by_id(part, filter.as_ref(), &introduced).map(|(value, filter)| {
+                    let mut bound = part.clone();
+                    bound.start.bound = true;
+                    bound.seeks = Vec::new();
+                    Box::new(IdStart {
+                        value,
+                        clause: MatchClause {
+                            optional: found.optional,
+                            patterns: vec![bound],
+                            filter,
+                            introduced: introduced.clone(),
+                            by_id: None,
+                        },
+                    })
+                })
+            }
+            _ => None,
+        };
         Ok(ReadClause::Match(MatchClause {
             optional: found.optional,
             patterns,
             filter,
             introduced,
+            by_id,
         }))
     }
 

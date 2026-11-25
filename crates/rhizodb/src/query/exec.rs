@@ -8,6 +8,7 @@ use crate::error::ErrorKind;
 use crate::gql::ast::SortDirection;
 use crate::gql::ast::UnionKind;
 use crate::graph::GraphTx;
+use crate::graph::NodeId;
 use crate::procedure::Procedure;
 use crate::procedure::ValueType;
 use crate::result;
@@ -41,6 +42,7 @@ use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
 use super::regex::Patterns;
+use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
@@ -523,18 +525,39 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
-        for row in rows {
+        for mut row in rows {
             let before = out.len();
-            self.match_patterns(&found.patterns, &row, &mut |matched| {
-                let keep = match &found.filter {
-                    Some(filter) => self.predicate(filter, matched)?,
-                    None => true,
-                };
-                if keep {
-                    out.push(matched.clone());
+            let sought = found.by_id.as_deref().and_then(|by_id| {
+                let value = self.eval(&by_id.value, &row).ok()?;
+                Some((by_id, value))
+            });
+            match sought {
+                Some((by_id, value)) => {
+                    if let (Some(id), [part]) = (seek::id(&value), by_id.clause.patterns.as_slice())
+                    {
+                        let id = NodeId(id);
+                        set(&mut row, part.start.slot, Datum::Node(id));
+                        if part.steps.is_empty()
+                            && part.path.is_none()
+                            && part.start.labels.is_none()
+                            && part.start.properties.is_none()
+                        {
+                            let kept = self.with_labels(id, |_| ())?.is_some()
+                                && match &by_id.clause.filter {
+                                    Some(filter) => self.predicate(filter, &row)?,
+                                    None => true,
+                                };
+                            if kept {
+                                out.push(row);
+                                continue;
+                            }
+                        } else {
+                            self.match_into(&by_id.clause, &row, &mut out)?;
+                        }
+                    }
                 }
-                Ok(true)
-            })?;
+                None => self.match_into(found, &row, &mut out)?,
+            }
             if found.optional && out.len() == before {
                 let mut padded = row;
                 for slot in &found.introduced {
@@ -544,6 +567,19 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
         }
         Ok(out)
+    }
+
+    fn match_into(&self, found: &MatchClause, row: &Row, out: &mut Vec<Row>) -> Result<(), Error> {
+        self.match_patterns(&found.patterns, row, &mut |matched| {
+            let keep = match &found.filter {
+                Some(filter) => self.predicate(filter, matched)?,
+                None => true,
+            };
+            if keep {
+                out.push(matched.clone());
+            }
+            Ok(true)
+        })
     }
 
     fn project(&self, projection: &Projection, rows: Vec<Row>) -> Result<Vec<Row>, Error> {

@@ -452,3 +452,35 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn an_id_lookup_answers_as_a_lookup_that_tests_its_condition_again() {
+    let db = trapped_db(false);
+    let shapes = [
+        "UNWIND [VALUE] AS v MATCH (n) WHERE ID = v RETURN id(n)",
+        "UNWIND [VALUE] AS v OPTIONAL MATCH (n) WHERE ID = v RETURN id(n)",
+        "UNWIND [VALUE] AS v MATCH (n:P) WHERE v = ID AND n.k > 1 RETURN id(n), n.k",
+        "UNWIND [VALUE] AS v MATCH (n)-[r:T]->(m) WHERE ID = v RETURN id(r), id(m)",
+        "UNWIND [VALUE] AS v OPTIONAL MATCH (n {k: 4}) WHERE ID = v RETURN id(n)",
+        "UNWIND [VALUE] AS v MATCH p = (n) WHERE ID = v RETURN length(p)",
+        "UNWIND [VALUE] AS v MATCH (n) WHERE n.k > 0 AND ID = v AND n.k < 10 RETURN id(n)",
+        "UNWIND [VALUE] AS v MATCH (n) WHERE n.trap AND ID = v RETURN id(n)",
+        "UNWIND [VALUE] AS v MATCH (n) WHERE ID = v AND n.trap - 1 = 0 RETURN id(n)",
+        "UNWIND [VALUE] AS v MATCH (n) WHERE ID = v MATCH (n)-[:T]->(m) RETURN id(m)",
+    ];
+    let values = ["0", "3", "3.0", "99", "-1", "null", "'x'", "2.5", "[0]"];
+    let answer = |query: &str| match db.execute(query, &Parameters::new()) {
+        Ok(result) => format!("{:?}", result.rows()),
+        Err(error) => format!("error {:?}: {error}", error.kind()),
+    };
+    for shape in shapes {
+        for value in values {
+            let query = shape.replace("VALUE", value);
+            let sought = query.replace("ID", "id(n)");
+            let twice = query
+                .replace("ID = v", "(id(n) = v AND id(n) = v)")
+                .replace("v = ID", "(v = id(n) AND v = id(n))");
+            assert_eq!(answer(&sought), answer(&twice), "{sought}");
+        }
+    }
+}

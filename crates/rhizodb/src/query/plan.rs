@@ -109,6 +109,16 @@ pub(crate) struct MatchClause {
     pub(crate) filter: Option<Expr>,
     /// Slots the clause binds, set to null when an optional match finds nothing.
     pub(crate) introduced: Vec<Slot>,
+    pub(crate) by_id: Option<Box<IdStart>>,
+}
+
+/// How a match of one pattern part runs when the ID lookup of its start node succeeds: `value`
+/// gives the ID, and `clause` matches from that node, bound, with the equality that the lookup
+/// served read as true.
+#[derive(Clone, Debug)]
+pub(crate) struct IdStart {
+    pub(crate) value: Expr,
+    pub(crate) clause: MatchClause,
 }
 
 /// A procedure call. Each row gets one row per result, with output `index` of the result in
