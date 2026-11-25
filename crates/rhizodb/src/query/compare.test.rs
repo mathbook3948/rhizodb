@@ -22,8 +22,14 @@ fn datum() -> impl Strategy<Value = Datum> {
         prop_oneof![
             prop::collection::vec(inner.clone(), 0..3)
                 .prop_map(|items| Datum::List(Arc::new(items))),
-            prop::collection::btree_map("[ab]", inner, 0..2)
-                .prop_map(|entries| Datum::Map(Arc::new(entries))),
+            prop::collection::btree_map("[ab]", inner, 0..2).prop_map(|entries| {
+                Datum::Map(Arc::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (Arc::from(key), value))
+                        .collect(),
+                ))
+            }),
         ]
     })
 }
