@@ -239,6 +239,15 @@ fn deeply_nested_query_text_is_a_syntax_error_on_a_small_stack() {
 }
 
 #[test]
+fn a_long_chain_of_next_statements_runs_on_a_small_stack() {
+    let db = db();
+    let text = format!("RETURN 0 AS a{}", " NEXT RETURN a + 1 AS a".repeat(20_000));
+    on_small_stack(|| {
+        assert_eq!(single(&db, &text), int(20_000));
+    });
+}
+
+#[test]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {
@@ -306,6 +315,11 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     "{}INSERT (:D){}",
                     "CALL { ".repeat(depth),
                     " }".repeat(depth)
+                ),
+                format!(
+                    "{}RETURN 1 AS x{}",
+                    "CALL { RETURN 1 AS y NEXT ".repeat(depth),
+                    " } RETURN x".repeat(depth)
                 ),
                 format!(
                     "UNWIND [1] AS i {}INSERT (:D {{i: i}}) RETURN i AS j{}",

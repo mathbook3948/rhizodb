@@ -241,6 +241,27 @@ pub(crate) fn branch_rows<C>(branch: &Pipeline<C>, rows: Vec<Row>) -> Vec<Vec<Da
         .collect()
 }
 
+/// The rows a `table` call gives from the rows of each branch.
+pub(crate) fn table_rows<C>(
+    call: &CallSubquery<C>,
+    parts: Vec<Vec<Vec<Datum>>>,
+    slots: usize,
+) -> Vec<Row> {
+    if call.outputs.is_empty() {
+        return vec![vec![Datum::Null; slots]];
+    }
+    combine(call.combine, parts)
+        .into_iter()
+        .map(|values| {
+            let mut row = vec![Datum::Null; slots];
+            for (slot, value) in call.outputs.iter().zip(values) {
+                set(&mut row, *slot, value);
+            }
+            row
+        })
+        .collect()
+}
+
 /// Adds to `out` the rows a `CALL` subquery gives for `row`, from the rows of each branch.
 pub(crate) fn extend_row<C>(
     call: &CallSubquery<C>,
@@ -411,6 +432,17 @@ impl<T: ReadTransaction> Env<'_, T> {
         call: &CallSubquery<ReadClause>,
         rows: Vec<Row>,
     ) -> Result<Vec<Row>, Error> {
+        if call.table {
+            let mut parts = Vec::new();
+            for branch in &call.branches {
+                let mut inner = rows.clone();
+                for clause in &branch.clauses {
+                    inner = self.read_clause(clause, inner)?;
+                }
+                parts.push(branch_rows(branch, inner));
+            }
+            return Ok(table_rows(call, parts, self.slots));
+        }
         let mut out = Vec::new();
         for row in rows {
             let mut parts = Vec::new();

@@ -30,6 +30,7 @@ use super::eval::set;
 use super::eval::type_error;
 use super::exec::branch_rows;
 use super::exec::extend_row;
+use super::exec::table_rows;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::MergeClause;
@@ -104,6 +105,14 @@ impl<W: WriteTransaction> Writer<'_, W> {
             } => {
                 self.delete(*detach, *retain, targets, &rows)?;
                 Ok(rows)
+            }
+            UpdateClause::CallSubquery(call) if call.table => {
+                let mut parts = Vec::new();
+                for branch in &call.branches {
+                    let inner = self.run(&branch.clauses, rows.clone())?;
+                    parts.push(branch_rows(branch, inner));
+                }
+                Ok(table_rows(call, parts, self.slots))
             }
             UpdateClause::CallSubquery(call) => {
                 let mut out = Vec::new();

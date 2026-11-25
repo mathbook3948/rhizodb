@@ -82,9 +82,14 @@ pub(crate) enum ReadClause {
 /// `CALL { ... }`: runs every branch from each row and extends the row with each row the
 /// branches return, in `outputs`. Without `outputs`, the branches end without `RETURN` and each
 /// row is kept once.
+///
+/// A statement after `NEXT` is a `table` call instead: every branch runs once on all the rows,
+/// and the rows the branches return, in `outputs`, replace them. Without `outputs` they become
+/// one row.
 #[derive(Clone, Debug)]
 pub(crate) struct CallSubquery<C> {
     pub(crate) optional: bool,
+    pub(crate) table: bool,
     pub(crate) combine: UnionKind,
     pub(crate) branches: Vec<Pipeline<C>>,
     pub(crate) outputs: Vec<Slot>,

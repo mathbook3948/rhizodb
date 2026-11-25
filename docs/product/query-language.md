@@ -77,6 +77,14 @@ GQL is the reference language, but the only public conformance suite is the open
 - `OTHERWISE` gives the rows of its left operand, or of its right operand when the left gives none.
 - GQL's `||` joins two strings or two lists, binds like `+`, and is a type error on anything else, while `+` keeps Cypher's wider rules.
 - `||` is an operator only when its two pipes touch, so a lone `|` still ends a comprehension filter or a label disjunction.
+- `NEXT` passes the rows a statement returns to the statement after it, whose only variables are the columns of those rows.
+- `NEXT YIELD a, b` keeps only the named columns of the rows it passes on.
+- Each statement after `NEXT` runs once over all the rows the statement before it returned, so an aggregate or a set operator there sees all of them.
+- A statement that ends without `RETURN` passes on one row without columns, and one that does not update the graph must end with `RETURN`.
+- A statement after `NEXT` starts the clause order rules afresh, so it may read after the statement before it updated the graph.
+- `NEXT` joins statements more loosely than any set operator, and works inside `CALL { ... }`.
+- `NEXT` is a keyword only between two statements, so it still works as a variable, label, or relationship type.
+- A chain of statements joined by `NEXT` counts as one extra level of nesting toward the parser's limit.
 - A `CALL` that is the only clause inside `EXISTS` follows the rules of a `CALL` inside a larger query.
 - A `CALL` inside a larger query passes the arguments of a procedure that takes any.
 - A `CALL` inside a larger query binds only its `YIELD` items.

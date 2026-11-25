@@ -19,6 +19,17 @@ pub(crate) struct Span {
 pub(crate) enum Query {
     Single(SingleQuery),
     Union(Union),
+    /// Statements joined by `NEXT`, each fed the rows the one before it returns. Holds two or
+    /// more blocks, none of them a `Next`, and the first block has no `YIELD`.
+    Next(Vec<Block>),
+}
+
+/// One statement of a `NEXT` chain: `NEXT YIELD a, b query`, where `yields` is `None` without
+/// `YIELD`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Block {
+    pub yields: Option<Vec<Name>>,
+    pub query: Query,
 }
 
 /// Two or more single queries joined by one set operator.
