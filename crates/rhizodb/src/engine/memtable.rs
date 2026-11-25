@@ -1,7 +1,9 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicU64;
@@ -217,6 +219,7 @@ pub(crate) struct Memtable {
     chains: RwLock<Chains>,
     filter: Filter,
     bytes: AtomicU64,
+    graves: Mutex<VecDeque<(TableId, Key, u64)>>,
 }
 
 fn cost(key: &[u8], slot: &Slot) -> u64 {
@@ -296,7 +299,7 @@ impl Memtable {
     ) {
         let mut chains = self.chains.write().unwrap_or_else(PoisonError::into_inner);
         let mut added = 0u64;
-        let mut freed = 0u64;
+        let mut freed = self.sweep(&mut chains, horizon);
         for (table, key, slot) in changes {
             let key_length = key.len() as u64;
             self.filter
@@ -318,6 +321,39 @@ impl Memtable {
         self.bytes.fetch_add(added, Ordering::Relaxed);
         self.bytes
             .fetch_sub(freed.min(self.bytes()), Ordering::Relaxed);
+    }
+
+    /// Records that no layer below this memtable holds any of `keys`, which the commit at `lsn`
+    /// deleted, so once every snapshot sees that commit their chains can go instead of hiding
+    /// nothing until a checkpoint.
+    pub(crate) fn bury(&self, lsn: u64, keys: impl IntoIterator<Item = (TableId, Bytes)>) {
+        let mut graves = self.graves.lock().unwrap_or_else(PoisonError::into_inner);
+        graves.extend(
+            keys.into_iter()
+                .map(|(table, key)| (table, Key::new(key), lsn)),
+        );
+    }
+
+    fn sweep(&self, chains: &mut Chains, horizon: u64) -> u64 {
+        let mut graves = self.graves.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut freed = 0u64;
+        while let Some((table, key, lsn)) = graves.pop_front_if(|(_, _, lsn)| *lsn <= horizon) {
+            let Some(keys) = chains.get_mut(&table) else {
+                continue;
+            };
+            let deleted_last = keys
+                .get(&key)
+                .and_then(|chain| chain.last())
+                .is_some_and(|version| version.lsn == lsn && version.slot.is_none());
+            if deleted_last && let Some(chain) = keys.remove(&key) {
+                let key_length = key.bytes.len() as u64;
+                freed += chain
+                    .iter()
+                    .map(|version| key_length + cost(&[], &version.slot))
+                    .sum::<u64>();
+            }
+        }
+        freed
     }
 
     /// Every key's newest version, per table in key order, which a checkpoint writes to the file.

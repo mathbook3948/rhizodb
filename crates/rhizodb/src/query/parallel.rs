@@ -54,6 +54,52 @@ impl Default for Parallelism {
     }
 }
 
+/// The threads running read queries of one database, its callers and their helpers, so a split
+/// takes helpers only from the cores those threads leave idle.
+#[derive(Debug, Default)]
+pub(crate) struct Workers {
+    busy: AtomicUsize,
+}
+
+/// Threads counted as busy in [`Workers`] until it drops.
+#[derive(Debug)]
+pub(crate) struct Busy<'w> {
+    workers: &'w Workers,
+    threads: usize,
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.workers.busy.fetch_sub(self.threads, Ordering::Relaxed);
+    }
+}
+
+impl Workers {
+    /// Counts the calling thread as busy while it runs a read query.
+    pub(crate) fn enter(&self) -> Busy<'_> {
+        self.busy.fetch_add(1, Ordering::Relaxed);
+        Busy {
+            workers: self,
+            threads: 1,
+        }
+    }
+
+    /// Takes up to `wanted` helper threads, as many as keep the busy threads within `threads`.
+    pub(crate) fn reserve(&self, wanted: usize, threads: usize) -> Busy<'_> {
+        let mut taken = 0;
+        let _ = self
+            .busy
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |busy| {
+                taken = threads.saturating_sub(busy).min(wanted);
+                (taken > 0).then(|| busy + taken)
+            });
+        Busy {
+            workers: self,
+            threads: taken,
+        }
+    }
+}
+
 /// The start nodes one worker of a parallel read matches its first pattern from: the run of
 /// `ids` that `range` holds, which the worker moves to each morsel it takes.
 #[derive(Debug)]
@@ -74,14 +120,15 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
 }
 
 /// Runs a read-only program, splitting a match that reads enough start nodes across
-/// `parallelism.threads` threads. The rows, their order, and any error are those of
-/// [`exec::run_read`].
+/// `parallelism.threads` threads, less those that other read queries of `workers` keep busy.
+/// The rows, their order, and any error are those of [`exec::run_read`].
 pub(crate) fn run_read<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
     parallelism: Parallelism,
+    workers: &Workers,
 ) -> Result<QueryResult, Error>
 where
     GraphTx<T>: Sync,
@@ -89,12 +136,13 @@ where
     if parallelism.threads < 2 || program.calls_host {
         return exec::run_read(tx, program, parameters, now);
     }
+    let _running = workers.enter();
     exec::read_program(
         tx,
         program,
         parameters,
         now,
-        |env, clause, next, rows| match split(env, parallelism, clause, next, &rows) {
+        |env, clause, next, rows| match split(env, parallelism, workers, clause, next, &rows) {
             Some(read) => match read.run(env, parallelism) {
                 Some(done) => Ok(done),
                 None => env.read_clauses(clause, next, rows),
@@ -120,22 +168,24 @@ enum Part<'q> {
     Rows(Vec<Row>, usize),
 }
 
-struct Split<'q> {
+struct Split<'q, 'w> {
     clause: &'q ReadClause,
     part: &'q PatternPart,
     job: Job<'q>,
     row: &'q Row,
     ids: Vec<NodeId>,
     enough: Option<usize>,
+    helpers: Busy<'w>,
 }
 
-fn split<'q, T: ReadTransaction>(
+fn split<'q, 'w, T: ReadTransaction>(
     env: &Env<'_, T>,
     parallelism: Parallelism,
+    workers: &'w Workers,
     clause: &'q ReadClause,
     next: Option<&'q ReadClause>,
     rows: &'q [Row],
-) -> Option<Split<'q>> {
+) -> Option<Split<'q, 'w>> {
     let ReadClause::Match(found) = clause else {
         return None;
     };
@@ -180,6 +230,10 @@ fn split<'q, T: ReadTransaction>(
     if env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()? {
         return None;
     }
+    let helpers = workers.reserve(parallelism.threads - 1, parallelism.threads);
+    if helpers.threads == 0 {
+        return None;
+    }
     let ids = env.scanned_nodes(&part.start).ok()?;
     let enough = match &job {
         Job::Rows {
@@ -200,6 +254,7 @@ fn split<'q, T: ReadTransaction>(
         row,
         ids,
         enough,
+        helpers,
     })
 }
 
@@ -264,7 +319,7 @@ fn per_morsel<T: ReadTransaction>(env: &Env<'_, T>, projection: &Projection) -> 
     })
 }
 
-impl<'q> Split<'q> {
+impl<'q> Split<'q, '_> {
     fn run<T: ReadTransaction>(
         self,
         env: &Env<'_, T>,
@@ -321,7 +376,7 @@ impl<'q> Split<'q> {
             }
             done
         };
-        let helpers = parallelism.threads.min(morsels.len()).saturating_sub(1);
+        let helpers = self.helpers.threads.min(morsels.len().saturating_sub(1));
         let finished = thread::scope(|scope| {
             let handles: Vec<_> = (0..helpers)
                 .filter_map(|_| {
@@ -418,3 +473,7 @@ impl<'q> Split<'q> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "parallel.test.rs"]
+mod tests;

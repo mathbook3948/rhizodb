@@ -16,6 +16,7 @@ fn no_arguments_give_the_defaults() {
             out: None,
             engines: None,
             servers: Servers::default(),
+            load: Load::default(),
         })
     );
 }
@@ -36,6 +37,7 @@ fn every_flag_is_read() {
             out: Some(PathBuf::from("r.json")),
             engines: None,
             servers: Servers::default(),
+            load: Load::default(),
         })
     );
 }

@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -23,6 +24,11 @@ use crate::runner::Settings;
 use crate::runner::run_all;
 use crate::scale::Scale;
 use crate::sqlite::SqliteEngine;
+use crate::stress::Load;
+use crate::stress::Scenario;
+use crate::stress::load_json;
+use crate::stress::load_table;
+use crate::stress::run_load;
 use crate::workloads;
 
 /// Seed of the generated dataset. Changing it changes every number.
@@ -49,6 +55,8 @@ pub struct Arguments {
     pub out: Option<PathBuf>,
     pub engines: Option<Vec<EngineKind>>,
     pub servers: Servers,
+    /// The load scenarios to run in place of the workload suite, when any are named.
+    pub load: Load,
 }
 
 /// A command line the binary cannot read.
@@ -59,7 +67,7 @@ impl fmt::Display for UsageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT]",
+            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT] [--load readers,mixed,sustained|all] [--threads 1,2,4,8] [--seconds N]",
             self.0
         )
     }
@@ -78,6 +86,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
         out: None,
         engines: None,
         servers: Servers::default(),
+        load: Load::default(),
     };
     let mut arguments = arguments.into_iter();
     while let Some(flag) = arguments.next() {
@@ -109,6 +118,30 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
                     text.split(',').map(EngineKind::parse).collect();
                 parsed.engines =
                     Some(engines.ok_or_else(|| UsageError(format!("unknown engine in `{text}`")))?);
+            }
+            "--load" => {
+                let text = value()?;
+                parsed.load.scenarios = Scenario::parse_list(&text)
+                    .ok_or_else(|| UsageError(format!("unknown load scenario in `{text}`")))?;
+            }
+            "--threads" => {
+                let text = value()?;
+                let threads: Option<Vec<usize>> = text
+                    .split(',')
+                    .map(|count| count.parse().ok().filter(|count| *count > 0))
+                    .collect();
+                parsed.load.threads = threads.ok_or_else(|| {
+                    UsageError(format!("`{text}` is not a list of positive counts"))
+                })?;
+            }
+            "--seconds" => {
+                let text = value()?;
+                let seconds: u64 = text
+                    .parse()
+                    .ok()
+                    .filter(|seconds| *seconds > 0)
+                    .ok_or_else(|| UsageError(format!("`{text}` is not a positive count")))?;
+                parsed.load.duration = Duration::from_secs(seconds);
             }
             "--neo4j" => parsed.servers.neo4j = Some(value()?),
             "--memgraph" => parsed.servers.memgraph = Some(value()?),
@@ -267,6 +300,9 @@ pub fn main() -> ExitCode {
     for warning in &warnings {
         eprintln!("{warning}");
     }
+    if !arguments.load.scenarios.is_empty() {
+        return load_main(&arguments);
+    }
     let options = Options {
         scale: arguments.scale,
         reps: arguments.reps,
@@ -322,6 +358,65 @@ pub fn main() -> ExitCode {
     });
     if broken {
         eprintln!("some workloads failed, errored, or disagreed between the engines");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn load_main(arguments: &Arguments) -> ExitCode {
+    let plan = arguments.scale.plan();
+    let data = Dataset::generate(SEED, plan);
+    let mut environment = match Environment::new(&env::temp_dir(), &plan, &data) {
+        Ok(environment) => environment,
+        Err(error) => {
+            eprintln!("cannot create the scratch directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let kinds = arguments
+        .engines
+        .clone()
+        .unwrap_or_else(|| vec![EngineKind::Rhizodb, EngineKind::Ladybugdb]);
+    let all = engines_for(&arguments.servers);
+    let chosen: Vec<&dyn Engine> = all
+        .iter()
+        .filter(|engine| kinds.contains(&engine.kind()))
+        .map(|engine| &**engine)
+        .collect();
+    let reports = run_load(
+        &mut environment,
+        &chosen,
+        &data,
+        &arguments.load,
+        arguments.reps,
+        |name| eprintln!("running {name}"),
+    );
+    print!("{}", load_table(&reports));
+    if let Some(path) = &arguments.out {
+        let header = json!({
+            "scale": arguments.scale.name(),
+            "reps": arguments.reps,
+            "seed": SEED,
+            "persons": plan.persons,
+            "seconds": arguments.load.duration.as_secs(),
+            "cores": std::thread::available_parallelism().map_or(0, |cores| cores.get()),
+            "engines": chosen.iter().map(|engine| {
+                let mut config = engine.config();
+                config["engine"] = json!(engine.kind().name());
+                config
+            }).collect::<Vec<_>>(),
+        });
+        let text = serde_json::to_string_pretty(&load_json(&reports, header)).unwrap_or_default();
+        if let Err(error) = fs::write(path, text) {
+            eprintln!("cannot write {}: {error}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    if reports
+        .iter()
+        .any(|report| report.engines.iter().any(|series| !series.clean()))
+    {
+        eprintln!("some load runs failed, errored, or returned wrong answers");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

@@ -45,6 +45,7 @@ use self::cache::PlanCache;
 use self::datum::Datum;
 use self::datum::from_parameter;
 pub(crate) use self::parallel::Parallelism;
+use self::parallel::Workers;
 use self::plan::Plan;
 
 /// The procedures that `CALL` reaches, the plans of the queries bound against them, and how many
@@ -56,6 +57,7 @@ pub(crate) struct Statements {
     procedures: RwLock<Procedures>,
     plans: PlanCache,
     parallelism: Parallelism,
+    workers: Workers,
 }
 
 impl Statements {
@@ -128,6 +130,7 @@ where
             &values,
             &Clocks::for_own_transaction(),
             statements.parallelism,
+            &statements.workers,
         ),
         Plan::Updating(program) => {
             let mut tx = graph.write()?;
@@ -158,6 +161,7 @@ where
             &values,
             &Clocks::within(began),
             statements.parallelism,
+            &statements.workers,
         ),
         Plan::Updating(_) => Err(Error::new(
             ErrorKind::ReadOnlyTransaction,

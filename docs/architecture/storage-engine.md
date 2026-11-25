@@ -86,6 +86,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
 - Every reader registers its snapshot, and a commit drops each version that no registered snapshot or later one can see.
+- A commit's tombstone of a key that neither the frozen memtable nor the tree holds is dropped with its key's versions once every registered snapshot sees the commit.
 - A write transaction keeps its operations in order, for the log, and each written key's value now, for its own reads and for the memtable.
 - A range delete puts a tombstone in the memtable for each key it removes, and replaying its log operation finds the same keys.
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
@@ -130,6 +131,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Commits go on into a new memtable while a background checkpoint or compaction runs, and a commit waits for it once the new memtable reaches twice the limit.
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
+- With background checkpoints, the writer only drops those segments from the log's list and the checkpoint thread removes their files, so no commit waits for the removal.
+- The background checkpoint thread keeps each memtable it wrote until no snapshot holds it and frees it then, so no commit or reader frees a frozen memtable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
