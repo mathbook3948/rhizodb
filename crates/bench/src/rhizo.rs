@@ -28,8 +28,8 @@ const FILE_NAME: &str = "graph.rhizodb";
 const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN id(p)";
 const CREATE_CITIES: &str =
     "UNWIND $rows AS r CREATE (c:City {id: r.id, name: r.name}) RETURN id(c)";
-const CREATE_KNOWS: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $persons[$from[i]] MATCH (b) WHERE id(b) = $persons[$to[i]] CREATE (a)-[:KNOWS {since: $since[i]}]->(b)";
-const CREATE_LIVES_IN: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $persons[$from[i]] MATCH (b) WHERE id(b) = $cities[$to[i]] CREATE (a)-[:LIVES_IN]->(b)";
+const CREATE_KNOWS: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $from[i] MATCH (b) WHERE id(b) = $to[i] CREATE (a)-[:KNOWS {since: $since[i]}]->(b)";
+const CREATE_LIVES_IN: &str = "UNWIND range(0, size($from) - 1) AS i MATCH (a) WHERE id(a) = $from[i] MATCH (b) WHERE id(b) = $to[i] CREATE (a)-[:LIVES_IN]->(b)";
 
 /// RhizoDB, opened as a file.
 #[derive(Clone, Copy, Debug)]
@@ -39,8 +39,15 @@ pub struct RhizoEngine;
 struct Prepared {
     persons: Vec<Parameters>,
     cities: Vec<Parameters>,
-    knows: Vec<Parameters>,
-    lives_in: Vec<Parameters>,
+    knows: Vec<EdgeBatch>,
+    lives_in: Vec<EdgeBatch>,
+}
+
+#[derive(Debug)]
+struct EdgeBatch {
+    from: Vec<usize>,
+    to: Vec<usize>,
+    since: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -100,7 +107,7 @@ impl Instance for RhizoInstance {
     }
 
     fn prepare_bulk_load(&self, data: &Dataset, _scratch: &Path) -> Result<(), EngineError> {
-        let index = |id: i64| Value::Integer(id - 1);
+        let index = |id: i64| usize::try_from(id - 1).unwrap_or(usize::MAX);
         let prepared = Prepared {
             persons: person_rows(data)
                 .chunks(NODE_BATCH)
@@ -113,20 +120,24 @@ impl Instance for RhizoInstance {
             knows: data
                 .knows
                 .chunks(EDGE_BATCH)
-                .map(|batch| {
-                    Parameters::new()
-                        .with("from", column(batch, |edge| index(edge.from)))
-                        .with("to", column(batch, |edge| index(edge.to)))
-                        .with("since", column(batch, |edge| Value::Integer(edge.since)))
+                .map(|batch| EdgeBatch {
+                    from: batch.iter().map(|edge| index(edge.from)).collect(),
+                    to: batch.iter().map(|edge| index(edge.to)).collect(),
+                    since: Some(Value::List(
+                        batch
+                            .iter()
+                            .map(|edge| Value::Integer(edge.since))
+                            .collect(),
+                    )),
                 })
                 .collect(),
             lives_in: data
                 .lives_in
                 .chunks(EDGE_BATCH)
-                .map(|batch| {
-                    Parameters::new()
-                        .with("from", column(batch, |edge| index(edge.person)))
-                        .with("to", column(batch, |edge| index(edge.city)))
+                .map(|batch| EdgeBatch {
+                    from: batch.iter().map(|edge| index(edge.person)).collect(),
+                    to: batch.iter().map(|edge| index(edge.city)).collect(),
+                    since: None,
                 })
                 .collect(),
         };
@@ -144,17 +155,20 @@ impl Instance for RhizoInstance {
         let mut transaction = self.database.begin_write().map_err(failed)?;
         let persons = create_nodes(&mut transaction, CREATE_PERSONS, &prepared.persons)?;
         let cities = create_nodes(&mut transaction, CREATE_CITIES, &prepared.cities)?;
-        for mut batch in prepared.knows {
-            batch.insert("persons", persons.clone());
-            transaction.execute(CREATE_KNOWS, &batch).map_err(failed)?;
-        }
-        for mut batch in prepared.lives_in {
-            batch.insert("persons", persons.clone());
-            batch.insert("cities", cities.clone());
-            transaction
-                .execute(CREATE_LIVES_IN, &batch)
-                .map_err(failed)?;
-        }
+        create_edges(
+            &mut transaction,
+            CREATE_KNOWS,
+            prepared.knows,
+            &persons,
+            &persons,
+        )?;
+        create_edges(
+            &mut transaction,
+            CREATE_LIVES_IN,
+            prepared.lives_in,
+            &persons,
+            &cities,
+        )?;
         transaction.commit().map_err(failed)
     }
 
@@ -341,15 +355,11 @@ fn rows_parameter(rows: Vec<Vec<(&'static str, Value)>>) -> Parameters {
     Parameters::from([("rows", Value::List(rows))])
 }
 
-fn column<T>(batch: &[T], value: impl Fn(&T) -> Value) -> Value {
-    Value::List(batch.iter().map(value).collect())
-}
-
 fn create_nodes(
     transaction: &mut WriteTransaction<'_>,
     statement: &str,
     batches: &[Parameters],
-) -> Result<Value, EngineError> {
+) -> Result<Vec<Value>, EngineError> {
     let mut handles = Vec::new();
     for batch in batches {
         let result = transaction.execute(statement, batch).map_err(failed)?;
@@ -359,7 +369,36 @@ fn create_nodes(
             }
         }
     }
-    Ok(Value::List(handles))
+    Ok(handles)
+}
+
+fn create_edges(
+    transaction: &mut WriteTransaction<'_>,
+    statement: &str,
+    batches: Vec<EdgeBatch>,
+    sources: &[Value],
+    targets: &[Value],
+) -> Result<(), EngineError> {
+    let ends = |positions: &[usize], handles: &[Value]| {
+        Value::List(
+            positions
+                .iter()
+                .map(|at| handles.get(*at).cloned().unwrap_or(Value::Null))
+                .collect(),
+        )
+    };
+    for batch in batches {
+        let mut parameters = Parameters::new()
+            .with("from", ends(&batch.from, sources))
+            .with("to", ends(&batch.to, targets));
+        if let Some(since) = batch.since {
+            parameters.insert("since", since);
+        }
+        transaction
+            .execute(statement, &parameters)
+            .map_err(failed)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
