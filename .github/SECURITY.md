@@ -4,7 +4,7 @@ RhizoDB runs inside the program that embeds it and reads queries and database fi
 
 ## Supported versions
 
-RhizoDB has no release yet. Security fixes go to the `main` branch and into the next release.
+Below 1.0, security fixes go to the `main` branch and into the next release, and only the latest release is supported.
 
 ## Report a vulnerability
 

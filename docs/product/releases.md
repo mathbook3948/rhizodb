@@ -23,6 +23,7 @@ The crate is developed and released from its own repository, and hosts depend on
 - docs.rs builds the documentation for one Linux target, since the API is the same on every platform.
 - The published crate carries both license texts.
 - The guide for hosts is the crate-level documentation, so docs.rs shows it and its examples run as doctests.
+- The README's example runs as a doctest, and every program in `crates/rhizodb/examples` runs in `mise run check`, so neither goes stale.
 - Every public item has documentation, which a lint enforces.
 
 ## Open

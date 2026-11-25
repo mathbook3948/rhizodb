@@ -22,6 +22,7 @@ pub mod fingerprint;
 pub mod ladybug;
 pub mod measure;
 pub mod random;
+pub mod readme;
 pub mod report;
 pub mod rhizo;
 pub mod runner;

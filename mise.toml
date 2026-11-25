@@ -28,6 +28,9 @@ run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "cargo clippy --package rhizodb --features fuzzing -- -D warnings",
   "cargo test --workspace",
+  "cargo run --quiet --package rhizodb --example social",
+  "cargo run --quiet --package rhizodb --example search",
+  "cargo run --quiet --package rhizodb --example procedures",
 ]
 
 [tasks.storage-deep]
@@ -90,3 +93,8 @@ description = "Measure every engine, for example: mise run bench --scale small -
 depends = ["lbug-extensions"]
 dir = "crates/bench"
 run = "cargo run --release --features duckdb,cozo --"
+
+[tasks.bench-readme]
+description = "Measure RhizoDB and LadybugDB at medium scale with 5 repetitions and rewrite the benchmark table in README.md, or set BENCH_README_REPORT to a saved JSON report to only rewrite the table"
+depends = ["lbug-extensions"]
+run = "bash crates/bench/scripts/readme-table.sh"
