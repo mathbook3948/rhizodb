@@ -28,6 +28,9 @@ run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "cargo clippy --package rhizodb --features fuzzing -- -D warnings",
   "cargo test --workspace",
+  "cargo run --quiet --package rhizodb --example social",
+  "cargo run --quiet --package rhizodb --example search",
+  "cargo run --quiet --package rhizodb --example procedures",
 ]
 
 [tasks.storage-deep]

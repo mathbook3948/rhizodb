@@ -1,6 +1,6 @@
 [package]
 name = "rhizodb"
-description = "An embedded, schemaless property graph database with a GQL query layer"
+description = "An embedded, schemaless property graph database for Rust, queried with GQL"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ rust-version.workspace = true
 readme = "../../README.md"
 documentation = "https://docs.rs/rhizodb"
 keywords = ["graph", "database", "gql", "cypher", "embedded"]
-categories = ["database-implementations"]
+categories = ["database-implementations", "database"]
 
 [features]
 # Exposes the decoders and the parser to the fuzz targets in `fuzz/`. Not part of the public API.
