@@ -8,6 +8,8 @@ use std::hash::BuildHasherDefault;
 use std::hash::Hash;
 use std::hash::Hasher;
 
+use twox_hash::XxHash3_64;
+
 use crate::error::Error;
 use crate::graph::Text;
 
@@ -21,7 +23,7 @@ const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
 /// that equivalent values share, every other row in order.
 #[derive(Debug, Default)]
 pub(crate) struct KeyIndex {
-    state: RandomState,
+    state: Seed,
     hashed: HashMap<u64, Bucket, BuildHasherDefault<Hashed>>,
     ordered: BTreeMap<Key, usize>,
 }
@@ -44,6 +46,55 @@ impl Hasher for Hashed {
 
     fn write_u64(&mut self, value: u64) {
         self.0 = value;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Seed(u64);
+
+impl Default for Seed {
+    fn default() -> Self {
+        Self(RandomState::new().build_hasher().finish())
+    }
+}
+
+impl BuildHasher for Seed {
+    type Hasher = Mixer;
+
+    fn build_hasher(&self) -> Mixer {
+        Mixer(self.0)
+    }
+}
+
+#[derive(Debug)]
+struct Mixer(u64);
+
+const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
+
+fn fold(value: u64) -> u64 {
+    let full = u128::from(value) * u128::from(MULTIPLIER);
+    full as u64 ^ (full >> 64) as u64
+}
+
+impl Hasher for Mixer {
+    fn finish(&self) -> u64 {
+        fold(self.0)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = XxHash3_64::oneshot_with_seed(self.0, bytes);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write_u64(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = fold(self.0.rotate_left(29) ^ value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
     }
 }
 
@@ -183,7 +234,7 @@ fn hash_value(value: &Datum, hasher: &mut impl Hasher) -> bool {
 }
 
 #[cfg(test)]
-fn hash(state: &RandomState, key: &[Datum]) -> Option<u64> {
+fn hash(state: &Seed, key: &[Datum]) -> Option<u64> {
     let mut hasher = state.build_hasher();
     key.iter()
         .all(|value| hash_value(value, &mut hasher))

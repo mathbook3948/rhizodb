@@ -46,7 +46,7 @@ fn row() -> impl Strategy<Value = Vec<Datum>> {
 
 #[test]
 fn equal_integers_and_floats_share_a_hash() {
-    let state = RandomState::new();
+    let state = Seed::default();
     for (integer, float) in [
         (0, 0.0),
         (0, -0.0),
@@ -87,7 +87,7 @@ proptest! {
     #[test]
     fn equivalent_rows_share_a_hash(a in row(), b in row()) {
         if Key(a.clone()) == Key(b.clone()) {
-            let state = RandomState::new();
+            let state = Seed::default();
             prop_assert_eq!(hash(&state, &a), hash(&state, &b));
         }
     }
