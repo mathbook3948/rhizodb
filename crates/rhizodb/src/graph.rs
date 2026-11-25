@@ -796,6 +796,18 @@ impl<T: ReadTransaction> GraphTx<T> {
                         .dictionary()
                         .map(|set| self.carries(Some(set), label))
                         .collect::<Result<Vec<bool>, GraphError>>()?;
+                    if let [true] = carries.as_slice() {
+                        ids.reserve(stored.head().live() as usize);
+                        for (index, word) in stored.alive_words().into_iter().enumerate() {
+                            let mut rest = word;
+                            while rest != 0 {
+                                let slot = index * 64 + rest.trailing_zeros() as usize;
+                                rest &= rest - 1;
+                                ids.push(meta::node_at(group, slot));
+                            }
+                        }
+                        return Ok(());
+                    }
                     for (slot, code) in stored.live_codes() {
                         match carries.get(code) {
                             Some(true) => ids.push(meta::node_at(group, slot)),

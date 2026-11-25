@@ -558,7 +558,8 @@ impl<'a> MetaBytes<'a> {
         self.head
     }
 
-    fn alive_words(&self) -> [u64; WORDS] {
+    /// The bitmap of live slots, 64 slots a word, lowest slot in the lowest bit.
+    pub(crate) fn alive_words(&self) -> [u64; WORDS] {
         let start = self.head.layout.body;
         let mut words = [0u64; WORDS];
         for (index, word) in words.iter_mut().enumerate() {
