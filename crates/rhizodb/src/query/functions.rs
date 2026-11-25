@@ -746,7 +746,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 Ok(if function == Function::Keys {
                     Datum::List(Arc::new(
-                        entries.keys().cloned().map(Datum::String).collect(),
+                        entries
+                            .keys()
+                            .map(|key| Datum::String(key.to_string()))
+                            .collect(),
                     ))
                 } else {
                     Datum::Map(entries)
