@@ -76,16 +76,17 @@ pub(crate) enum ReadClause {
     Filter(Expr),
     /// Extends each row with the value of each expression in its slot.
     Let(Vec<(Expr, Slot)>),
-    CallSubquery(Box<CallSubquery>),
+    CallSubquery(Box<CallSubquery<ReadClause>>),
 }
 
 /// `CALL { ... }`: runs every branch from each row and extends the row with each row the
-/// branches return, in `outputs`.
+/// branches return, in `outputs`. Without `outputs`, the branches end without `RETURN` and each
+/// row is kept once.
 #[derive(Clone, Debug)]
-pub(crate) struct CallSubquery {
+pub(crate) struct CallSubquery<C> {
     pub(crate) optional: bool,
     pub(crate) combine: UnionKind,
-    pub(crate) branches: Vec<Pipeline<ReadClause>>,
+    pub(crate) branches: Vec<Pipeline<C>>,
     pub(crate) outputs: Vec<Slot>,
 }
 
@@ -100,6 +101,8 @@ pub(crate) enum UpdateClause {
         targets: Vec<Expr>,
         retain: bool,
     },
+    /// A `CALL { ... }` whose query updates the graph.
+    CallSubquery(Box<CallSubquery<Clause>>),
 }
 
 #[derive(Clone, Debug)]

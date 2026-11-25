@@ -303,6 +303,16 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     " } RETURN x".repeat(depth)
                 ),
                 format!(
+                    "{}INSERT (:D){}",
+                    "CALL { ".repeat(depth),
+                    " }".repeat(depth)
+                ),
+                format!(
+                    "UNWIND [1] AS i {}INSERT (:D {{i: i}}) RETURN i AS j{}",
+                    "CALL (i) { ".repeat(depth),
+                    " } RETURN 1 AS k".repeat(depth)
+                ),
+                format!(
                     "RETURN {}0{}",
                     "reduce(a = ".repeat(depth),
                     ", x IN [1] | a + x)".repeat(depth)

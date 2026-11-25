@@ -70,6 +70,7 @@ pub(crate) fn bind(
         parameter_reads: 0,
         parameter_names: Vec::new(),
         type_error: None,
+        updates_allowed: true,
     };
     let (singles, combine) = union_parts(query);
     let mut parts = Vec::new();
@@ -77,7 +78,7 @@ pub(crate) fn bind(
     let mut results_read_variables = false;
     for single in singles {
         let (pipeline, part_columns, reads_variables) =
-            binder.single_query(single, Scope::default(), false)?;
+            binder.single_query(single, Scope::default(), Body::Query)?;
         results_read_variables |= reads_variables;
         match &columns {
             Some(first) if *first != part_columns => {
@@ -141,6 +142,31 @@ pub(crate) fn bind(
         closed,
         parameters,
     }))
+}
+
+fn query_updates(query: &ast::Query) -> bool {
+    let (singles, _) = union_parts(query);
+    singles
+        .iter()
+        .any(|single| single.clauses.iter().any(clause_updates))
+}
+
+fn clause_updates(clause: &ast::Clause) -> bool {
+    match clause {
+        ast::Clause::Insert(_)
+        | ast::Clause::Merge(_)
+        | ast::Clause::Set(_)
+        | ast::Clause::Remove(_)
+        | ast::Clause::Delete(_) => true,
+        ast::Clause::CallSubquery(call) => query_updates(&call.body),
+        ast::Clause::Match(_)
+        | ast::Clause::With(_)
+        | ast::Clause::Return(_)
+        | ast::Clause::Unwind(_)
+        | ast::Clause::Call(_)
+        | ast::Clause::Filter(_)
+        | ast::Clause::Let(_) => false,
+    }
 }
 
 fn union_parts(query: &ast::Query) -> (Vec<&ast::SingleQuery>, ast::UnionKind) {
@@ -272,6 +298,14 @@ struct Binder<'a> {
     parameter_reads: usize,
     parameter_names: Vec<String>,
     type_error: Option<Error>,
+    updates_allowed: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    Query,
+    Call,
+    Expression,
 }
 
 fn error(kind: ErrorKind, message: impl Into<String>) -> Error {
@@ -297,7 +331,7 @@ impl Binder<'_> {
         &mut self,
         query: &ast::SingleQuery,
         mut scope: Scope,
-        subquery: bool,
+        body: Body,
     ) -> Result<(Pipeline<Clause>, Vec<String>, bool), Error> {
         let mut clauses = Vec::new();
         let mut output = None;
@@ -325,16 +359,11 @@ impl Binder<'_> {
                     "WITH is needed between an updating clause and a reading clause",
                 ));
             }
-            follows_update = matches!(
-                clause,
-                ast::Clause::Insert(_)
-                    | ast::Clause::Merge(_)
-                    | ast::Clause::Set(_)
-                    | ast::Clause::Remove(_)
-                    | ast::Clause::Delete(_)
-            ) || (follows_update
-                && matches!(clause, ast::Clause::Filter(_) | ast::Clause::Let(_)));
-            if subquery && follows_update {
+            let updates = clause_updates(clause);
+            follows_update = updates
+                || (follows_update
+                    && matches!(clause, ast::Clause::Filter(_) | ast::Clause::Let(_)));
+            if updates && !self.updates_allowed {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
                     "a subquery cannot update the graph",
@@ -343,13 +372,14 @@ impl Binder<'_> {
             clauses.push(self.clause(
                 clause,
                 &query.clauses[index + 1..],
-                !subquery && query.clauses.len() == 1,
+                body == Body::Query && query.clauses.len() == 1,
                 &mut scope,
                 &mut output,
                 &mut result_reads_variables,
             )?);
-            let ends_without_return = index == last && output.is_none() && !subquery;
+            let ends_without_return = index == last && output.is_none() && body != Body::Expression;
             if ends_without_return
+                && !updates
                 && matches!(
                     clause,
                     ast::Clause::Match(_)
@@ -524,17 +554,18 @@ impl Binder<'_> {
         scope: &mut Scope,
     ) -> Result<Clause, Error> {
         let (singles, combine) = union_parts(&call.body);
+        let updating = query_updates(&call.body);
         let mut branches = Vec::new();
         let mut columns: Option<Vec<String>> = None;
         for single in singles {
-            if !matches!(single.clauses.last(), Some(ast::Clause::Return(_))) {
+            if !updating && !matches!(single.clauses.last(), Some(ast::Clause::Return(_))) {
                 return Err(error(
                     ErrorKind::InvalidClauseComposition,
-                    "a CALL subquery must end with RETURN",
+                    "a CALL subquery that does not update the graph must end with RETURN",
                 ));
             }
             let inner = imported_scope(call.imports.as_ref(), single, scope)?;
-            let (pipeline, part_columns, _) = self.single_query(single, inner, true)?;
+            let (pipeline, part_columns, _) = self.single_query(single, inner, Body::Call)?;
             if columns.as_ref().is_some_and(|first| *first != part_columns) {
                 return Err(error(
                     ErrorKind::DifferentColumnsInUnion,
@@ -542,17 +573,7 @@ impl Binder<'_> {
                 ));
             }
             columns = Some(part_columns);
-            branches.push(Pipeline {
-                clauses: pipeline
-                    .clauses
-                    .into_iter()
-                    .filter_map(|clause| match clause {
-                        Clause::Read(clause) => Some(clause),
-                        Clause::Update(_) => None,
-                    })
-                    .collect(),
-                output: pipeline.output,
-            });
+            branches.push(pipeline);
         }
         let mut outputs = Vec::new();
         for name in columns.unwrap_or_default() {
@@ -566,6 +587,35 @@ impl Binder<'_> {
             scope.insert(&name, slot, Kind::Unknown);
             outputs.push(slot);
         }
+        if updating {
+            for clause in branches.iter_mut().flat_map(|branch| &mut branch.clauses) {
+                if let Clause::Update(UpdateClause::Delete { retain, .. }) = clause {
+                    *retain = true;
+                }
+            }
+            return Ok(Clause::Update(UpdateClause::CallSubquery(Box::new(
+                CallSubquery {
+                    optional: call.optional,
+                    combine,
+                    branches,
+                    outputs,
+                },
+            ))));
+        }
+        let branches = branches
+            .into_iter()
+            .map(|branch| Pipeline {
+                clauses: branch
+                    .clauses
+                    .into_iter()
+                    .filter_map(|clause| match clause {
+                        Clause::Read(clause) => Some(clause),
+                        Clause::Update(_) => None,
+                    })
+                    .collect(),
+                output: branch.output,
+            })
+            .collect();
         Ok(Clause::Read(ReadClause::CallSubquery(Box::new(
             CallSubquery {
                 optional: call.optional,
@@ -1963,7 +2013,10 @@ impl Binder<'_> {
         let mut free = Vec::new();
         collect_clauses_free(&query.clauses, &mut Vec::new(), &mut free);
         let scope = self.pattern_scope(scope, free.into_iter(), mode)?;
-        let (pipeline, _, _) = self.root(|binder| binder.single_query(query, scope, true))?;
+        let updates_allowed = std::mem::replace(&mut self.updates_allowed, false);
+        let bound = self.root(|binder| binder.single_query(query, scope, Body::Expression));
+        self.updates_allowed = updates_allowed;
+        let (pipeline, _, _) = bound?;
         let clauses = pipeline
             .clauses
             .into_iter()

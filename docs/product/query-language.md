@@ -59,7 +59,13 @@ GQL is the reference language, but the only public conformance suite is the open
 - `reduce(accumulator = init, variable IN list | body)` folds the list from the left, gives `init` for an empty list and null for a null list, and its body cannot aggregate.
 - `[OPTIONAL] CALL { query }` runs its query once per incoming row and extends the row with each row the query returns, and `OPTIONAL CALL` keeps a row whose query returns none, with nulls.
 - A `CALL` query sees the outer variables its scope clause names, `(a, b)`, `()`, or `(*)`, and without a scope clause those that the plain variable items of a leading `WITH` name, so any other name inside is a new variable.
-- A `CALL` query must end with `RETURN`, cannot update the graph, and cannot return a column named like an outer variable.
+- A `CALL` query cannot return a column named like an outer variable.
+- A `CALL` query may update the graph, and then it may end without `RETURN`, which keeps each incoming row once whatever the query gives.
+- A `CALL` query that does not update the graph must end with `RETURN`.
+- A `CALL` query runs to its end for one incoming row before it runs for the next, so each run sees the writes of the runs before it.
+- A `CALL` whose query updates the graph is an updating clause, so a reading clause after it needs a `WITH` between them.
+- A query inside `EXISTS`, `COUNT`, or `COLLECT` cannot update the graph, even through a `CALL` inside it.
+- An element that a `CALL` query deletes is returned after the `CALL` as it was when deleted, under the rules for elements deleted earlier in the same query.
 - A `CALL` query may join single queries with `UNION` or `UNION ALL`, under the column rule of a top-level `UNION`.
 - A simple `CASE` branch takes a list of tests of the scrutinee, each a value it must equal, a comparison operator and a value, or `IS [NOT] NULL`, and the scrutinee is evaluated once.
 - `ORDER BY` takes `NULLS FIRST` and `NULLS LAST`, and without them nulls sort last ascending and first descending.

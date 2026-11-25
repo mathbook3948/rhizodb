@@ -28,6 +28,9 @@ use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
 use super::eval::type_error;
+use super::exec::branch_rows;
+use super::exec::extend_row;
+use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::MergeClause;
 use super::plan::NodePattern;
@@ -102,7 +105,49 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 self.delete(*detach, *retain, targets, &rows)?;
                 Ok(rows)
             }
+            UpdateClause::CallSubquery(call) => {
+                let mut out = Vec::new();
+                for row in rows {
+                    let mut parts = Vec::new();
+                    for branch in &call.branches {
+                        let inner = self.run(&branch.clauses, vec![row.clone()])?;
+                        parts.push(branch_rows(branch, inner));
+                    }
+                    extend_row(call, row, parts, &mut out);
+                }
+                Ok(out)
+            }
         }
+    }
+
+    /// Applies the first of `clauses`, with the one after it when a read can fuse the two, and
+    /// says how many it applied.
+    pub(crate) fn step(
+        &mut self,
+        clauses: &[Clause],
+        rows: Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        match clauses {
+            [Clause::Read(clause), rest @ ..] => {
+                let next = match rest.first() {
+                    Some(Clause::Read(next)) => Some(next),
+                    _ => None,
+                };
+                self.env().read_clauses(clause, next, rows)
+            }
+            [Clause::Update(clause), ..] => Ok((self.apply(clause, rows)?, 1)),
+            [] => Ok((rows, 0)),
+        }
+    }
+
+    fn run(&mut self, clauses: &[Clause], mut rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+        let mut clauses = clauses;
+        while !clauses.is_empty() {
+            let (next, applied) = self.step(clauses, rows)?;
+            rows = next;
+            clauses = clauses.get(applied.max(1)..).unwrap_or_default();
+        }
+        Ok(rows)
     }
 
     fn env(&self) -> Env<'_, W> {

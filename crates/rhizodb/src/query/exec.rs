@@ -37,6 +37,7 @@ use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
 use super::plan::MatchClause;
+use super::plan::Pipeline;
 use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
@@ -107,43 +108,15 @@ pub(crate) fn run_write<W: WriteTransaction>(
         rel_type_tokens: RefCell::default(),
     }
     .check_closed(&program.closed)?;
-    let rows = run(program, |clauses, rows| match clauses {
-        [Clause::Read(clause), rest @ ..] => Env {
-            tx: &*tx,
-            slots,
-            parameters,
-            now,
-            graveyard: &graveyard,
-            patterns: &patterns,
-            check: None,
-            columns: RefCell::default(),
-            keys: RefCell::default(),
-            labels: RefCell::default(),
-            label_tokens: RefCell::default(),
-            property_indexes: RefCell::default(),
-            adjacency: RefCell::default(),
-            rel_type_tokens: RefCell::default(),
-        }
-        .read_clauses(
-            clause,
-            match rest.first() {
-                Some(Clause::Read(next)) => Some(next),
-                _ => None,
-            },
-            rows,
-        ),
-        [Clause::Update(clause), ..] => Writer {
-            tx,
-            slots,
-            parameters,
-            now,
-            patterns: &patterns,
-            graveyard: &mut graveyard,
-        }
-        .apply(clause, rows)
-        .map(|rows| (rows, 1)),
-        [] => Ok((rows, 0)),
-    })?;
+    let mut writer = Writer {
+        tx,
+        slots,
+        parameters,
+        now,
+        patterns: &patterns,
+        graveyard: &mut graveyard,
+    };
+    let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
@@ -253,6 +226,44 @@ fn combine(kind: UnionKind, parts: Vec<Vec<Vec<Datum>>>) -> Vec<Vec<Datum>> {
         rows.retain(|row| seen.insert(row));
     }
     rows
+}
+
+/// The values of a branch's output slots in each row it gave.
+pub(crate) fn branch_rows<C>(branch: &Pipeline<C>, rows: Vec<Row>) -> Vec<Vec<Datum>> {
+    rows.iter()
+        .map(|row| {
+            branch
+                .output
+                .iter()
+                .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+                .collect()
+        })
+        .collect()
+}
+
+/// Adds to `out` the rows a `CALL` subquery gives for `row`, from the rows of each branch.
+pub(crate) fn extend_row<C>(
+    call: &CallSubquery<C>,
+    row: Row,
+    parts: Vec<Vec<Vec<Datum>>>,
+    out: &mut Vec<Row>,
+) {
+    if call.outputs.is_empty() {
+        out.push(row);
+        return;
+    }
+    let results = combine(call.combine, parts);
+    if results.is_empty() && call.optional {
+        out.push(row);
+        return;
+    }
+    for values in results {
+        let mut next = row.clone();
+        for (slot, value) in call.outputs.iter().zip(values) {
+            set(&mut next, *slot, value);
+        }
+        out.push(next);
+    }
 }
 
 fn materialize<T: ReadTransaction>(
@@ -395,7 +406,11 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn call_subquery(&self, call: &CallSubquery, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
+    fn call_subquery(
+        &self,
+        call: &CallSubquery<ReadClause>,
+        rows: Vec<Row>,
+    ) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
         for row in rows {
             let mut parts = Vec::new();
@@ -404,31 +419,9 @@ impl<T: ReadTransaction> Env<'_, T> {
                 for clause in &branch.clauses {
                     inner = self.read_clause(clause, inner)?;
                 }
-                parts.push(
-                    inner
-                        .iter()
-                        .map(|result| {
-                            branch
-                                .output
-                                .iter()
-                                .map(|slot| result.get(*slot).cloned().unwrap_or(Datum::Null))
-                                .collect()
-                        })
-                        .collect(),
-                );
+                parts.push(branch_rows(branch, inner));
             }
-            let results = combine(call.combine, parts);
-            if results.is_empty() && call.optional {
-                out.push(row);
-                continue;
-            }
-            for values in results {
-                let mut next = row.clone();
-                for (slot, value) in call.outputs.iter().zip(values) {
-                    set(&mut next, *slot, value);
-                }
-                out.push(next);
-            }
+            extend_row(call, row, parts, &mut out);
         }
         Ok(out)
     }
