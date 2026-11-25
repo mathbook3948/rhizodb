@@ -262,11 +262,17 @@ fn open_or_create_staging<F: FileSystem>(
             match fs.open(staging, block_size()?) {
                 Ok(file) => Ok(Some(file)),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) if is_being_removed(&error) => Ok(None),
                 Err(error) => Err(error.into()),
             }
         }
+        Err(error) if is_being_removed(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn is_being_removed(error: &io::Error) -> bool {
+    cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied
 }
 
 fn open_or_create_whole_or_not_at_all<F: FileSystem>(

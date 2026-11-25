@@ -80,6 +80,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
+- On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets that refusal waits and tries again as it does for a locked staging file.
 - Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
