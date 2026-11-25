@@ -56,6 +56,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - The threads that `OpenOptions::threads` sets are a budget the database's read queries share: a query splits its start nodes only across threads that other read queries leave idle. Concurrent queries no longer each spawn a full set of helpers onto the same cores, so four readers of the load benchmark read 1.8 times as fast and eight readers 3 times as fast as with a full set per query.
 - A commit no longer waits for the log segments a background checkpoint freed to be removed, or for the memtable that checkpoint wrote to be freed, which made the first commits after each checkpoint take up to half a second under sustained writes. The checkpoint thread does both.
 - A commit that deletes a key no checkpoint has written drops its tombstone once every open snapshot sees the delete, so reads beside a steady writer no longer slow down with every commit until the next checkpoint. Beside one writer, a mix of lookups, scans, and traversals reads twice as fast as before at the medium benchmark scale.
+- Writing a batch of rows takes fewer allocations: the maps of a parameter share their keys, an index into a list parameter reads the item in place, and a relationship's record is encoded once into a buffer the transaction keeps, so a bulk load of a medium graph runs about a fifth fewer instructions.
 
 ### Fixed
 
