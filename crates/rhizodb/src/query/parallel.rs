@@ -167,6 +167,10 @@ fn split<'q, T: ReadTransaction>(
                 projection: Some(projection),
             },
         },
+        Some(ReadClause::CallSubquery(call)) if call.table => Job::Rows {
+            next: None,
+            projection: None,
+        },
         _ => Job::Rows {
             next: next.cloned(),
             projection: None,

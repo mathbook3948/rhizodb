@@ -80,8 +80,8 @@ impl OpenOptions {
     /// [`std::thread::available_parallelism`] reports. A query that reads enough start nodes
     /// splits them across these threads, the calling thread among them, and returns the same rows
     /// in the same order, and fails the same way, as on one thread. A query that calls a procedure
-    /// the host registered, or runs in a write transaction, stays on the calling thread. Zero and
-    /// one keep every query on the calling thread.
+    /// the host registered, updates the graph, or runs in a write transaction stays on the calling
+    /// thread. Zero and one keep every query on the calling thread.
     ///
     /// ```
     /// use rhizodb::OpenOptions;
@@ -101,7 +101,7 @@ impl OpenOptions {
 
     /// How many start nodes a match must read before a read query splits them across
     /// [threads](OpenOptions::threads), so that a small query does not pay to start them. It
-    /// defaults to 8192, two row groups.
+    /// defaults to 8192.
     pub fn parallel_threshold(mut self, nodes: usize) -> Self {
         self.parallelism.threshold = nodes;
         self

@@ -31,7 +31,7 @@ const FILTERS: [&str; 12] = [
     "WHERE size(n.name) > 2",
 ];
 
-const TAILS: [&str; 26] = [
+const TAILS: [&str; 31] = [
     "RETURN count(*)",
     "RETURN count(n.x), sum(n.x), avg(n.x), min(n.x), max(n.x)",
     "RETURN sum(n.f), avg(n.f), stDev(n.f), stDevP(n.f)",
@@ -58,6 +58,11 @@ const TAILS: [&str; 26] = [
     "MATCH (n)-[:R|S]-(m) RETURN n.x, m.x ORDER BY n.x, m.x LIMIT 7",
     "MATCH (m:B) WHERE m.x = n.x RETURN count(*), collect(m.name)",
     "RETURN n.x ORDER BY n.x LIMIT $limit",
+    "CALL (n) { MATCH (n)-[:R]->(m) RETURN count(m) AS c } RETURN n.x, c ORDER BY n.x, c LIMIT 6",
+    "CALL (n) { RETURN n.x * 2 AS d } RETURN d, count(*)",
+    "WITH n WHERE VALUE { MATCH (n)-[:R]->(m) RETURN count(m) } > 1 RETURN n.name, n.x",
+    "RETURN n.x AS x NEXT RETURN sum(x), count(*)",
+    "RETURN count(*) AS c NEXT MATCH (m) WHERE m.x < c RETURN m.x, m.name LIMIT 4",
 ];
 
 fn value(rng: &mut Rng) -> String {
