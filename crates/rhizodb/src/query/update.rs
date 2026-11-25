@@ -19,6 +19,7 @@ use crate::graph::RelationshipId;
 use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Token;
+use crate::graph::TokenKind;
 use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
@@ -57,6 +58,7 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) now: &'a Clocks,
     pub(crate) patterns: &'a Patterns,
     pub(crate) graveyard: &'a mut Graveyard,
+    pub(crate) tokens: Vec<(u8, String, u32)>,
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -127,6 +129,19 @@ impl<W: WriteTransaction> Writer<'_, W> {
         }
     }
 
+    fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
+        if let Some((_, _, id)) = self
+            .tokens
+            .iter()
+            .find(|(tag, held, _)| *tag == K::TAG && held == name)
+        {
+            return Ok(Token::new(*id));
+        }
+        let token = self.tx.intern_token::<K>(name)?;
+        self.tokens.push((K::TAG, name.to_owned(), token.id()));
+        Ok(token)
+    }
+
     fn eval(&self, expr: &Expr, row: &Row) -> Result<Datum, Error> {
         self.env().eval(expr, row)
     }
@@ -150,7 +165,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         for (key, value) in entries {
             match into_property(value)? {
                 Some(value) => {
-                    properties.insert(self.tx.intern_token::<PropertyKey>(&key)?, value);
+                    properties.insert(self.token::<PropertyKey>(&key)?, value);
                 }
                 None if merging => {
                     return Err(Error::new(
@@ -218,9 +233,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             ..NodeRecord::default()
         };
         for label in pattern.labels.iter().flat_map(LabelExpr::names) {
-            record
-                .labels
-                .insert(self.tx.intern_token::<Label>(&label.0)?);
+            record.labels.insert(self.token::<Label>(&label.0)?);
         }
         let id = self.tx.create_node(record)?;
         set(row, pattern.slot, Datum::Node(id));
@@ -245,7 +258,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 | Direction::Undirected => (current, next),
             };
             let rel_type = match &relationship.labels {
-                Some(LabelExpr::Name(name)) => self.tx.intern_token::<RelationshipType>(&name.0)?,
+                Some(LabelExpr::Name(name)) => self.token::<RelationshipType>(&name.0)?,
                 _ => return Err(type_error("a relationship to create needs one type")),
             };
             let record = RelationshipRecord {

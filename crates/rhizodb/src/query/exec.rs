@@ -141,6 +141,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
             now,
             patterns: &patterns,
             graveyard: &mut graveyard,
+            tokens: Vec::new(),
         }
         .apply(clause, rows)
         .map(|rows| (rows, 1)),

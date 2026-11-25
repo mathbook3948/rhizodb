@@ -144,11 +144,11 @@ fn to_stored(value: &Datum, depth: usize) -> Result<PropertyValue, Error> {
                     format!("a property list cannot nest deeper than {MAX_DEPTH} levels"),
                 ));
             }
-            items
-                .iter()
-                .map(|item| to_stored(item, depth + 1))
-                .collect::<Result<_, _>>()
-                .map(PropertyValue::List)
+            let mut stored = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                stored.push(to_stored(item, depth + 1)?);
+            }
+            Ok(PropertyValue::List(stored))
         }
         other => Err(Error::new(
             ErrorKind::InvalidPropertyType,
