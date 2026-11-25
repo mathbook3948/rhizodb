@@ -418,6 +418,15 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         for (table, key, value) in index.rows(0, &old_output) {
             stale.put(table, &key, &value).unwrap();
         }
+        let mut block = Block::default();
+        block.insert(0, 0, &[0, 1, 2], 3).unwrap();
+        stale
+            .put(
+                Table::KeywordPostings,
+                &keys::posting_key(0, "stale", 0),
+                block.bytes().unwrap(),
+            )
+            .unwrap();
         stale
             .put(
                 Table::KeywordTotals,
@@ -660,7 +669,7 @@ struct CountingWrite {
 
 impl CountingWrite {
     fn count(&self, table: Table) {
-        if ENTRY_TABLES.contains(&table) {
+        if ENTRY_TABLES.contains(&table) && table != Table::KeywordPostings {
             self.entry_writes.set(self.entry_writes.get() + 1);
         }
     }
@@ -763,7 +772,7 @@ impl WriteTransaction for CountingWrite {
 }
 
 #[test]
-fn opening_a_database_of_format_four_keeps_its_keyword_entries() {
+fn opening_a_database_of_format_four_keeps_its_keyword_entries_and_moves_its_postings_to_blocks() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("four.redb");
     {
@@ -942,19 +951,36 @@ fn a_definition_reads_back_as_it_was_written() {
     assert_ne!(over_label.encode(), over_type.encode());
 }
 
-#[test]
-fn counts_read_the_frequency_and_length_of_a_posting_without_its_positions() {
-    let posting = encode_posting(&[0, 5, 9], 12);
-    assert_eq!(decode_counts(&posting).unwrap(), (3, 12));
-    assert_eq!(decode_posting(&posting).unwrap().positions, [0, 5, 9]);
+fn row_posting(positions: &[u32], length: u32) -> Vec<u8> {
+    let mut out = u32::try_from(positions.len())
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    out.extend_from_slice(&length.to_be_bytes());
+    let mut previous = 0;
+    for position in positions {
+        put_varint(&mut out, usize::try_from(position - previous).unwrap());
+        previous = *position;
+    }
+    out
 }
 
 #[test]
-fn counts_of_a_posting_cut_short_of_its_positions_fail_to_decode() {
-    let posting = encode_posting(&[0, 5, 9], 12);
-    assert!(decode_counts(&posting[..10]).is_err());
-    assert!(decode_counts(&posting[..8]).is_err());
-    assert!(decode_counts(&posting[..7]).is_err());
+fn a_posting_row_of_format_thirteen_reads_its_positions_and_length() {
+    let posting = row_posting(&[0, 5, 9], 12);
+    assert_eq!(decode_row_posting(&posting).unwrap(), (vec![0, 5, 9], 12));
+}
+
+#[test]
+fn a_posting_row_cut_short_or_left_long_fails_to_decode() {
+    let posting = row_posting(&[0, 5, 9], 12);
+    for end in 0..posting.len() {
+        assert!(decode_row_posting(&posting[..end]).is_err(), "{end}");
+    }
+    let mut long = posting.clone();
+    long.push(1);
+    assert!(decode_row_posting(&long).is_err());
+    assert!(decode_row_posting(&row_posting(&[], 0)).is_err());
 }
 
 #[test]

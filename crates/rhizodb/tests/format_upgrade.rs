@@ -588,3 +588,99 @@ fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {
         int(0)
     );
 }
+
+const FORMAT_THIRTEEN: &str = "tests/fixtures/format-13.db";
+
+fn copy_of_engine_file(fixture: &str, directory: &Path) -> PathBuf {
+    let path = directory.join("graph.db");
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture), &path).unwrap();
+    path
+}
+
+#[test]
+fn a_database_of_format_thirteen_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_THIRTEEN, directory.path());
+    let answers = answers_in("format-13.answers");
+    assert_eq!(answers.len(), 15);
+    for _ in 0..2 {
+        let db = Database::open(&path).unwrap();
+        for (query, expected) in &answers {
+            assert_eq!(format!("{:?}", run(&db, query)), *expected, "{query}");
+        }
+    }
+}
+
+#[test]
+fn a_database_of_format_thirteen_keeps_its_keyword_indexes_exact_through_writes_after_the_upgrade()
+{
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_THIRTEEN, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH (d:Doc) WHERE d.i % 31 = 3 SET d.text = 'graph again and again graph'",
+        );
+        run(&db, "MATCH (d:Doc) WHERE d.i % 37 = 6 DETACH DELETE d");
+        run(
+            &db,
+            "UNWIND range(2000, 2300) AS i CREATE (:Doc {i: i, title: 'new ' + toString(i), text: 'graph store ocean quokka'})",
+        );
+        run(
+            &db,
+            "MATCH (a:Doc {i: 2000}), (b:Doc {i: 2001}) CREATE (a)-[:NOTE {k: 9999, note: 'friend of the bridge'}]->(b)",
+        );
+    }
+    let db = Database::open(&path).unwrap();
+    db.create_keyword_index(
+        "doc text again",
+        rhizodb::IndexTarget::Label("Doc"),
+        &["title", "text"],
+    )
+    .unwrap();
+    db.create_keyword_index(
+        "note text again",
+        rhizodb::IndexTarget::RelationshipType("NOTE"),
+        &["note"],
+    )
+    .unwrap();
+    for (procedure, element, index, text) in [
+        ("queryNodes", "node", "doc text", "graph"),
+        ("queryNodes", "node", "doc text", "quokka"),
+        ("queryNodes", "node", "doc text", "stor*"),
+        ("queryNodes", "node", "doc text", "\"graph store\" ocean"),
+        ("queryNodes", "node", "doc text", "그래프"),
+        ("queryNodes", "node", "doc text", "again"),
+        ("queryRelationships", "relationship", "note text", "bridge"),
+        (
+            "queryRelationships",
+            "relationship",
+            "note text",
+            "\"friend of\"",
+        ),
+    ] {
+        let search = |name: &str| {
+            run(
+                &db,
+                &format!(
+                    "CALL db.index.keyword.{procedure}('{name}', '{text}', 5000) YIELD {element}, score RETURN id({element}), score"
+                ),
+            )
+        };
+        let upgraded = search(index);
+        assert!(!upgraded.is_empty(), "{index} {text}");
+        assert_eq!(
+            upgraded,
+            search(&format!("{index} again")),
+            "{index} {text}"
+        );
+    }
+    assert_eq!(
+        single(
+            &db,
+            "CALL db.index.keyword.queryNodes('doc text', 'gone', 10) YIELD node RETURN count(*)"
+        ),
+        int(0)
+    );
+}

@@ -44,6 +44,8 @@ use super::meta::LabelSetId;
 use super::meta::MetaBytes;
 use super::meta::MetaEdit;
 use super::meta::Part;
+use super::postings;
+use super::postings::Block;
 use super::properties::ColumnWrite;
 use super::records::Properties;
 use super::relationships;
@@ -744,16 +746,30 @@ impl<T: ReadTransaction> GraphTx<T> {
                         .iter()
                         .map(|(id, record)| (id.0, Element::Relationship(record))),
                 );
+            let mut blocks: BTreeMap<Vec<u8>, Block> = BTreeMap::new();
             for (element, record) in elements {
                 let Some(entry) = index.definition.entry(record) else {
                     continue;
                 };
                 if let Entry::Keyword(document) = &entry {
                     documents += 1;
-                    length += u64::from(document_length(document));
+                    let terms = document_length(document);
+                    length += u64::from(terms);
+                    let block = postings::block_of(element);
+                    for (term, positions) in document {
+                        blocks
+                            .entry(keys::posting_key(index.id, term, block))
+                            .or_default()
+                            .insert(block, element, positions, terms)?;
+                    }
                 }
                 for (table, key, value) in index.rows(element, &entry) {
                     expected.insert((table, key), value);
+                }
+            }
+            for (key, block) in blocks {
+                if let Some(bytes) = block.bytes() {
+                    expected.insert((Table::KeywordPostings, key), bytes.to_vec());
                 }
             }
             if matches!(index.definition.kind, IndexKind::Keyword { .. }) {
@@ -768,6 +784,13 @@ impl<T: ReadTransaction> GraphTx<T> {
             for (key, value) in self.transaction.scan_prefix(table, &[])? {
                 actual.insert((table, key), value);
             }
+        }
+        for (key, block) in self.postings.under(&[]) {
+            let at = (Table::KeywordPostings, key);
+            match block.bytes() {
+                Some(bytes) => actual.insert(at, bytes.to_vec()),
+                None => actual.remove(&at),
+            };
         }
         for ((table, key), value) in &expected {
             match actual.get(&(*table, key.clone())) {

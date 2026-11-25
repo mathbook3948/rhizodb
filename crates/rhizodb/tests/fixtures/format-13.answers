@@ -1,0 +1,30 @@
+MATCH (d:Doc) RETURN count(*), min(id(d)), max(id(d))
+  [[Integer(1363), Integer(2), Integer(1799)]]
+CALL db.index.keyword.queryNodes('doc text', 'graph', 10) YIELD node, score RETURN id(node), node.i, score
+  [[Integer(5), Integer(4), Float(1.4080084070726908)], [Integer(33), Integer(27), Float(1.4080084070726908)], [Integer(60), Integer(50), Float(1.4080084070726908)], [Integer(88), Integer(73), Float(1.4080084070726908)], [Integer(116), Integer(96), Float(1.4080084070726908)], [Integer(143), Integer(119), Float(1.4080084070726908)], [Integer(171), Integer(142), Float(1.4080084070726908)], [Integer(226), Integer(188), Float(1.4080084070726908)], [Integer(254), Integer(211), Float(1.4080084070726908)], [Integer(281), Integer(234), Float(1.4080084070726908)]]
+CALL db.index.keyword.queryNodes('doc text', 'river', 1000) YIELD node RETURN count(*), sum(node.i)
+  [[Integer(495), Integer(370856)]]
+CALL db.index.keyword.queryNodes('doc text', 'quokka', 10) YIELD node, score RETURN node.i, score
+  [[Integer(873), Float(5.659382574915468)], [Integer(388), Float(5.400752156157037)], [Integer(776), Float(5.164727194189141)], [Integer(291), Float(4.948468059929005)], [Integer(1164), Float(4.948468059929005)], [Integer(679), Float(4.749591617352615)], [Integer(194), Float(4.566083036551394)], [Integer(582), Float(4.396227289820026)], [Integer(97), Float(4.238555389214166)], [Integer(485), Float(4.091801792769686)]]
+CALL db.index.keyword.queryNodes('doc text', 'stor*', 10) YIELD node, score RETURN node.i, score
+  [[Integer(10), Float(1.7259906303753054)], [Integer(100), Float(1.7259906303753054)], [Integer(145), Float(1.7259906303753054)], [Integer(190), Float(1.7259906303753054)], [Integer(235), Float(1.7259906303753054)], [Integer(370), Float(1.7259906303753054)], [Integer(415), Float(1.7259906303753054)], [Integer(460), Float(1.7259906303753054)], [Integer(505), Float(1.7259906303753054)], [Integer(640), Float(1.7259906303753054)]]
+CALL db.index.keyword.queryNodes('doc text', '"graph store"', 10) YIELD node, score RETURN node.i, score
+  [[Integer(4), Float(2.2032633956407497)], [Integer(5), Float(2.2032633956407497)], [Integer(27), Float(2.2032633956407497)], [Integer(28), Float(2.2032633956407497)], [Integer(34), Float(2.2032633956407497)], [Integer(50), Float(2.2032633956407497)], [Integer(63), Float(2.2032633956407497)], [Integer(73), Float(2.2032633956407497)], [Integer(92), Float(2.2032633956407497)], [Integer(96), Float(2.2032633956407497)]]
+CALL db.index.keyword.queryNodes('doc text', '"store graph" ocean', 10) YIELD node, score RETURN node.i, score
+  [[Integer(4), Float(3.798069658935687)], [Integer(27), Float(3.798069658935687)], [Integer(50), Float(3.798069658935687)], [Integer(73), Float(3.798069658935687)], [Integer(96), Float(3.798069658935687)], [Integer(119), Float(3.798069658935687)], [Integer(142), Float(3.798069658935687)], [Integer(188), Float(3.798069658935687)], [Integer(211), Float(3.798069658935687)], [Integer(234), Float(3.798069658935687)]]
+CALL db.index.keyword.queryNodes('doc text', '그래프 데이터', 10) YIELD node, score RETURN node.i, score
+  [[Integer(117), Float(7.407203543595977)], [Integer(351), Float(7.407203543595977)], [Integer(468), Float(7.407203543595977)], [Integer(702), Float(7.407203543595977)], [Integer(819), Float(7.407203543595977)], [Integer(936), Float(7.407203543595977)], [Integer(1053), Float(7.407203543595977)], [Integer(1170), Float(7.407203543595977)], [Integer(1404), Float(7.407203543595977)], [Integer(91), Float(7.206369020320063)]]
+CALL db.index.keyword.queryNodes('doc text', '图数据', 10) YIELD node, score RETURN node.i, score
+  [[Integer(153), Float(5.473007732266559)], [Integer(306), Float(5.473007732266559)], [Integer(459), Float(5.473007732266559)], [Integer(612), Float(5.473007732266559)], [Integer(765), Float(5.473007732266559)], [Integer(918), Float(5.473007732266559)], [Integer(1071), Float(5.473007732266559)], [Integer(1224), Float(5.473007732266559)], [Integer(1377), Float(5.473007732266559)], [Integer(136), Float(5.276716805003705)]]
+CALL db.index.keyword.queryNodes('doc text', 'rewritten', 1000) YIELD node RETURN count(*), sum(node.i)
+  [[Integer(58), Integer(43035)]]
+CALL db.index.keyword.queryNodes('doc tags', 'tag7', 1000) YIELD node RETURN count(*), sum(node.i)
+  [[Integer(137), Integer(103219)]]
+CALL db.index.keyword.queryNodes('doc text', 'gone', 10) YIELD node RETURN count(*)
+  [[Integer(0)]]
+CALL db.index.keyword.queryRelationships('note text', 'bridge', 10) YIELD relationship, score RETURN id(relationship), relationship.k, score
+  [[Integer(2), Integer(6), Float(0.6903102992247457)], [Integer(4), Integer(12), Float(0.6903102992247457)], [Integer(6), Integer(18), Float(0.6903102992247457)], [Integer(8), Integer(24), Float(0.6903102992247457)], [Integer(10), Integer(30), Float(0.6903102992247457)], [Integer(12), Integer(36), Float(0.6903102992247457)], [Integer(16), Integer(48), Float(0.6903102992247457)], [Integer(20), Integer(60), Float(0.6903102992247457)], [Integer(24), Integer(72), Float(0.6903102992247457)], [Integer(26), Integer(78), Float(0.6903102992247457)]]
+CALL db.index.keyword.queryRelationships('note text', '"friend of"', 1000) YIELD relationship RETURN count(*), sum(relationship.k)
+  [[Integer(176), Integer(132072)]]
+CALL db.index.keyword.queryRelationships('note text', 'fr*', 1000) YIELD relationship RETURN count(*)
+  [[Integer(351)]]

@@ -25,6 +25,10 @@ use super::ids::RelationshipType;
 use super::ids::Token;
 use super::keys;
 use super::meta;
+use super::postings;
+use super::postings::Block;
+use super::postings::Entries;
+use super::postings::Posting;
 use super::tokenize;
 use super::tokenize::Clause;
 use super::tokenize::Purpose;
@@ -36,6 +40,8 @@ const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
 
 const VALUE_DISTANCE: u32 = 3;
+
+const HELD_POSTING_BYTES: usize = 16 << 20;
 
 const LARGEST_SQUARED_LENGTH: f64 = f64::MAX / 4.0;
 const SMALLEST_COSINE_SQUARED_LENGTH: f64 = f64::MIN_POSITIVE;
@@ -461,29 +467,15 @@ impl Index {
     }
 
     /// The rows that hold `entry` for the element with ID `element`, leaving out the keyword
-    /// totals.
+    /// postings, which share blocks with other elements, and the keyword totals.
     pub(crate) fn rows(&self, element: u64, entry: &Entry) -> Vec<Row> {
         let entry_key = keys::index_entry_key(self.id, element).to_vec();
         match entry {
-            Entry::Keyword(document) => {
-                let length = document_length(document);
-                let mut rows: Vec<Row> = document
-                    .iter()
-                    .map(|(term, positions)| {
-                        (
-                            Table::KeywordPostings,
-                            keys::posting_key(self.id, term, element),
-                            encode_posting(positions, length),
-                        )
-                    })
-                    .collect();
-                rows.push((
-                    Table::KeywordDocuments,
-                    entry_key,
-                    encode_document(document),
-                ));
-                rows
-            }
+            Entry::Keyword(document) => vec![(
+                Table::KeywordDocuments,
+                entry_key,
+                encode_document(document),
+            )],
             Entry::Vector(vector) => vec![(
                 Table::Vectors,
                 entry_key,
@@ -635,34 +627,7 @@ fn decode_document(bytes: &[u8]) -> Result<Vec<(String, u32)>, DecodeError> {
     Ok(document)
 }
 
-#[derive(Debug)]
-struct Posting {
-    positions: Vec<u32>,
-    length: u32,
-}
-
-fn encode_posting(positions: &[u32], length: u32) -> Vec<u8> {
-    let mut out = frequency(positions).to_be_bytes().to_vec();
-    out.extend_from_slice(&length.to_be_bytes());
-    let mut previous = 0u32;
-    for position in positions {
-        put_varint(
-            &mut out,
-            usize::try_from(position.saturating_sub(previous)).unwrap_or(usize::MAX),
-        );
-        previous = *position;
-    }
-    out
-}
-
-fn decode_counts(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
-    let mut reader = Reader::new(bytes);
-    let counts = (reader.u32()?, reader.u32()?);
-    reader.take(usize::try_from(counts.0).map_err(|_| DecodeError::LengthOverflow)?)?;
-    Ok(counts)
-}
-
-fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
+fn decode_row_posting(bytes: &[u8]) -> Result<(Vec<u32>, u32), DecodeError> {
     let mut reader = Reader::new(bytes);
     let frequency = reader.u32()?;
     let length = reader.u32()?;
@@ -676,7 +641,10 @@ fn decode_posting(bytes: &[u8]) -> Result<Posting, DecodeError> {
         positions.push(position);
     }
     reader.finish()?;
-    Ok(Posting { positions, length })
+    if positions.is_empty() {
+        return Err(DecodeError::UnexpectedEnd);
+    }
+    Ok((positions, length))
 }
 
 fn stored_vector(bytes: &[u8], dimension: usize) -> Result<&[[u8; 8]], DecodeError> {
@@ -816,14 +784,14 @@ impl<T: ReadTransaction> GraphTx<T> {
             let clause_scores: BTreeMap<u64, f64> = match &clause {
                 Clause::Term(term) => {
                     let mut counts = BTreeMap::new();
-                    self.transaction.visit_prefix(
-                        Table::KeywordPostings,
-                        &keys::posting_prefix(id, term),
-                        |key, value| -> Result<(), GraphError> {
-                            counts.insert(keys::parse_posting_element(key)?, decode_counts(value)?);
-                            Ok(())
-                        },
-                    )?;
+                    self.visit_posting_blocks(&keys::posting_prefix(id, term), |key, value| {
+                        let mut entries = Entries::new(keys::parse_posting_block(key)?, value);
+                        while let Some(entry) = entries.next_counts() {
+                            let (element, frequency, length) = entry?;
+                            counts.insert(element, (frequency, length));
+                        }
+                        Ok(())
+                    })?;
                     score(counts).collect()
                 }
                 Clause::Prefix(prefix) => {
@@ -836,19 +804,19 @@ impl<T: ReadTransaction> GraphTx<T> {
                             *held = held.max(value);
                         }
                     };
-                    self.transaction.visit_prefix(
-                        Table::KeywordPostings,
-                        &keys::term_prefix(id, prefix),
-                        |key, value| -> Result<(), GraphError> {
-                            let term = keys::parse_posting_term(key)?.as_bytes();
-                            if current.as_deref() != Some(term) {
-                                merge(std::mem::take(&mut counts));
-                                current = Some(term.to_vec());
-                            }
-                            counts.insert(keys::parse_posting_element(key)?, decode_counts(value)?);
-                            Ok(())
-                        },
-                    )?;
+                    self.visit_posting_blocks(&keys::term_prefix(id, prefix), |key, value| {
+                        let term = keys::parse_posting_term(key)?.as_bytes();
+                        if current.as_deref() != Some(term) {
+                            merge(std::mem::take(&mut counts));
+                            current = Some(term.to_vec());
+                        }
+                        let mut entries = Entries::new(keys::parse_posting_block(key)?, value);
+                        while let Some(entry) = entries.next_counts() {
+                            let (element, frequency, length) = entry?;
+                            counts.insert(element, (frequency, length));
+                        }
+                        Ok(())
+                    })?;
                     merge(counts);
                     best_scores
                 }
@@ -863,15 +831,38 @@ impl<T: ReadTransaction> GraphTx<T> {
 
     fn postings(&self, index: u32, term: &str) -> Result<BTreeMap<u64, Posting>, GraphError> {
         let mut postings = BTreeMap::new();
-        self.transaction.visit_prefix(
-            Table::KeywordPostings,
-            &keys::posting_prefix(index, term),
-            |key, value| -> Result<(), GraphError> {
-                postings.insert(keys::parse_posting_element(key)?, decode_posting(value)?);
-                Ok(())
-            },
-        )?;
+        self.visit_posting_blocks(&keys::posting_prefix(index, term), |key, value| {
+            for posting in Entries::new(keys::parse_posting_block(key)?, value) {
+                let posting = posting?;
+                postings.insert(posting.element, posting);
+            }
+            Ok(())
+        })?;
         Ok(postings)
+    }
+
+    fn visit_posting_blocks(
+        &self,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), GraphError>,
+    ) -> Result<(), GraphError> {
+        let mut held = self.postings.under(prefix).peekable();
+        self.transaction
+            .visit_prefix(Table::KeywordPostings, prefix, |key, value| {
+                while let Some((at, block)) = held.next_if(|(at, _)| at.as_slice() <= key) {
+                    if let Some(bytes) = block.bytes() {
+                        visit(&at, bytes)?;
+                    }
+                    if at.as_slice() == key {
+                        return Ok(());
+                    }
+                }
+                visit(key, value)
+            })?;
+        held.try_for_each(|(at, block)| match block.bytes() {
+            Some(bytes) => visit(&at, bytes),
+            None => Ok(()),
+        })
     }
 
     fn phrase_matches(
@@ -1230,6 +1221,35 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(true)
     }
 
+    /// Rewrites the postings stored before format version 14, one row per term and element, as
+    /// posting blocks, keeping each posting's frequency, term count, and positions.
+    pub(crate) fn move_postings_to_blocks(&mut self) -> Result<(), GraphError> {
+        for (_, index) in self.indexes()? {
+            if !matches!(index.definition.kind, IndexKind::Keyword { .. }) {
+                continue;
+            }
+            let prefix = keys::index_prefix(index.id);
+            let rows = self
+                .transaction
+                .scan_prefix(Table::KeywordPostings, &prefix)?;
+            for (key, _) in &rows {
+                self.transaction.delete(Table::KeywordPostings, key)?;
+            }
+            let mut block_key = Vec::new();
+            for (key, value) in rows {
+                let term = keys::parse_posting_term(&key)?;
+                let element = keys::parse_posting_block(&key)?;
+                let (positions, length) = decode_row_posting(&value)?;
+                let block = postings::block_of(element);
+                keys::put_posting_key(&mut block_key, index.id, term, block);
+                self.edit_posting_block(&block_key, block, |held| {
+                    held.insert(block, element, &positions, length)
+                })?;
+            }
+        }
+        self.flush_postings()
+    }
+
     /// Removes the index and all its entries. Returns whether there was one to remove.
     pub(crate) fn drop_index(&mut self, name: &str) -> Result<bool, GraphError> {
         let Some(index) = self.index(name)? else {
@@ -1242,6 +1262,8 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn clear(&mut self, index: &Index) -> Result<(), GraphError> {
+        let prefix = keys::index_prefix(index.id);
+        self.postings.forget(&prefix);
         for table in ENTRY_TABLES {
             for (key, _) in self
                 .transaction
@@ -1276,7 +1298,13 @@ impl<T: WriteTransaction> GraphTx<T> {
             let rows = |entry: &Entry| index.rows(element, entry);
             let old = before.and_then(|record| definition.entry(record));
             let new = after.and_then(|record| definition.entry(record));
-            if old.as_ref().map(rows) == new.as_ref().map(rows) {
+            let unchanged = match definition.kind {
+                IndexKind::Keyword { .. } => old == new,
+                IndexKind::Vector { .. } | IndexKind::Property { .. } => {
+                    old.as_ref().map(rows) == new.as_ref().map(rows)
+                }
+            };
+            if unchanged {
                 continue;
             }
             if before.is_some() {
@@ -1299,7 +1327,58 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.transaction.put(table, &key, &value)?;
         }
         if let Entry::Keyword(document) = entry {
-            self.adjust_totals(index.id, document_length(document), true)?;
+            let length = document_length(document);
+            let block = postings::block_of(element);
+            let mut key = Vec::new();
+            for (term, positions) in document {
+                keys::put_posting_key(&mut key, index.id, term, block);
+                self.edit_posting_block(&key, block, |held| {
+                    held.insert(block, element, positions, length)
+                })?;
+            }
+            self.adjust_totals(index.id, length, true)?;
+        }
+        Ok(())
+    }
+
+    fn edit_posting_block(
+        &mut self,
+        key: &[u8],
+        block: u64,
+        edit: impl FnOnce(&mut Block) -> Result<(), DecodeError>,
+    ) -> Result<(), GraphError> {
+        let held = match self.postings.get_mut(key, block) {
+            Some(held) => held,
+            None => {
+                let loaded = self
+                    .transaction
+                    .get_with(Table::KeywordPostings, key, |bytes| {
+                        Block::load(block, bytes).map_err(GraphError::from)
+                    })?
+                    .unwrap_or_default();
+                self.postings.insert(key, block, loaded);
+                self.postings
+                    .get_mut(key, block)
+                    .ok_or(GraphError::Corrupt("a held posting block went missing"))?
+            }
+        };
+        let before = held.len();
+        edit(held)?;
+        let after = held.len();
+        self.postings.resized(before, after);
+        if self.postings.bytes() > HELD_POSTING_BYTES {
+            self.flush_postings()?;
+        }
+        Ok(())
+    }
+
+    /// Writes every posting block this transaction holds into storage.
+    pub(crate) fn flush_postings(&mut self) -> Result<(), GraphError> {
+        for (key, block) in self.postings.take() {
+            match block.bytes() {
+                Some(bytes) => self.transaction.put(Table::KeywordPostings, &key, bytes)?,
+                None => self.transaction.delete(Table::KeywordPostings, &key)?,
+            }
         }
         Ok(())
     }
@@ -1317,11 +1396,11 @@ impl<T: WriteTransaction> GraphTx<T> {
                     return Ok(());
                 };
                 let mut length = 0u32;
+                let block = postings::block_of(element);
+                let mut key = Vec::new();
                 for (term, frequency) in decode_document(&bytes)? {
-                    self.transaction.delete(
-                        Table::KeywordPostings,
-                        &keys::posting_key(index.id, &term, element),
-                    )?;
+                    keys::put_posting_key(&mut key, index.id, &term, block);
+                    self.edit_posting_block(&key, block, |held| held.remove(block, element))?;
                     length = length.saturating_add(frequency);
                 }
                 self.transaction

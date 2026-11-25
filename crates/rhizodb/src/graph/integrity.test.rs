@@ -1121,7 +1121,7 @@ fn an_indexed_graph_after_edits_passes() {
 
 #[test]
 fn a_missing_posting_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "alice", ALICE.0);
+    let key = keys::posting_key(NAMES_INDEX, "alice", postings::block_of(ALICE.0));
     assert_index_damage_caught(
         |write| write.delete(Table::KeywordPostings, &key).unwrap(),
         IntegrityViolation::MissingIndexEntry {
@@ -1133,7 +1133,7 @@ fn a_missing_posting_is_caught() {
 
 #[test]
 fn a_posting_for_a_term_the_node_lacks_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "zed", ALICE.0);
+    let key = keys::posting_key(NAMES_INDEX, "zed", postings::block_of(ALICE.0));
     assert_index_damage_caught(
         |write| {
             write
@@ -1149,11 +1149,13 @@ fn a_posting_for_a_term_the_node_lacks_is_caught() {
 
 #[test]
 fn a_posting_with_the_wrong_positions_is_caught() {
-    let key = keys::posting_key(NAMES_INDEX, "bobson", BOB.0);
-    let mut moved = 1u32.to_be_bytes().to_vec();
-    moved.extend_from_slice(&2u32.to_be_bytes());
-    moved.push(5);
-    for value in [moved, [0, 0, 0, 1, 0, 0, 0, 2].to_vec()] {
+    let block = postings::block_of(BOB.0);
+    let key = keys::posting_key(NAMES_INDEX, "bobson", block);
+    let mut moved = Block::default();
+    moved.insert(block, BOB.0, &[5], 2).unwrap();
+    let mut longer = Block::default();
+    longer.insert(block, BOB.0, &[0], 3).unwrap();
+    for value in [moved, longer].map(|held| held.bytes().unwrap().to_vec()) {
         let key = key.clone();
         assert_index_damage_caught(
             |write| write.put(Table::KeywordPostings, &key, &value).unwrap(),
@@ -1303,7 +1305,11 @@ fn a_graph_with_a_relationship_index_after_edits_and_deletes_passes() {
 fn a_missing_relationship_posting_is_caught() {
     let graph = relationship_indexed_graph();
     assert_eq!(violations_of(&graph), vec![], "graph must start healthy");
-    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
+    let key = keys::posting_key(
+        FRIENDSHIP_NOTES_INDEX,
+        "friends",
+        postings::block_of(FRIENDSHIP.0),
+    );
     corrupt(&graph, |write| {
         write.delete(Table::KeywordPostings, &key).unwrap();
     });
@@ -1318,14 +1324,18 @@ fn a_missing_relationship_posting_is_caught() {
 #[test]
 fn a_relationship_index_entry_for_a_relationship_with_nothing_to_index_is_caught() {
     let graph = relationship_indexed_graph();
-    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", LOOP.0);
+    let block = postings::block_of(LOOP.0);
+    let key = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", block);
     corrupt(&graph, |write| {
-        let stored = keys::posting_key(FRIENDSHIP_NOTES_INDEX, "friends", FRIENDSHIP.0);
-        let value = write.get(Table::KeywordPostings, &stored).unwrap().unwrap();
-        write.put(Table::KeywordPostings, &key, &value).unwrap();
+        let value = write.get(Table::KeywordPostings, &key).unwrap().unwrap();
+        let mut held = Block::load(block, &value).unwrap();
+        held.insert(block, LOOP.0, &[0], 1).unwrap();
+        write
+            .put(Table::KeywordPostings, &key, held.bytes().unwrap())
+            .unwrap();
     });
     assert!(
-        violations_of(&graph).contains(&IntegrityViolation::UnexpectedIndexEntry {
+        violations_of(&graph).contains(&IntegrityViolation::WrongIndexEntry {
             table: Table::KeywordPostings,
             key,
         })

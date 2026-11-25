@@ -30,6 +30,7 @@ mod index;
 pub(crate) mod integrity;
 mod keys;
 mod meta;
+mod postings;
 mod properties;
 mod records;
 mod relationships;
@@ -85,7 +86,7 @@ use meta::Slot;
 use relationships::ChunkEdit;
 use relationships::ChunkRef;
 
-const FORMAT_VERSION: u32 = 13;
+const FORMAT_VERSION: u32 = 14;
 const OLDEST_FORMAT_VERSION: u32 = 1;
 const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
 const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
@@ -94,6 +95,7 @@ const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
 const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
 const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
+const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
 const ENTRIES_OUT_OF_ORDER: GraphError =
     GraphError::Corrupt("the adjacency entries of a segment are out of order");
@@ -261,6 +263,11 @@ impl<S: Storage> Graph<S> {
             if found.is_some_and(|found| found < ADJACENCY_SEGMENTS_FORMAT_VERSION) {
                 tx.move_adjacency_to_segments()?;
             }
+            let stale_postings =
+                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
+            if !stale_postings && found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
+                tx.move_postings_to_blocks()?;
+            }
             if upgrade {
                 tx.transaction.put(
                     Table::Metadata,
@@ -268,8 +275,6 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            let stale_postings =
-                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
             if tx.adopt_current_tokenizer(stale_postings)? || upgrade {
                 tx.commit()?;
             }
@@ -319,6 +324,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            postings: postings::Held::default(),
             counters: Vec::new(),
         })
     }
@@ -368,6 +374,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            postings: postings::Held::default(),
             counters: Vec::new(),
         })
     }
@@ -395,6 +402,7 @@ pub(crate) struct GraphTx<T> {
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
+    postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
 }
 
@@ -420,6 +428,7 @@ impl<T> GraphTx<T> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            postings: postings::Held::default(),
             counters: Vec::new(),
         }
     }
@@ -1149,6 +1158,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.transaction
                 .put(Table::Metadata, &key, &next.to_be_bytes())?;
         }
+        self.flush_postings()?;
         self.flush_columns()?;
         self.flush_adjacency()?;
         self.flush_relationships()?;

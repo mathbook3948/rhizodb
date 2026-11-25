@@ -43,6 +43,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A procedure body returns `Result<ProcedureOutput, ProcedureError>`, where `ProcedureOutput` is a type of its own built from a `Vec` of rows, by `collect`, or with `push_row`, and `ProcedureError` is `Box<dyn Error + Send + Sync>`.
 - `Database::register_procedure` takes `&self`, so a database shared through an `Arc` can register procedures.
 - The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
+- A keyword index stores the postings of each term in blocks of 128 consecutive element IDs instead of one entry per element, so building and searching one take about half the time. Opening a database of an earlier format moves its postings into blocks without tokenizing its text again, and an earlier build cannot open the result.
 - `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
 
 ### Fixed

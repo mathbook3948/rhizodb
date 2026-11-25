@@ -58,6 +58,8 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - A phrase is ranked as one term whose occurrences are the phrase's.
 - A prefix is ranked in each element by the best of the terms it matches there.
 - Each keyword index keeps its element count and total term count.
+- The postings of one term are stored in blocks of 128 consecutive element IDs, one entry per term and block.
+- A write transaction holds each posting block it changes and writes it once at commit, or earlier when the held blocks grow past a bound.
 - Each posting keeps its element's term count.
 - Each posting keeps the positions of its term in the element.
 - Each indexed element keeps the terms it was indexed under.
