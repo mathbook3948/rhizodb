@@ -39,6 +39,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
 - `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
 - Automatic space reclaim: after a checkpoint, a file that holds more than twice its live data plus 76 MiB, and has grown by its live data since the last compaction, is compacted in the background, so a long-running host's file does not grow without bound.
+- `Display` for `Value`, `Node`, `Relationship`, and `Path`, in the notation of GQL literals such as `{k: [1, 'a']}`, `(:Person {name: 'Ada'})`, and `<(:A)-[:T]->(:B)>`, so a host can print query results without writing a formatter.
 
 ### Changed
 
