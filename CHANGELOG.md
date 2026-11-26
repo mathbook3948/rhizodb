@@ -64,6 +64,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Appending keys in small commits split a full page in two at many checkpoints, so tables loaded in key order, such as new node IDs, kept about one half-full page per such checkpoint. Appends now leave full pages.
 - An automatic compaction that ran while a read transaction was open could not reuse the space it emptied, so it grew the file instead of shrinking it and held off the next compaction. It now waits until the transactions that began before the checkpoint have ended.
 - A damaged database file whose catalog claimed a huge number of extent slots opened, then made its first checkpoint run out of memory. An open now ignores the free slots after the last extent in use, and fails as corrupt data when an extent starts past the end of the file.
 - A backup that failed, for example on a full disk, left the log segments of its staging copy in the target directory for good. They are now removed with the staging file.

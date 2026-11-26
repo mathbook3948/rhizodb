@@ -108,6 +108,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A run's header names its table, its role, and the first bytes, length, and hash of the key it belongs to.
 - Each page owns the runs of its long keys, which are rewritten with it, while a value's run stays until its entry changes.
 - A checkpoint packs cells greedily on the rightmost path of a table, so appends leave full pages, and spreads cells evenly elsewhere.
+- A short page joined with its neighbour is packed greedily too when the pair ends the rightmost path, so an append that leaves a short last page splits no full page in two.
 - A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child until the root has several children or is a leaf.
 - Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
 - The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
