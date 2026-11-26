@@ -1026,7 +1026,7 @@ fn brute_force(
                 }
                 _ => dot(query, vector),
             };
-            (position, score)
+            (position, score + 0.0)
         })
         .collect();
     scored.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));

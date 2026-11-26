@@ -198,7 +198,7 @@ impl Batch {
                 VectorMetric::Euclidean => 0.0 - sums[lane].sqrt(),
                 VectorMetric::DotProduct => sums[lane],
             };
-            scored.push((self.ids[lane], score));
+            scored.push((self.ids[lane], score + 0.0));
         }
         self.len = 0;
     }

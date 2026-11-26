@@ -1224,3 +1224,44 @@ fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
         assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
     }
 }
+
+#[test]
+fn zero_vector_scores_of_either_sign_tie_in_ascending_id_order() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .create_vector_index(
+            "dots",
+            IndexTarget::Label("Doc"),
+            "at",
+            2,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for vector in [[-1.0, -2.0], [1.0, 2.0]] {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    at,
+                    PropertyValue::List(vector.map(PropertyValue::Float).to_vec()),
+                )]),
+            })
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let found = graph
+        .read()
+        .unwrap()
+        .vector_search("dots", ElementKind::Node, &[0.0, 0.0], 10)
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|(id, score)| (*id, score.to_bits()))
+            .collect::<Vec<_>>(),
+        vec![(0, 0.0f64.to_bits()), (1, 0.0f64.to_bits())]
+    );
+}
