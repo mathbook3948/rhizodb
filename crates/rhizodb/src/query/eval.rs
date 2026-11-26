@@ -308,10 +308,15 @@ impl<T: ReadTransaction> Env<'_, T> {
     pub(crate) fn property_map(
         &self,
         properties: &crate::graph::Properties,
-    ) -> Result<BTreeMap<String, Datum>, Error> {
+    ) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         properties
             .iter()
-            .map(|(key, value)| Ok((self.tx.token_name(*key)?, Datum::from(value.clone()))))
+            .map(|(key, value)| {
+                Ok((
+                    Arc::from(self.tx.token_name(*key)?),
+                    Datum::from(value.clone()),
+                ))
+            })
             .collect()
     }
 
@@ -559,7 +564,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             } else {
                 taints.remove(key);
             }
-            values.insert(key.clone(), value);
+            values.insert(Arc::from(key.as_str()), value);
         }
         Ok((datum::map(values)?, Taint::map(taints)))
     }
@@ -582,6 +587,16 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn indexed(&self, base: &Expr, index: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
+        if let Expr::Parameter(at) = base {
+            let base = self.parameters.get(*at).unwrap_or(&Datum::Null);
+            let (index, index_taint) = self.tracked(index, row)?;
+            let whole = index_taint.is_whole();
+            return settle(
+                self.index(base, index),
+                whole,
+                Taint::when(index_taint.is_tainted()),
+            );
+        }
         let (base, base_taint) = self.tracked(base, row)?;
         let (index, index_taint) = self.tracked(index, row)?;
         let taint = if index_taint.is_tainted() {
@@ -590,7 +605,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             base_taint.at(&base, &index)
         };
         settle(
-            self.index(base, index),
+            self.index(&base, index),
             base_taint.is_whole() || index_taint.is_whole(),
             taint,
         )
@@ -972,7 +987,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn index(&self, base: Datum, index: Datum) -> Result<Datum, Error> {
+    fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error> {
         match (base, index) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::List(items), Datum::Integer(index)) => Ok(list_position(items.len(), index)
@@ -986,10 +1001,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                 ),
             )),
             (Datum::Map(entries), Datum::String(key)) => {
-                Ok(entries.get(&key).cloned().unwrap_or(Datum::Null))
+                Ok(entries.get(key.as_str()).cloned().unwrap_or(Datum::Null))
             }
             (base @ (Datum::Node(_) | Datum::Relationship(_)), Datum::String(key)) => {
-                self.property(&base, &key)
+                self.property(base, &key)
             }
             (Datum::Map(_) | Datum::Node(_) | Datum::Relationship(_), other) => Err(Error::new(
                 ErrorKind::MapElementAccessByNonString,
