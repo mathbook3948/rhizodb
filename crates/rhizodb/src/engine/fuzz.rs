@@ -19,6 +19,7 @@ use super::wal_format::Op;
 use super::wal_format::SegmentHeader;
 use super::wal_format::batch_record;
 use super::wal_format::checkpoint_record;
+use super::wal_format::config_record;
 use super::wal_format::decode_record;
 use super::wal_format::seal_record;
 use crate::storage::Entry;
@@ -92,6 +93,10 @@ pub(crate) fn decode_formats(bytes: &[u8]) -> Result<(), String> {
                     .map_err(|error| error.to_string())?,
                     Body::Checkpoint { lsn, generation } => {
                         checkpoint_record(decoded.lsn, decoded.hlc, *lsn, *generation)
+                    }
+                    Body::Config { writer_id } => {
+                        config_record(decoded.lsn, decoded.term, decoded.hlc, writer_id)
+                            .map_err(|error| error.to_string())?
                     }
                 };
                 again[20..28].copy_from_slice(&decoded.term.to_le_bytes());

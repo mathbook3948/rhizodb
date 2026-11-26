@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use crate::engine::any_fs;
 use crate::engine::any_fs::AnyFs;
@@ -141,10 +142,10 @@ impl OpenOptions {
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
-        Ok(Database {
-            graph: Graph::open_as(in_memory_backend()?, self.replica)?,
-            statements: Statements::new(self.parallelism),
-        })
+        Ok(Database::from_parts(
+            Graph::open_as(in_memory_backend()?, self.replica)?,
+            Statements::new(self.parallelism),
+        ))
     }
 
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
@@ -156,10 +157,10 @@ impl OpenOptions {
                 format!("there is no database file at {}", path.display()),
             ));
         }
-        Ok(Database {
-            graph: Graph::open_as(open_backend(path)?, self.replica)?,
-            statements: Statements::new(self.parallelism),
-        })
+        Ok(Database::from_parts(
+            Graph::open_as(open_backend(path)?, self.replica)?,
+            Statements::new(self.parallelism),
+        ))
     }
 }
 
@@ -201,11 +202,20 @@ pub struct DatabaseStats {
 /// writing queries run one at a time.
 #[derive(Debug)]
 pub struct Database {
-    graph: Graph<Backend>,
+    pub(crate) graph: Graph<Backend>,
     statements: Statements,
+    pub(crate) roles: Mutex<()>,
 }
 
 impl Database {
+    pub(crate) fn from_parts(graph: Graph<Backend>, statements: Statements) -> Self {
+        Self {
+            graph,
+            statements,
+            roles: Mutex::new(()),
+        }
+    }
+
     /// Opens the database file at `path`, creating it when it does not exist.
     ///
     /// A damaged file fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on

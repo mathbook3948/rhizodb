@@ -45,10 +45,13 @@ pub(crate) enum Table {
     NodeColumns,
     Adjacency,
     RelationshipChunks,
+    /// The terms of the writers a database has followed or been, with the LSN each began at,
+    /// which only replication writes.
+    ReplicationHistory,
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 20] = [
+    pub(crate) const ALL: [Table; 21] = [
         Table::Metadata,
         Table::TokenByName,
         Table::TokenById,
@@ -69,6 +72,7 @@ impl Table {
         Table::NodeColumns,
         Table::Adjacency,
         Table::RelationshipChunks,
+        Table::ReplicationHistory,
     ];
 
     /// Whether only the upgrade of an older format version reads the table, so a new database
@@ -106,6 +110,7 @@ impl Table {
             Table::NodeColumns => "node_columns",
             Table::Adjacency => "adjacency",
             Table::RelationshipChunks => "relationship_chunks",
+            Table::ReplicationHistory => "replication_history",
         }
     }
 }

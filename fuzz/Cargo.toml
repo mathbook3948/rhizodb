@@ -55,3 +55,10 @@ path = "fuzz_targets/engine_file.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "replication_changes"
+path = "fuzz_targets/replication_changes.rs"
+test = false
+doc = false
+bench = false

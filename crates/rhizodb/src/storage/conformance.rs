@@ -707,11 +707,17 @@ fn a_second_writer_waits_for_the_first<H: Harness>(harness: &mut H) {
     assert_eq!(latest(&store, Table::Metadata, b"counter"), Some(vec![2]));
 }
 
+fn graph_tables() -> impl Iterator<Item = Table> {
+    Table::ALL
+        .into_iter()
+        .filter(|table| *table != Table::ReplicationHistory)
+}
+
 fn commits_survive_a_reopen_and_the_rest_does_not<H: Harness>(harness: &mut H) {
     let store = harness.open();
     let large = patterned(70_000, 3);
     let mut write = store.begin_write().unwrap();
-    for table in Table::ALL {
+    for table in graph_tables() {
         write.put(table, b"kept", table.name().as_bytes()).unwrap();
     }
     write.put(Table::Vectors, b"large", &large).unwrap();
@@ -733,7 +739,7 @@ fn commits_survive_a_reopen_and_the_rest_does_not<H: Harness>(harness: &mut H) {
         entries(&[(b"kept", b"nodes"), (b"second", b"2")])
     );
     assert_eq!(read.get(Table::Vectors, b"large").unwrap(), Some(large));
-    for table in Table::ALL {
+    for table in graph_tables() {
         assert_eq!(
             read.get(table, b"kept").unwrap(),
             Some(table.name().as_bytes().to_vec())

@@ -62,7 +62,7 @@ use super::wal::Wal;
 use super::wal::segment_files;
 use super::wal::segment_name;
 use super::wal_format::Body;
-use super::wal_format::batch_record;
+use super::wal_format::term_batch_record;
 use crate::storage::Entry;
 use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
@@ -178,6 +178,7 @@ struct Writer<F: FileSystem> {
     wal: Option<Wal<F>>,
     last_lsn: u64,
     last_hlc: u64,
+    term: u64,
 }
 
 #[derive(Debug)]
@@ -205,6 +206,9 @@ enum Task<F: FileSystem> {
 #[derive(Debug)]
 struct Shared<F: FileSystem> {
     options: EngineOptions,
+    fs: Arc<F>,
+    name: String,
+    epochs: Mutex<Vec<Epoch>>,
     pages: Arc<Pages<F::File>>,
     published: Mutex<Published>,
     writer: Mutex<Writer<F>>,
@@ -400,15 +404,11 @@ fn replay_into(
     last_hlc: &mut u64,
     record: super::wal_format::Record,
 ) -> Result<(), EngineError> {
-    if let Body::Batch(ops) = record.body {
-        let mut staged = Staged::new(View::new(*last_lsn, Arc::clone(layers)));
-        for op in ops {
-            staged.replay(op)?;
-        }
-        layers
-            .active
-            .apply(record.lsn, staged.into_changes(), record.lsn);
-    }
+    let mut staged = Staged::new(View::new(*last_lsn, Arc::clone(layers)));
+    stage_record(&mut staged, record.lsn, record.term, record.body)?;
+    layers
+        .active
+        .apply(record.lsn, staged.into_changes(), record.lsn);
     *last_lsn = record.lsn;
     *last_hlc = (*last_hlc).max(record.hlc);
     Ok(())
@@ -558,8 +558,13 @@ impl<F: FileSystem + 'static> Engine<F> {
             )?;
             (wal, header)
         };
+        let epochs = replica::load_epochs(&layers)?;
+        let term = epochs.last().map_or(0, |epoch| epoch.term);
         let shared = Arc::new(Shared {
             options,
+            fs: Arc::clone(&fs),
+            name: name.to_owned(),
+            epochs: Mutex::new(epochs),
             pages,
             published: Mutex::new(Published {
                 view: View::new(last_lsn, layers),
@@ -570,6 +575,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 wal: Some(wal),
                 last_lsn,
                 last_hlc,
+                term,
             }),
             trees: Mutex::new(vec![Arc::downgrade(&tree)]),
             durable: Mutex::new(Durable {
@@ -634,19 +640,37 @@ impl<F: FileSystem + 'static> Engine<F> {
         self.drop_segments_aside(writer);
         let lsn = writer.last_lsn + 1;
         let hlc = hybrid_clock_after(writer.last_hlc);
-        let record = batch_record(
+        let record = term_batch_record(
             lsn,
+            writer.term,
             hlc,
             u128::from(lsn),
             staged.ops.iter().map(StagedOp::borrowed),
         )?;
+        self.append(writer, record, lsn, hlc)?;
+        self.publish(writer, lsn, staged);
+        Ok(())
+    }
+
+    fn append(
+        &self,
+        writer: &mut Writer<F>,
+        record: Vec<u8>,
+        lsn: u64,
+        hlc: u64,
+    ) -> Result<(), EngineError> {
         let wal = writer.wal.as_mut().ok_or(EngineError::Poisoned)?;
         if let Err(error) = wal.append(record, hlc) {
-            shared.poison_with(&error);
+            self.shared.poison_with(&error);
             return Err(error);
         }
         writer.last_lsn = lsn;
-        writer.last_hlc = hlc;
+        writer.last_hlc = writer.last_hlc.max(hlc);
+        Ok(())
+    }
+
+    fn publish(&self, writer: &mut Writer<F>, lsn: u64, staged: Staged) {
+        let shared = &*self.shared;
         let (layers, horizon) = {
             let published = lock(&shared.published);
             let snapshot = published.view.snapshot;
@@ -672,7 +696,6 @@ impl<F: FileSystem + 'static> Engine<F> {
                 shared.wait_for_checkpoint();
             }
         }
-        Ok(())
     }
 
     fn drop_segments_aside(&self, writer: &mut Writer<F>) {
@@ -1584,6 +1607,28 @@ impl<F: FileSystem + 'static> WriteTransaction for EngineWrite<'_, F> {
         Ok(())
     }
 }
+
+fn stage_record(staged: &mut Staged, lsn: u64, term: u64, body: Body) -> Result<(), EngineError> {
+    match body {
+        Body::Batch(ops) => {
+            for op in ops {
+                staged.replay(op)?;
+            }
+        }
+        Body::Config { writer_id } => {
+            let (key, value) = replica::history_entry(term, &writer_id, lsn);
+            staged.put(TableId::of(Table::ReplicationHistory), &key, &value);
+        }
+        Body::Checkpoint { .. } => {}
+    }
+    Ok(())
+}
+
+#[path = "replica.rs"]
+mod replica;
+
+pub(crate) use replica::Epoch;
+pub(crate) use replica::epoch_at;
 
 #[cfg(test)]
 #[path = "store.test.rs"]

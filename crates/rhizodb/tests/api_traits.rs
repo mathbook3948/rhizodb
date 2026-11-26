@@ -4,6 +4,7 @@
 use std::error::Error as StdError;
 use std::fmt::Debug;
 
+use rhizodb::Changes;
 use rhizodb::Database;
 use rhizodb::DatabaseStats;
 use rhizodb::Date;
@@ -45,6 +46,7 @@ fn values_and_handles_move_and_share_across_threads() {
     shared::<OpenOptions>();
     shared::<DatabaseStats>();
     shared::<Position>();
+    shared::<Changes>();
     shared::<Parameters>();
     shared::<QueryResult>();
     shared::<Value>();

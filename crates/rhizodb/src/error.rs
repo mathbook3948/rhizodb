@@ -209,6 +209,9 @@ pub enum ErrorKind {
     TooFarBehind,
     /// Changes to apply do not start right after the last change the database holds.
     Gap,
+    /// Changes were given to [`Database::apply`](crate::Database::apply) of a database that is
+    /// a writer, which takes no changes of another writer until it is demoted.
+    NotReplica,
 }
 
 impl ErrorKind {

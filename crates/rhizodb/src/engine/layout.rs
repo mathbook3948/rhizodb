@@ -129,6 +129,7 @@ impl TableId {
             Table::NodeColumns => 0x111,
             Table::Adjacency => 0x112,
             Table::RelationshipChunks => 0x113,
+            Table::ReplicationHistory => 0x01,
         })
     }
 

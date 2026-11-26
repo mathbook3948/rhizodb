@@ -23,6 +23,7 @@ const SEGMENT_CHECKSUM_AT: usize = WAL_BLOCK - 8;
 
 const BATCH_FORMAT: u8 = 1;
 const CHECKPOINT_FORMAT: u8 = 1;
+const CONFIG_FORMAT: u8 = 1;
 
 /// The first block of every segment, which names the database and log it belongs to, so a segment
 /// can be shipped to another node and replayed there on its own.
@@ -139,6 +140,8 @@ pub(crate) enum Body {
     Batch(Vec<Op>),
     /// A checkpoint at `lsn` reached the database file in header generation `generation`.
     Checkpoint { lsn: u64, generation: u64 },
+    /// A writer of id `writer_id` begins the record's term with this record.
+    Config { writer_id: Vec<u8> },
 }
 
 /// The kinds of record. Kinds this build reserves but cannot apply refuse the segment, since
@@ -297,13 +300,25 @@ pub(crate) fn seal_record(seed: u64, record: &mut [u8]) -> Result<(), EngineErro
 }
 
 /// A batch record of `ops`, to be sealed by the segment it lands in.
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn batch_record<'a>(
     lsn: u64,
     hlc: u64,
     txn: u128,
     ops: impl ExactSizeIterator<Item = OpRef<'a>>,
 ) -> Result<Vec<u8>, EngineError> {
-    let mut record = record_prefix(lsn, 0, hlc, txn, Kind::Batch, BATCH_FORMAT);
+    term_batch_record(lsn, 0, hlc, txn, ops)
+}
+
+/// A batch record of `ops` that a writer of `term` committed.
+pub(crate) fn term_batch_record<'a>(
+    lsn: u64,
+    term: u64,
+    hlc: u64,
+    txn: u128,
+    ops: impl ExactSizeIterator<Item = OpRef<'a>>,
+) -> Result<Vec<u8>, EngineError> {
+    let mut record = record_prefix(lsn, term, hlc, txn, Kind::Batch, BATCH_FORMAT);
     put_u32(
         &mut record,
         u32::try_from(ops.len()).map_err(|_| EngineError::TooLarge)?,
@@ -314,6 +329,18 @@ pub(crate) fn batch_record<'a>(
             return Err(EngineError::TooLarge);
         }
     }
+    Ok(record)
+}
+
+/// A configuration record that begins `term` under the writer `writer_id`.
+pub(crate) fn config_record(
+    lsn: u64,
+    term: u64,
+    hlc: u64,
+    writer_id: &[u8],
+) -> Result<Vec<u8>, EngineError> {
+    let mut record = record_prefix(lsn, term, hlc, u128::from(lsn), Kind::Config, CONFIG_FORMAT);
+    put_bytes(&mut record, writer_id)?;
     Ok(record)
 }
 
@@ -400,6 +427,9 @@ fn decode_checked(mut reader: Reader<'_>) -> Result<Record, EngineError> {
         (Kind::Checkpoint, CHECKPOINT_FORMAT) => Body::Checkpoint {
             lsn: reader.u64()?,
             generation: reader.u64()?,
+        },
+        (Kind::Config, CONFIG_FORMAT) => Body::Config {
+            writer_id: reader.bytes()?.to_vec(),
         },
         (kind, format) => {
             return Err(EngineError::Unsupported(format!(

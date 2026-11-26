@@ -254,6 +254,45 @@ The version counts up when the format changes. A build reads every version up to
 refuses a newer one with [`ErrorKind::UnsupportedDumpVersion`], and writes only its own. A new
 version only adds, such as a value tag, so an older dump keeps its meaning.
 
+# Replication
+
+One database is the writer and any number of replicas follow it. The host moves changes between
+them and decides which node writes.
+
+- A replica opens with [`OpenOptions::replica`] and refuses every local write.
+- [`Database::position`] names the last change a database holds. A replica sends its position to
+  another node, which answers with [`Database::changes_since`]. The replica then hands the
+  [`Changes`] to [`Database::apply`]. A replica serves changes too, so they can be relayed.
+- [`Database::promote`] makes a node the writer of a term the host chose, higher than every term
+  before it. [`Database::demote`] stops a writer and returns its final position, which the next
+  writer applies before it promotes, so a planned handover loses no write.
+- Changes of an older term fail with [`ErrorKind::Fenced`]. Two databases with other changes at
+  one place fail with [`ErrorKind::Diverged`], and the host keeps only the side of the node that
+  holds its lease.
+
+The host routes every write to the current writer and keeps data that belongs to one node in a
+database file of its own. Replication is asynchronous, so a write that no replica applied yet can
+be lost with its writer. A host that must not lose one waits until a replica reports a position
+at or past the write before it answers.
+
+```
+use rhizodb::Database;
+use rhizodb::OpenOptions;
+use rhizodb::Parameters;
+
+let writer = Database::in_memory()?;
+writer.promote(1, b"node-a")?;
+writer.execute("INSERT (:Order {id: 1})", &Parameters::new())?;
+let replica = OpenOptions::new().replica(true).in_memory()?;
+let changes = writer.changes_since(&replica.position(), 1 << 20)?;
+replica.apply(&changes)?;
+let last = writer.demote()?;
+assert_eq!(replica.position(), last);
+replica.promote(2, b"node-b")?;
+replica.execute("INSERT (:Order {id: 2})", &Parameters::new())?;
+# Ok::<(), rhizodb::Error>(())
+```
+
 # Upgrades
 
 The file records a format version. Opening a file written by an older version of RhizoDB

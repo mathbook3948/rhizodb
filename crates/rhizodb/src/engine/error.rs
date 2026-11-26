@@ -22,6 +22,8 @@ pub(crate) enum EngineError {
     TooLarge,
     /// A failure that already crossed the storage trait, such as one a scan's visitor raised.
     Storage(StorageError),
+    /// Changes or a promotion that replication refuses, reported as `kind`.
+    Replication(ErrorKind, String),
 }
 
 impl EngineError {
@@ -54,6 +56,7 @@ impl fmt::Display for EngineError {
             ),
             Self::TooLarge => formatter.write_str("a key, value, or transaction is too large"),
             Self::Storage(error) => write!(formatter, "{error}"),
+            Self::Replication(_, message) => formatter.write_str(message),
         }
     }
 }
@@ -85,7 +88,9 @@ impl From<EngineError> for StorageError {
         if let EngineError::Storage(error) = error {
             return error;
         }
-        if error.is_corrupt() {
+        if let EngineError::Replication(kind, _) = &error {
+            StorageError::of_kind(*kind, error)
+        } else if error.is_corrupt() {
             StorageError::corrupt(error)
         } else if matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock) {
             StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
