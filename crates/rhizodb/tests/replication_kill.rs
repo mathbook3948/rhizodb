@@ -174,6 +174,7 @@ impl Drop for ChildReplica {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_replica_killed_during_apply_reopens_at_a_position_its_writer_passed() {
     let directory = tempfile::tempdir().unwrap();
     let (last, seen, count) = write_changes(directory.path());

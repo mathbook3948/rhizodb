@@ -180,3 +180,17 @@ fn a_hole_that_a_page_already_holds_is_refused() {
     table.holes = vec![(ExtentId(1), Blocks::range(1, 1))];
     assert!(table.place(1, |_, _| {}).unwrap_err().is_corrupt());
 }
+
+#[test]
+fn fitting_the_file_drops_free_slots_past_the_last_extent_and_refuses_an_extent_past_its_end() {
+    let mut table = with_an_open_extent_per_purpose();
+    table.next_slot = 1 << 40;
+    let file_blocks = physical_block(3, 0).unwrap();
+
+    table.fit_file(file_blocks).unwrap();
+
+    assert_eq!(table.next_slot, 3);
+    assert!(table.free_slots().is_empty());
+    let error = table.fit_file(physical_block(2, 0).unwrap()).unwrap_err();
+    assert!(error.is_corrupt(), "{error}");
+}

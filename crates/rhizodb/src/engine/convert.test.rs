@@ -168,6 +168,7 @@ fn fail_each_operation_of_a_conversion(base: &SimFs, state: &State, shuffles: bo
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_during_a_conversion_leaves_the_redb_file_or_the_whole_copy() {
     let (base, state) = redb_database();
     fail_each_operation_of_a_conversion(&base, &state, true);
@@ -190,6 +191,7 @@ fn unclean_redb_database() -> (SimFs, State) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_redb_file_left_by_a_crash_converts_after_redb_recovers_it_in_memory() {
     let (base, state) = unclean_redb_database();
     let engine = open(&base.crash(Crash::DropUnsynced)).unwrap();
@@ -200,6 +202,7 @@ fn a_redb_file_left_by_a_crash_converts_after_redb_recovers_it_in_memory() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_damaged_redb_file_fails_to_convert_and_stays_as_it_was() {
     let (base, state) = redb_database();
     let original = file_bytes(&base, NAME);

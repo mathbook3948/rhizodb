@@ -237,6 +237,7 @@ fn same_entries(left: &Entries, right: &Entries) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_of_one_type_reads_back_every_value_from_every_position(
         values in (0u8..4).prop_flat_map(segment_values),
     ) {
@@ -251,6 +252,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_of_mixed_types_reads_back_every_value_from_every_position(
         values in segment_values(4),
     ) {
@@ -271,6 +273,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_delta_reads_back_each_property_and_answers_for_each_key(
         slot in 0..SLOTS,
         entries in delta_entries(),
@@ -305,6 +308,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn merged_values_hold_each_change_over_the_stored_value(
         stored in segment_values(1),
         changes in prop::collection::btree_map(
@@ -920,6 +924,7 @@ fn a_resealed_delta_with_an_undecodable_value_fails_where_it_is_read() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn segment_keys_sort_as_their_group_key_segment_and_part_and_read_back(
         left in (any::<u64>(), any::<u32>(), 0..SEGMENTS, 0..SEGMENT_SLOTS),
         right in (any::<u64>(), any::<u32>(), 0..SEGMENTS, 0..SEGMENT_SLOTS),

@@ -569,6 +569,7 @@ fn check(db: Arc<Database>, seed: u64, per_thread: u64) -> BTreeMap<i64, Vec<i64
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn concurrent_transactions_in_memory_are_strictly_serializable() {
     let replays = regression_seeds("concurrent_transactions_in_memory_are_strictly_serializable");
     for seed in replays.into_iter().chain([seed()]) {
@@ -577,6 +578,7 @@ fn concurrent_transactions_in_memory_are_strictly_serializable() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn concurrent_transactions_on_a_file_are_strictly_serializable() {
     let replays = regression_seeds("concurrent_transactions_on_a_file_are_strictly_serializable");
     for seed in replays.into_iter().chain([seed()]) {

@@ -546,6 +546,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(48)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn small_graphs_answer_as_the_row_path(nodes in 0i64..80, seed in any::<u64>()) {
         let report = equivalent(nodes, seed, 40).map_err(TestCaseError::fail)?;
         prop_assert!(report.queries == 80);
@@ -556,6 +557,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(3)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn graphs_across_row_group_boundaries_answer_as_the_row_path(
         nodes in prop::sample::select(vec![4095i64, 4096, 4097, 8193]),
         seed in any::<u64>(),

@@ -329,6 +329,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(32)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn adjacency_matches_a_model_through_commits_rollbacks_reopens_and_crashes(
         ops in prop::collection::vec(op(), 1..80),
     ) {

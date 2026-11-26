@@ -577,6 +577,7 @@ impl Sim {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn replicas_converge_on_their_writer_under_random_faults() {
     let seeds = test_scale::cases(6);
     let first = std::env::var("RHIZODB_REPLICATION_SEED")

@@ -149,12 +149,11 @@ impl<F: FileSystem> Detached<F> {
         self.names.is_empty()
     }
 
-    /// Removes the segments' files.
-    pub(crate) fn remove(self) -> Result<(), EngineError> {
+    /// Removes the segments' files, leaving any it fails to remove for the next open to remove.
+    pub(crate) fn remove(self) {
         for name in &self.names {
-            self.fs.remove(name)?;
+            let _ = self.fs.remove(name);
         }
-        Ok(())
     }
 }
 
@@ -494,8 +493,8 @@ impl<F: FileSystem> Wal<F> {
     }
 
     /// Removes the segments before `sequence`, once a durable header no longer needs them.
-    pub(crate) fn drop_before(&mut self, sequence: u64) -> Result<(), EngineError> {
-        self.detach_before(sequence).remove()
+    pub(crate) fn drop_before(&mut self, sequence: u64) {
+        self.detach_before(sequence).remove();
     }
 
     /// Forgets the segments before `sequence`, once a durable header no longer needs them, and

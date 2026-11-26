@@ -1,6 +1,7 @@
 mod support;
 
 use rhizodb::ErrorKind;
+use rhizodb::Parameters;
 use rhizodb::Value;
 use support::*;
 
@@ -158,6 +159,22 @@ fn text_converts_to_a_number_only_when_it_is_a_decimal_number() {
             "{text:?}"
         );
     }
+    assert_eq!(
+        run(
+            &db,
+            "RETURN toInteger('-9223372036854775809') AS low, \
+             toInteger('-9223372036854775808.5') AS min, \
+             toInteger('9223372036854775808') AS high, \
+             toInteger('9007199254740993.5') AS exact, toInteger('-.5') AS zero"
+        ),
+        [vec![
+            Value::Null,
+            int(i64::MIN),
+            Value::Null,
+            int(9_007_199_254_740_993),
+            int(0)
+        ]]
+    );
 }
 
 #[test]
@@ -194,6 +211,90 @@ fn implicit_grouping_keys_are_the_non_aggregated_items() {
         "UNWIND [1, 2, 3, 4] AS x RETURN x % 2 AS parity, sum(x) AS total ORDER BY parity",
     );
     assert_eq!(rows, [vec![int(0), int(6)], vec![int(1), int(4)]]);
+}
+
+#[test]
+fn a_constant_grouping_key_does_not_block_the_same_constant_inside_an_aggregate() {
+    let db = db();
+    let params = Parameters::new().with("t", 2);
+    for (query, expected) in [
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 1 AS one, count(*) + 1 AS c",
+            vec![int(1), int(4)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 0 AS base, coalesce(sum(x), 0) AS total",
+            vec![int(0), int(6)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN $t AS t, count(*) * $t AS w",
+            vec![int(2), int(6)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 1 AS one, count(*) AS c ORDER BY c + 1",
+            vec![int(1), int(3)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN date() AS today, max(date()) <= date() AS fresh",
+            vec![single(&db, "RETURN date()"), boolean(true)],
+        ),
+    ] {
+        assert_eq!(
+            db.execute(query, &params).unwrap().rows(),
+            [expected],
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn a_repeated_key_in_a_pattern_map_is_evaluated_before_the_last_one_wins() {
+    let db = db();
+    run(&db, "INSERT (:L {x: 1}), (:L {x: 2})");
+    let zero = Parameters::new().with("zero", 0);
+    for query in [
+        "MATCH (n:L {x: 10 / $zero, x: 1}) RETURN n.x",
+        "MATCH (n {x: 10 / $zero, x: 1}) RETURN n.x",
+    ] {
+        assert_eq!(
+            db.execute(query, &zero).unwrap_err().kind(),
+            ErrorKind::DivisionByZero,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        run(&db, "MATCH (n:L {x: 2, x: 1}) RETURN n.x"),
+        [vec![int(1)]]
+    );
+}
+
+#[test]
+fn an_aggregate_in_an_aggregating_order_by_reads_projected_names_as_projected() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 2, 2] AS x WITH x AS y, count(*) AS c ORDER BY sum(y) RETURN y, c"
+        ),
+        [vec![int(1), int(1)], vec![int(2), int(2)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [3, 1] AS x WITH x, count(*) AS c ORDER BY max(x) RETURN x"
+        ),
+        [vec![int(1)], vec![int(3)]]
+    );
+    for query in [
+        "UNWIND [{v: 3}, {v: 1}] AS n WITH n.v AS n, count(*) AS c ORDER BY sum(n) RETURN n, c",
+        "UNWIND [{v: 3}, {v: 1}] AS n WITH n.v AS n, count(*) AS c ORDER BY max(n) RETURN n, c",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::AmbiguousAggregationExpression,
+            "{query}"
+        );
+    }
 }
 
 #[test]
@@ -249,6 +350,13 @@ fn an_aggregate_argument_cannot_call_rand() {
     for query in [
         "RETURN count(rand())",
         "MATCH (n:Missing) RETURN collect(n.x + rand())",
+        "RETURN collect([x IN range(1, 3) | rand()])",
+        "RETURN collect([x IN range(1, 3) WHERE x < rand() * 3])",
+        "RETURN sum(reduce(a = 0.0, x IN [1, 2] | a + rand()))",
+        "RETURN collect(any(x IN [1, 2] WHERE x < rand()))",
+        "MATCH (n) RETURN collect([(n)-->(m) WHERE rand() < 0.5 | m])",
+        "MATCH (n) RETURN collect([(n)-->(m) | rand()])",
+        "MATCH (n) RETURN count(EXISTS { (n)-->(m) WHERE rand() < 0.5 })",
     ] {
         assert_eq!(
             error_kind(&db, query),

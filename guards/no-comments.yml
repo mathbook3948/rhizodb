@@ -11,8 +11,8 @@ rule:
     - kind: block_comment
   not:
     any:
-      - regex: ^//[/!]
-      - regex: ^/\*[*!]
+      - regex: ^//(/([^/]|$)|!)
+      - regex: ^/\*(\*[^*/]|!)
       - regex: ^// ast-grep-ignore
 ---
 id: doc-comments-on-public-api-only
@@ -24,9 +24,9 @@ files:
 rule:
   any:
     - kind: line_comment
-      regex: ^///
+      regex: ^///([^/]|$)
     - kind: block_comment
-      regex: ^/\*\*
+      regex: ^/\*\*[^*/]
   not:
     any:
       - precedes:

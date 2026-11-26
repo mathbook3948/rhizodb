@@ -81,6 +81,30 @@ pub(crate) const MAX_NESTING: usize = 128;
 
 const SHARED_KEYS: usize = 16;
 
+pub(crate) const MAX_STRING_BYTES: usize = 1 << 28;
+
+pub(crate) const MAX_LIST_ITEMS: usize = 10_000_000;
+
+pub(crate) fn check_string_bytes(bytes: usize) -> Result<(), Error> {
+    if bytes > MAX_STRING_BYTES {
+        return Err(Error::new(
+            ErrorKind::NumberOutOfRange,
+            format!("a query cannot build a string of more than {MAX_STRING_BYTES} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_list_items(items: usize) -> Result<(), Error> {
+    if items > MAX_LIST_ITEMS {
+        return Err(Error::new(
+            ErrorKind::NumberOutOfRange,
+            format!("a query cannot build a list of more than {MAX_LIST_ITEMS} items"),
+        ));
+    }
+    Ok(())
+}
+
 fn nesting_too_deep() -> Error {
     Error::new(
         ErrorKind::NestingTooDeep,

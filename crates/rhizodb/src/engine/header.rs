@@ -10,6 +10,7 @@ use super::layout::BlockRef;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
 
+const COUNTER_LIMIT: u64 = 1 << 63;
 pub(crate) const MAGIC: [u8; 8] = *b"RHIZODB\0";
 
 /// The engine format this build writes. A file of another major or a newer minor is refused.
@@ -274,6 +275,18 @@ impl Header {
         if generation == 0 || next_extent.is_none() || catalog_lsn > checkpoint_lsn.max(staged_lsn)
         {
             return Err(reader.bad("generation, extent counter, or catalog LSN"));
+        }
+        if [
+            generation,
+            checkpoint_lsn,
+            staged_lsn,
+            wal.first_segment,
+            next_extent.0,
+        ]
+        .iter()
+        .any(|counter| *counter >= COUNTER_LIMIT)
+        {
+            return Err(reader.bad("counter"));
         }
         Ok(Self {
             minor,

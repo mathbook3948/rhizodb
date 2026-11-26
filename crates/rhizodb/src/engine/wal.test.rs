@@ -138,7 +138,7 @@ fn recovery_replays_only_the_records_after_the_checkpoint() {
     let first = wal.first_needed(25);
     assert!(first > 1);
     let checkpoint = header(25, first);
-    wal.drop_before(first).unwrap();
+    wal.drop_before(first);
     for crash in [Crash::DropUnsynced, Crash::KeepUnsynced] {
         let crashed = fs.crash(crash);
         let (_, seen) = lsns(&crashed, &checkpoint).unwrap();
@@ -408,9 +408,7 @@ fn append_and_checkpoint_until_failure(fs: &SimFs, fail_at: Option<u64>) -> (Hea
         if lsn % 9 == 0 {
             let checkpoint = header(lsn - 4, wal.first_needed(lsn - 4));
             durable = checkpoint;
-            if wal.drop_before(checkpoint.wal.first_segment).is_err() {
-                return (durable, acked, false);
-            }
+            wal.drop_before(checkpoint.wal.first_segment);
         }
     }
     (durable, acked, false)
@@ -426,6 +424,7 @@ fn crashes(seeds: u64) -> Vec<Crash> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
     let total = {
         let fs = SimFs::new();

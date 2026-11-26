@@ -41,6 +41,7 @@ fn committer(db: &Arc<Database>, stop: &Arc<AtomicBool>) -> thread::JoinHandle<(
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_committed() {
     let db = Arc::new(db());
     let stop = Arc::new(AtomicBool::new(false));
@@ -80,6 +81,7 @@ fn a_second_write_on_the_writing_thread_fails_even_right_after_another_thread_co
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn writers_on_many_threads_each_commit_whole_and_none_waits_forever() {
     let db = Arc::new(db());
     let threads = 8;
