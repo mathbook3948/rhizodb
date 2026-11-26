@@ -254,3 +254,90 @@ fn synced_commits_of_one_put() {
         elapsed / commits as u32
     );
 }
+
+fn bench_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+#[test]
+#[ignore = "a benchmark, run in release with --ignored --nocapture"]
+fn hot_point_reads_around_scans_of_long_values() {
+    use crate::storage::Maintenance;
+
+    let cache_bytes = bench_env("BENCH_CACHE_BYTES", 64 << 20);
+    let hot_keys = bench_env("BENCH_HOT_KEYS", 200_000);
+    let long_bytes = bench_env("BENCH_LONG_BYTES", 4 * cache_bytes);
+    let long_length = bench_env("BENCH_LONG_LENGTH", 4000) as usize;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizo");
+    let options = EngineOptions {
+        cache_bytes: cache_bytes as usize,
+        ..EngineOptions::default()
+    };
+    {
+        let store = open_path(&path, options).unwrap();
+        load(&store, hot_keys);
+        let long_values = long_bytes / long_length as u64;
+        for batch in 0..long_values.div_ceil(BATCH) {
+            let mut write = store.begin_write().unwrap();
+            for id in batch * BATCH..((batch + 1) * BATCH).min(long_values) {
+                let text = vec![b'a' + (id % 26) as u8; long_length];
+                write.put(Table::PropertyEntries, &key(id), &text).unwrap();
+            }
+            write.commit().unwrap();
+        }
+        store.checkpoint().unwrap();
+    }
+    let store = open_path(&path, options).unwrap();
+    let counted = |label: &str, work: &dyn Fn() -> u64| {
+        let before = store.stats().unwrap();
+        let start = Instant::now();
+        let operations = work();
+        let elapsed = start.elapsed();
+        let after = store.stats().unwrap();
+        let hits = after.cache_hits - before.cache_hits;
+        let misses = after.cache_misses - before.cache_misses;
+        eprintln!(
+            "| {label} | {:.1} ms | {:.0} ns | {hits} | {misses} | {:.1}% |",
+            elapsed.as_secs_f64() * 1e3,
+            elapsed.as_nanos() as f64 / operations as f64,
+            100.0 * hits as f64 / (hits + misses).max(1) as f64
+        );
+    };
+    let hot_reads = || {
+        let read = store.begin_read().unwrap();
+        let reads = hot_keys / 8;
+        for index in 0..reads {
+            let id = index * 7_919 % reads * 8;
+            assert!(read.get(Table::Nodes, &key(id)).unwrap().is_some());
+        }
+        reads
+    };
+    let scan = || {
+        let read = store.begin_read().unwrap();
+        let mut values = 0;
+        read.visit_prefix(Table::PropertyEntries, &[], |_, value| {
+            assert_eq!(value.len(), long_length);
+            values += 1;
+            Ok::<_, crate::storage::StorageError>(())
+        })
+        .unwrap();
+        values
+    };
+    eprintln!(
+        "cache {} MiB, {hot_keys} hot keys, {} MiB of {long_length}-byte values",
+        cache_bytes >> 20,
+        long_bytes >> 20
+    );
+    eprintln!("| step | time | per operation | hits | misses | hit rate |");
+    eprintln!("|---|---|---|---|---|---|");
+    counted("hot point reads, cold", &hot_reads);
+    counted("hot point reads, warm", &hot_reads);
+    counted("scan of the long values", &scan);
+    counted("hot point reads after the scan", &hot_reads);
+    counted("the scan again", &scan);
+    counted("hot point reads after two scans", &hot_reads);
+}

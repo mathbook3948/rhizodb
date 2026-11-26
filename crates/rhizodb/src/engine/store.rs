@@ -26,6 +26,7 @@ use super::blob::RunRef;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
+use super::cache::Access;
 use super::catalog::Root;
 use super::check;
 use super::check::CheckReport;
@@ -1527,7 +1528,7 @@ trait Reads {
         visit: Visit<'_, E>,
     ) -> Result<(), E>;
 
-    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError>;
+    fn load(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError>;
 }
 
 impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
@@ -1550,8 +1551,8 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
         self.view.scan(table, start, end, visit)
     }
 
-    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
-        self.view.load(blob)
+    fn load(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError> {
+        self.view.load(blob, access)
     }
 }
 
@@ -1575,8 +1576,8 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
         self.staged.scan(table, start, end, visit)
     }
 
-    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
-        self.staged.view.load(blob)
+    fn load(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError> {
+        self.staged.view.load(blob, access)
     }
 }
 
@@ -1586,6 +1587,7 @@ fn walk_values<R: Reads, E: From<StorageError>>(
     (start, end): Bounds<'_>,
     mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
+    let mut loaded = 0;
     reads.walk(
         TableId::of(table),
         start,
@@ -1593,7 +1595,8 @@ fn walk_values<R: Reads, E: From<StorageError>>(
         &mut |key, value| match value {
             CellValue::Inline(value) => visit(key, value),
             CellValue::External(blob) => {
-                visit(key, &reads.load(&blob).map_err(StorageError::from)?)
+                let access = Access::of_scan(&mut loaded, blob.length as usize);
+                visit(key, &reads.load(&blob, access).map_err(StorageError::from)?)
             }
         },
     )

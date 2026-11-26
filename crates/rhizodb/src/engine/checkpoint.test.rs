@@ -147,7 +147,7 @@ impl Store {
 fn loaded(tree: &Tree, value: CellValue<'_>) -> Vec<u8> {
     match value {
         CellValue::Inline(value) => value.to_vec(),
-        CellValue::External(blob) => tree.load_value(&blob).unwrap().to_vec(),
+        CellValue::External(blob) => tree.load_value(&blob, Access::Point).unwrap().to_vec(),
     }
 }
 
@@ -471,7 +471,8 @@ fn deleting_all_but_two_keys_of_a_deep_tree_leaves_no_chain_of_single_children()
     let root = store.roots[&TABLE];
     if root.level > 0 {
         let cached =
-            crate::engine::tree::fetch(&*store.pages, TABLE, root.page, root.level).unwrap();
+            crate::engine::tree::fetch(&*store.pages, TABLE, root.page, root.level, Access::Point)
+                .unwrap();
         assert!(
             cached.header.cells > 1,
             "the root {root:?} is a branch with one child"

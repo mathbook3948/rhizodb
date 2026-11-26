@@ -108,6 +108,14 @@ proptest! {
     fn the_engine_checkpointing_in_the_background_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(tiny(CheckpointMode::Background))(), &ops)?;
     }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn the_engine_checkpointing_in_the_background_with_values_in_its_cache_matches_the_versioned_model(
+        ops in model::ops(),
+    ) {
+        model::check(&mut on_sim_fs(caching_values(CheckpointMode::Background))(), &ops)?;
+    }
 }
 
 fn fill(engine: &impl Storage, rounds: u32) {
@@ -1338,7 +1346,7 @@ fn a_checkpoint_does_not_wait_for_a_check_that_is_reading_the_file() {
 
 fn caching_values(checkpoint: CheckpointMode) -> EngineOptions {
     EngineOptions {
-        cache_bytes: 16 << 20,
+        cache_bytes: 64 << 20,
         ..tiny(checkpoint)
     }
 }
