@@ -32,6 +32,7 @@ use rhizodb::Relationship;
 use rhizodb::RelationshipId;
 use rhizodb::ReplicationFailure;
 use rhizodb::Role;
+use rhizodb::Snapshot;
 use rhizodb::SyntaxErrorKind;
 use rhizodb::Temporal;
 use rhizodb::Time;
@@ -51,6 +52,7 @@ fn values_and_handles_move_and_share_across_threads() {
     shared::<OpenOptions>();
     shared::<DatabaseStats>();
     shared::<Position>();
+    shared::<Snapshot<'static>>();
     shared::<Changes>();
     shared::<History>();
     shared::<HistoryEntry>();

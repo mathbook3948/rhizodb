@@ -16,6 +16,7 @@ use super::cache::CachedPage;
 use super::cache::CheckedPage;
 use super::error::EngineError;
 use super::header::Header;
+use super::header::Retained;
 use super::layout::BLOCK;
 use super::layout::BlockRef;
 use super::layout::EXTENT_BLOCKS;
@@ -154,6 +155,12 @@ impl<B: BlockFile> Pages<B> {
         Ok(())
     }
 
+    /// Fills `buffer` with the file's blocks from block `first` on, past the cache.
+    pub(crate) fn read_blocks(&self, first: u64, buffer: &mut [u8]) -> Result<(), EngineError> {
+        self.file.read(first, buffer)?;
+        Ok(())
+    }
+
     /// The bytes of the database file.
     pub(crate) fn file_bytes(&self) -> Result<u64, EngineError> {
         Ok(self.file.block_count()? * BLOCK as u64)
@@ -168,8 +175,13 @@ impl<B: BlockFile> Pages<B> {
         Ok(())
     }
 
-    pub(crate) fn write_header(&self, header: &Header) -> Result<(), EngineError> {
-        self.file.write(header.slot(), &header.encode())?;
+    pub(crate) fn write_header(
+        &self,
+        header: &Header,
+        retained: &Retained,
+    ) -> Result<(), EngineError> {
+        self.file
+            .write(header.slot(), &header.encode_with(retained))?;
         self.file.sync()?;
         Ok(())
     }

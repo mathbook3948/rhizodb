@@ -25,6 +25,54 @@ const KNOWN_FLAGS: u32 = CLEAN;
 
 const CHECKSUM_AT: usize = BLOCK - 8;
 
+const RETAINED_AT: usize = 1024;
+
+/// The most peers whose acknowledged positions a header records.
+pub(crate) const PEER_LIMIT: usize = 32;
+
+/// The log a header keeps beyond what recovery needs: the first segment kept, or zero for none,
+/// and the position each acknowledged peer holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Retained {
+    pub(crate) from: u64,
+    pub(crate) peers: Vec<(Vec<u8>, u64)>,
+}
+
+impl Retained {
+    fn encode(&self, out: &mut [u8]) {
+        let mut bytes = Vec::new();
+        put_u64(&mut bytes, self.from);
+        put_u16(&mut bytes, self.peers.len() as u16);
+        for (peer, lsn) in self.peers.iter().take(PEER_LIMIT) {
+            bytes.push(peer.len() as u8);
+            bytes.extend_from_slice(peer);
+            put_u64(&mut bytes, *lsn);
+        }
+        for (slot, byte) in out.iter_mut().zip(bytes) {
+            *slot = byte;
+        }
+    }
+
+    fn decode(area: &[u8]) -> Result<Self, EngineError> {
+        let mut reader = Reader::new(area, "the retained log of a header slot");
+        let from = reader.u64()?;
+        let count = usize::from(reader.u16()?);
+        if count > PEER_LIMIT {
+            return Err(reader.bad("peer count"));
+        }
+        let mut peers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let length = usize::from(reader.u8()?);
+            let peer = reader.take(length)?.to_vec();
+            peers.push((peer, reader.u64()?));
+        }
+        if reader.rest().iter().any(|byte| *byte != 0) {
+            return Err(reader.bad("reserved area"));
+        }
+        Ok(Self { from, peers })
+    }
+}
+
 /// An extent a checkpoint appends to. Blocks past `written` hold nothing a header reaches, so a
 /// later checkpoint overwrites them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +143,11 @@ impl Header {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
+        self.encode_with(&Retained::default())
+    }
+
+    /// The slot's bytes, with `retained` recorded beside the header.
+    pub(crate) fn encode_with(&self, retained: &Retained) -> Vec<u8> {
         let mut out = Vec::with_capacity(BLOCK);
         out.extend_from_slice(&MAGIC);
         put_u16(&mut out, FORMAT_MAJOR);
@@ -126,6 +179,7 @@ impl Header {
         put_u64(&mut out, self.replication.checkpoint_chain);
         put_u128(&mut out, self.replication.origin);
         out.resize(CHECKSUM_AT, 0);
+        retained.encode(&mut out[RETAINED_AT..]);
         let sum = checksum(0, &[&out]);
         put_u64(&mut out, sum);
         out
@@ -210,7 +264,8 @@ impl Header {
             checkpoint_chain: reader.u64()?,
             origin: reader.u128()?,
         };
-        if reader.rest().iter().any(|byte| *byte != 0) {
+        let reserved = RETAINED_AT - (CHECKSUM_AT - reader.remaining());
+        if reader.rest().iter().take(reserved).any(|byte| *byte != 0) {
             return Err(reader.bad("reserved area"));
         }
         if staged_lsn != 0 && (staged_lsn <= checkpoint_lsn || flags & CLEAN != 0) {
@@ -237,6 +292,14 @@ impl Header {
             replication,
         })
     }
+}
+
+/// The log a valid header slot keeps for peers.
+pub(crate) fn decode_retained(block: &[u8]) -> Result<Retained, EngineError> {
+    let area = block
+        .get(RETAINED_AT..CHECKSUM_AT)
+        .ok_or_else(|| EngineError::corrupt("a header slot is not one block"))?;
+    Retained::decode(area)
 }
 
 /// Decodes the slot in block `slot`, which must hold a generation of its parity.

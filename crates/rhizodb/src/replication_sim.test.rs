@@ -52,6 +52,7 @@ fn options() -> EngineOptions {
         cache_pages: 256,
         reclaim_slack: 1 << 20,
         stage_floor: 8,
+        ..EngineOptions::default()
     }
 }
 

@@ -212,6 +212,18 @@ pub enum ErrorKind {
     TooFarBehind,
     /// Changes to apply do not start right after the last change the database holds.
     Gap,
+    /// A peer id given to [`Database::acknowledge`](crate::Database::acknowledge) or
+    /// [`Database::forget_peer`](crate::Database::forget_peer) is empty or longer than 64
+    /// bytes.
+    InvalidPeerId,
+    /// A [`Snapshot`](crate::Snapshot) was read after it outlived
+    /// [`OpenOptions::snapshot_time_limit`](crate::OpenOptions::snapshot_time_limit), when the
+    /// database had already released the pages it held. Take a new snapshot.
+    SnapshotExpired,
+    /// [`Database::acknowledge`](crate::Database::acknowledge) named a new peer when the
+    /// database already keeps the log for 32 peers. Forget a peer that is gone with
+    /// [`Database::forget_peer`](crate::Database::forget_peer), or relay through a replica.
+    TooManyPeers,
     /// Changes were given to [`Database::apply`](crate::Database::apply) of a database that is
     /// a writer, which takes no changes of another writer until it is demoted.
     NotReplica,

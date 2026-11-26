@@ -138,6 +138,8 @@ fn options() -> EngineOptions {
         cache_pages: 64,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        max_retained_bytes: EngineOptions::default().max_retained_bytes,
+        pin_limit: EngineOptions::default().pin_limit,
     }
 }
 

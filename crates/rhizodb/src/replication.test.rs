@@ -74,6 +74,7 @@ mod crash {
             cache_pages: 64,
             reclaim_slack: 64 << 10,
             stage_floor: 8,
+            ..EngineOptions::default()
         }
     }
 

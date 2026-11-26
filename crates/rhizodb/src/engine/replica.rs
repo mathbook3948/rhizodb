@@ -296,7 +296,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             replication,
             ..durable.header
         };
-        if let Err(error) = shared.pages.write_header(&header) {
+        if let Err(error) = shared.pages.write_header(&header, &shared.retained_area()) {
             shared.poison_with(&error);
             return Err(error);
         }
@@ -319,6 +319,18 @@ impl<F: FileSystem + 'static> Engine<F> {
             *role = Role::Fenced;
             self.shared.accepting.store(false, Ordering::Release);
         }
+        Ok(())
+    }
+
+    /// Makes a file a snapshot was just installed into a replica with an incarnation of its
+    /// own, so it never passes as the writer the snapshot came from.
+    pub(crate) fn become_installed_replica(&self) -> Result<(), EngineError> {
+        let _writer = lock(&self.shared.writer);
+        self.write_replication(|replication| {
+            replication.replica = true;
+            replication.incarnation = super::new_incarnation();
+        })?;
+        self.set_role(Role::Replica);
         Ok(())
     }
 

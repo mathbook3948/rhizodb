@@ -69,6 +69,4 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 
 ## Open
 
-- Snapshots, their install, and how long a writer keeps changes for its replicas.
-- How a writer keeps its log for replicas across a clean close, which today removes every segment.
 - How a replica of a newer build follows a writer that has not upgraded the graph's format yet, since a replica cannot write the upgrade.

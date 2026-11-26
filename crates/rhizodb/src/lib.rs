@@ -13,6 +13,7 @@ mod procedure;
 mod query;
 mod replication;
 mod result;
+mod snapshot;
 mod storage;
 mod temporal;
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub use result::Path;
 pub use result::QueryResult;
 pub use result::Relationship;
 pub use result::Value;
+pub use snapshot::Snapshot;
 pub use temporal::Date;
 pub use temporal::DateTime;
 pub use temporal::Duration;
