@@ -76,6 +76,8 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Kuzu test files on the empty dataset are vendored unchanged with their license and upstream commit, and their cases run under a checked-in list of cases that must pass, by the TCK's rule.
 - The Kuzu runner lets statements that only declare a schema succeed without running, and an expected error matches any error.
 - Code and tests taken from other projects keep their source and license.
+- Every check rejects a wildcard version and a dependency from an unknown registry or git source, and warns on duplicate versions.
+- A nightly job checks the workspace's locked dependencies against the RustSec advisories, so a new advisory fails the nightly rather than every pull request.
 
 ## Open
 

@@ -45,6 +45,16 @@ jobs:
         env:
           RHIZODB_SOAK_SECS: "1200"
 
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v5
+      - run: cargo deny check advisories
+
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 120
