@@ -4,6 +4,7 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
+use std::ptr;
 
 use memchr::memmem;
 
@@ -1050,7 +1051,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(hop) = HopScan::of(found) else {
             return Ok(None);
         };
-        if self.check.is_some() || self.seek_possible(hop.scan.part)? {
+        if self.check.is_some()
+            || self.seek_possible(hop.scan.part)?
+            || !ptr::eq(self.oriented(hop.scan.part)?, hop.scan.part)
+        {
             return Ok(None);
         }
         let start = hop.scan.slot;

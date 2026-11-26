@@ -201,6 +201,7 @@ fn split<'q, 'w, T: ReadTransaction>(
         || env.morsel.is_some()
         || row_at_a_time()
         || env.seek_possible(part).ok()?
+        || !ptr::eq(env.oriented(part).ok()?, part)
     {
         return None;
     }

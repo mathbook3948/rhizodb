@@ -249,7 +249,7 @@ fn is_point(test: &SeekTest) -> bool {
     matches!(test, SeekTest::Equal(_) | SeekTest::In(_))
 }
 
-fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
+pub(crate) fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
     let all = |items: &[Expr]| items.iter().all(|item| independent(item, bound_later));
     let maybe = |item: Option<&Expr>| item.is_none_or(|item| independent(item, bound_later));
     match expr {
@@ -323,6 +323,15 @@ fn deterministic(function: Function) -> bool {
 
 type Found = (Vec<u64>, Option<Token<PropertyKey>>);
 
+enum Indexed {
+    /// No index serves it.
+    Unserved,
+    /// The label or relationship type it names does not exist, so it finds nothing.
+    Nothing,
+    /// This index, over this property.
+    Index(u32, Token<PropertyKey>),
+}
+
 /// The start nodes a seek found, ascending and each once.
 #[derive(Debug)]
 pub(crate) struct Sought {
@@ -372,6 +381,60 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(None)
     }
 
+    /// Whether a seek of `part` applies, which may still fail if its value fails to evaluate.
+    /// With `points`, only a seek by `=` or `IN` counts.
+    pub(crate) fn seek_served(&self, part: &PatternPart, points: bool) -> Result<bool, Error> {
+        for seek in &part.seeks {
+            if points && !seek.tests.iter().any(is_point) {
+                continue;
+            }
+            let served = match &seek.key {
+                SeekKey::Id => true,
+                SeekKey::Property(key) => {
+                    !matches!(self.seek_index(part, seek, key)?, Indexed::Unserved)
+                }
+            };
+            if served {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn seek_index(&self, part: &PatternPart, seek: &Seek, key: &str) -> Result<Indexed, Error> {
+        let target = match seek.element {
+            SeekElement::Start => {
+                let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
+                    return Ok(Indexed::Unserved);
+                };
+                match self.tx.lookup_token::<Label>(&label.0)? {
+                    Some(token) => Target::Label(token),
+                    None => return Ok(Indexed::Nothing),
+                }
+            }
+            SeekElement::FirstRelationship => {
+                let Some(LabelExpr::Name(rel_type)) = part
+                    .steps
+                    .first()
+                    .and_then(|step| step.relationship.labels.as_ref())
+                else {
+                    return Ok(Indexed::Unserved);
+                };
+                match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
+                    Some(token) => Target::RelationshipType(token),
+                    None => return Ok(Indexed::Nothing),
+                }
+            }
+        };
+        let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
+            return Ok(Indexed::Unserved);
+        };
+        Ok(match self.property_index(target, property)? {
+            Some(index) => Indexed::Index(index, property),
+            None => Indexed::Unserved,
+        })
+    }
+
     fn id_seek(&self, seek: &Seek, row: &Row) -> Option<Vec<u64>> {
         seek.tests.iter().find_map(|test| match test {
             SeekTest::Equal(expr) => {
@@ -399,35 +462,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         key: &str,
         row: &Row,
     ) -> Result<Option<Found>, Error> {
-        let target = match seek.element {
-            SeekElement::Start => {
-                let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
-                    return Ok(None);
-                };
-                match self.tx.lookup_token::<Label>(&label.0)? {
-                    Some(token) => Target::Label(token),
-                    None => return Ok(Some((Vec::new(), None))),
-                }
-            }
-            SeekElement::FirstRelationship => {
-                let Some(LabelExpr::Name(rel_type)) = part
-                    .steps
-                    .first()
-                    .and_then(|step| step.relationship.labels.as_ref())
-                else {
-                    return Ok(None);
-                };
-                match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
-                    Some(token) => Target::RelationshipType(token),
-                    None => return Ok(Some((Vec::new(), None))),
-                }
-            }
-        };
-        let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
-            return Ok(None);
-        };
-        let Some(index) = self.property_index(target, property)? else {
-            return Ok(None);
+        let (index, property) = match self.seek_index(part, seek, key)? {
+            Indexed::Unserved => return Ok(None),
+            Indexed::Nothing => return Ok(Some((Vec::new(), None))),
+            Indexed::Index(index, property) => (index, property),
         };
         let mut points: Option<Vec<KeyRange>> = None;
         let mut range: Option<KeyRange> = None;

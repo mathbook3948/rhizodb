@@ -10,6 +10,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- A `MATCH` pattern starts at a later node that an earlier clause binds, or that an ID lookup or a property index serves, instead of reading every node at its left end and checking the far end of each walk, so `MATCH (x:Person {id: $id}) MATCH (a)-[:FOLLOWS]->(x)` and `MATCH (a)-[:KNOWS]->(b:Person {id: $x})` with an index on `Person.id` read only the relationships of the found node. Results are the same, though rows without `ORDER BY` may come in another order.
 - Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database (once per transaction inside a write transaction) instead of once per element, so returning many elements no longer reads storage once per label and property.
 - `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
 
