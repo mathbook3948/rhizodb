@@ -252,6 +252,30 @@ fn a_long_chain_of_next_statements_runs_on_a_small_stack() {
 }
 
 #[test]
+fn a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack() {
+    let test = "a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a0: 1}), (:L {a0: 1, a1: 1})");
+    let entries: Vec<String> = (0..5_000).map(|key| format!("a{key}: 1")).collect();
+    let entries = entries.join(", ");
+    on_small_stack(|| {
+        for text in [
+            format!("MATCH (n:L {{{entries}}}) RETURN count(*)"),
+            format!("MATCH (n {{{entries}}}) RETURN count(*)"),
+        ] {
+            assert_eq!(single(&db, &text), int(0));
+        }
+        assert_eq!(
+            single(&db, "MATCH (n:L {a0: 1, a1: 1}) RETURN count(*)"),
+            int(1)
+        );
+    });
+}
+
+#[test]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {

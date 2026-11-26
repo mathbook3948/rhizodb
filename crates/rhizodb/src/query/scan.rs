@@ -916,9 +916,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             };
             conjuncts.push(filter);
         }
-        Ok(Some(conjuncts.into_iter().reduce(|all, next| {
-            Pred::Logic(BinaryOp::And, Box::new(all), Box::new(next))
-        })))
+        Ok(Some(conjunction(conjuncts)))
     }
 
     /// `MATCH` over `scan`, reading only the columns its filter tests. `None` when the filter has
@@ -1370,6 +1368,16 @@ fn is_read(
 
 fn reads(value: &Value, column: usize) -> bool {
     matches!(value, Value::Column(held) if *held == column)
+}
+
+fn conjunction(mut conjuncts: Vec<Pred>) -> Option<Pred> {
+    if conjuncts.len() <= 1 {
+        return conjuncts.pop();
+    }
+    let right = conjuncts.split_off(conjuncts.len() / 2);
+    let left = conjunction(conjuncts)?;
+    let right = conjunction(right)?;
+    Some(Pred::Logic(BinaryOp::And, Box::new(left), Box::new(right)))
 }
 
 fn pred_reads(pred: &Pred, column: usize) -> bool {

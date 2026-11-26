@@ -95,3 +95,4 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `[a = (b)]` and other one-item lists of a comparison with a parenthesized value were parsed as pattern comprehensions and failed. A list starts a pattern comprehension only when a relationship follows the parenthesis.
 - A type union inside `ANY<...>` or `LIST<...>` in the `WHERE` of a list comprehension, as in `[x IN l WHERE x IS :: ANY<INTEGER | STRING> | x]`, ended the filter at its `|`.
 - A pattern used as a predicate in the `RETURN` or `WITH` of a subquery inside a `WHERE` was accepted, though the same clause rejects it everywhere else.
+- A node pattern with about a thousand properties, as in `MATCH (n:L {a0: 1, a1: 1, ...})`, overflowed the stack and aborted the host process when the query scanned columns, because its conditions were joined into one chain as deep as the map was long. They are now joined into a balanced tree.
