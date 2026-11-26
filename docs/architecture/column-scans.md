@@ -13,6 +13,7 @@ Node properties are stored as typed columns per row group, but the executor eval
 - A condition outside that set, an optional match, or a pattern a property index or an ID lookup serves leaves the clause to the row-at-a-time path.
 - A scan answers and fails exactly as testing each row in turn does: it tests the filter only on nodes whose property map holds, and a property map value that reads the node leaves the clause to the row path.
 - A computed value can fail, so a scan that computes one in its filter, items, sort keys, or distinct columns computes it for every node the row path would, without the shortcuts below that skip a node's values.
+- A plain projection on a scan computes values that can fail in at most one of its filter, its items, and its sort keys other than items it names, since the row path computes each of those for every row before the next, and it leaves the clause to the row path when `SKIP` or `LIMIT` fails, which the row path evaluates between them.
 - A scan reads each row group's columns for the properties it tests whole, once, and builds a row only for a node that passes.
 - A value read by a scan is the value the transaction sees, its own uncommitted changes and the stored deltas included.
 - An aggregating projection right after a scan reads its keys and arguments from the scan when each is the node, one of its properties, or a value fixed for the input row.
@@ -20,6 +21,7 @@ Node properties are stored as typed columns per row group, but the executor eval
 - Such a hop takes its filter only when the filter reads neither the relationship nor the far node and computes nothing, since it tests the start node before it knows a match exists, and evaluates whatever the scan cannot read on the matched row.
 - Expanding consecutive nodes reads their adjacency segments from storage in one pass per window of segments, which starts at one segment and doubles up to 16 while the reads stay consecutive, so a traversal that only now and then reads the next segment reads no more than before.
 - The far node of such a hop is tested against its pattern once, and when every group key reads only the far node or values fixed for the input row, each far node finds its group once.
+- When every group key of such a hop reads only the start node, its properties, or values fixed for the input row, each start node finds its group once.
 - A plain projection right after a scan whose items, sort keys, and distinct columns are of that kind is computed on the scan.
 - `ORDER BY` with `LIMIT` on a scan keeps the best `SKIP` plus `LIMIT` nodes by their sort keys in a bounded heap, ties broken by scan order, and evaluates the other items only for the nodes it keeps.
 - Once that heap is full, a node's sort keys are read one at a time, and the node is dropped at the first key that ranks it behind the last node kept.

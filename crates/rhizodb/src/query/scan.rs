@@ -1210,6 +1210,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             HopValue::Row(_) => false,
         });
+        let by_start = key_values.iter().all(|value| match value {
+            HopValue::Scanned(Value::Fixed(_) | Value::Column(_) | Value::Node) => true,
+            HopValue::Scanned(Value::Row(slot)) => *slot != relationship.slot && *slot != far,
+            HopValue::Scanned(Value::Apply(_)) | HopValue::Row(_) => false,
+        });
         let tokens = compiler.tokens;
         let mut groups = self.groups(keys, aggregates);
         let mut positions: ById<(usize, NodeId), usize> = ById::default();
@@ -1237,6 +1242,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     row_of = Some(input);
                 }
                 set(&mut row, start, Datum::Node(at.node));
+                let mut start_position = None;
                 for adjacent in &adjacent {
                     let other = adjacent.other;
                     let fit = match fits.get(&other) {
@@ -1266,8 +1272,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                         HopValue::Scanned(value) => here.datum(value),
                         HopValue::Row(expr) => self.eval(expr, &row),
                     };
-                    let position = match by_far.then(|| positions.get(&(input, other))).flatten() {
-                        Some(position) => *position,
+                    let held = match start_position {
+                        Some(position) => Some(position),
+                        None => by_far
+                            .then(|| positions.get(&(input, other)).copied())
+                            .flatten(),
+                    };
+                    let position = match held {
+                        Some(position) => position,
                         None => {
                             let values = key_values
                                 .iter()
@@ -1276,6 +1288,9 @@ impl<T: ReadTransaction> Env<'_, T> {
                             let position = groups.group(values);
                             if by_far {
                                 positions.insert((input, other), position);
+                            }
+                            if by_start {
+                                start_position = Some(position);
                             }
                             position
                         }
@@ -1341,22 +1356,44 @@ impl<T: ReadTransaction> Env<'_, T> {
             None
         };
         let empty = vec![Datum::Null; self.slots];
-        let skip = match &projection.skip {
-            Some(skip) => self.count(skip, &empty, "SKIP")?,
-            None => 0,
+        let bounds = || -> Result<(usize, Option<usize>), Error> {
+            let skip = match &projection.skip {
+                Some(skip) => self.count(skip, &empty, "SKIP")?,
+                None => 0,
+            };
+            let limit = match &projection.limit {
+                Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
+                None => None,
+            };
+            Ok((skip, limit))
         };
-        let limit = match &projection.limit {
-            Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
-            None => None,
+        let sorted_apart = projection
+            .order_by
+            .iter()
+            .zip(&sort_values)
+            .any(|((expr, _), value)| {
+                computed(value)
+                    && !matches!(expr, Expr::Slot(slot) if items.iter().any(|(_, item)| item == slot))
+            });
+        let phases = [
+            filter.as_ref().is_some_and(pred_computed),
+            item_values
+                .iter()
+                .chain(outputs.iter().flatten())
+                .any(computed),
+            sorted_apart,
+        ];
+        let fallible = phases.contains(&true);
+        if phases.iter().filter(|phase| **phase).count() > 1 {
+            return Ok(None);
+        }
+        let (skip, limit) = match bounds() {
+            Ok(bounds) => bounds,
+            Err(_) if fallible => return Ok(None),
+            Err(error) => return Err(error),
         };
         let kept = limit.map(|limit| skip.saturating_add(limit));
         let ordered = !directions.is_empty();
-        let fallible = item_values
-            .iter()
-            .chain(&sort_values)
-            .chain(outputs.iter().flatten())
-            .any(computed)
-            || filter.as_ref().is_some_and(pred_computed);
         let early = kept.is_some() && !fallible;
         let tokens: Vec<Option<Token<PropertyKey>>> = compiler
             .tokens
