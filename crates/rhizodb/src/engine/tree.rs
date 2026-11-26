@@ -7,9 +7,11 @@ use std::sync::OnceLock;
 
 use super::blob::BlobRef;
 use super::blob::Role;
+use super::cache::Access;
 use super::cache::CachedPage;
 use super::catalog::Root;
 use super::error::EngineError;
+use super::layout::BLOCK;
 use super::layout::TableId;
 #[cfg(test)]
 use super::memtable::Bytes;
@@ -156,13 +158,14 @@ pub(crate) fn fetch(
     table: TableId,
     page: ChildRef,
     level: u8,
+    access: Access,
 ) -> Result<CachedPage, EngineError> {
     if level > MAX_LEVEL {
         return Err(EngineError::corrupt(
             "a tree is deeper than any the engine writes",
         ));
     }
-    let cached = source.page(page.at)?;
+    let cached = source.page(page.at, access)?;
     let kind = if level == 0 {
         PageKind::Leaf
     } else {
@@ -201,7 +204,7 @@ impl Tree {
             return Ok(None);
         };
         if slot.get().is_none() {
-            let page = fetch(&*self.source, table, root.page, root.level)?;
+            let page = fetch(&*self.source, table, root.page, root.level, Access::Point)?;
             let children = if root.level > 0 {
                 Node::parse(&page.header, &page.bytes, table)?.cells()
             } else {
@@ -227,14 +230,18 @@ impl Tree {
             return Ok(None);
         };
         if slot.get().is_none() {
-            let _ = slot.set(fetch(&*self.source, table, child, level)?);
+            let _ = slot.set(fetch(&*self.source, table, child, level, Access::Point)?);
         }
         Ok(slot.get())
     }
 
-    /// The value stored in `blob`, a run of a value cell of this tree.
-    pub(crate) fn load_value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
-        self.source.value(blob)
+    /// The value stored in `blob`, a run of a value cell a read of this tree met.
+    pub(crate) fn load_value(
+        &self,
+        blob: &BlobRef,
+        access: Access,
+    ) -> Result<Arc<[u8]>, EngineError> {
+        self.source.value(blob, access)
     }
 
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
@@ -267,7 +274,7 @@ impl Tree {
             let cached = match held.take() {
                 Some(cached) => cached,
                 None => {
-                    fetched = fetch(&*self.source, table, page, level)?;
+                    fetched = fetch(&*self.source, table, page, level, Access::Point)?;
                     &fetched
                 }
             };
@@ -279,7 +286,9 @@ impl Tree {
                 }
                 return match node.value(index)? {
                     CellValue::Inline(value) => Ok(Some(read(value))),
-                    CellValue::External(blob) => Ok(Some(read(&self.source.value(&blob)?))),
+                    CellValue::External(blob) => {
+                        Ok(Some(read(&self.source.value(&blob, Access::Point)?)))
+                    }
                 };
             }
             page = node.child(index)?;
@@ -309,6 +318,7 @@ impl Tree {
             visit,
             &mut Vec::new(),
             None,
+            &mut 0,
         )
     }
 
@@ -326,8 +336,17 @@ impl Tree {
             return Ok(());
         };
         let mut key = Vec::new();
+        let mut read = 0;
         let Ok(mut held) = finger.0.try_lock() else {
-            return self.descend(table, root, Range { start, end }, visit, &mut key, None);
+            return self.descend(
+                table,
+                root,
+                Range { start, end },
+                visit,
+                &mut key,
+                None,
+                &mut read,
+            );
         };
         let target = match start {
             Bound::Included(target) | Bound::Excluded(target) => Some(target),
@@ -339,8 +358,9 @@ impl Tree {
             .filter(|leaf| leaf.table == table && target.is_some_and(|t| leaf.bounds.covers(t)))
         {
             let range = Range { start, end };
-            if self.scan_page(table, &leaf.page, 0, None, range, visit, &mut key, None)?
-                == Flow::Done
+            if self.scan_page(
+                table, &leaf.page, 0, None, range, visit, &mut key, None, &mut read,
+            )? == Flow::Done
             {
                 return Ok(());
             }
@@ -358,11 +378,16 @@ impl Tree {
             visit,
             &mut key,
             Some(&mut seek),
+            &mut read,
         );
         *held = seek.into_leaf(table);
         outcome
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scan's whole state starts here"
+    )]
     fn descend<E: From<StorageError>>(
         &self,
         table: TableId,
@@ -371,6 +396,7 @@ impl Tree {
         visit: Visit<'_, E>,
         key: &mut Vec<u8>,
         seek: Option<&mut Seek>,
+        read: &mut u64,
     ) -> Result<(), E> {
         match self.pinned(table, root).map_err(lift)? {
             Some(pinned) => self.scan_page(
@@ -382,10 +408,15 @@ impl Tree {
                 visit,
                 key,
                 seek,
+                read,
             ),
             None => {
-                let page = fetch(&*self.source, table, root.page, root.level).map_err(lift)?;
-                self.scan_page(table, &page, root.level, None, range, visit, key, seek)
+                let access = Access::of_scan(read, BLOCK);
+                let page =
+                    fetch(&*self.source, table, root.page, root.level, access).map_err(lift)?;
+                self.scan_page(
+                    table, &page, root.level, None, range, visit, key, seek, read,
+                )
             }
         }
         .map(|_| ())
@@ -414,6 +445,7 @@ impl Tree {
         visit: Visit<'_, E>,
         key: &mut Vec<u8>,
         seek: Option<&mut Seek>,
+        read: &mut u64,
     ) -> Result<Flow, E> {
         let Range { start, end } = range;
         let load = self.load_key();
@@ -479,12 +511,32 @@ impl Tree {
                 None => None,
             };
             let flow = match held {
-                Some(page) => {
-                    self.scan_page(table, page, level - 1, None, from, visit, key, child_seek)?
-                }
+                Some(page) => self.scan_page(
+                    table,
+                    page,
+                    level - 1,
+                    None,
+                    from,
+                    visit,
+                    key,
+                    child_seek,
+                    read,
+                )?,
                 None => {
-                    let page = fetch(&*self.source, table, child, level - 1).map_err(lift)?;
-                    self.scan_page(table, &page, level - 1, None, from, visit, key, child_seek)?
+                    let access = Access::of_scan(read, BLOCK);
+                    let page =
+                        fetch(&*self.source, table, child, level - 1, access).map_err(lift)?;
+                    self.scan_page(
+                        table,
+                        &page,
+                        level - 1,
+                        None,
+                        from,
+                        visit,
+                        key,
+                        child_seek,
+                        read,
+                    )?
                 }
             };
             if flow == Flow::Done {

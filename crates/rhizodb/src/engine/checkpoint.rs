@@ -11,6 +11,7 @@ use super::blob::item_checksum;
 use super::blob::run_blocks;
 use super::blob::split_runs;
 use super::block_file::BlockFile;
+use super::cache::Access;
 use super::catalog::Catalog;
 use super::catalog::Root;
 use super::error::EngineError;
@@ -404,7 +405,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         level: u8,
         low: &Bytes,
     ) -> Result<Content, EngineError> {
-        let cached = fetch(self.source(), table, page, level)?;
+        let cached = fetch(self.source(), table, page, level, Access::Point)?;
         let node = Node::parse(&cached.header, &cached.bytes, table)?;
         let load = |blob: &BlobRef| load_blob(self.source(), blob, Role::Key);
         let (content, owned) = node.content(&load, low)?;
@@ -686,7 +687,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         mut level: u8,
     ) -> Result<(ChildRef, u8), EngineError> {
         while level > 0 {
-            let cached = fetch(self.source(), table, page, level)?;
+            let cached = fetch(self.source(), table, page, level, Access::Point)?;
             let node = Node::parse(&cached.header, &cached.bytes, table)?;
             if node.cells() > 1 {
                 break;

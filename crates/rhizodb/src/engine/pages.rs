@@ -11,6 +11,7 @@ use super::blob::RunRef;
 use super::blob::decode_run;
 use super::blob::item_checksum;
 use super::block_file::BlockFile;
+use super::cache::Access;
 use super::cache::Cache;
 use super::cache::CachedPage;
 use super::cache::CheckedPage;
@@ -25,12 +26,12 @@ use super::page::PageHeader;
 
 /// Reads checked pages and runs of the database file.
 pub(crate) trait PageSource: Send + Sync + fmt::Debug {
-    fn page(&self, at: BlockRef) -> Result<CachedPage, EngineError>;
+    fn page(&self, at: BlockRef, access: Access) -> Result<CachedPage, EngineError>;
 
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError>;
 
     /// The value `blob` points to, read as [`load_blob`] reads it, or from the cache.
-    fn value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError>;
+    fn value(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError>;
 
     fn seed(&self) -> u64;
 }
@@ -144,6 +145,7 @@ impl<B: BlockFile> Pages<B> {
                 header,
                 bytes: bytes.into_boxed_slice(),
             }),
+            Access::Point,
         );
         Ok(())
     }
@@ -180,7 +182,7 @@ impl<B: BlockFile> Pages<B> {
 }
 
 impl<B: BlockFile> PageSource for Pages<B> {
-    fn page(&self, at: BlockRef) -> Result<CachedPage, EngineError> {
+    fn page(&self, at: BlockRef, access: Access) -> Result<CachedPage, EngineError> {
         if let Some(page) = self.cache.get(at) {
             return Ok(page);
         }
@@ -191,7 +193,7 @@ impl<B: BlockFile> PageSource for Pages<B> {
             header,
             bytes: bytes.into_boxed_slice(),
         });
-        self.cache.insert(at, Arc::clone(&page));
+        self.cache.insert(at, Arc::clone(&page), access);
         Ok(page)
     }
 
@@ -202,12 +204,12 @@ impl<B: BlockFile> PageSource for Pages<B> {
         Ok(bytes)
     }
 
-    fn value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
+    fn value(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError> {
         if let Some(bytes) = self.cache.value(blob) {
             return Ok(bytes);
         }
         let bytes: Arc<[u8]> = load_blob(self, blob, Role::Value)?.into();
-        self.cache.insert_value(*blob, Arc::clone(&bytes));
+        self.cache.insert_value(*blob, Arc::clone(&bytes), access);
         Ok(bytes)
     }
 

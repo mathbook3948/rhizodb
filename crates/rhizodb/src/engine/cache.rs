@@ -28,6 +28,32 @@ const SHARDS: usize = 64;
 
 const CLOCK_SLACK: usize = 64;
 
+const ENTRY_BYTES: usize =
+    size_of::<(BlockRef, Entry)>() + size_of::<BlockRef>() + 2 * size_of::<usize>();
+
+/// Whether a read looked up one key or belongs to a long scan, which decides whether what it
+/// reads may push other entries out of the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    Point,
+    Scan,
+}
+
+const SHORT_SCAN: u64 = 1 << 20;
+
+impl Access {
+    /// The access of a scan's next read of `bytes`, after adding them to the bytes `read` the
+    /// scan has read.
+    pub(crate) fn of_scan(read: &mut u64, bytes: usize) -> Self {
+        *read += bytes as u64;
+        if *read > SHORT_SCAN {
+            Access::Scan
+        } else {
+            Access::Point
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Cached {
     Page(CachedPage),
@@ -36,10 +62,11 @@ enum Cached {
 
 impl Cached {
     fn weight(&self) -> usize {
-        match self {
-            Cached::Page(_) => BLOCK,
-            Cached::Value(_, bytes) => bytes.len(),
-        }
+        ENTRY_BYTES
+            + match self {
+                Cached::Page(_) => size_of::<CheckedPage>() + BLOCK,
+                Cached::Value(_, bytes) => bytes.len(),
+            }
     }
 }
 
@@ -140,19 +167,19 @@ impl Cache {
         })
     }
 
-    pub(crate) fn insert(&self, at: BlockRef, page: CachedPage) {
-        self.hold(at, Cached::Page(page));
+    pub(crate) fn insert(&self, at: BlockRef, page: CachedPage, access: Access) {
+        self.hold(at, Cached::Page(page), access);
     }
 
     /// Keeps the value `blob` points to, unless it would take more than a quarter of its
     /// shard, so one large value never empties a shard.
-    pub(crate) fn insert_value(&self, blob: BlobRef, bytes: Arc<[u8]>) {
+    pub(crate) fn insert_value(&self, blob: BlobRef, bytes: Arc<[u8]>, access: Access) {
         if bytes.len() <= self.per_shard / 4 {
-            self.hold(blob.first.at, Cached::Value(blob, bytes));
+            self.hold(blob.first.at, Cached::Value(blob, bytes), access);
         }
     }
 
-    fn hold(&self, at: BlockRef, cached: Cached) {
+    fn hold(&self, at: BlockRef, cached: Cached, access: Access) {
         let weight = cached.weight();
         let mut shard = self
             .shard(at)
@@ -171,27 +198,33 @@ impl Cache {
                 .retain(|held| entries.contains_key(held) && seen.insert(*held));
             shard.hand = 0;
         }
-        while shard.bytes + weight > self.per_shard && !shard.clock.is_empty() {
+        if access == Access::Scan && shard.bytes + weight > self.per_shard {
+            return;
+        }
+        let mut freed = None;
+        while shard.bytes > 0 && shard.bytes + weight > self.per_shard {
             let hand = shard.hand % shard.clock.len();
+            shard.hand = hand + 1;
             let held = shard.clock[hand];
-            if let Some(used) = shard
-                .entries
-                .get_mut(&held)
-                .map(|entry| entry.used.get_mut())
-                && *used
-            {
-                *used = false;
-                shard.hand = hand + 1;
-                continue;
+            match shard.entries.get_mut(&held) {
+                Some(entry) if entry.used.load(Ordering::Relaxed) => {
+                    *entry.used.get_mut() = false;
+                    continue;
+                }
+                Some(_) => {
+                    if let Some(entry) = shard.entries.remove(&held) {
+                        shard.bytes -= entry.cached.weight();
+                    }
+                }
+                None => {}
             }
-            if let Some(entry) = shard.entries.remove(&held) {
-                shard.bytes -= entry.cached.weight();
-            }
-            shard.clock.swap_remove(hand);
-            shard.hand = hand;
+            freed.get_or_insert(hand);
         }
         shard.bytes += weight;
-        shard.clock.push(at);
+        match freed {
+            Some(place) => shard.clock[place] = at,
+            None => shard.clock.push(at),
+        }
         shard.entries.insert(
             at,
             Entry {
