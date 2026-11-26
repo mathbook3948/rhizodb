@@ -112,6 +112,17 @@ fn closing_after_deleting_nearly_everything_gives_the_space_back_and_keeps_the_r
 }
 
 #[test]
+fn stats_answer_on_the_thread_that_holds_the_write_transaction() {
+    let db = db();
+    let mut write = db.begin_write().unwrap();
+    write
+        .execute("CREATE (:Item {i: 1})", &Parameters::new())
+        .unwrap();
+    assert!(db.stats().is_ok());
+    write.commit().unwrap();
+}
+
+#[test]
 fn stats_count_the_log_and_the_cache() {
     let directory = tempfile::tempdir().unwrap();
     let db = Database::open(directory.path().join("graph.db")).unwrap();

@@ -95,7 +95,7 @@ impl OpenOptions {
     }
 
     /// Whether [`OpenOptions::open`] creates the file when there is none, which it does unless
-    /// this is set to `false`. Without it, a path with no file fails with
+    /// this is set to `false`. Without it, a path with no file or an empty file fails with
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
     pub fn create(mut self, create: bool) -> Self {
         self.create = create;
@@ -215,11 +215,11 @@ impl OpenOptions {
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
     ///
     /// Fails with [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound) when
-    /// [`OpenOptions::create`] is `false` and there is no file at `path`, and with the kinds
-    /// [`Database::open`] lists.
+    /// [`OpenOptions::create`] is `false` and there is no file at `path` or the file there is
+    /// empty, and with the kinds [`Database::open`] lists.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
         let path = path.as_ref();
-        if !self.create && !exists(path)? {
+        if !self.create && !holds_bytes(path)? {
             return Err(Error::new(
                 ErrorKind::DatabaseNotFound,
                 format!("there is no database file at {}", path.display()),
@@ -241,7 +241,7 @@ impl OpenOptions {
         let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
             .map_err(StorageError::from)?;
         Ok(Database::from_parts(
-            installed_graph(installed)?,
+            graph_on(installed, true)?,
             Statements::new(self.parallelism),
         ))
     }
@@ -257,21 +257,16 @@ pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>
     Ok(Graph::open_as(backend, follows)?)
 }
 
-fn installed_graph(backend: Backend) -> Result<Graph<Backend>, Error> {
-    backend
-        .become_installed_replica()
-        .map_err(StorageError::from)?;
-    Ok(Graph::open_as(backend, true)?)
-}
-
-fn exists(path: &Path) -> Result<bool, Error> {
-    path.try_exists().map_err(|error| {
-        Error::caused_by(
+fn holds_bytes(path: &Path) -> Result<bool, Error> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::caused_by(
             ErrorKind::Storage,
             format!("cannot read whether {} exists: {error}", path.display()),
             Box::new(error),
-        )
-    })
+        )),
+    }
 }
 
 /// The size of a database on disk and how well its cache serves reads, from
@@ -645,7 +640,9 @@ impl Database {
     /// first and filled as the elements arrive.
     ///
     /// The import commits a batch of lines at a time, so its memory stays bounded by the batch
-    /// and the longest line, however large the dump. A failed import therefore leaves the
+    /// and the longest line, however large the dump. Write transactions and writing queries on
+    /// other threads wait until the import ends, so none lands between two batches, while
+    /// reads go on and see the batches committed so far. A failed import therefore leaves the
     /// batches before the failure committed. Import into a new file and delete it when the
     /// import fails, rather than into a database other code uses.
     ///
@@ -876,13 +873,10 @@ impl Database {
         Ok(self.graph.maintain(Maintenance::compact)??)
     }
 
-    /// The size of the database on disk and how well its cache serves reads.
-    ///
-    /// Fails with
-    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
-    /// when the calling thread holds a write transaction.
+    /// The size of the database on disk and how well its cache serves reads. It waits for no
+    /// transaction, so it also answers on a thread that holds a write transaction.
     pub fn stats(&self) -> Result<DatabaseStats, Error> {
-        let stats = self.graph.maintain(Maintenance::stats)??;
+        let stats = self.graph.inspect(Maintenance::stats)?;
         Ok(DatabaseStats {
             file_bytes: stats.file_bytes,
             live_bytes: stats.live_bytes,

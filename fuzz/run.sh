@@ -5,7 +5,7 @@ seconds="${1:-300}"
 if [ "$#" -gt 0 ]; then
   shift
 fi
-targets="${*:-parse value_decode graph_ops db_file engine_formats engine_file replication_changes}"
+targets="${*:-parse value_decode graph_ops db_file engine_formats engine_file replication_changes dump_import}"
 toolchain="nightly-2026-11-20"
 cd "$(dirname "$0")"
 limits="-timeout=20 -rss_limit_mb=3072"

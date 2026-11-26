@@ -151,14 +151,14 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
         self.pinned.header.checkpoint_lsn
     }
 
-    /// The term and writer of the newest commit the checkpoint holds.
-    pub(crate) fn epoch(&self) -> &EpochId {
-        &self.pinned.epoch
-    }
-
     /// The chain hash of the newest commit the checkpoint holds.
     pub(crate) fn chain(&self) -> u64 {
         self.pinned.header.replication.checkpoint_chain
+    }
+
+    /// The term and writer of the newest commit the checkpoint holds.
+    pub(crate) fn epoch(&self) -> &EpochId {
+        &self.pinned.epoch
     }
 
     /// The database whose history the checkpoint holds, or zero when it holds no change.

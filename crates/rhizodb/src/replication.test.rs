@@ -5,6 +5,7 @@ use crate::error::ErrorKind;
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_position_reads_back_from_its_bytes(
         term in 1u64..,
         writer_id in proptest::collection::vec(any::<u8>(), 1..=64),
@@ -16,6 +17,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn arbitrary_bytes_fail_as_corrupt_data_or_read_back_the_same(bytes in proptest::collection::vec(any::<u8>(), 0..100)) {
         match Position::from_bytes(&bytes) {
             Ok(position) => prop_assert_eq!(position.to_bytes(), bytes),
@@ -28,6 +30,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(48)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn damaged_changes_fail_without_a_panic(edits in proptest::collection::vec(any::<u8>(), 0..64)) {
         super::apply_changes_for_fuzzing(&edits).map_err(TestCaseError::fail)?;
     }
@@ -188,6 +191,7 @@ mod crash {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_crash_at_any_write_of_apply_leaves_a_position_the_writer_passed() {
         let (writer, seen) = written();
         let batches = batches(&writer);
@@ -361,6 +365,7 @@ mod crash {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_crash_at_any_write_of_a_promotion_or_demotion_leaves_one_role() {
         let base = SimFs::new();
         let db = open_on(&base, false);

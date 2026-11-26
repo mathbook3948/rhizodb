@@ -322,18 +322,6 @@ impl<F: FileSystem + 'static> Engine<F> {
         Ok(())
     }
 
-    /// Makes a file a snapshot was just installed into a replica with an incarnation of its
-    /// own, so it never passes as the writer the snapshot came from.
-    pub(crate) fn become_installed_replica(&self) -> Result<(), EngineError> {
-        let _writer = lock(&self.shared.writer);
-        self.write_replication(|replication| {
-            replication.replica = true;
-            replication.incarnation = super::new_incarnation();
-        })?;
-        self.set_role(Role::Replica);
-        Ok(())
-    }
-
     /// Makes a file that holds no change and no history a replica, and refuses a file that a
     /// writer holds.
     pub(crate) fn declare_replica(&self) -> Result<(), EngineError> {

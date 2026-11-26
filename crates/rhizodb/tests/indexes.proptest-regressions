@@ -7,3 +7,4 @@
 cc 7c5612f7660cf5570db30e7086e1317354f34d695f15dfdaf0749f68851644e7 # shrinks to documents = [], prefix = "r"
 cc 12ac0afddaafc562dc5425084ae5e91e0edceb9be7bdbab6ea70243cbde36d7d # shrinks to documents = [], phrase = [0]
 cc 5027d2cb192b1135fe3bc9b3ffea9b75c80ff3bb87edf9033eef0876413304d5 # shrinks to (vectors, query) = ([[-2, 5]], [6, -3]), metric = Cosine, limit = 30
+cc ac5ab051703dd7f814847b2863d855593ec2eed2b3a70c38b36f623941da6fdd # shrinks to (vectors, query) = ([[0]], [-1]), metric = DotProduct, limit = 1
