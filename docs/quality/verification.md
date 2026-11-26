@@ -52,7 +52,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.
 - Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
-- The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
+- The parser, the value decoder, damaged database files, random write transactions, and dump import are fuzzed.
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
 - The fuzz run fails on any panic that escapes RhizoDB, any hang, and any run out of memory.
