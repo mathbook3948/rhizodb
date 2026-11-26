@@ -773,7 +773,9 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                 let key = Bytes::from(key);
                 let value = match value {
                     CellValue::Inline(value) => Bytes::from(value),
-                    CellValue::External(blob) => Bytes::from(tree.load_value(&blob)?),
+                    CellValue::External(blob) => {
+                        Bytes::from(load_blob(&*tree.source, &blob, Role::Value)?)
+                    }
                 };
                 let value = self.stored(table, &key, &value)?;
                 builder.push_leaf(self, table, LeafEntry { key, value })?;

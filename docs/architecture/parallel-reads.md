@@ -14,7 +14,8 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - A morsel restricts the start nodes of that one pattern part, found by identity, so later patterns, subqueries, and pattern predicates read the whole graph as before.
 - Each worker evaluates its morsels with the operators the serial path uses, the column scan, the hop aggregate, and the row-at-a-time matcher, through one environment of its own that shares only the transaction, the parameters, and the clocks, and keeps its caches across its morsels.
 - An aggregating projection after the match merges per-morsel groups in morsel order, so groups keep the order of their first row and every aggregate sees its values in scan order.
-- A worker keeps the values of `sum`, `avg`, and the distinct aggregates instead of folding them, and the merge folds them in scan order, so float sums, integer overflow, and `DISTINCT` give exactly the serial result.
+- A worker keeps the values of `sum`, `avg`, and the distinct aggregates other than `min` and `max` instead of folding them, and the merge folds them in scan order, so float sums, integer overflow, and `DISTINCT` give exactly the serial result.
+- A worker hands on one value for each `min` and `max` and its collected list for `collect`, and the merge keeps the value or appends the list as if the worker's rows followed the rows merged before them.
 - A plain projection runs per morsel without `SKIP` or its trailing filter and with a `LIMIT` of `SKIP` plus `LIMIT`, and the joined rows then go through the full projection once, which keeps ties in scan order.
 - With `LIMIT` and neither `ORDER BY` nor `DISTINCT`, no morsel starts once the finished morsels before it hold the rows the projection keeps.
 - A `DISTINCT` projection without `LIMIT` stays on the calling thread, since joining the morsels would repeat its whole deduplication there.
@@ -37,5 +38,5 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 
 ## Open
 
-- A worker keeps every value of `sum`, `avg`, and the distinct aggregates, so their memory grows with the rows instead of the groups.
+- A worker keeps every value of `sum`, `avg`, and the distinct aggregates other than `min` and `max`, so their memory grows with the rows instead of the groups.
 - A traversal from a single start node, such as a seek followed by several hops, does not split yet.

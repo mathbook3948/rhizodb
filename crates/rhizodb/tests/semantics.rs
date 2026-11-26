@@ -1558,6 +1558,101 @@ fn a_distinct_aggregate_counts_each_element_and_each_equal_value_once() {
 }
 
 #[test]
+fn min_and_max_follow_the_sort_order_across_types_and_skip_nulls() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [2.5, 'a', null, true, [1], {a: 1}, date('2024-01-01'), 7] AS x \
+             RETURN min(x), max(x)"
+        ),
+        [vec![map(&[("a", int(1))]), int(7)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND ['b', null, 'a', 'c'] AS x RETURN min(x), max(x), min(DISTINCT x)"
+        ),
+        [vec![string("a"), string("c"), string("a")]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [[1, 2], [1], [1, null], [0, 9]] AS x RETURN min(x), max(x)"
+        ),
+        [vec![list([int(0), int(9)]), list([int(1), Value::Null])]]
+    );
+    assert_eq!(
+        run(&db, "UNWIND [null, null] AS x RETURN min(x), max(x)"),
+        [vec![Value::Null, Value::Null]]
+    );
+    assert_eq!(
+        run(&db, "UNWIND [] AS x RETURN min(x), max(x)"),
+        [vec![Value::Null, Value::Null]]
+    );
+    let rows = run(
+        &db,
+        "UNWIND [1, 0.0 / 0.0, -1.5, 9223372036854775807] AS x RETURN min(x), max(x)",
+    );
+    assert!(
+        matches!(rows.as_slice(), [row] if row[0] == float(-1.5) && matches!(row[1], Value::Float(f) if f.is_nan())),
+        "{rows:?}"
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [3, 1, 2, 1, 3, 2] AS x WITH x, x % 2 AS k \
+             RETURN k, min(x), max(x), min(DISTINCT x), max(DISTINCT x) ORDER BY k"
+        ),
+        [
+            vec![int(0), int(2), int(2), int(2), int(2)],
+            vec![int(1), int(1), int(3), int(1), int(3)],
+        ]
+    );
+}
+
+#[test]
+fn of_equivalent_values_min_keeps_the_first_and_max_the_last_unless_distinct() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 1.0] AS x RETURN min(x), max(x), min(DISTINCT x), max(DISTINCT x)"
+        ),
+        [vec![int(1), float(1.0), int(1), int(1)]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1.0, 1, null] AS x RETURN min(x), max(x), min(DISTINCT x), max(DISTINCT x)"
+        ),
+        [vec![float(1.0), int(1), float(1.0), float(1.0)]]
+    );
+}
+
+#[test]
+fn split_min_max_and_collect_match_the_serial_answer() {
+    let serial = rhizodb::OpenOptions::new().threads(1).in_memory().unwrap();
+    let parallel = parallel_options().in_memory().unwrap();
+    let load = "UNWIND range(0, 9999) AS i INSERT (:N {i: i, g: i % 3, \
+                x: CASE i % 4 WHEN 0 THEN i % 5 WHEN 1 THEN toFloat(i % 5) \
+                WHEN 2 THEN toString(i % 7) ELSE null END})";
+    for db in [&serial, &parallel] {
+        run(db, load);
+    }
+    for query in [
+        "MATCH (n:N) RETURN min(n.x), max(n.x), min(DISTINCT n.x), max(DISTINCT n.x)",
+        "MATCH (n:N) WHERE n.i % 4 < 2 RETURN n.g AS g, min(n.x), max(n.x), \
+         max(DISTINCT n.x) ORDER BY g",
+        "MATCH (n:N) RETURN n.g AS g, size(collect(n.x)), collect(DISTINCT n.x) ORDER BY g",
+        "MATCH (n:N) WHERE n.i < 40 RETURN collect(n.x), collect(n.i)",
+        "MATCH (n:N) RETURN percentileDisc(n.i, 0.3), percentileCont(n.i, 0.3)",
+    ] {
+        assert_eq!(run(&serial, query), run(&parallel, query), "{query}");
+    }
+}
+
+#[test]
 fn sum_and_avg_add_their_numbers_in_order_and_overflow_only_on_integers() {
     let db = db();
     let big = "9223372036854775807";
