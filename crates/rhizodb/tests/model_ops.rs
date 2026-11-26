@@ -32,8 +32,11 @@ fn fail(seed: u64, run: &Run, reason: &str) -> ! {
 #[test]
 fn random_transactions_in_memory_match_the_model() {
     let base = seed();
-    for offset in 0..cases(FAST_RUNS) {
-        let seed = base.wrapping_add(offset);
+    let fresh = (0..cases(FAST_RUNS)).map(|offset| base.wrapping_add(offset));
+    for seed in regression_seeds("random_transactions_in_memory_match_the_model")
+        .into_iter()
+        .chain(fresh)
+    {
         let mut rng = Rng::new(seed);
         let mut run = Run::new(db());
         for _ in 0..TRANSACTIONS_PER_RUN {
@@ -48,9 +51,10 @@ fn random_transactions_in_memory_match_the_model() {
 fn random_transactions_on_a_file_match_the_model_across_reopens() {
     let base = seed();
     let directory = tempfile::tempdir().unwrap();
-    for offset in 0..cases(FAST_RUNS / 4) {
-        let seed = base.wrapping_add(offset);
-        let path = directory.path().join(format!("run-{offset}.rhizodb"));
+    let fresh = (0..cases(FAST_RUNS / 4)).map(|offset| base.wrapping_add(offset));
+    let replays = regression_seeds("random_transactions_on_a_file_match_the_model_across_reopens");
+    for (run, seed) in replays.into_iter().chain(fresh).enumerate() {
+        let path = directory.path().join(format!("run-{run}.rhizodb"));
         let mut rng = Rng::new(seed);
         let mut run = Run::new(Database::open(&path).unwrap());
         for _ in 0..TRANSACTIONS_PER_RUN {

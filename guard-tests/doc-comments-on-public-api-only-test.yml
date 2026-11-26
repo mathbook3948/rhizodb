@@ -1,0 +1,8 @@
+id: doc-comments-on-public-api-only
+valid:
+  - "/// A contract.\npub fn f() {}"
+  - "/** A contract. */\npub fn f() {}"
+invalid:
+  - "/// Explains internals.\nfn f() {}"
+  - "/** Explains internals. */\nfn f() {}"
+  - "pub struct S {\n    /** A note. */\n    x: u8,\n}"
