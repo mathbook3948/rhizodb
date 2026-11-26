@@ -1865,10 +1865,11 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(Some(record))
     }
 
-    fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
-        self.node_label_set(id)?
-            .map(|_| ())
-            .ok_or(GraphError::NodeNotFound(id))
+    fn require_node(&mut self, id: NodeId) -> Result<(), GraphError> {
+        let mut reader = std::mem::take(&mut self.labels);
+        let found = self.with_labels(&mut reader, id, |_| ());
+        self.labels = reader;
+        found?.ok_or(GraphError::NodeNotFound(id))
     }
 
     fn partial_record(

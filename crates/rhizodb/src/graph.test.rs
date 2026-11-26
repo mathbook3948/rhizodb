@@ -931,6 +931,7 @@ pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
 
 #[derive(Debug, Default)]
 struct Gate {
+    node_chunk_reads: std::sync::atomic::AtomicUsize,
     armed: std::sync::atomic::AtomicBool,
     entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     opened: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
@@ -967,8 +968,19 @@ impl Storage for GatedStorage {
     }
 }
 
+impl GatedWrite {
+    fn count(&self, table: Table) {
+        if table == Table::NodeChunks {
+            self.gate
+                .node_chunk_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 impl ReadTransaction for GatedWrite {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.count(table);
         self.inner.get(table, key)
     }
 
@@ -995,6 +1007,7 @@ impl ReadTransaction for GatedWrite {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> Result<R, E>,
     ) -> Result<Option<R>, E> {
+        self.count(table);
         self.inner.get_with(table, key, read)
     }
 
@@ -1094,4 +1107,38 @@ fn a_read_begins_while_a_commit_that_creates_an_index_is_writing() {
     let read = graph.read().unwrap();
     assert_eq!(read.indexes().unwrap().len(), 1);
     assert_eq!(read.index_definitions().unwrap().len(), 1);
+}
+
+#[test]
+fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: RedbStorage::in_memory().unwrap(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    let source = write.create_node(NodeRecord::default()).unwrap();
+    let target = write.create_node(NodeRecord::default()).unwrap();
+    let rel_type = write.intern_token("R").unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    gate.node_chunk_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..100 {
+        write
+            .create_relationship(&RelationshipRecord {
+                rel_type,
+                source,
+                target,
+                properties: Properties::new(),
+            })
+            .unwrap();
+    }
+    let reads = gate
+        .node_chunk_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads <= 4, "{reads} node meta reads");
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
 }
