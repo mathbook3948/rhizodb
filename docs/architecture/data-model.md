@@ -23,6 +23,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Relationship records are stored in chunks of 32 consecutive IDs, one entry per chunk under the chunk's number, so a load writes one entry per 32 relationships.
 - A chunk holds a layout byte, a bitmap of the slots that hold a relationship, and each of those records in slot order after its length as a varint.
 - A chunk without relationships is not stored.
+- A chunk stays one value however long its records make it, and a chunk longer than 1 KiB is read from the block cache once its run has been read, so chunks need no cut into parts the way columns and adjacency segments have.
 - A write transaction loads a chunk the first time it changes it and writes the chunks it changed at commit, or all of them earlier once they hold more than 4 MiB of records.
 - Opening a database written before relationship chunks moves every relationship record into its chunk, in the opening write transaction.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.

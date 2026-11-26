@@ -233,8 +233,8 @@ impl Tree {
     }
 
     /// The value stored in `blob`, a run of a value cell of this tree.
-    pub(crate) fn load_value(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
-        load_blob(&*self.source, blob, Role::Value)
+    pub(crate) fn load_value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
+        self.source.value(blob)
     }
 
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
@@ -279,9 +279,7 @@ impl Tree {
                 }
                 return match node.value(index)? {
                     CellValue::Inline(value) => Ok(Some(read(value))),
-                    CellValue::External(blob) => {
-                        Ok(Some(read(&load_blob(&*self.source, &blob, Role::Value)?)))
-                    }
+                    CellValue::External(blob) => Ok(Some(read(&self.source.value(&blob)?))),
                 };
             }
             page = node.child(index)?;

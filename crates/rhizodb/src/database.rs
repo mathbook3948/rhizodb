@@ -208,10 +208,10 @@ pub struct DatabaseStats {
     /// The bytes the write-ahead log beside the file takes on disk. A checkpoint removes the
     /// segments it no longer needs, and the segment in use keeps up to 1 MiB allocated ahead.
     pub wal_bytes: u64,
-    /// The page reads the cache served since the database was opened.
+    /// The reads of pages and long values that the cache served since the database was opened.
     pub cache_hits: u64,
-    /// The page reads the cache could not serve, which read the file, since the database was
-    /// opened.
+    /// The reads of pages and long values that the cache could not serve, which read the file,
+    /// since the database was opened.
     pub cache_misses: u64,
 }
 

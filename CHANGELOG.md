@@ -14,6 +14,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
 - Reading or changing the relationships of a node no longer reads the stored relationships of a hub node in the same block of 16 node IDs. Before, every such read or commit read the whole of the hub's adjacency, so its cost grew with the hub's degree.
 - A commit that adds a relationship to a hub no longer reads the hub's stored adjacency, and rewrites it once its pending changes reach the square root of eight times its size instead of half a part. Adding relationships to one node one commit at a time no longer takes time quadratic in its degree, and the bytes it writes for the hub grow with the degree to the power 1.5 instead of the square.
+- Reading a relationship whose chunk of 32 records is longer than 1 KiB, as with a few properties or one short string per relationship, no longer reads the database file each time. The block cache now keeps long values whole beside its pages, within the same memory budget, so repeated reads of such relationships, traversals that read their properties, and scans such as `MATCH ()-[r]->() RETURN avg(r.weight)` take no file read or checksum once the chunk is cached. `DatabaseStats::cache_hits` and `cache_misses` now count these reads too.
 
 ### Fixed
 

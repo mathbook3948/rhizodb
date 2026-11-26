@@ -94,10 +94,10 @@ fn the_engine_on_kv_workloads() {
     let mut results = Vec::new();
     {
         let options = EngineOptions {
-            cache_pages: std::env::var("BENCH_CACHE_PAGES")
+            cache_bytes: std::env::var("BENCH_CACHE_BYTES")
                 .ok()
-                .and_then(|pages| pages.parse().ok())
-                .unwrap_or(EngineOptions::default().cache_pages),
+                .and_then(|bytes| bytes.parse().ok())
+                .unwrap_or(EngineOptions::default().cache_bytes),
             memtable_limit: std::env::var("BENCH_MEMTABLE")
                 .ok()
                 .and_then(|bytes| bytes.parse().ok())
