@@ -816,6 +816,37 @@ fn installing_over_a_database_open_on_the_simulated_file_system_fails_and_keeps_
 }
 
 #[test]
+fn an_install_refuses_a_snapshot_older_than_the_terms_the_locked_database_began() {
+    let source_fs = SimFs::new();
+    let source = open(&source_fs, SOURCE, by_hand()).unwrap();
+    source.promote(1, b"node-a").unwrap();
+    write_round(&source, 1, 10);
+    source.checkpoint().unwrap();
+    let old = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let target = SimFs::new();
+    let replica = install(
+        Arc::new(target.clone()),
+        TARGET,
+        old.as_slice(),
+        options(),
+        false,
+    )
+    .unwrap();
+    replica.promote(4, b"node-b").unwrap();
+    replica.checkpoint().unwrap();
+    drop(replica);
+    let error = install(
+        Arc::new(target.clone()),
+        TARGET,
+        old.as_slice(),
+        options(),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(StorageError::from(error).kind(), ErrorKind::Fenced);
+}
+
+#[test]
 fn installing_over_another_database_fails_unless_forced_and_keeps_it() {
     let (_fs, source, expected) = loaded_source(3, 10);
     let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
