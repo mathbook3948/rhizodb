@@ -152,7 +152,7 @@ pub enum ErrorKind {
     /// An index is created under a name that an index with another definition already holds.
     IndexAlreadyExists,
     /// An index definition cannot be built: no name, no keyword property, or a vector dimension
-    /// of zero.
+    /// of zero or above `u32::MAX`.
     InvalidIndexDefinition,
     /// A host procedure was registered in the `db` namespace, which built-in procedures reserve.
     ReservedProcedureName,
@@ -160,7 +160,8 @@ pub enum ErrorKind {
     Storage,
     /// Stored data does not decode, breaks an invariant, or makes the storage engine fail.
     CorruptData,
-    /// The database was written in a format version this build cannot read.
+    /// The database was written in a format version this build cannot read, of the graph layer
+    /// or of the storage engine.
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
