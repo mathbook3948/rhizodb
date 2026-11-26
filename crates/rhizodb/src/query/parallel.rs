@@ -1,7 +1,8 @@
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::ptr;
-use std::sync::Condvar;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
@@ -10,6 +11,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::thread;
+use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -62,18 +64,25 @@ impl Default for Parallelism {
 const WRITING: Duration = Duration::from_millis(10);
 
 /// The threads running read queries of one database, its callers and their helpers, so a split
-/// takes helpers only from the cores those threads leave idle. While writes flow, a read query
-/// starts only while fewer read threads than cores run, so a committing writer never queues for
-/// a core behind more readers than the machine can run at once.
+/// takes helpers only from the cores those threads leave idle. A read query starts at once while
+/// fewer read threads than cores run, no query waits, and no write flows. Otherwise it waits in a
+/// queue that hands each freed turn to the query that has waited longest, and only one fewer
+/// than the cores run, so the spare core runs each woken query and each committing writer at
+/// once instead of slicing the cores between more threads than they hold.
 #[derive(Debug)]
 pub(crate) struct Workers {
     busy: AtomicUsize,
-    waiting: AtomicUsize,
-    gate: Mutex<()>,
-    freed: Condvar,
+    queued: AtomicUsize,
+    queue: Mutex<VecDeque<Arc<Turn>>>,
     cores: usize,
     epoch: Instant,
     wrote_at: AtomicU64,
+}
+
+#[derive(Debug)]
+struct Turn {
+    thread: Thread,
+    granted: AtomicBool,
 }
 
 impl Default for Workers {
@@ -95,11 +104,8 @@ impl Drop for Busy<'_> {
             return;
         }
         self.workers.busy.fetch_sub(self.threads, Ordering::SeqCst);
-        if self.workers.waiting.load(Ordering::SeqCst) > 0 {
-            let _gate = self.workers.lock_gate();
-            for _ in 0..self.threads {
-                self.workers.freed.notify_one();
-            }
+        if self.workers.queued.load(Ordering::SeqCst) > 0 {
+            self.workers.hand_over();
         }
     }
 }
@@ -108,9 +114,8 @@ impl Workers {
     pub(crate) fn with_cores(cores: usize) -> Self {
         Self {
             busy: AtomicUsize::new(0),
-            waiting: AtomicUsize::new(0),
-            gate: Mutex::new(()),
-            freed: Condvar::new(),
+            queued: AtomicUsize::new(0),
+            queue: Mutex::new(VecDeque::new()),
             cores: cores.max(1),
             epoch: Instant::now(),
             wrote_at: AtomicU64::new(0),
@@ -121,8 +126,8 @@ impl Workers {
         u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// Records that a write transaction begins, so read queries take turns for the cores for a
-    /// while.
+    /// Records that a write transaction begins, so read queries leave a core to the writer for
+    /// a while.
     pub(crate) fn writing(&self) {
         self.wrote_at
             .store(self.since_epoch().max(1), Ordering::Relaxed);
@@ -133,41 +138,68 @@ impl Workers {
         wrote_at != 0 && self.since_epoch().saturating_sub(wrote_at) < WRITING.as_nanos() as u64
     }
 
-    fn lock_gate(&self) -> MutexGuard<'_, ()> {
-        self.gate.lock().unwrap_or_else(PoisonError::into_inner)
+    fn queued_limit(&self) -> usize {
+        (self.cores - 1).max(1)
     }
 
-    fn try_take_one(&self) -> bool {
+    fn free_limit(&self) -> usize {
+        if self.writes_flow() {
+            self.queued_limit()
+        } else {
+            self.cores
+        }
+    }
+
+    fn lock_queue(&self) -> MutexGuard<'_, VecDeque<Arc<Turn>>> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn try_take_one(&self, limit: usize) -> bool {
         self.busy
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |busy| {
-                (busy < self.cores).then_some(busy + 1)
+                (busy < limit).then_some(busy + 1)
             })
             .is_ok()
     }
 
-    /// Counts the calling thread as busy while it runs a read query, first waiting, in turn
-    /// with the other waiting queries, until fewer threads than cores are busy.
+    fn hand_over(&self) {
+        let mut queue = self.lock_queue();
+        while !queue.is_empty() && self.try_take_one(self.queued_limit()) {
+            if let Some(turn) = queue.pop_front() {
+                self.queued.fetch_sub(1, Ordering::SeqCst);
+                turn.granted.store(true, Ordering::Release);
+                turn.thread.unpark();
+            }
+        }
+    }
+
+    /// Counts the calling thread as busy while it runs a read query, first waiting for a turn
+    /// once the cores are taken, until every query that came before it has started.
     pub(crate) fn enter(&self) -> Busy<'_> {
         let taken = Busy {
             workers: self,
             threads: 1,
         };
-        if !self.writes_flow() {
-            self.busy.fetch_add(1, Ordering::SeqCst);
+        let limit = self.free_limit();
+        if self.queued.load(Ordering::SeqCst) == 0 && self.try_take_one(limit) {
             return taken;
         }
-        if self.waiting.load(Ordering::SeqCst) == 0 && self.try_take_one() {
-            return taken;
+        let turn = Arc::new(Turn {
+            thread: thread::current(),
+            granted: AtomicBool::new(false),
+        });
+        {
+            let mut queue = self.lock_queue();
+            self.queued.fetch_add(1, Ordering::SeqCst);
+            if queue.is_empty() && self.try_take_one(limit) {
+                self.queued.fetch_sub(1, Ordering::SeqCst);
+                return taken;
+            }
+            queue.push_back(Arc::clone(&turn));
         }
-        let mut gate = self.lock_gate();
-        self.waiting.fetch_add(1, Ordering::SeqCst);
-        while !self.try_take_one() {
-            gate = self
-                .freed
-                .wait(gate)
-                .unwrap_or_else(PoisonError::into_inner);
+        while !turn.granted.load(Ordering::Acquire) {
+            thread::park();
         }
-        self.waiting.fetch_sub(1, Ordering::SeqCst);
         taken
     }
 
