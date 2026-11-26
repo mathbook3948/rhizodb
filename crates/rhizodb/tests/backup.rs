@@ -56,12 +56,13 @@ fn backup_child() {
     }
 }
 
-fn check_backup(path: &Path) {
+fn check_backup(path: &Path, i: i64) {
     let db = Database::open(path).unwrap();
     let n = match single(&db, "MATCH (c:Counter) RETURN c.n") {
         Value::Integer(n) => n,
         other => panic!("{other:?}"),
     };
+    assert_eq!(n, i, "backup-{i} holds the commit before it");
     assert_eq!(
         single(&db, "MATCH (t:Tick) RETURN count(t)"),
         Value::Integer(n * 200)
@@ -78,6 +79,7 @@ fn check_backup(path: &Path) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_killed_backup_leaves_its_target_absent_or_whole() {
     for trial in 0..cases(FAST_TRIALS) {
         let directory = tempfile::tempdir().unwrap();
@@ -108,8 +110,8 @@ fn a_killed_backup_leaves_its_target_absent_or_whole() {
         }
         for entry in std::fs::read_dir(directory.path()).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-            if name.starts_with("backup-") {
-                check_backup(&directory.path().join(&name));
+            if let Some(i) = name.strip_prefix("backup-") {
+                check_backup(&directory.path().join(&name), i.parse().unwrap());
             } else {
                 assert!(
                     name == "source"

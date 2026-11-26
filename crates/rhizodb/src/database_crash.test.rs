@@ -285,11 +285,13 @@ fn operations() -> (u64, u64) {
     (opened, fs.operations())
 }
 
-fn points(from: u64, total: u64, budget: u64) -> Vec<u64> {
+fn points(from: u64, total: u64, budget: u64, seed: u64) -> Vec<u64> {
     let span = total - from;
     let stride = (span / budget.max(1)).max(1);
-    let mut points: Vec<u64> = (from..total).step_by(stride as usize).collect();
-    let mut state = total;
+    let mut points: Vec<u64> = (from + seed % stride..total)
+        .step_by(stride as usize)
+        .collect();
+    let mut state = total ^ seed;
     for _ in 0..budget / 4 {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -305,9 +307,10 @@ fn crash_during_workload(failure: Failure) {
     let (opened, total) = operations();
     let budget = u64::from(test_scale::cases(40));
     let seeds = u64::from(test_scale::cases(1)).min(16);
+    let seed = test_scale::seed();
     let mut expected = Expected::default();
     let mut problems = Vec::new();
-    for at in points(opened, total, budget) {
+    for at in points(opened, total, budget, seed) {
         let fs = SimFs::new();
         let run = match open(&fs) {
             Ok(db) => {
@@ -329,15 +332,33 @@ fn crash_during_workload(failure: Failure) {
             }
         }
     }
-    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "replay with RHIZODB_TEST_SEED={seed}\n{}",
+        problems.join("\n")
+    );
 }
 
 #[test]
+fn the_sampled_points_reach_every_operation_across_seeds() {
+    let (from, total, budget) = (100, 1_000, 40);
+    let mut reached = std::collections::BTreeSet::new();
+    for seed in 0..budget {
+        let points = points(from, total, budget, seed);
+        assert!(points.iter().all(|at| (from..total).contains(at)));
+        reached.extend(points);
+    }
+    assert_eq!(reached, (from..total).collect());
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_at_any_point_of_a_workload_recovers_the_acknowledged_steps() {
     crash_during_workload(Failure::FromThenOn);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn one_failed_write_or_sync_in_a_workload_loses_only_its_own_step() {
     crash_during_workload(Failure::Once);
 }
@@ -364,6 +385,7 @@ fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole_empty_one() {
     let (opened, _) = operations();
     let seeds = u64::from(test_scale::cases(2)).min(16);

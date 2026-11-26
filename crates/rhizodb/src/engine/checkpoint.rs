@@ -525,7 +525,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
                         )?);
                     }
                 }
-                self.settle(table, level - 1, &mut children)?;
+                self.settle(table, level - 1, &mut children, rightmost)?;
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -540,6 +540,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         table: TableId,
         level: u8,
         children: &mut Vec<Child>,
+        rightmost: bool,
     ) -> Result<(), EngineError> {
         let mut index = 0;
         while index < children.len() && children.len() > 1 {
@@ -553,13 +554,14 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             } else {
                 index - 1
             };
+            let last = rightmost && left + 2 == children.len();
             let right = children.remove(left + 1);
             let left_child = children.remove(left);
             let low = left_child.low().clone();
             let left_content = self.content_of(table, level, left_child)?;
             let right_content = self.content_of(table, level, right)?;
             let joined = join(vec![left_content, right_content]);
-            let pieces = lows(low, pack(joined, false));
+            let pieces = lows(low, pack(joined, last));
             let added = pieces.len();
             for (offset, piece) in pieces.into_iter().enumerate() {
                 children.insert(left + offset, piece);
@@ -632,7 +634,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             .checked_add_signed(self.entry_change)
             .ok_or_else(|| EngineError::corrupt("a table's entry count went below zero"))?;
         loop {
-            self.settle(table, level, &mut children)?;
+            self.settle(table, level, &mut children, true)?;
             match children.len() {
                 0 => return Ok(None),
                 1 => {

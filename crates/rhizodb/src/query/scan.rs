@@ -1006,19 +1006,17 @@ impl<T: ReadTransaction> Env<'_, T> {
         let mut entries_held = Vec::new();
         if let Some(Expr::Map(entries)) = &scan.part.start.properties {
             for (at, (key, value)) in entries.iter().enumerate() {
-                if entries[at + 1..].iter().any(|(other, _)| other == key) {
-                    continue;
-                }
                 let Some(value) = compiler.value(value)?.filter(|value| !scanned(value)) else {
                     return Ok(None);
                 };
+                if entries[at + 1..].iter().any(|(other, _)| other == key) {
+                    continue;
+                }
                 let column = Value::Column(compiler.column(key)?);
                 entries_held.push(Pred::Compare(column, vec![(ComparisonOp::Equal, value)]));
             }
         }
-        let map = entries_held
-            .into_iter()
-            .reduce(|all, next| Pred::Logic(BinaryOp::And, Box::new(all), Box::new(next)));
+        let map = conjunction(entries_held);
         let filter = match &found.filter {
             Some(filter) => match compiler.pred(filter)? {
                 Some(filter) => Some(filter),
@@ -1551,6 +1549,16 @@ fn reads(value: &Value, column: usize) -> bool {
         },
         Value::Node | Value::Fixed(_) | Value::Row(_) => false,
     }
+}
+
+fn conjunction(mut conjuncts: Vec<Pred>) -> Option<Pred> {
+    if conjuncts.len() <= 1 {
+        return conjuncts.pop();
+    }
+    let right = conjuncts.split_off(conjuncts.len().div_ceil(2));
+    let left = conjunction(conjuncts)?;
+    let right = conjunction(right)?;
+    Some(Pred::Logic(BinaryOp::And, Box::new(left), Box::new(right)))
 }
 
 fn pred_reads(pred: &Pred, column: usize) -> bool {

@@ -8,6 +8,7 @@ use super::header::OpenExtent;
 use super::layout::BlockRef;
 use super::layout::EXTENT_BLOCKS;
 use super::layout::ExtentId;
+use super::layout::physical_block;
 
 /// What an extent was opened for. Files of engine format minor 1 and before kept an open extent
 /// for each purpose, and every extent opened since is a tree extent that takes every kind of
@@ -378,6 +379,24 @@ impl ExtentTable {
         self.next_slot = top;
         self.reusable.retain(|slot| *slot < top);
         Some(end)
+    }
+
+    /// Fails unless every extent starts inside a file of `file_blocks` blocks, then lowers the
+    /// high-water mark past the free slots at the end, as an open may since no reader holds a
+    /// tree yet.
+    pub(crate) fn fit_file(&mut self, file_blocks: u64) -> Result<(), EngineError> {
+        let mut top = 0;
+        for (id, entry) in &self.entries {
+            if physical_block(entry.slot, 0)? >= file_blocks {
+                return Err(EngineError::corrupt(format!(
+                    "extent {} starts past the end of the file",
+                    id.0
+                )));
+            }
+            top = top.max(entry.slot + 1);
+        }
+        self.next_slot = top;
+        Ok(())
     }
 
     /// Records that `blocks` blocks from `at` are no longer reachable.

@@ -181,6 +181,39 @@ fn control_characters_never_reach_a_term() {
 }
 
 #[test]
+fn invisible_format_characters_inside_a_word_are_dropped() {
+    for text in [
+        "Ver\u{ad}sicherung",
+        "Ver\u{2060}sicherung",
+        "Ver\u{feff}sicherung",
+        "Versi\u{200e}cherung",
+    ] {
+        assert_eq!(document(text), ["versicherung"], "{text:?}");
+        assert_eq!(query(text), ["versicherung"], "{text:?}");
+    }
+    assert_eq!(query("東\u{2060}京"), query("東京"));
+    assert_eq!(
+        document("한\u{200d}국"),
+        ["한\u{200d}국", "한\u{200d}", "국"]
+    );
+}
+
+#[test]
+fn a_double_quote_inside_a_hebrew_word_splits_it_as_a_query_does() {
+    for text in ["צה\"ל", "ארה\"ב"] {
+        let stored = document(text);
+        let typed = clauses(text);
+        assert!(!typed.is_empty(), "{text:?}");
+        for clause in typed {
+            let Clause::Term(term) = clause else {
+                panic!("{text:?} gave {clause:?}");
+            };
+            assert!(stored.contains(&term), "{term:?} not in {stored:?}");
+        }
+    }
+}
+
+#[test]
 fn composed_and_decomposed_text_give_the_same_terms() {
     assert_eq!(document("cafe\u{301} Åsa"), document("café A\u{30a}sa"));
     assert_eq!(document("cafe\u{301}"), ["café"]);
@@ -352,6 +385,13 @@ const POOL: &[char] = &[
     '*',
     '-',
     '_',
+    '\u{5e6}',
+    '\u{5d4}',
+    '\u{5dc}',
+    '\u{5b4}',
+    '\u{ad}',
+    '\u{2060}',
+    '\u{e0041}',
     '\u{1f469}',
     '\u{1f4bb}',
     '\u{fb01}',
@@ -374,6 +414,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(5000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn no_term_is_empty_holds_whitespace_or_a_control_character(text in mixed_text()) {
         for purpose in PURPOSES {
             for term in terms(&text, purpose) {
@@ -388,6 +429,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn no_term_starts_with_a_character_that_joins_the_one_before_it(text in mixed_text()) {
         for purpose in PURPOSES {
             for term in terms(&text, purpose) {
@@ -402,6 +444,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn positions_start_at_zero_and_never_go_back(text in mixed_text()) {
         let query = terms(&text, Purpose::Query);
         let document = terms(&text, Purpose::Document);
@@ -430,6 +473,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_space_between_two_texts_gives_the_terms_of_each_in_turn(
         left in mixed_text(),
         right in mixed_text(),
@@ -463,6 +507,28 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn typing_the_stored_text_as_a_query_looks_only_for_what_it_stored(text in mixed_text()) {
+        let stored: Vec<String> = terms(&text, Purpose::Document)
+            .into_iter()
+            .map(|term| term.text)
+            .collect();
+        for clause in clauses(&text) {
+            let looked_for = match &clause {
+                Clause::Term(term) | Clause::Prefix(term) => vec![term.clone()],
+                Clause::Phrase(terms) => terms.iter().map(|term| term.text.clone()).collect(),
+            };
+            for term in looked_for {
+                prop_assert!(
+                    stored.contains(&term),
+                    "{text:?} as a query gives {clause:?}, but stored {stored:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn typing_a_stored_term_finds_a_term_the_text_stored(text in mixed_text()) {
         let stored: Vec<String> = terms(&text, Purpose::Document)
             .into_iter()
@@ -503,6 +569,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(20000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn ascii_segments_give_the_terms_the_unicode_steps_give(text in ascii_heavy_text()) {
         for purpose in PURPOSES {
             let scan = scan(&nfkc(&text), purpose);
@@ -513,5 +580,16 @@ proptest! {
                 text
             );
         }
+    }
+}
+
+#[test]
+fn another_unicode_version_of_any_table_gives_another_fingerprint() {
+    let current = unicode_versions();
+    assert_eq!(fingerprint(), fingerprint_of(&current));
+    for table in 0..current.len() {
+        let mut older = current;
+        older[table].1 = older[table].1.wrapping_sub(1);
+        assert_ne!(fingerprint_of(&older), fingerprint(), "table {table}");
     }
 }

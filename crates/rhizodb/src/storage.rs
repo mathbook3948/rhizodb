@@ -13,25 +13,34 @@ pub(crate) mod redb_backend;
 #[cfg(test)]
 pub(crate) mod sim_backend;
 
-/// The fixed set of ordered key-value tables the graph layer is built on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum Table {
+macro_rules! tables {
+    ($($(#[$meta:meta])* $variant:ident,)*) => {
+        #[doc = "The fixed set of ordered key-value tables the graph layer is built on."]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub(crate) enum Table {
+            $($(#[$meta])* $variant,)*
+        }
+
+        impl Table {
+            pub(crate) const ALL: [Table; 0 $(+ { stringify!($variant); 1 })*] =
+                [$(Table::$variant),*];
+        }
+    };
+}
+
+tables! {
     Metadata,
     TokenByName,
     TokenById,
-    /// The node records of format versions before property columns, which only their upgrade
-    /// reads.
+    #[doc = "The node records of format versions before property columns, which only their upgrade reads."]
     Nodes,
-    /// The relationship records of format versions before relationship chunks, one entry per
-    /// relationship, which only their upgrade reads.
+    #[doc = "The relationship records of format versions before relationship chunks, one entry per relationship, which only their upgrade reads."]
     Relationships,
-    /// The outgoing adjacency of format versions before adjacency segments, which only their
-    /// upgrade reads.
+    #[doc = "The outgoing adjacency of format versions before adjacency segments, which only their upgrade reads."]
     Outgoing,
-    /// The incoming adjacency of format versions before adjacency segments, which only their
-    /// upgrade reads.
+    #[doc = "The incoming adjacency of format versions before adjacency segments, which only their upgrade reads."]
     Incoming,
-    /// The label index of format versions before node meta, which only their upgrade reads.
+    #[doc = "The label index of format versions before node meta, which only their upgrade reads."]
     LabelIndex,
     Indexes,
     KeywordPostings,
@@ -48,29 +57,6 @@ pub(crate) enum Table {
 }
 
 impl Table {
-    pub(crate) const ALL: [Table; 20] = [
-        Table::Metadata,
-        Table::TokenByName,
-        Table::TokenById,
-        Table::Nodes,
-        Table::Relationships,
-        Table::Outgoing,
-        Table::Incoming,
-        Table::LabelIndex,
-        Table::Indexes,
-        Table::KeywordPostings,
-        Table::KeywordDocuments,
-        Table::KeywordTotals,
-        Table::Vectors,
-        Table::PropertyEntries,
-        Table::NodeChunks,
-        Table::LabelSets,
-        Table::LabelSetByTokens,
-        Table::NodeColumns,
-        Table::Adjacency,
-        Table::RelationshipChunks,
-    ];
-
     /// Whether only the upgrade of an older format version reads the table, so a new database
     /// does not create it.
     pub(crate) const fn is_legacy(self) -> bool {

@@ -277,6 +277,7 @@ fn kill_point(rng: &mut Rng) -> (u64, u64) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_database_survives_a_writer_killed_between_and_inside_transactions() {
     let seed = seed();
     let mut rng = Rng::new(seed);
@@ -317,6 +318,7 @@ fn a_database_survives_a_writer_killed_between_and_inside_transactions() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn an_open_write_transaction_killed_before_commit_leaves_no_trace() {
     let directory = tempfile::tempdir().unwrap();
     for hold_after in [0, 3] {

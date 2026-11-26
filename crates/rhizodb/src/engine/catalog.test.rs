@@ -157,6 +157,7 @@ fn holes_that_overlap_touch_or_pass_the_written_blocks_are_corrupt() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_bytes_decode_or_fail_without_panicking(bytes in proptest::collection::vec(any::<u8>(), 0..400)) {
         let mut bytes = bytes;
         if let Some(first) = bytes.first_mut() {

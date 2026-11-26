@@ -1227,8 +1227,9 @@ pub(crate) fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Erro
         BinaryOp::Add => add(lhs, rhs),
         BinaryOp::Concat => match (lhs, rhs) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
-            (Datum::String(a), Datum::String(b)) => Ok(Datum::String(a + &b)),
+            (Datum::String(a), Datum::String(b)) => joined(a, &b),
             (Datum::List(a), Datum::List(b)) => {
+                datum::check_list_items(a.len().saturating_add(b.len()))?;
                 let mut items = Arc::unwrap_or_clone(a);
                 items.extend(Arc::unwrap_or_clone(b));
                 datum::list(items)
@@ -1277,28 +1278,36 @@ fn add(lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match (lhs, rhs) {
         (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
         (Datum::List(mut a), Datum::List(b)) => {
+            datum::check_list_items(a.len().saturating_add(b.len()))?;
             Arc::make_mut(&mut a).extend(Arc::unwrap_or_clone(b));
             Ok(Datum::List(a))
         }
         (Datum::List(mut a), b) => {
+            datum::check_list_items(a.len().saturating_add(1))?;
             datum::check_item(&b)?;
             Arc::make_mut(&mut a).push(b);
             Ok(Datum::List(a))
         }
         (a, Datum::List(mut b)) => {
+            datum::check_list_items(b.len().saturating_add(1))?;
             datum::check_item(&a)?;
             Arc::make_mut(&mut b).insert(0, a);
             Ok(Datum::List(b))
         }
-        (Datum::String(a), Datum::String(b)) => Ok(Datum::String(a + &b)),
+        (Datum::String(a), Datum::String(b)) => joined(a, &b),
         (Datum::String(a), b @ (Datum::Integer(_) | Datum::Float(_))) => {
-            Ok(Datum::String(a + &number_text(&b)))
+            joined(a, &number_text(&b))
         }
         (a @ (Datum::Integer(_) | Datum::Float(_)), Datum::String(b)) => {
-            Ok(Datum::String(number_text(&a) + &b))
+            joined(number_text(&a), &b)
         }
         (lhs, rhs) => arithmetic(BinaryOp::Add, lhs, rhs),
     }
+}
+
+fn joined(a: String, b: &str) -> Result<Datum, Error> {
+    datum::check_string_bytes(a.len().saturating_add(b.len()))?;
+    Ok(Datum::String(a + b))
 }
 
 /// Formats a number the way `toString` does.

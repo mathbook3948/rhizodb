@@ -225,6 +225,35 @@ fn a_panicking_procedure_unwinds_out_and_leaves_the_database_usable() {
 }
 
 #[test]
+fn a_query_that_panics_in_a_write_transaction_aborts_it_so_its_writes_cannot_commit() {
+    let db = db();
+    db.register_procedure(
+        Procedure::new("test.boom", |_| panic!("the host's procedure panicked")).output("x"),
+    )
+    .unwrap();
+    let mut tx = db.begin_write().unwrap();
+    tx.execute("INSERT (:Kept)", &Parameters::new()).unwrap();
+    let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        tx.execute(
+            "INSERT (:Half) WITH 1 AS y CALL test.boom() YIELD x RETURN x",
+            &Parameters::new(),
+        )
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(
+        tx.execute("RETURN 1", &Parameters::new())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::TransactionAborted
+    );
+    assert_eq!(
+        tx.commit().unwrap_err().kind(),
+        ErrorKind::TransactionAborted
+    );
+    assert!(run(&db, "MATCH (n) RETURN n").is_empty());
+}
+
+#[test]
 fn updating_queries_in_a_read_transaction_fail_before_reading_and_keep_it_usable() {
     let db = db();
     run(&db, "INSERT (:A {n: 1})");
@@ -434,6 +463,7 @@ fn a_failed_creation_leaves_nothing_behind() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn threads_racing_to_create_one_file_end_with_one_database_that_keeps_every_write() {
     for _ in 0..cases(5) {
         let (directory, path) = graph_file();

@@ -369,3 +369,30 @@ fn a_call_subquery_inside_exists_sees_the_outer_row() {
     );
     assert_eq!(ints(&rows), [1, 2]);
 }
+
+#[test]
+fn an_uncorrelated_call_inside_a_hidden_scope_reads_none_of_the_hidden_variables() {
+    let db = graph();
+    for query in [
+        "MATCH (n) RETURN DISTINCT n.k AS k ORDER BY COUNT { CALL { MATCH (n) RETURN n AS m } RETURN m }, k",
+        "MATCH (n) RETURN DISTINCT n.k AS k ORDER BY COUNT { CALL () { MATCH (n) RETURN n AS m } RETURN m }, k",
+        "MATCH (n) RETURN DISTINCT n.k AS k \
+         ORDER BY COUNT { CALL { WITH 1 AS one MATCH (n) RETURN n AS m } RETURN m }, k",
+    ] {
+        assert_eq!(
+            run(&db, query),
+            [vec![int(1)], vec![int(2)], vec![int(3)]],
+            "{query}"
+        );
+    }
+    for query in [
+        "MATCH (n) RETURN DISTINCT n.k AS k ORDER BY COUNT { CALL { WITH n MATCH (n)-->(m) RETURN m } RETURN m }",
+        "MATCH (n) RETURN DISTINCT n.k AS k ORDER BY COUNT { CALL (n) { MATCH (n)-->(m) RETURN m } RETURN m }",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::UndefinedVariable,
+            "{query}"
+        );
+    }
+}

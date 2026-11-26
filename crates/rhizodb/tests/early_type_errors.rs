@@ -595,6 +595,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(2048))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_type_error_the_text_check_reports_holds_whatever_values_the_value_errors_stand_for(
         case in closed(true),
         fillings in prop::collection::vec(0usize..4, 1..8),
@@ -616,6 +617,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_type_error_a_constant_expression_raises_is_one_the_text_check_reports(
         case in closed(false),
         filling in 0usize..4,
@@ -632,5 +634,18 @@ proptest! {
                 "{} raised {:?} but the text check disagrees", constant, kind
             );
         }
+    }
+}
+
+#[test]
+fn a_pattern_filter_that_cannot_be_boolean_fails_before_any_match_is_found() {
+    let db = db();
+    let expected = error_kind(&db, "MATCH (n) WHERE 1 RETURN n");
+    for query in [
+        "MATCH (n) WHERE EXISTS { (n)-->(m) WHERE 1 } RETURN n",
+        "MATCH (n) RETURN [(n)-->(m) WHERE 'x' | m] AS l",
+        "MATCH (n) RETURN COUNT { (n)-->(m) WHERE [] } AS c",
+    ] {
+        assert_eq!(error_kind(&db, query), expected, "{query}");
     }
 }
