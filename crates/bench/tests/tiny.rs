@@ -6,11 +6,12 @@ use bench::report::Agreement;
 use bench::scale::Scale;
 
 /// What an engine has no form of, which the report shows as unsupported instead of a failure.
-const UNSUPPORTED: [(EngineKind, &str); 4] = [
+const UNSUPPORTED: [(EngineKind, &str); 5] = [
     (EngineKind::Sqlite, "index/vector-create"),
     (EngineKind::Sqlite, "index/vector-search"),
     (EngineKind::Duckdb, "index/keyword-create"),
     (EngineKind::Duckdb, "index/vector-create"),
+    (EngineKind::Cozodb, "path/all-shortest-pair"),
 ];
 
 fn embedded() -> Vec<EngineKind> {

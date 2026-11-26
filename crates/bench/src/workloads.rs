@@ -1,4 +1,5 @@
 pub(crate) mod load;
+mod path;
 mod read;
 mod search;
 mod write;
@@ -107,6 +108,7 @@ pub fn all() -> Vec<Workload> {
     workloads.extend(load::workloads());
     workloads.extend(write::small_commits());
     workloads.extend(read::workloads());
+    workloads.extend(path::workloads());
     workloads.extend(write::bulk());
     workloads.extend(search::workloads());
     workloads
