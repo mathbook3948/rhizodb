@@ -416,6 +416,44 @@ fn replay_into(
 
 const RETIRED_POLL: Duration = Duration::from_millis(50);
 
+fn remove_segments_before<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    sequence: u64,
+) -> Result<(), EngineError> {
+    for earlier in segment_files(fs, name)?
+        .into_iter()
+        .filter(|earlier| *earlier < sequence)
+    {
+        fs.remove(&segment_name(name, earlier))?;
+    }
+    Ok(())
+}
+
+fn make_recovery_durable<F: FileSystem + 'static>(
+    shared: &Shared<F>,
+    fs: &F,
+    name: &str,
+) -> Result<(), EngineError> {
+    let mut writer = lock(&shared.writer);
+    let hlc = hybrid_clock_after(writer.last_hlc);
+    writer
+        .wal
+        .as_mut()
+        .ok_or(EngineError::WalMissing)?
+        .roll_over(hlc)?;
+    writer.last_hlc = hlc;
+    if let Some(job) = shared.freeze(&mut writer) {
+        shared.run_checkpoint(job, false);
+    }
+    shared.drop_segments(&mut writer);
+    if shared.is_poisoned() {
+        return Err(shared.refusal());
+    }
+    let first = lock(&shared.durable).header.wal.first_segment;
+    remove_segments_before(fs, name, first)
+}
+
 fn checkpoint_worker<F: FileSystem + 'static>(
     shared: &Shared<F>,
     receiver: &mpsc::Receiver<Task<F>>,
@@ -517,16 +555,20 @@ impl<F: FileSystem + 'static> Engine<F> {
         });
         let mut last_lsn = header.checkpoint_lsn;
         let mut last_hlc = header.checkpoint_hlc;
+        let recovered = !header.clean;
         let (wal, header) = if header.clean {
-            for sequence in segment_files(&*fs, name)? {
-                fs.remove(&segment_name(name, sequence))?;
+            let sequence = header.wal.first_segment + 1;
+            for later in segment_files(&*fs, name)?
+                .into_iter()
+                .filter(|later| *later >= sequence)
+            {
+                fs.remove(&segment_name(name, later))?;
             }
             let identity = LogIdentity {
                 database_id: header.database_id,
                 shard_id: header.shard_id,
                 salt: random_u64(),
             };
-            let sequence = header.wal.first_segment + 1;
             last_hlc = hybrid_clock_after(last_hlc);
             let wal = Wal::create(
                 Arc::clone(&fs),
@@ -547,6 +589,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 ..header
             };
             pages.write_header(&header)?;
+            remove_segments_before(&*fs, name, sequence)?;
             (wal, header)
         } else {
             let wal = Wal::recover(
@@ -587,6 +630,9 @@ impl<F: FileSystem + 'static> Engine<F> {
             poisoned: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
         });
+        if recovered {
+            make_recovery_durable(&shared, &*fs, name)?;
+        }
         let (jobs, worker) = match options.checkpoint {
             #[cfg(any(test, feature = "fuzzing"))]
             CheckpointMode::Inline => (None, None),

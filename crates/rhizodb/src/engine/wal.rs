@@ -129,7 +129,8 @@ impl<F: FileSystem> Wal<F> {
 
     /// Opens the log `header` names after a crash and calls `replay` with every record after
     /// the checkpoint, in LSN order. A torn tail of the last segment is cut off, an unfinished
-    /// last segment is removed, and any other damage fails as corruption.
+    /// last segment is removed, and any other damage fails as corruption. Segments before the
+    /// first one `header` names are left for the caller to remove.
     pub(crate) fn recover(
         fs: Arc<F>,
         base: &str,
@@ -143,12 +144,6 @@ impl<F: FileSystem> Wal<F> {
             salt: header.wal.salt,
         };
         let mut sequences = segment_files(&*fs, base)?;
-        for stale in sequences
-            .iter()
-            .filter(|seq| **seq < header.wal.first_segment)
-        {
-            fs.remove(&segment_name(base, *stale))?;
-        }
         sequences.retain(|seq| *seq >= header.wal.first_segment);
         if sequences.first() != Some(&header.wal.first_segment) {
             return Err(EngineError::WalMissing);
@@ -357,7 +352,8 @@ impl<F: FileSystem> Wal<F> {
             .ok_or_else(|| EngineError::corrupt("the log has no segment"))
     }
 
-    fn roll_over(&mut self, hlc: u64) -> Result<(), EngineError> {
+    /// Starts a new segment, durable with its name, that the next record goes to.
+    pub(crate) fn roll_over(&mut self, hlc: u64) -> Result<(), EngineError> {
         let sequence = self.active_segment()?.sequence + 1;
         let (file, header) = new_segment(
             &*self.fs,

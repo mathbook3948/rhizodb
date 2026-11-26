@@ -43,7 +43,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A write torn with garbage may also garble the other sectors of its 4 KiB unit, synced ones included, as a device that rewrites a whole page or sector does.
 - A simulated crash may lose a change of file length, a create, a rename, or a remove that was not synced.
 - The simulated file system can fail every operation after a chosen count, once or from then on.
-- A failed fsync in the simulated file system fails every later fsync of that file.
+- A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
+- A failed sync of the simulated file system's names fails every later one.
 - Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
 - The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
 - No backup of the redb file is kept after the conversion.
@@ -85,7 +86,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
 - On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets a refusal of access at any step of creating the database waits and tries again as it does for a locked staging file.
-- Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
+- Opening a cleanly closed database starts a log with a new salt, which a header without the clean flag records before any commit, and removes leftover segments once that header is durable.
+- Opening a database after an unclean shutdown starts a new segment, writes every replayed commit into the file under a new header, and removes the segments that header no longer needs only once it is durable, so no later commit rests on log records or a header that only the page cache held.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
@@ -170,3 +172,4 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
+- How an open makes a header that only the page cache held durable without risking the one durable header, since the new header goes to that slot and a torn write there leaves neither.

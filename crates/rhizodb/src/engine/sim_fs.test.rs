@@ -315,20 +315,24 @@ fn an_error_aimed_at_one_file_counts_and_fails_only_that_file() {
 }
 
 #[test]
-fn a_failed_sync_fails_every_later_sync_of_that_file() {
+fn a_failed_sync_loses_the_writes_since_the_last_sync_and_later_syncs_succeed() {
     let fs = SimFs::new();
-    let file = synced_file(&fs, "db", &[page(1)]);
-    let other = synced_file(&fs, "other", &[page(1)]);
+    let file = synced_file(&fs, "db", &[page(1), page(1)]);
     file.write(0, [page(2)].as_flattened()).unwrap();
     fs.fail_file_after("db", 0, Failure::Once).unwrap();
     assert!(file.sync().is_err());
-    assert!(file.sync().is_err());
-    file.write(0, [page(3)].as_flattened()).unwrap();
-    assert!(file.sync().is_err());
-    other.sync().unwrap();
-    assert_eq!(pages(&fs.crash(Crash::DropUnsynced), "db"), [page(1)]);
-    let reopened = fs.crash(Crash::DropUnsynced);
-    reopened.open("db", size()).unwrap().sync().unwrap();
+    assert_eq!(pages(&fs, "db"), [page(2), page(1)]);
+    file.sync().unwrap();
+    assert_eq!(
+        pages(&fs.crash(Crash::DropUnsynced), "db"),
+        [page(1), page(1)]
+    );
+    file.write(1, [page(3)].as_flattened()).unwrap();
+    fs.open("db", size()).unwrap().sync().unwrap();
+    assert_eq!(
+        pages(&fs.crash(Crash::DropUnsynced), "db"),
+        [page(1), page(3)]
+    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -45,7 +46,8 @@ pub(crate) enum Crash {
     /// torn at sectors into new, old, and garbage bytes, and a torn block may also garble
     /// other sectors of its 4 KiB unit, synced ones included. It applies the kept writes in a
     /// shuffled order, may lose an unsynced change of length, and keeps a prefix of the
-    /// unsynced name changes.
+    /// unsynced name changes. Writes a failed sync left behind are treated the same, before
+    /// the writes after it.
     Scramble { seed: u64 },
     /// Like [`Crash::Scramble`], but each sector holds its old or its new bytes, never
     /// garbage, as on a device whose sector writes are atomic.
@@ -78,7 +80,7 @@ struct Inode {
     live: Vec<u8>,
     durable: Vec<u8>,
     pending: Vec<DataChange>,
-    sync_failed: bool,
+    unsettled: Vec<DataChange>,
 }
 
 #[derive(Clone, Debug)]
@@ -276,7 +278,7 @@ impl SimFs {
                 live: bytes.clone(),
                 durable: bytes,
                 pending: Vec::new(),
-                sync_failed: false,
+                unsettled: Vec::new(),
             });
         }
         let names: BTreeMap<String, usize> = names
@@ -310,9 +312,11 @@ enum Torn {
 
 fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
     let mut bytes = inode.durable.clone();
-    let mut order: Vec<&DataChange> = inode.pending.iter().collect();
-    random.shuffle(&mut order);
-    for change in order {
+    let mut unsettled: Vec<&DataChange> = inode.unsettled.iter().collect();
+    random.shuffle(&mut unsettled);
+    let mut pending: Vec<&DataChange> = inode.pending.iter().collect();
+    random.shuffle(&mut pending);
+    for change in unsettled.into_iter().chain(pending) {
         match change {
             DataChange::SetLength(length) => {
                 if random.chance(2) {
@@ -537,16 +541,38 @@ impl BlockFile for SimFile {
 
     fn sync(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
-        if state.inode(self.inode).sync_failed {
-            return Err(injected());
-        }
-        if let Err(error) = state.operate(Some(self.inode)) {
-            state.inode(self.inode).sync_failed = true;
+        let failed = state.operate(Some(self.inode));
+        let inode = state.inode(self.inode);
+        let pending = mem::take(&mut inode.pending);
+        if let Err(error) = failed {
+            let writes = pending
+                .into_iter()
+                .filter(|change| matches!(change, DataChange::Write { .. }));
+            inode.unsettled.extend(writes);
             return Err(error);
         }
-        let inode = state.inode(self.inode);
-        inode.durable = inode.live.clone();
-        inode.pending.clear();
+        for change in pending {
+            match change {
+                DataChange::SetLength(length) => {
+                    inode.durable.resize(length, 0);
+                    inode.unsettled.retain(|old| match old {
+                        DataChange::Write { start, .. } => *start < length,
+                        DataChange::SetLength(_) => true,
+                    });
+                }
+                DataChange::Write { start, data } => {
+                    let end = start + data.len();
+                    grow(&mut inode.durable, end);
+                    inode.durable[start..end].copy_from_slice(&data);
+                    inode.unsettled.retain(|old| match old {
+                        DataChange::Write { start: old, data } => {
+                            old + data.len() <= start || *old >= end
+                        }
+                        DataChange::SetLength(_) => true,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }

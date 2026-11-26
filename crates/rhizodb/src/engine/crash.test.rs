@@ -244,6 +244,109 @@ fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generatio
 }
 
 #[test]
+fn a_reopen_after_any_failure_keeps_each_later_acknowledged_commit_through_a_power_loss() {
+    for every_commit in [false, true] {
+        let options = EngineOptions {
+            memtable_limit: if every_commit {
+                0
+            } else {
+                options().memtable_limit
+            },
+            ..options()
+        };
+        let transactions = transactions(13, 10);
+        let total = {
+            let fs = SimFs::new();
+            let engine = open(&fs, options).unwrap();
+            let before = fs.operations();
+            run_until_failure(&engine, &transactions);
+            drop(engine);
+            fs.operations() - before
+        };
+        let seeds = u64::from(test_scale::cases(2));
+        let mut reopened = 0;
+        for fail_at in 0..=total {
+            let fs = SimFs::new();
+            let engine = open(&fs, options).unwrap();
+            fs.fail_after(fail_at, Failure::Once);
+            run_until_failure(&engine, &transactions);
+            drop(engine);
+            let Ok(engine) = open(&fs, options) else {
+                continue;
+            };
+            reopened += 1;
+            let mut expected = vec![dump(&engine)];
+            for writes in &transactions {
+                expected.push(applied(expected.last().unwrap(), writes));
+            }
+            let run = run_until_failure(&engine, &transactions);
+            let images: Vec<(Crash, SimFs)> = crashes(seeds)
+                .into_iter()
+                .map(|crash| (crash, fs.crash(crash)))
+                .collect();
+            drop(engine);
+            for (crash, image) in images {
+                let engine = open(&image, options)
+                    .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+                let found = dump(&engine);
+                assert!(
+                    found == expected[run.acknowledged]
+                        || (run.in_flight && found == expected[run.acknowledged + 1]),
+                    "fail at {fail_at}, {crash:?}: {} commits acknowledged after the reopen, \
+                     state differs",
+                    run.acknowledged
+                );
+            }
+        }
+        assert!(
+            reopened * 2 > total,
+            "only {reopened} of {total} reopens succeeded"
+        );
+    }
+}
+
+#[test]
+fn a_commit_whose_log_sync_failed_and_reappeared_after_a_reopen_survives_a_power_loss() {
+    let put = |key: &[u8]| vec![Write::Put(Table::Metadata, key.to_vec(), b"v".to_vec())];
+    let options = EngineOptions {
+        segment_target: 1 << 20,
+        memtable_limit: 1 << 20,
+        wal_limit: 1 << 20,
+        ..options()
+    };
+    let fs = SimFs::new();
+    let engine = open(&fs, options).unwrap();
+    commit(&engine, &put(b"a")).unwrap();
+    let segment = crate::engine::wal::segment_name(
+        NAME,
+        *crate::engine::wal::segment_files(&fs, NAME)
+            .unwrap()
+            .last()
+            .unwrap(),
+    );
+    fs.fail_file_after(&segment, 1, Failure::Once).unwrap();
+    assert!(commit(&engine, &put(b"b")).is_err());
+    drop(engine);
+    let engine = open(&fs, options).unwrap();
+    let seen = dump(&engine);
+    assert_eq!(
+        seen,
+        applied(&applied(&State::new(), &put(b"a")), &put(b"b"))
+    );
+    commit(&engine, &put(b"c")).unwrap();
+    let expected = applied(&seen, &put(b"c"));
+    let images: Vec<(Crash, SimFs)> = crashes(4)
+        .into_iter()
+        .map(|crash| (crash, fs.crash(crash)))
+        .collect();
+    drop(engine);
+    for (crash, image) in images {
+        let engine = open(&image, options).unwrap_or_else(|error| panic!("{crash:?}: {error}"));
+        assert_eq!(dump(&engine), expected, "{crash:?}");
+    }
+}
+
+#[test]
 fn every_failure_while_opening_leaves_the_database_whole() {
     let transactions = transactions(11, 12);
     let states = states(&transactions);
@@ -517,6 +620,24 @@ fn file_blocks(fs: &SimFs) -> u64 {
     .unwrap()
 }
 
+fn durable_header(fs: &SimFs) -> crate::engine::header::Header {
+    let file = fs
+        .open(
+            NAME,
+            crate::engine::block_file::BlockSize::new(4096).unwrap(),
+        )
+        .unwrap();
+    let mut slots = [vec![0; 4096], vec![0; 4096]];
+    for (slot, block) in slots.iter_mut().enumerate() {
+        file.read(slot as u64, block).unwrap();
+    }
+    crate::engine::header::choose(
+        crate::engine::header::decode_slot(&slots[0], 0),
+        crate::engine::header::decode_slot(&slots[1], 1),
+    )
+    .unwrap()
+}
+
 fn fail_each_operation_of(
     base: &SimFs,
     options: EngineOptions,
@@ -541,12 +662,13 @@ fn fail_each_operation_of(
         let (acknowledged, in_flight) = step(&engine);
         drop(engine);
         for crash in crashes(seeds) {
-            let reopened = open(&copy.crash(crash), options)
+            let crashed = copy.crash(crash);
+            staged += usize::from(durable_header(&crashed).staged_lsn != 0);
+            let reopened = open(&crashed, options)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
             reopened.check().unwrap_or_else(|error| {
                 panic!("check after fail at {fail_at}, {crash:?}: {error}")
             });
-            staged += usize::from(reopened.header().staged_lsn != 0);
             let found = dump(&reopened);
             let at = start + acknowledged;
             assert!(

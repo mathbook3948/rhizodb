@@ -136,7 +136,6 @@ fn recovery_replays_only_the_records_after_the_checkpoint() {
         let crashed = fs.crash(crash);
         let (_, seen) = lsns(&crashed, &checkpoint).unwrap();
         assert_eq!(seen, (26..=40).collect::<Vec<_>>());
-        assert_eq!(segment_files(&crashed, BASE).unwrap()[0], first);
     }
 }
 
@@ -353,7 +352,7 @@ fn a_torn_first_segment_header_is_corruption() {
 }
 
 #[test]
-fn stale_segments_below_the_first_needed_are_removed() {
+fn stale_segments_below_the_first_needed_are_left_for_the_caller() {
     let fs = SimFs::new();
     let mut wal = fresh(&fs);
     for lsn in 1..=40 {
@@ -361,9 +360,10 @@ fn stale_segments_below_the_first_needed_are_removed() {
     }
     let first = wal.first_needed(20);
     assert!(first > 2);
-    let (_, seen) = lsns(&fs, &header(20, first)).unwrap();
+    let (wal, seen) = lsns(&fs, &header(20, first)).unwrap();
     assert_eq!(seen, (21..=40).collect::<Vec<_>>());
-    assert_eq!(segment_files(&fs, BASE).unwrap()[0], first);
+    assert_eq!(segment_files(&fs, BASE).unwrap()[0], 1);
+    assert_eq!(wal.first_needed(0), first);
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
         let (durable, acked, in_flight) = append_and_checkpoint_until_failure(&fs, Some(fail_at));
         for crash in crashes(seeds) {
             let crashed = fs.crash(crash);
-            let before = log_bytes(&crashed);
+            let before = log_bytes(&crashed, durable.wal.first_segment);
             let (mut wal, seen) = lsns(&crashed, &durable)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
             let first = durable.checkpoint_lsn + 1;
@@ -452,10 +452,10 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
                     lost_in_flight += 1;
                 }
             }
-            if log_bytes(&crashed) < before {
+            if log_bytes(&crashed, durable.wal.first_segment) < before {
                 cut_tails += 1;
             }
-            assert_eq!(log_bytes(&crashed), wal.size());
+            assert_eq!(log_bytes(&crashed, durable.wal.first_segment), wal.size());
             wal.append(record(last), 0).unwrap();
             wal.append(record(last + 1), 0).unwrap();
             let (_, again) = lsns(&crashed.crash(crash), &durable).unwrap();
@@ -470,10 +470,11 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
     assert!(kept_in_flight > 0 && lost_in_flight > 0 && cut_tails > 0);
 }
 
-fn log_bytes(fs: &SimFs) -> u64 {
+fn log_bytes(fs: &SimFs, first: u64) -> u64 {
     segment_files(fs, BASE)
         .unwrap()
         .into_iter()
+        .filter(|sequence| *sequence >= first)
         .map(|sequence| {
             let file = fs
                 .open(&segment_name(BASE, sequence), wal_block().unwrap())
