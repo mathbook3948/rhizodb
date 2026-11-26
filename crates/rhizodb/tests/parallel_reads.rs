@@ -32,7 +32,7 @@ const FILTERS: [&str; 12] = [
     "WHERE size(n.name) > 2",
 ];
 
-const TAILS: [&str; 31] = [
+const TAILS: [&str; 32] = [
     "RETURN count(*)",
     "RETURN count(n.x), sum(n.x), avg(n.x), min(n.x), max(n.x)",
     "RETURN sum(n.f), avg(n.f), stDev(n.f), stDevP(n.f)",
@@ -40,6 +40,9 @@ const TAILS: [&str; 31] = [
     "RETURN n.g AS g, count(*), sum(n.f), collect(n.name)",
     "RETURN count(DISTINCT n.x), sum(DISTINCT n.x), avg(DISTINCT n.f), collect(DISTINCT n.g)",
     "RETURN percentileCont(n.f, 0.5), percentileDisc(n.x, 0.3), min(n.name), max(n.f)",
+    "RETURN n.g AS g, min(n.x), max(DISTINCT n.x), min(CASE WHEN n.f > 0.5 THEN 1 ELSE 1.0 END), \
+     max(CASE WHEN n.f > 0.5 THEN 1 ELSE 1.0 END), \
+     max(DISTINCT CASE WHEN n.f > 0.5 THEN 1 ELSE 1.0 END) ORDER BY g",
     "RETURN n.g AS g, percentileCont(n.f, n.p) ORDER BY g",
     "RETURN sum(n.big), count(n.big)",
     "RETURN n.x, n.name ORDER BY n.x DESC LIMIT 5",

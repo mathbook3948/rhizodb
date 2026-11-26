@@ -14,6 +14,8 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
 - Reading or changing the relationships of a node no longer reads the stored relationships of a hub node in the same block of 16 node IDs. Before, every such read or commit read the whole of the hub's adjacency, so its cost grew with the hub's degree.
 - A commit that adds a relationship to a hub no longer reads the hub's stored adjacency, and rewrites it once its pending changes reach the square root of eight times its size instead of half a part. Adding relationships to one node one commit at a time no longer takes time quadratic in its degree, and the bytes it writes for the hub grow with the degree to the power 1.5 instead of the square.
+- `min()` and `max()`, with or without `DISTINCT`, keep one value per group as rows arrive instead of holding every value of the group until the end, so `MATCH (n:N) RETURN min(n.x), max(n.x)` uses memory per group instead of per row and no longer slows down when it splits across threads. The results are unchanged, ties between equivalent values such as `1` and `1.0` included.
+- Joining the `collect()` lists of a query split across threads checks the value limits once per list instead of once per item, and `percentileCont()` and `percentileDisc()` sort their values once instead of twice.
 
 ### Fixed
 
