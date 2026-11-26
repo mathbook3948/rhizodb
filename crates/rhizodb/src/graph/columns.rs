@@ -985,49 +985,71 @@ enum Placed {
     Heap(u32),
 }
 
-/// A [`Column`] with where each slot's value lies, for a scan that reads the value of many slots.
-/// An integer or a float is held decoded.
+/// Where each slot's value of one column of a group lies, for a scan that reads the value of many
+/// slots. An integer or a float is held decoded, and only the parts of other values are kept.
 #[derive(Debug)]
 pub(crate) struct IndexedColumn {
-    column: Column,
+    parts: Vec<Segment>,
     at: Vec<Placed>,
+    first: Option<(usize, usize)>,
 }
 
 impl IndexedColumn {
-    pub(crate) fn new(column: Column) -> Self {
-        let mut at = vec![Placed::Absent; SLOTS];
-        for (segment, parts) in column.segments.iter().enumerate() {
-            let Some(first) = parts.first() else {
+    /// A column with no stored segment.
+    pub(crate) fn new() -> Self {
+        Self {
+            parts: Vec::new(),
+            at: vec![Placed::Absent; SLOTS],
+            first: None,
+        }
+    }
+
+    /// Takes in the part of segment `segment` stored under `key`, checked. Parts arrive in
+    /// ascending key order, and the first part of a segment sets the span its values are placed
+    /// by.
+    pub(crate) fn insert(
+        &mut self,
+        segment: usize,
+        key: &[u8],
+        bytes: &[u8],
+    ) -> Result<(), GraphError> {
+        let layout = SegmentRef::parse(key, bytes)?.layout;
+        let part = part_of_key(key);
+        let span = match self.first {
+            Some((held, span)) if held == segment => span,
+            _ => {
+                self.first = Some((segment, layout.span));
+                layout.span
+            }
+        };
+        let words = match layout.kind {
+            Kind::Int | Kind::Float => bytes.get(layout.values..).unwrap_or_default(),
+            Kind::Bool | Kind::Str | Kind::Variant => {
+                self.parts.push(Segment {
+                    part,
+                    bytes: bytes.into(),
+                    layout,
+                });
+                &[]
+            }
+        };
+        let held = self.parts.len().saturating_sub(1) as u32;
+        let words = words.as_chunks::<8>().0;
+        for (index, position) in ones(layout.bitmap).enumerate() {
+            if position / span != part {
                 continue;
+            }
+            let placed = match words.get(index) {
+                Some(word) if layout.kind == Kind::Int => Placed::Int(i64::from_le_bytes(*word)),
+                Some(word) => Placed::Float(f64::from_le_bytes(*word)),
+                None if words.is_empty() => Placed::Heap(held << 8 | index as u32),
+                None => return Err(VALUE_OUTSIDE),
             };
-            let span = first.layout.span;
-            for (held, part) in parts.iter().enumerate() {
-                let layout = part.layout;
-                let words = match layout.kind {
-                    Kind::Int | Kind::Float => part.bytes.get(layout.values..).unwrap_or_default(),
-                    Kind::Bool | Kind::Str | Kind::Variant => &[],
-                };
-                let words = words.as_chunks::<8>().0;
-                for (index, position) in ones(layout.bitmap).enumerate() {
-                    if position / span != part.part {
-                        continue;
-                    }
-                    let placed = match words.get(index) {
-                        Some(word) if layout.kind == Kind::Int => {
-                            Placed::Int(i64::from_le_bytes(*word))
-                        }
-                        Some(word) => Placed::Float(f64::from_le_bytes(*word)),
-                        None => {
-                            Placed::Heap((segment as u32) << 16 | (held as u32) << 8 | index as u32)
-                        }
-                    };
-                    if let Some(slot) = at.get_mut(segment * SEGMENT_SLOTS + position) {
-                        *slot = placed;
-                    }
-                }
+            if let Some(slot) = self.at.get_mut(segment * SEGMENT_SLOTS + position) {
+                *slot = placed;
             }
         }
-        Self { column, at }
+        Ok(())
     }
 
     /// The value in `slot` of the group where it is absent or an integer.
@@ -1047,12 +1069,7 @@ impl IndexedColumn {
             Some(Placed::Float(value)) => return Ok(Some(Cell::Float(*value))),
             Some(Placed::Heap(at)) => *at as usize,
         };
-        match self
-            .column
-            .segments
-            .get(at >> 16)
-            .and_then(|parts| parts.get(at >> 8 & 0xff))
-        {
+        match self.parts.get(at >> 8) {
             Some(part) => part.view().cell(at & 0xff).map(Some),
             None => Ok(None),
         }

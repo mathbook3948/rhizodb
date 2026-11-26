@@ -165,6 +165,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         Ok(column)
     }
 
+    fn load_indexed_column(&self, (group, token): ColumnId) -> Result<IndexedColumn, GraphError> {
+        let mut column = IndexedColumn::new();
+        self.transaction.visit_prefix(
+            Table::NodeColumns,
+            &columns::column_prefix(group, token),
+            |key, value| match columns::parse_key(key)? {
+                ColumnKey::Segment { segment, .. } => column.insert(segment, key, value),
+                ColumnKey::Delta { .. } => Err(GraphError::Corrupt(
+                    "a property column delta lies among segments",
+                )),
+            },
+        )?;
+        Ok(column)
+    }
+
     fn load_deltas(&self, group: u64) -> Result<Deltas, GraphError> {
         let mut deltas = Deltas::new();
         self.transaction.visit_prefix(
@@ -330,7 +345,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .iter()
             .map(|token| {
                 token
-                    .map(|token| Ok((token, IndexedColumn::new(self.load_column((group, token))?))))
+                    .map(|token| Ok((token, self.load_indexed_column((group, token))?)))
                     .transpose()
             })
             .collect::<Result<_, GraphError>>()?;
