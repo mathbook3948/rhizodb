@@ -45,8 +45,13 @@ env = { RHIZODB_TEST_SCALE = "100" }
 run = [
   "cargo test --release --package rhizodb --test isolation --test kill_recovery --test model_ops --test corrupt_file --test concurrency --test resource_limits --test backup --test query_oracle --test memory_growth --test snapshot_stress",
   "cargo test --release --package interleavings",
-  "RHIZODB_TEST_PARALLEL=1 RHIZODB_TEST_SCALE=1 cargo test --release --package rhizodb --tests",
+  { task = "parallel-deep" },
 ]
+
+[tasks.parallel-deep]
+description = "Run every integration test with each read query that can split forced across four threads"
+env = { RHIZODB_TEST_PARALLEL = "1", RHIZODB_TEST_SCALE = "1" }
+run = "cargo test --release --package rhizodb --tests"
 
 [tasks.soak]
 description = "Kill a writing child process at random points for RHIZODB_SOAK_SECS seconds (default 3600), and check every reopened file against what the child reported"
