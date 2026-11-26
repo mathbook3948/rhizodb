@@ -6,10 +6,11 @@
 mod db_file;
 mod support;
 
+use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::Once;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
@@ -17,7 +18,31 @@ use support::*;
 
 const FAST_DAMAGES: u64 = 24;
 
-static LAST_PANIC: Mutex<String> = Mutex::new(String::new());
+static QUIET_HOOK: Once = Once::new();
+
+thread_local! {
+    static PROBE_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Installs, once per binary, a panic hook that records the location of a panic on a thread that
+/// is probing and prints nothing for it, and hands every other panic to the hook it replaced.
+fn quiet_probe_panics() {
+    QUIET_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let probing = PROBE_PANIC.with_borrow_mut(|last| {
+                let probing = last.is_some();
+                if probing {
+                    *last = Some(info.location().map(ToString::to_string).unwrap_or_default());
+                }
+                probing
+            });
+            if !probing {
+                previous(info);
+            }
+        }));
+    });
+}
 
 fn regressions(target: &str) -> Vec<PathBuf> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,21 +81,19 @@ fn format_eight_pristine() -> Vec<u8> {
 fn probe_on(pristine: &[u8], inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Outcomes {
     let directory = tempfile::tempdir().unwrap();
     let damaged = directory.path().join("damaged.rhizodb");
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|info| {
-        if let Some(location) = info.location() {
-            *LAST_PANIC.lock().unwrap() = location.to_string();
-        }
-    }));
+    quiet_probe_panics();
     let mut outcomes = Outcomes {
         panics: Vec::new(),
         failures: Vec::new(),
     };
     for (name, bytes) in inputs {
         let file = db_file::damage(pristine.to_vec(), &bytes);
-        match std::panic::catch_unwind(AssertUnwindSafe(|| {
+        PROBE_PANIC.set(Some(String::new()));
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
             db_file::open_and_probe(&damaged, &file)
-        })) {
+        }));
+        let location = PROBE_PANIC.take().unwrap_or_default();
+        match outcome {
             Ok(kinds) => outcomes.failures.push((name, kinds)),
             Err(payload) => {
                 let message = payload
@@ -78,14 +101,12 @@ fn probe_on(pristine: &[u8], inputs: impl IntoIterator<Item = (String, Vec<u8>)>
                     .map(|message| (*message).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_default();
-                let location = LAST_PANIC.lock().unwrap().clone();
                 outcomes.panics.push(format!(
                     "{name} (damage {bytes:?}): {message} at {location}"
                 ));
             }
         }
     }
-    std::panic::set_hook(hook);
     outcomes
 }
 
