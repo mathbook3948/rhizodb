@@ -44,6 +44,7 @@ pub(crate) use self::builtin::is_reserved;
 use self::cache::PlanCache;
 use self::datum::Datum;
 use self::datum::from_parameter;
+pub(crate) use self::eval::float_text;
 pub(crate) use self::parallel::Parallelism;
 use self::parallel::Workers;
 use self::plan::Plan;
