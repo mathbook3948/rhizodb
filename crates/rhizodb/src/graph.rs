@@ -81,7 +81,6 @@ use meta::LabelSetCache;
 use meta::LabelSetId;
 use meta::Meta;
 use meta::MetaBytes;
-use meta::MetaEdit;
 use meta::MetaHead;
 use meta::Part;
 use meta::Slot;
@@ -89,13 +88,7 @@ use relationships::ChunkEdit;
 use relationships::ChunkRef;
 
 const FORMAT_VERSION: u32 = 14;
-const OLDEST_FORMAT_VERSION: u32 = 1;
-const POSITIONAL_POSTING_FORMAT_VERSION: u32 = 4;
-const TAGGED_INDEX_TARGET_FORMAT_VERSION: u32 = 5;
-const NODE_META_FORMAT_VERSION: u32 = 8;
-const NODE_COLUMNS_FORMAT_VERSION: u32 = 9;
-const ADJACENCY_SEGMENTS_FORMAT_VERSION: u32 = 10;
-const VARINT_RELATIONSHIPS_FORMAT_VERSION: u32 = 11;
+const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
@@ -227,9 +220,8 @@ impl CommittedTokens {
 
 impl<S: Storage> Graph<S> {
     /// Records the format version on first open, upgrades a database written in an older
-    /// version to the current one, and rejects a database written in a newer version. Index
-    /// definitions written before indexes could cover relationships are rewritten, and keyword
-    /// indexes written before postings kept positions or built by another tokenizer are rebuilt,
+    /// version to the current one, and rejects a database written in a newer version or one
+    /// older than the oldest it upgrades. Keyword indexes built by another tokenizer are rebuilt
     /// in the same write transaction.
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
         {
@@ -251,23 +243,9 @@ impl<S: Storage> Graph<S> {
             if let Some(found) = found
                 && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
             {
-                tx.move_relationships_to_chunks(found < VARINT_RELATIONSHIPS_FORMAT_VERSION)?;
+                tx.move_relationships_to_chunks()?;
             }
-            if found.is_some_and(|found| found < TAGGED_INDEX_TARGET_FORMAT_VERSION) {
-                tx.tag_index_targets()?;
-            }
-            if found.is_some_and(|found| found < NODE_META_FORMAT_VERSION) {
-                tx.move_labels_to_node_meta()?;
-            }
-            if found.is_some_and(|found| found < NODE_COLUMNS_FORMAT_VERSION) {
-                tx.move_properties_to_columns()?;
-            }
-            if found.is_some_and(|found| found < ADJACENCY_SEGMENTS_FORMAT_VERSION) {
-                tx.move_adjacency_to_segments()?;
-            }
-            let stale_postings =
-                found.is_some_and(|found| found < POSITIONAL_POSTING_FORMAT_VERSION);
-            if !stale_postings && found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
+            if found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
                 tx.move_postings_to_blocks()?;
             }
             if upgrade {
@@ -277,7 +255,7 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            if tx.adopt_current_tokenizer(stale_postings)? || upgrade {
+            if tx.adopt_current_tokenizer()? || upgrade {
                 tx.commit()?;
             }
         }
@@ -1301,7 +1279,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         }
     }
 
-    fn move_relationships_to_chunks(&mut self, fixed: bool) -> Result<(), GraphError> {
+    fn move_relationships_to_chunks(&mut self) -> Result<(), GraphError> {
         const BATCH_SHIFT: u32 = 16;
         let mut batches = BTreeSet::new();
         self.transaction
@@ -1318,11 +1296,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             let mut chunks: BTreeMap<u64, ChunkEdit> = BTreeMap::new();
             self.transaction
                 .visit_range(Table::Relationships, &start, &end, |key, value| {
-                    let record = if fixed {
-                        RelationshipRecord::decode_fixed(value)?
-                    } else {
-                        RelationshipRecord::decode(value)?
-                    };
+                    let record = RelationshipRecord::decode(value)?;
                     let (chunk, slot) = relationships::locate(RelationshipId(decode_u64(key)?));
                     chunks
                         .entry(chunk)
@@ -1341,54 +1315,6 @@ impl<T: WriteTransaction> GraphTx<T> {
             }
             self.transaction
                 .delete_range(Table::Relationships, &start, &end)?;
-        }
-        Ok(())
-    }
-
-    fn move_adjacency_to_segments(&mut self) -> Result<(), GraphError> {
-        for (side, table) in [
-            (Side::Outgoing, Table::Outgoing),
-            (Side::Incoming, Table::Incoming),
-        ] {
-            let mut groups = BTreeSet::new();
-            self.transaction.visit_prefix(table, &[], |key, _| {
-                let (node, _, _) = keys::parse_adjacency_key(key)?;
-                groups.insert(meta::locate(node).0);
-                Ok::<(), GraphError>(())
-            })?;
-            for group in groups {
-                let start = keys::element_key(meta::node_at(group, 0).0);
-                let end = group
-                    .checked_add(1)
-                    .and_then(|after| after.checked_mul(meta::SLOTS as u64))
-                    .map_or([0xff; 9].to_vec(), |after| {
-                        keys::element_key(after).to_vec()
-                    });
-                let mut segments: BTreeMap<SegmentId, Vec<(usize, Vec<Edge>)>> = BTreeMap::new();
-                for (key, value) in self.transaction.scan_range(table, &start, &end)? {
-                    let (node, rel_type, relationship) = keys::parse_adjacency_key(&key)?;
-                    let edge = Edge {
-                        relationship,
-                        other: NodeId(decode_u64(&value)?),
-                    };
-                    let (id, position) = adjacency::locate(side, node, rel_type.id());
-                    let slots = segments.entry(id).or_default();
-                    match slots.last_mut() {
-                        Some((held, edges)) if *held == position => edges.push(edge),
-                        _ => slots.push((position, vec![edge])),
-                    }
-                }
-                for (id, slots) in segments {
-                    let borrowed: Vec<(usize, &[Edge])> = slots
-                        .iter()
-                        .map(|(position, edges)| (*position, edges.as_slice()))
-                        .collect();
-                    for (key, bytes) in adjacency::encode_segment(&id, &borrowed)? {
-                        self.transaction.put(Table::Adjacency, &key, &bytes)?;
-                    }
-                }
-                self.transaction.delete_range(table, &start, &end)?;
-            }
         }
         Ok(())
     }
@@ -1475,92 +1401,6 @@ impl<T: WriteTransaction> GraphTx<T> {
             .put(Table::LabelSets, &set.0.to_be_bytes(), key)?;
         self.transaction
             .put(Table::LabelSetByTokens, key, &set.0.to_be_bytes())?;
-        Ok(())
-    }
-
-    fn move_labels_to_node_meta(&mut self) -> Result<(), GraphError> {
-        let mut groups = BTreeSet::new();
-        self.transaction.visit_prefix(Table::Nodes, &[], |key, _| {
-            groups.insert(meta::locate(NodeId(decode_u64(key)?)).0);
-            Ok::<(), GraphError>(())
-        })?;
-        for group in groups {
-            let start = keys::element_key(meta::node_at(group, 0).0);
-            let end = group
-                .checked_add(1)
-                .and_then(|after| after.checked_mul(meta::SLOTS as u64))
-                .map_or([0xff; 9].to_vec(), |after| {
-                    keys::element_key(after).to_vec()
-                });
-            let mut edit = MetaEdit::default();
-            for (key, value) in self.transaction.scan_range(Table::Nodes, &start, &end)? {
-                let id = NodeId(decode_u64(&key)?);
-                let record = NodeRecord::decode_with_labels(&value)?;
-                for label in &record.labels {
-                    self.transaction
-                        .delete(Table::LabelIndex, &keys::label_key(*label, id))?;
-                }
-                self.transaction.put(Table::Nodes, &key, &record.encode())?;
-                let set = self.intern_label_set(&record.labels)?;
-                if let Some((key, _)) = self.new_label_sets.remove(&set) {
-                    self.store_label_set(set, &key)?;
-                }
-                edit.put(meta::locate(id).1, set);
-            }
-            if let Some(chunk) = edit.encode(group, |set| self.label_set(set))? {
-                self.transaction
-                    .put(Table::NodeChunks, &meta::meta_key(group), &chunk)?;
-            }
-        }
-        for (key, _) in self.transaction.scan_prefix(Table::LabelIndex, &[])? {
-            self.transaction.delete(Table::LabelIndex, &key)?;
-        }
-        Ok(())
-    }
-
-    fn move_properties_to_columns(&mut self) -> Result<(), GraphError> {
-        let mut group: Option<u64> = None;
-        let mut values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>> = BTreeMap::new();
-        for (key, value) in self.transaction.scan_prefix(Table::Nodes, &[])? {
-            let (at, slot) = meta::locate(NodeId(decode_u64(&key)?));
-            if group.is_some_and(|group| group != at) {
-                self.put_columns(group, std::mem::take(&mut values))?;
-            }
-            group = Some(at);
-            for (token, value) in NodeRecord::decode_properties(&value)? {
-                values.entry(token).or_default().push((slot, value));
-            }
-            self.transaction.delete(Table::Nodes, &key)?;
-        }
-        self.put_columns(group, values)
-    }
-
-    fn put_columns(
-        &mut self,
-        group: Option<u64>,
-        values: BTreeMap<Token<PropertyKey>, Vec<(usize, PropertyValue)>>,
-    ) -> Result<(), GraphError> {
-        let Some(group) = group else {
-            return Ok(());
-        };
-        for (token, values) in values {
-            let mut start = 0;
-            while start < values.len() {
-                let segment = values[start].0 / columns::SEGMENT_SLOTS;
-                let end = values[start..]
-                    .iter()
-                    .position(|(slot, _)| slot / columns::SEGMENT_SLOTS != segment)
-                    .map_or(values.len(), |offset| start + offset);
-                let cells: Vec<(usize, columns::Cell<'_>)> = values[start..end]
-                    .iter()
-                    .map(|(slot, value)| (slot % columns::SEGMENT_SLOTS, columns::Cell::of(value)))
-                    .collect();
-                for (key, bytes) in columns::encode_segment(group, token, segment, &cells)? {
-                    self.transaction.put(Table::NodeColumns, &key, &bytes)?;
-                }
-                start = end;
-            }
-        }
         Ok(())
     }
 
@@ -1908,10 +1748,6 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "graph/maintenance.test.rs"]
 mod maintenance_tests;
-
-#[cfg(test)]
-#[path = "graph/upgrade.test.rs"]
-mod upgrade_tests;
 
 #[cfg(test)]
 #[path = "graph/node_meta.test.rs"]

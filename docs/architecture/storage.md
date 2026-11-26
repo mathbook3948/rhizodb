@@ -17,12 +17,10 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - Opening an existing file that the engine cannot read never rewrites it, since it may be a damaged database.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
+- Opening a database written in a format version older than the first one RhizoDB's own engine wrote fails the same way, since only redb ever stored those versions.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
-- Opening a database written before postings kept term positions rebuilds its keyword indexes in the same write transaction.
-- Opening a database written in an older format version whose postings already kept positions does not rebuild its keyword indexes for the upgrade alone.
+- Opening a database written in an older format version does not rebuild its keyword indexes for the upgrade alone.
 - Opening a database written before posting blocks moves each posting into its block in the same write transaction, without tokenizing again.
-- Index definitions and index entries live in tables of their own, so a database from before indexes upgrades with no index.
-- Opening a database written before indexes could cover relationships rewrites each index definition as one over a label, in the same write transaction.
 - Adding a kind of index changes the format version, so an older build refuses the database instead of failing on an unknown definition.
 - `Database::backup_to` copies every table of one read snapshot into a new database file of the same backend, so restoring a backup is opening it.
 - A backup copies through the storage trait, and each backend writes the new file itself and returns once that one file holds the copy durably.

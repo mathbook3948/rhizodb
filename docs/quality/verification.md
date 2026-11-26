@@ -48,7 +48,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A commit that writes property column chunks or deltas is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
 - Property column chunks and deltas are corrupted byte by byte, in their encoding, in their stored entries, and in the database file, and every read must then fail as corrupt data or answer as before.
 - Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
-- Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
+- Every format upgrade from a version that RhizoDB's own engine wrote is tested on a fixture that a checked-in program writes with the last commit whose engine wrote that version.
 - Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.

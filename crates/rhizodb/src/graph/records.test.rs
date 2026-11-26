@@ -17,33 +17,6 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
-    fn a_node_record_decodes_the_properties_it_encodes(properties in properties()) {
-        let record = NodeRecord { labels: BTreeSet::new(), properties };
-        let decoded = NodeRecord::decode_properties(&record.encode()).unwrap();
-        prop_assert_eq!(decoded.len(), record.properties.len());
-        for (key, value) in &decoded {
-            prop_assert!(agrees(Some(value.clone()), record.properties.get(key)));
-        }
-    }
-
-    #[test]
-    fn a_record_written_before_node_meta_reads_its_labels_and_properties(
-        labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
-        properties in properties(),
-    ) {
-        let mut legacy = Vec::new();
-        put_varint(&mut legacy, labels.len());
-        for label in &labels {
-            legacy.extend_from_slice(&label.id().to_be_bytes());
-        }
-        let record = NodeRecord { labels: labels.clone(), properties };
-        legacy.extend_from_slice(&record.encode());
-        let read = NodeRecord::decode_with_labels(&legacy).unwrap();
-        prop_assert_eq!(read.labels, labels);
-        prop_assert_eq!(read.properties.len(), record.properties.len());
-    }
-
-    #[test]
     fn one_relationship_property_reads_what_the_whole_record_holds(
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
@@ -88,11 +61,6 @@ proptest! {
         prop_assert!(same_record(&read, &record));
     }
 
-    #[test]
-    fn a_relationship_record_of_the_fixed_layout_reads_as_it_was_written(record in relationship()) {
-        let read = RelationshipRecord::decode_fixed(&record.encode_fixed()).unwrap();
-        prop_assert!(same_record(&read, &record));
-    }
 }
 
 #[test]

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use rhizodb::Database;
+use rhizodb::Value;
 use support::*;
 
 /// Each query of an answer file in `tests/fixtures`, with the answer the fixture's own commit
@@ -222,6 +223,86 @@ fn a_database_of_format_thirteen_keeps_its_keyword_indexes_exact_through_writes_
         single(
             &db,
             "CALL db.index.keyword.queryNodes('doc text', 'gone', 10) YIELD node RETURN count(*)"
+        ),
+        int(0)
+    );
+}
+
+const FORMAT_ELEVEN: &str = "tests/fixtures/format-11.db";
+
+fn assert_relationship_fixture_answers(db: &Database, answers: &str) {
+    let answers = answers_in(answers);
+    assert_eq!(answers.len(), 15);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn a_database_of_format_eleven_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_ELEVEN, directory.path());
+    assert_relationship_fixture_answers(&Database::open(&path).unwrap(), "format-11.answers");
+    assert_relationship_fixture_answers(&Database::open(&path).unwrap(), "format-11.answers");
+}
+
+#[test]
+fn a_database_of_format_eleven_takes_relationship_writes_after_the_upgrade() {
+    assert_takes_relationship_writes_after_the_upgrade(FORMAT_ELEVEN);
+}
+
+fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(fixture, directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH ()-[r:EVERY]->() SET r.i = r.i + 10, r.added = [true]",
+        );
+        run(&db, "MATCH ()-[r:MANY]->() REMOVE r.p128");
+        run(&db, "MATCH ()-[r:T7]->() DELETE r");
+        run(
+            &db,
+            "MATCH (a:Item {i: 16998}), (b:Item {i: 3}) CREATE (a)-[:NEW {w: -1}]->(b)",
+        );
+        run(&db, "MATCH (x:Item {i: 128}) DETACH DELETE x");
+    }
+    let db = Database::open(&path).unwrap();
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r:EVERY]->() RETURN r.i, r.added, r.s ORDER BY r.i"
+        ),
+        [
+            vec![
+                int(11),
+                Value::List(vec![Value::Boolean(true)]),
+                string("text")
+            ],
+            vec![
+                int(12),
+                Value::List(vec![Value::Boolean(true)]),
+                string("한국어")
+            ],
+        ]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "MATCH ()-[r:MANY]->() RETURN size(keys(r)), r.p128, r.p209"
+        ),
+        [vec![int(209), Value::Null, int(209)]]
+    );
+    assert_eq!(single(&db, "MATCH ()-[r:T7]->() RETURN count(*)"), int(0));
+    assert_eq!(
+        run(&db, "MATCH (a)-[r:NEW]->(b) RETURN a.i, r.w, b.i"),
+        [vec![int(16998), int(-1), int(3)]]
+    );
+    assert_eq!(
+        single(
+            &db,
+            "MATCH (a:Item)-[:NEXT*1..3]->(b:Item {i: 129}) RETURN count(*)"
         ),
         int(0)
     );

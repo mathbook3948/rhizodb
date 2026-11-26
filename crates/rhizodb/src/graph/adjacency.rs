@@ -410,6 +410,7 @@ fn part_len(run: usize, data: usize) -> usize {
 /// covers the same number of positions, its span, except that the last ends with the segment.
 /// The span is the largest under which every part fits `PART_BYTES`, or 1 when none does. A
 /// part that would hold no relationship is not stored.
+#[cfg(test)]
 pub(crate) fn encode_segment(
     id: &SegmentId,
     slots: &[(usize, &[Edge])],
@@ -422,6 +423,7 @@ pub(crate) fn encode_segment(
     Ok(lay_out(id, &borrowed, None))
 }
 
+#[cfg(test)]
 fn encode_slots(slots: &[(usize, &[Edge])]) -> Result<Vec<(usize, Vec<u8>)>, GraphError> {
     let mut last = None;
     let mut out = Vec::with_capacity(slots.len());

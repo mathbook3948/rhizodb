@@ -390,14 +390,14 @@ fn the_current_format_version_is_written_on_first_open_and_accepted_after() {
 }
 
 #[test]
-fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
+fn the_oldest_format_version_opens_and_is_upgraded_to_the_current_version() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
     write
         .put(
             Table::Metadata,
             keys::FORMAT_VERSION_KEY,
-            &1u32.to_be_bytes(),
+            &OLDEST_FORMAT_VERSION.to_be_bytes(),
         )
         .unwrap();
     write.commit().unwrap();
@@ -413,41 +413,23 @@ fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
 }
 
 #[test]
-fn a_version_six_database_reads_its_float_lists_after_the_upgrade() {
+fn a_format_version_older_than_the_oldest_is_rejected_on_open() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
+    let older = OLDEST_FORMAT_VERSION - 1;
     write
         .put(
             Table::Metadata,
             keys::FORMAT_VERSION_KEY,
-            &6u32.to_be_bytes(),
+            &older.to_be_bytes(),
         )
-        .unwrap();
-    let mut record = vec![0, 2, 0, 0, 0, 0, 5, 2, 2];
-    record.extend_from_slice(&0.5f64.to_bits().to_be_bytes());
-    record.push(2);
-    record.extend_from_slice(&(-1.0f64).to_bits().to_be_bytes());
-    record.extend_from_slice(&[0, 0, 0, 1, 1]);
-    record.extend_from_slice(&7i64.to_be_bytes());
-    write
-        .put(Table::Nodes, &keys::element_key(0), &record)
         .unwrap();
     write.commit().unwrap();
 
-    let graph = Graph::open(storage).unwrap();
-    let read = graph.read().unwrap();
-    let node = read.node(NodeId(0)).unwrap().unwrap();
-    assert_eq!(
-        node.properties.get(&Token::new(0)),
-        Some(&PropertyValue::List(vec![
-            PropertyValue::Float(0.5),
-            PropertyValue::Float(-1.0)
-        ]))
-    );
-    assert_eq!(
-        node.properties.get(&Token::new(1)),
-        Some(&PropertyValue::Integer(7))
-    );
+    assert!(matches!(
+        Graph::open(storage),
+        Err(GraphError::UnsupportedFormatVersion(found)) if found == older
+    ));
 }
 
 #[test]
@@ -639,49 +621,6 @@ fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() 
     }
 }
 
-/// Deletes every property column and returns the properties they held, by node.
-pub(crate) fn take_columns(write: &mut impl WriteTransaction) -> BTreeMap<NodeId, Properties> {
-    let mut values: BTreeMap<(NodeId, Token<PropertyKey>), PropertyValue> = BTreeMap::new();
-    let mut changes = Vec::new();
-    for (key, value) in write.scan_prefix(Table::NodeColumns, &[]).unwrap() {
-        match columns::parse_key(&key).unwrap() {
-            columns::ColumnKey::Segment {
-                group,
-                token,
-                segment,
-                ..
-            } => {
-                let view = columns::SegmentRef::parse(&key, &value).unwrap();
-                for cell in view.cells() {
-                    let (at, cell) = cell.unwrap();
-                    let node = meta::node_at(group, segment * columns::SEGMENT_SLOTS + at);
-                    values.insert((node, token), cell.to_value().unwrap());
-                }
-            }
-            columns::ColumnKey::Delta { group, slot } => {
-                let delta = columns::DeltaRef::parse(&key, &value).unwrap();
-                for entry in delta.entries() {
-                    let (token, cell) = entry.unwrap();
-                    let value = cell.map(|cell| cell.to_value().unwrap());
-                    changes.push(((meta::node_at(group, slot), token), value));
-                }
-            }
-        }
-        write.delete(Table::NodeColumns, &key).unwrap();
-    }
-    for (at, value) in changes {
-        match value {
-            Some(value) => values.insert(at, value),
-            None => values.remove(&at),
-        };
-    }
-    let mut nodes: BTreeMap<NodeId, Properties> = BTreeMap::new();
-    for ((node, token), value) in values {
-        nodes.entry(node).or_default().insert(token, value);
-    }
-    nodes
-}
-
 /// Rewrites a database of the current format in the layout of format 13, which kept each
 /// element's posting of a term as its own entry under the element's ID, so a test can open it as
 /// an older version.
@@ -739,159 +678,5 @@ pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
             keys::FORMAT_VERSION_KEY,
             &11u32.to_be_bytes(),
         )
-        .unwrap();
-}
-
-/// Rewrites a database of the current format in the layout of format 10, which kept each
-/// relationship record's type and ends at fixed width, so a test can open it as an older version.
-pub(crate) fn store_as_format_ten(write: &mut impl WriteTransaction) {
-    store_as_format_eleven(write);
-    for (key, value) in write.scan_prefix(Table::Relationships, &[]).unwrap() {
-        let record = RelationshipRecord::decode(&value).unwrap();
-        write
-            .put(Table::Relationships, &key, &record.encode_fixed())
-            .unwrap();
-    }
-    write
-        .put(
-            Table::Metadata,
-            keys::FORMAT_VERSION_KEY,
-            &10u32.to_be_bytes(),
-        )
-        .unwrap();
-}
-
-/// Rewrites a database of the current format in the layout of format 9, which kept each
-/// relationship as one entry under its source in the outgoing table and one under its target in
-/// the incoming table, so a test can open it as an older version.
-pub(crate) fn store_as_format_nine(write: &mut impl WriteTransaction) {
-    store_as_format_ten(write);
-    let mut segments: BTreeMap<SegmentId, Vec<adjacency::Stored>> = BTreeMap::new();
-    for (key, value) in write.scan_prefix(Table::Adjacency, &[]).unwrap() {
-        let (id, _) = adjacency::parse_key(&key).unwrap();
-        write.delete(Table::Adjacency, &key).unwrap();
-        segments.entry(id).or_default().push((key, value));
-    }
-    for (id, stored) in segments {
-        let table = match id.side {
-            Side::Outgoing => Table::Outgoing,
-            Side::Incoming => Table::Incoming,
-        };
-        let edit = SegmentEdit::load(
-            &id,
-            stored
-                .iter()
-                .map(|(key, value)| (key.as_slice(), value.as_slice())),
-        )
-        .unwrap();
-        for (position, edges) in edit.slots().unwrap() {
-            for edge in edges {
-                write
-                    .put(
-                        table,
-                        &keys::adjacency_key(
-                            id.node_at(position),
-                            Token::new(id.rel_type),
-                            edge.relationship,
-                        ),
-                        &edge.other.0.to_be_bytes(),
-                    )
-                    .unwrap();
-            }
-        }
-    }
-    write
-        .put(
-            Table::Metadata,
-            keys::FORMAT_VERSION_KEY,
-            &9u32.to_be_bytes(),
-        )
-        .unwrap();
-}
-
-/// Rewrites a database of the current format in the layout of format 8, which kept each node's
-/// properties in one record under its ID, so a test can open it as an older version.
-pub(crate) fn store_as_format_eight(write: &mut impl WriteTransaction) {
-    store_as_format_nine(write);
-    for (node, properties) in take_columns(write) {
-        let record = NodeRecord {
-            labels: BTreeSet::new(),
-            properties,
-        }
-        .encode();
-        write
-            .put(Table::Nodes, &keys::element_key(node.0), &record)
-            .unwrap();
-    }
-    write
-        .put(
-            Table::Metadata,
-            keys::FORMAT_VERSION_KEY,
-            &8u32.to_be_bytes(),
-        )
-        .unwrap();
-}
-
-/// Rewrites a database of the current format in the layout of format 7, which kept each node's
-/// labels at the front of its record and in a label index, so a test can open it as an older
-/// version.
-pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
-    store_as_format_nine(write);
-    let mut sets = BTreeMap::new();
-    for (key, value) in write.scan_prefix(Table::LabelSets, &[]).unwrap() {
-        sets.insert(
-            decode_u32(&key).unwrap(),
-            meta::parse_label_set(&value).unwrap(),
-        );
-        write.delete(Table::LabelSets, &key).unwrap();
-        write.delete(Table::LabelSetByTokens, &value).unwrap();
-    }
-    let mut labels = BTreeMap::new();
-    let mut groups = BTreeMap::new();
-    for (key, value) in write.scan_prefix(Table::NodeChunks, &[]).unwrap() {
-        match meta::parse_key(&key).unwrap().unwrap() {
-            (group, meta::Part::Chunk) => {
-                let edit = MetaBytes::parse(group, &value).unwrap().to_edit().unwrap();
-                groups.insert(group, edit);
-            }
-            (group, meta::Part::Delta(_)) => {
-                let delta = meta::Delta::parse(&key, &value).unwrap();
-                let edit: &mut MetaEdit = groups.get_mut(&group).unwrap();
-                edit.set(delta.slot, delta.after);
-            }
-        }
-        write.delete(Table::NodeChunks, &key).unwrap();
-    }
-    for (group, edit) in groups {
-        for (slot, set) in edit.live() {
-            let held = sets.get(&set.0).cloned().unwrap_or_else(|| Arc::from([]));
-            labels.insert(meta::node_at(group, slot), held);
-        }
-    }
-    let mut properties = take_columns(write);
-    for (node, held) in labels {
-        let mut record = Vec::new();
-        crate::value::put_varint(&mut record, held.len());
-        for label in held.iter() {
-            record.extend_from_slice(&label.id().to_be_bytes());
-            write
-                .put(Table::LabelIndex, &keys::label_key(*label, node), &[])
-                .unwrap();
-        }
-        let properties = properties.remove(&node).unwrap_or_default();
-        record.extend_from_slice(
-            &NodeRecord {
-                labels: BTreeSet::new(),
-                properties,
-            }
-            .encode(),
-        );
-        write
-            .put(Table::Nodes, &keys::element_key(node.0), &record)
-            .unwrap();
-    }
-    assert!(properties.is_empty(), "a property column holds a dead node");
-    write
-        .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
         .unwrap();
 }
