@@ -1,12 +1,14 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
+use super::blob::BlobRef;
 use super::error::EngineError;
 use super::layout::TableId;
 use super::memtable::Bytes;
 use super::memtable::Lookup;
 use super::memtable::Memtable;
 use super::memtable::Slot;
+use super::node::CellValue;
 use super::tree::Finger;
 use super::tree::Tree;
 use crate::storage::StorageError;
@@ -49,7 +51,9 @@ impl Clone for View {
     }
 }
 
-pub(crate) type Visit<'a, E> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<(), E>;
+/// What a scan calls with each entry: its key, and its value in place or, for a value that lives
+/// in a run of its own, the run, which the scan does not read.
+pub(crate) type Visit<'a, E> = &'a mut dyn FnMut(&[u8], CellValue<'_>) -> Result<(), E>;
 
 impl View {
     pub(crate) fn new(snapshot: u64, layers: Arc<Layers>) -> Self {
@@ -76,6 +80,11 @@ impl View {
             }
         }
         self.layers.tree.get_with(table, key, read)
+    }
+
+    /// The value stored in `blob`, a run a scan of the snapshot met.
+    pub(crate) fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+        self.layers.tree.load_value(blob)
     }
 
     fn memtable_range(
@@ -157,14 +166,14 @@ pub(crate) fn merge_over<E>(
         while let Some((upper_key, slot)) = upper.get(next) {
             if **upper_key < *key {
                 if let Some(upper_value) = slot {
-                    visit(upper_key, upper_value)?;
+                    visit(upper_key, CellValue::Inline(upper_value))?;
                 }
                 next += 1;
             } else {
                 if **upper_key == *key {
                     next += 1;
                     if let Some(upper_value) = slot {
-                        visit(upper_key, upper_value)?;
+                        visit(upper_key, CellValue::Inline(upper_value))?;
                     }
                     return Ok(());
                 }
@@ -175,7 +184,7 @@ pub(crate) fn merge_over<E>(
     })?;
     for (key, slot) in upper.get(next..).unwrap_or_default() {
         if let Some(value) = slot {
-            visit(key, value)?;
+            visit(key, CellValue::Inline(value))?;
         }
     }
     Ok(())

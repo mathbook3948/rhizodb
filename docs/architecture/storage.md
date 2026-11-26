@@ -10,6 +10,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 
 - RhizoDB's own engine, decided in the storage engine doc, stores every database.
 - The storage layer sits behind a trait so it can be swapped.
+- A scan of the storage trait can leave each value the store keeps apart from its key unread and give its length instead, for a read that needs few of a range's large values.
 - Values are stored as bytes in a format RhizoDB defines, and the format carries a version.
 - Each format version can hold everything the older versions hold.
 - Opening a path with no file, or an empty one, writes the new database under a staging name in the same directory, syncs it, and links it into place, so a power loss during creation leaves either no database or a whole empty one.

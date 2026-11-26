@@ -232,6 +232,11 @@ impl Tree {
         Ok(slot.get())
     }
 
+    /// The value stored in `blob`, a run of a value cell of this tree.
+    pub(crate) fn load_value(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+        load_blob(&*self.source, blob, Role::Value)
+    }
+
     pub(crate) fn load_key(&self) -> impl Fn(&BlobRef) -> Result<Vec<u8>, EngineError> + '_ {
         |blob| load_blob(&*self.source, blob, Role::Key)
     }
@@ -443,13 +448,7 @@ impl Tree {
                     }
                     CellKey::Long { .. } => key.extend(cell.full(&load).map_err(lift)?),
                 }
-                match node.value(index).map_err(lift)? {
-                    CellValue::Inline(value) => visit(key, value)?,
-                    CellValue::External(blob) => {
-                        let value = load_blob(&*self.source, &blob, Role::Value).map_err(lift)?;
-                        visit(key, &value)?;
-                    }
-                }
+                visit(key, node.value(index).map_err(lift)?)?;
             }
             return Ok(Flow::Continue);
         }

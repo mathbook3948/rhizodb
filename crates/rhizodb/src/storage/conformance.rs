@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::Entry;
+use super::Peek;
 use super::ReadTransaction;
 use super::Storage;
 use super::StorageError;
@@ -26,7 +27,7 @@ type Case<H> = (&'static str, fn(&mut H));
 /// Runs every conformance case on a store from a fresh harness, and fails naming each case
 /// that failed.
 pub(crate) fn run<H: Harness>(mut fresh: impl FnMut() -> H) {
-    let cases: [Case<H>; 19] = [
+    let cases: [Case<H>; 20] = [
         ("reads_what_was_committed", reads_what_was_committed),
         ("a_put_replaces_the_value", a_put_replaces_the_value),
         ("a_delete_removes_its_key", a_delete_removes_its_key),
@@ -53,6 +54,10 @@ pub(crate) fn run<H: Harness>(mut fresh: impl FnMut() -> H) {
         (
             "a_range_scan_yields_keys_from_start_to_end",
             a_range_scan_yields_keys_from_start_to_end,
+        ),
+        (
+            "a_peek_scan_shows_each_value_or_its_length",
+            a_peek_scan_shows_each_value_or_its_length,
         ),
         (
             "a_visitor_error_stops_the_visit",
@@ -159,6 +164,32 @@ fn visited_range(
     })
     .unwrap();
     found
+}
+
+fn peeked(read: &impl ReadTransaction, table: Table, prefix: &[u8]) -> [Vec<Entry>; 2] {
+    let value_of = |key: &[u8], value: Peek<'_>| match value {
+        Peek::Bytes(value) => value.to_vec(),
+        Peek::Apart(length) => {
+            let value = copied(read, table, key).unwrap();
+            assert_eq!(value.len(), length);
+            value
+        }
+    };
+    let mut by_prefix = Vec::new();
+    read.visit_prefix_peek(table, prefix, |key, value| {
+        by_prefix.push((key.to_vec(), value_of(key, value)));
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    let mut end = prefix.to_vec();
+    end.push(u8::MAX);
+    let mut by_range = Vec::new();
+    read.visit_range_peek(table, prefix, &end, |key, value| {
+        by_range.push((key.to_vec(), value_of(key, value)));
+        Ok::<_, StorageError>(())
+    })
+    .unwrap();
+    [by_prefix, by_range]
 }
 
 fn copied(read: &impl ReadTransaction, table: Table, key: &[u8]) -> Option<Vec<u8>> {
@@ -441,6 +472,52 @@ fn a_range_scan_yields_keys_from_start_to_end<H: Harness>(harness: &mut H) {
     assert!(ranged(b"c", b"b").is_empty());
     assert!(ranged(b"b", b"b").is_empty());
     assert!(ranged(b"d", b"e").is_empty());
+}
+
+fn a_peek_scan_shows_each_value_or_its_length<H: Harness>(harness: &mut H) {
+    let store = harness.open();
+    let values: Vec<(Vec<u8>, Vec<u8>)> = [0, 10, 1023, 1025, 9000, 70_000]
+        .iter()
+        .enumerate()
+        .map(|(index, length)| (vec![b'p', index as u8], patterned(*length, index as u8)))
+        .collect();
+    let mut write = store.begin_write().unwrap();
+    for (key, value) in &values {
+        write.put(Table::Adjacency, key, value).unwrap();
+    }
+    write.put(Table::Adjacency, b"q", b"outside").unwrap();
+    assert_eq!(
+        peeked(&write, Table::Adjacency, b"p"),
+        [values.clone(), values.clone()]
+    );
+    write.commit().unwrap();
+    let read = store.begin_read().unwrap();
+    assert_eq!(
+        peeked(&read, Table::Adjacency, b"p"),
+        [values.clone(), values.clone()]
+    );
+    drop(read);
+    drop(store);
+
+    let store = harness.open();
+    let mut write = store.begin_write().unwrap();
+    let mut expected = values;
+    expected[4].1 = patterned(5000, 9);
+    write
+        .put(Table::Adjacency, &expected[4].0, &expected[4].1)
+        .unwrap();
+    write.delete(Table::Adjacency, &expected[1].0).unwrap();
+    expected.remove(1);
+    assert_eq!(
+        peeked(&write, Table::Adjacency, b"p"),
+        [expected.clone(), expected.clone()]
+    );
+    write.commit().unwrap();
+    let read = store.begin_read().unwrap();
+    assert_eq!(
+        peeked(&read, Table::Adjacency, b"p"),
+        [expected.clone(), expected]
+    );
 }
 
 fn a_visitor_error_stops_the_visit<H: Harness>(harness: &mut H) {

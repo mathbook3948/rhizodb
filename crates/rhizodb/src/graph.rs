@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::ThreadId;
 
+use crate::storage::Peek;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
@@ -71,6 +72,8 @@ pub(crate) use value_key::compared;
 
 use adjacency::Edge;
 use adjacency::Entries;
+use adjacency::Entry;
+use adjacency::Lazy;
 use adjacency::SegmentEdit;
 use adjacency::SegmentId;
 use adjacency::Side;
@@ -1095,12 +1098,16 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         reader: &mut AdjacencyReader,
         side: Side,
-        prefix: &[u8],
-        mut visit: impl FnMut(&[u8], &[u8], &mut Option<adjacency::Checked>) -> Result<(), GraphError>,
+        (prefix, position): (&[u8], usize),
+        mut visit: impl FnMut(
+            (&[u8], SegmentId, Entry),
+            &[u8],
+            &mut Option<adjacency::Checked>,
+        ) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
         let entries = reader.entries(side, prefix, |window| {
             let mut held = Vec::new();
-            self.transaction.visit_range(
+            self.transaction.visit_range_peek(
                 Table::Adjacency,
                 window.start(),
                 &window.end(),
@@ -1112,7 +1119,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                         return Err(ENTRIES_OUT_OF_ORDER);
                     }
                     if window.holds(key) {
-                        held.push((key.into(), value.into(), None));
+                        held.push((key.into(), Lazy::of(value), None));
                     }
                     Ok::<(), GraphError>(())
                 },
@@ -1122,14 +1129,32 @@ impl<T: ReadTransaction> GraphTx<T> {
         match entries {
             Entries::Held(entries) => {
                 for (key, value, verified) in entries {
-                    visit(key, value, verified)?;
+                    let (id, entry) = adjacency::parse_key(key)?;
+                    if !entry.covers(position) {
+                        visit((key, id, entry), &[], verified)?;
+                        continue;
+                    }
+                    if let Lazy::Apart(_) = value {
+                        *value = Lazy::Bytes(fetch_adjacency(&self.transaction, key)?);
+                    }
+                    if let Lazy::Bytes(bytes) = value {
+                        visit((key, id, entry), bytes, verified)?;
+                    }
                 }
                 Ok(())
             }
             Entries::Stored => {
                 self.transaction
-                    .visit_prefix(Table::Adjacency, prefix, |key, value| {
-                        visit(key, value, &mut None)
+                    .visit_prefix_peek(Table::Adjacency, prefix, |key, value| {
+                        let (id, entry) = adjacency::parse_key(key)?;
+                        match value {
+                            _ if !entry.covers(position) => visit((key, id, entry), &[], &mut None),
+                            Peek::Bytes(bytes) => visit((key, id, entry), bytes, &mut None),
+                            Peek::Apart(_) => {
+                                let bytes = fetch_adjacency(&self.transaction, key)?;
+                                visit((key, id, entry), &bytes, &mut None)
+                            }
+                        }
                     })
             }
         }
@@ -1155,15 +1180,18 @@ impl<T: ReadTransaction> GraphTx<T> {
             rel_type: u32::MAX,
             ..first
         };
+        let fetch = |key: &[u8]| fetch_adjacency(&self.transaction, key);
         let mut edits = self.adjacency.range(first..=last).peekable();
         let mut current: Option<(u32, SlotRead)> = None;
         let mut edited = None;
         self.visit_adjacency_prefix(
             reader,
             side,
-            &adjacency::segment_prefix(side, first.group, first.segment),
-            |key, value, verified| {
-                let (id, entry) = adjacency::parse_key(key)?;
+            (
+                &adjacency::segment_prefix(side, first.group, first.segment),
+                position,
+            ),
+            |(key, id, entry), value, verified| {
                 if edited == Some(id.rel_type) {
                     return Ok(());
                 }
@@ -1177,7 +1205,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                     while let Some((edit_id, edit)) =
                         edits.next_if(|(edit_id, _)| edit_id.rel_type <= id.rel_type)
                     {
-                        edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+                        edit.visit(position, &mut typed(edit_id.rel_type, emit), &fetch)?;
                         if edit_id.rel_type == id.rel_type {
                             edited = Some(id.rel_type);
                             return Ok(());
@@ -1200,7 +1228,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             read.finish(&mut typed(held, emit))?;
         }
         for (edit_id, edit) in edits {
-            edit.visit(position, &mut typed(edit_id.rel_type, emit))?;
+            edit.visit(position, &mut typed(edit_id.rel_type, emit), &fetch)?;
         }
         Ok(())
     }
@@ -1214,13 +1242,19 @@ impl<T: ReadTransaction> GraphTx<T> {
     ) -> Result<(), GraphError> {
         let mut emit = typed(id.rel_type, emit);
         if let Some(edit) = self.adjacency.get(id) {
-            return edit.visit(position, &mut emit);
+            return edit.visit(position, &mut emit, &|key| {
+                fetch_adjacency(&self.transaction, key)
+            });
         }
         let mut read = SlotRead::default();
-        self.visit_adjacency_prefix(reader, id.side, &id.prefix(), |key, value, verified| {
-            let (_, entry) = adjacency::parse_key(key)?;
-            read.visit(entry, position, (key, value, verified), &mut emit)
-        })?;
+        self.visit_adjacency_prefix(
+            reader,
+            id.side,
+            (&id.prefix(), position),
+            |(key, _, entry), value, verified| {
+                read.visit(entry, position, (key, value, verified), &mut emit)
+            },
+        )?;
         read.finish(&mut emit)
     }
 
@@ -1357,7 +1391,7 @@ impl<T: WriteTransaction> GraphTx<T> {
 
     fn flush_adjacency(&mut self) -> Result<(), GraphError> {
         for (id, edit) in std::mem::take(&mut self.adjacency) {
-            let flush = edit.flush(&id)?;
+            let flush = edit.flush(&id, &|key| fetch_adjacency(&self.transaction, key))?;
             for key in flush.delete {
                 self.transaction.delete(Table::Adjacency, &key)?;
             }
@@ -1415,28 +1449,6 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.flush_relationships()?;
         }
         Ok(())
-    }
-
-    fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
-        match self.adjacency.entry(id) {
-            btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
-            btree_map::Entry::Vacant(vacant) => {
-                let (start, end) = id.range();
-                let mut entries = Vec::new();
-                self.transaction
-                    .visit_range(Table::Adjacency, &start, &end, |key, value| {
-                        entries.push((key.to_vec(), value.to_vec()));
-                        Ok::<(), GraphError>(())
-                    })?;
-                let edit = SegmentEdit::load(
-                    &id,
-                    entries
-                        .iter()
-                        .map(|(key, value)| (key.as_slice(), value.as_slice())),
-                )?;
-                Ok(vacant.insert(edit))
-            }
-        }
     }
 
     fn move_relationships_to_chunks(&mut self) -> Result<(), GraphError> {
@@ -1611,7 +1623,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             (Side::Incoming, record.target, record.source),
         ] {
             let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
-            self.adjacency_edit(segment)?.add(
+            adjacency_edit(&mut self.adjacency, &self.transaction, segment)?.add(
                 position,
                 Edge {
                     relationship: id,
@@ -1728,7 +1740,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             (Side::Incoming, record.target),
         ] {
             let (segment, position) = adjacency::locate(side, node, record.rel_type.id());
-            self.adjacency_edit(segment)?.remove(position, id)?;
+            adjacency_edit(&mut self.adjacency, &self.transaction, segment)?.remove(
+                position,
+                id,
+                &|key| fetch_adjacency(&self.transaction, key),
+            )?;
         }
         self.reindex(id.0, Some(Element::Relationship(&record)), None)?;
         Ok(Some(record))
@@ -1949,6 +1965,37 @@ fn visit_held(
 ) -> Result<(), GraphError> {
     edit.entries()
         .try_for_each(|(slot, record)| visit(relationships::relationship_at(chunk, slot), record))
+}
+
+fn fetch_adjacency(
+    transaction: &impl ReadTransaction,
+    key: &[u8],
+) -> Result<Box<[u8]>, GraphError> {
+    transaction
+        .get_with(Table::Adjacency, key, |value| {
+            Ok::<_, GraphError>(Box::from(value))
+        })?
+        .ok_or(GraphError::Corrupt("an adjacency entry a scan met is gone"))
+}
+
+fn adjacency_edit<'a>(
+    adjacency: &'a mut BTreeMap<SegmentId, SegmentEdit>,
+    transaction: &impl ReadTransaction,
+    id: SegmentId,
+) -> Result<&'a mut SegmentEdit, GraphError> {
+    match adjacency.entry(id) {
+        btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
+        btree_map::Entry::Vacant(vacant) => {
+            let (start, end) = id.range();
+            let mut entries = Vec::new();
+            transaction.visit_range_peek(Table::Adjacency, &start, &end, |key, value| {
+                entries.push((Box::from(key), Lazy::of(value)));
+                Ok::<(), GraphError>(())
+            })?;
+            let edit = SegmentEdit::load(&id, entries, &|key| fetch_adjacency(transaction, key))?;
+            Ok(vacant.insert(edit))
+        }
+    }
 }
 
 fn typed(rel_type: u32, emit: &mut impl FnMut(Adjacent)) -> impl FnMut(Edge) + '_ {

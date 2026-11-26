@@ -32,14 +32,18 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A part's key holds its run of slots and its index, so a reader finds the part that holds a slot from the keys of one prefix scan.
 - A part holds the end offset of each of its slots but the last, two bytes each, or four when its relationships take more than 64 KiB.
 - Reading a node's adjacency of one type is one prefix scan of the segment, and of every type one prefix scan of the run of slots.
+- A read reads the value of a part larger than a part may be, which holds one slot and lives apart from its key, only when it reads that slot, so reading a hub's neighbour never reads the hub's part.
 - A query that reads the same adjacency prefix twice in a row keeps its entries for its next reads on that side, and still checks each entry only where a read meets it.
 - A slot's relationships come out by type and then by ID, outgoing ones before incoming ones.
 - A commit that changes a few slots of a segment with stored parts writes one delta per changed slot, which lists the relationships it removes from the parts and the ones it adds.
 - Deltas sort before the parts of their segment, so a read of one slot meets its delta before its part and merges them in one pass.
-- A segment keeps at most 4 deltas and none larger than half a part, and a commit that would leave more or larger lays the segment out again and deletes its deltas.
+- A segment keeps at most 4 deltas.
+- A delta of a slot that shares its part holds at most half a part, and one of a slot with a part larger than a part may be at most the square root of eight times that part's bytes, so a hub that gains one relationship a commit rewrites its part ever more rarely as it grows.
+- A commit that would leave more deltas, or a larger one, lays the segment out again and deletes every delta but those within their bound of slots with a part larger than a part may be, at most 4 and the largest parts first.
 - Laying a segment out again copies the encoded relationships of each slot no change touched as they are stored, and writes only the parts whose bytes differ, so a change beside a hub does not rewrite the hub's part.
 - A commit that leaves a segment without relationships deletes its parts and deltas.
 - A write transaction loads a segment, with its deltas, the first time it changes it, and keeps each changed slot as its change against the stored parts until commit.
+- A write transaction reads a part larger than a part may be only to read, remove from, or fold its slot, so a commit beside a hub, or one that adds to the hub's delta, never reads the hub's part.
 - A commit writes the segments it changed in key order.
 - Each adjacency part and delta carries a CRC-32 that covers its key, so a damaged entry or one read under another key is reported as corruption.
 - Nodes fall into row groups of 4096 consecutive IDs.

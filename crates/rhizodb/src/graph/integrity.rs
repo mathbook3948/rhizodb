@@ -688,7 +688,9 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         for (id, edit) in &self.adjacency {
-            for (position, edges) in edit.slots()? {
+            for (position, edges) in
+                edit.slots(&|key| super::fetch_adjacency(&self.transaction, key))?
+            {
                 for edge in edges {
                     entries.insert(
                         (

@@ -105,6 +105,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Every header a checkpoint writes records this build's minor, so an older build refuses a file that holds pages it cannot read.
 - A branch stores the lowest key of each child but the first, chosen as the shortest key that separates two leaves.
 - A value longer than 1 KiB lives in a run of blocks inside one extent, and its cell holds the run's reference, block count, LSN, the value's length, and its checksum.
+- A scan reads a value's run only for a caller that asks for the value, and gives the value's length to one that does not.
 - A key longer than 1 KiB lives in a run too, and its cell keeps its first 64 bytes after the page prefix, so most comparisons read no run.
 - An item larger than an extent is a chain of runs, each naming the next run and the slot of its extent.
 - A chained item is placed from its last run to its first, so the first run of a catalog lies in an open extent the header names.
