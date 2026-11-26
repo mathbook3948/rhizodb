@@ -12,7 +12,8 @@ A match that always begins at the leftmost node reads every node of its label, o
 - Otherwise the match picks its start when it runs: of the leftmost node and each later node that an ID lookup or an index lookup serves, the one with the fewest start nodes, with ties going to the leftmost.
 - The start nodes of the leftmost node are those its own lookup finds, else the nodes of its label, else all nodes.
 - The start nodes of a later node are those its lookup finds.
-- A later node's lookup stops once it finds as many nodes as the best start so far, so trying it reads fewer index entries than that start has nodes.
+- A later node's lookup stops once it finds as many nodes as the best start so far, so trying it reads fewer index entries than that start has nodes, whether those entries sit in the memtable or in the file.
+- The leftmost node's label size, when it decides, is read once per statement, so the writes of the statement itself do not change which start it picks.
 - No later node's lookup is tried once a start has at most one node.
 - A lookup serves a node as it serves a leftmost one, by the node's label or the type of the first relationship walked from it.
 - The size of a later node's label does not choose the start.
@@ -27,5 +28,4 @@ A match that always begins at the leftmost node reads every node of its label, o
 ## Open
 
 - A pattern with no bound node and no lookup begins at its leftmost node even when a later label holds far fewer nodes, since the engine keeps no relationship counts per node to tell whether that start reads less.
-- An index lookup whose entries still sit in the memory table copies its whole range from there before it stops, so a later start's capped lookup can cost as much as a full one until the table is flushed.
 - The order of pattern parts in one `MATCH` stays as written.

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -87,22 +88,6 @@ impl View {
         self.layers.tree.load_value(blob)
     }
 
-    fn memtable_range(
-        &self,
-        table: TableId,
-        start: Bound<&[u8]>,
-        end: Bound<&[u8]>,
-    ) -> Vec<(Bytes, Slot)> {
-        let active = self.layers.active.range(table, start, end, self.snapshot);
-        match &self.layers.frozen {
-            None => active,
-            Some(frozen) => {
-                let frozen = frozen.range(table, start, end, self.snapshot);
-                merge_slots(active, frozen)
-            }
-        }
-    }
-
     /// Calls `visit` with every entry between the bounds, in key order.
     pub(crate) fn scan<E: From<StorageError>>(
         &self,
@@ -111,9 +96,14 @@ impl View {
         end: Bound<&[u8]>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
-        let upper = self.memtable_range(table, start, end);
+        let active = self.layers.active.range(table, start, end, self.snapshot);
+        let frozen = self
+            .layers
+            .frozen
+            .iter()
+            .flat_map(|frozen| frozen.range(table, start, end, self.snapshot));
         merge_over(
-            &upper,
+            merge_slots(active, frozen),
             |lower| {
                 self.layers
                     .tree
@@ -126,65 +116,53 @@ impl View {
 
 /// `newer` and `older` merged in key order, `newer` winning on a key both hold.
 pub(crate) fn merge_slots(
-    newer: Vec<(Bytes, Slot)>,
-    older: Vec<(Bytes, Slot)>,
-) -> Vec<(Bytes, Slot)> {
-    if older.is_empty() {
-        return newer;
-    }
-    if newer.is_empty() {
-        return older;
-    }
-    let mut merged = Vec::with_capacity(newer.len() + older.len());
-    let mut older = older.into_iter().peekable();
-    for (key, slot) in newer {
-        while let Some((older_key, _)) = older.peek() {
-            if *older_key < key {
-                merged.extend(older.next());
-            } else {
-                if *older_key == key {
-                    older.next();
-                }
-                break;
+    newer: impl Iterator<Item = (Bytes, Slot)>,
+    older: impl Iterator<Item = (Bytes, Slot)>,
+) -> impl Iterator<Item = (Bytes, Slot)> {
+    let mut newer = newer.peekable();
+    let mut older = older.peekable();
+    std::iter::from_fn(move || {
+        let Some((newer_key, _)) = newer.peek() else {
+            return older.next();
+        };
+        match older.peek().map(|(older_key, _)| older_key.cmp(newer_key)) {
+            Some(Ordering::Less) => older.next(),
+            Some(Ordering::Equal) => {
+                older.next();
+                newer.next()
             }
+            Some(Ordering::Greater) | None => newer.next(),
         }
-        merged.push((key, slot));
-    }
-    merged.extend(older);
-    merged
+    })
 }
 
 /// Visits the entries `lower` yields with `upper` laid over them: an upper value replaces the
-/// lower one of its key, and an upper tombstone hides it.
+/// lower one of its key, and an upper tombstone hides it. It takes from `upper` only as far as
+/// the visit gets.
 pub(crate) fn merge_over<E>(
-    upper: &[(Bytes, Slot)],
+    upper: impl Iterator<Item = (Bytes, Slot)>,
     lower: impl FnOnce(Visit<'_, E>) -> Result<(), E>,
     visit: Visit<'_, E>,
 ) -> Result<(), E> {
-    let mut next = 0;
+    let mut upper = upper.peekable();
     lower(&mut |key, value| {
-        while let Some((upper_key, slot)) = upper.get(next) {
-            if **upper_key < *key {
-                if let Some(upper_value) = slot {
-                    visit(upper_key, CellValue::Inline(upper_value))?;
-                }
-                next += 1;
-            } else {
-                if **upper_key == *key {
-                    next += 1;
-                    if let Some(upper_value) = slot {
-                        visit(upper_key, CellValue::Inline(upper_value))?;
-                    }
-                    return Ok(());
-                }
+        while let Some((upper_key, _)) = upper.peek() {
+            let order = (**upper_key).cmp(key);
+            if order == Ordering::Greater {
                 break;
+            }
+            if let Some((upper_key, Some(upper_value))) = upper.next() {
+                visit(&upper_key, CellValue::Inline(&upper_value))?;
+            }
+            if order == Ordering::Equal {
+                return Ok(());
             }
         }
         visit(key, value)
     })?;
-    for (key, slot) in upper.get(next..).unwrap_or_default() {
+    for (key, slot) in upper {
         if let Some(value) = slot {
-            visit(key, CellValue::Inline(value))?;
+            visit(&key, CellValue::Inline(&value))?;
         }
     }
     Ok(())

@@ -35,7 +35,7 @@ fn an_error_of_the_visitor_stops_the_merge() {
     ];
     let mut seen = Vec::new();
     let result = merge_over(
-        &upper,
+        upper.into_iter(),
         |lower| lower(b"b", CellValue::Inline(b"2")),
         &mut |key, _| {
             seen.push(key.to_vec());
@@ -55,7 +55,8 @@ proptest! {
     ) {
         let mut expected = older.clone();
         expected.extend(newer.clone());
-        prop_assert_eq!(merge_slots(slots(&newer), slots(&older)), slots(&expected));
+        let merged: Vec<_> = merge_slots(slots(&newer).into_iter(), slots(&older).into_iter()).collect();
+        prop_assert_eq!(merged, slots(&expected));
     }
 
     #[test]
@@ -73,7 +74,7 @@ proptest! {
         }
         let mut merged = Vec::new();
         merge_over::<()>(
-            &slots(&upper),
+            slots(&upper).into_iter(),
             |visit| {
                 for (key, value) in &lower {
                     visit(key, CellValue::Inline(value))?;

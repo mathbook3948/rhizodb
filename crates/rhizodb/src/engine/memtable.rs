@@ -220,6 +220,9 @@ pub(crate) struct Memtable {
     filter: Filter,
     bytes: AtomicU64,
     graves: Mutex<VecDeque<(TableId, Key, u64)>>,
+    /// How many entries ranges have copied out, for tests that bound what a scan reads.
+    #[cfg(test)]
+    pub(crate) copied: AtomicU64,
 }
 
 fn cost(key: &[u8], slot: &Slot) -> u64 {
@@ -264,29 +267,26 @@ impl Memtable {
     }
 
     /// Every key between the bounds that has a version visible at `snapshot`, tombstones
-    /// included, in key order.
-    pub(crate) fn range(
-        &self,
+    /// included, in key order. It copies the keys out in batches that grow as it goes, so a
+    /// reader that stops early copies about as many as it read, not the whole range.
+    pub(crate) fn range<'a>(
+        &'a self,
         table: TableId,
-        start: Bound<&[u8]>,
-        end: Bound<&[u8]>,
+        start: Bound<&'a [u8]>,
+        end: Bound<&'a [u8]>,
         snapshot: u64,
-    ) -> Vec<(Bytes, Slot)> {
-        if self.bytes() == 0 || !bounds_are_ordered(start, end) {
-            return Vec::new();
+    ) -> Range<'a> {
+        let batch = if self.bytes() == 0 { 0 } else { FIRST_BATCH };
+        Range {
+            memtable: self,
+            table,
+            start,
+            end,
+            snapshot,
+            after: None,
+            entries: Vec::new().into_iter(),
+            next_batch: batch,
         }
-        let chains = self.read();
-        let Some(keys) = chains.get(&table) else {
-            return Vec::new();
-        };
-        let start = start.map(Probe::new);
-        let end = end.map(Probe::new);
-        keys.range::<dyn Ranked, _>((probe_bound(&start), probe_bound(&end)))
-            .filter_map(|(key, chain)| {
-                visible(chain, snapshot)
-                    .map(|version| (Arc::clone(&key.bytes), version.slot.clone()))
-            })
-            .collect()
     }
 
     /// Adds the versions of the commit at `lsn`, and drops every version that no snapshot at or
@@ -372,6 +372,76 @@ impl Memtable {
                 (*table, newest)
             })
             .collect()
+    }
+}
+
+const FIRST_BATCH: usize = 16;
+
+const LAST_BATCH: usize = 1024;
+
+/// The entries of [`Memtable::range`]. Each batch takes the read lock on its own, so no lock is
+/// held while the reader handles an entry, and it resumes after the last key it copied. That
+/// key's visible version is still there, since a commit drops a version only once no open snapshot
+/// needs it.
+#[derive(Debug)]
+pub(crate) struct Range<'a> {
+    memtable: &'a Memtable,
+    table: TableId,
+    start: Bound<&'a [u8]>,
+    end: Bound<&'a [u8]>,
+    snapshot: u64,
+    after: Option<Bytes>,
+    entries: std::vec::IntoIter<(Bytes, Slot)>,
+    next_batch: usize,
+}
+
+impl Range<'_> {
+    fn refill(&mut self) {
+        let start = match &self.after {
+            Some(after) => Bound::Excluded(&**after),
+            None => self.start,
+        };
+        let mut entries = Vec::new();
+        if bounds_are_ordered(start, self.end) {
+            let chains = self.memtable.read();
+            if let Some(keys) = chains.get(&self.table) {
+                let (start, end) = (start.map(Probe::new), self.end.map(Probe::new));
+                entries.extend(
+                    keys.range::<dyn Ranked, _>((probe_bound(&start), probe_bound(&end)))
+                        .filter_map(|(key, chain)| {
+                            visible(chain, self.snapshot)
+                                .map(|version| (Arc::clone(&key.bytes), version.slot.clone()))
+                        })
+                        .take(self.next_batch),
+                );
+            }
+        }
+        #[cfg(test)]
+        self.memtable
+            .copied
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        self.next_batch = if entries.len() < self.next_batch {
+            0
+        } else {
+            (self.next_batch * 2).min(LAST_BATCH)
+        };
+        self.after = entries.last().map(|(key, _)| Arc::clone(key));
+        self.entries = entries.into_iter();
+    }
+}
+
+impl Iterator for Range<'_> {
+    type Item = (Bytes, Slot);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.entries.next() {
+            return Some(entry);
+        }
+        if self.next_batch == 0 {
+            return None;
+        }
+        self.refill();
+        self.entries.next()
     }
 }
 

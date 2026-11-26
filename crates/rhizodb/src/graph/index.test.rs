@@ -1108,3 +1108,112 @@ fn zero_vector_scores_of_either_sign_tie_in_ascending_id_order() {
         vec![(0, 0.0f64.to_bits()), (1, 0.0f64.to_bits())]
     );
 }
+
+struct Grouped {
+    graph: Graph<TestStorage>,
+    index: u32,
+    group: Token<PropertyKey>,
+    label: Token<Label>,
+    nodes: Vec<NodeId>,
+}
+
+fn memtable_resident_halves(nodes: i64) -> Grouped {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("P").unwrap();
+    let group = write.intern_token("g").unwrap();
+    write
+        .create_property_index("p g", IndexTarget::Label("P"), "g")
+        .unwrap();
+    let nodes = (0..nodes)
+        .map(|at| {
+            write
+                .create_node(NodeRecord {
+                    labels: [label].into(),
+                    properties: Properties::from([(group, PropertyValue::Integer(at % 2))]),
+                })
+                .unwrap()
+        })
+        .collect();
+    let index = write
+        .property_index(Target::Label(label), group)
+        .unwrap()
+        .unwrap();
+    write.commit().unwrap();
+    Grouped {
+        graph,
+        index,
+        group,
+        label,
+        nodes,
+    }
+}
+
+#[test]
+fn a_capped_seek_over_memtable_entries_copies_about_as_many_as_it_reads() {
+    let Grouped { graph, index, .. } = memtable_resident_halves(20_000);
+    let read = graph.read().unwrap();
+    let zero = KeyRange::equal_to(&PropertyValue::Integer(0)).unwrap();
+    for limit in [0, 1, 15, 100, 1000] {
+        let before = graph.storage().memtable_copied();
+        assert_eq!(
+            read.property_seek_within(index, std::slice::from_ref(&zero), limit)
+                .unwrap(),
+            None
+        );
+        let copied = graph.storage().memtable_copied() - before;
+        assert!(
+            copied <= 2 * (limit as u64 + 1) + 16,
+            "a seek capped at {limit} copied {copied} entries"
+        );
+    }
+    let before = graph.storage().memtable_copied();
+    assert_eq!(
+        read.property_seek_within(index, &[zero], 10_000)
+            .unwrap()
+            .map(|found| found.len()),
+        Some(10_000)
+    );
+    assert!(graph.storage().memtable_copied() - before <= 2 * 10_001);
+}
+
+#[test]
+fn a_capped_seek_counts_the_writes_its_transaction_has_not_committed() {
+    let Grouped {
+        graph,
+        index,
+        group,
+        label,
+        nodes,
+    } = memtable_resident_halves(200);
+    let mut write = graph.write().unwrap();
+    for &node in nodes[..100].iter().step_by(2) {
+        write.delete_node(node).unwrap();
+    }
+    for &node in nodes[1..40].iter().step_by(2) {
+        write
+            .set_node_property(node, group, PropertyValue::Integer(0))
+            .unwrap();
+    }
+    for _ in 0..7 {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(group, PropertyValue::Integer(0))]),
+            })
+            .unwrap();
+    }
+    let zero = KeyRange::equal_to(&PropertyValue::Integer(0)).unwrap();
+    let all = write
+        .property_seek(index, std::slice::from_ref(&zero))
+        .unwrap();
+    assert_eq!(all.len(), 50 + 20 + 7);
+    let within = |limit| {
+        write
+            .property_seek_within(index, std::slice::from_ref(&zero), limit)
+            .unwrap()
+    };
+    assert_eq!(within(all.len()), Some(all.clone()));
+    assert_eq!(within(all.len() - 1), None);
+    assert_eq!(within(usize::MAX), Some(all));
+}

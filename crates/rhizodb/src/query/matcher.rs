@@ -292,7 +292,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         row: &Row,
     ) -> Result<(&'p PatternPart, Option<Sought>), Error> {
         let sought = self.seek_start(part, row)?;
-        if !self.others_served(part)? {
+        if part.others.is_empty() {
             return Ok((part, sought));
         }
         let mut fewest = match &sought {
@@ -327,17 +327,30 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(false)
     }
 
-    /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts.
+    /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts once per
+    /// statement.
     pub(crate) fn scanned_count(&self, pattern: &NodePattern) -> Result<u64, Error> {
-        Ok(
-            match pattern.labels.as_ref().and_then(LabelExpr::required) {
-                Some(label) => match self.label_token(&label.0)? {
-                    Some(token) => self.tx.count_nodes_with_label(token)?,
-                    None => 0,
-                },
-                None => self.tx.count_nodes()?,
+        let label = match pattern.labels.as_ref().and_then(LabelExpr::required) {
+            Some(label) => match self.label_token(&label.0)? {
+                Some(token) => Some(token),
+                None => return Ok(0),
             },
-        )
+            None => None,
+        };
+        if let Some((_, count)) = self
+            .node_counts
+            .borrow()
+            .iter()
+            .find(|(held, _)| *held == label)
+        {
+            return Ok(*count);
+        }
+        let count = match label {
+            Some(token) => self.tx.count_nodes_with_label(token)?,
+            None => self.tx.count_nodes()?,
+        };
+        self.node_counts.borrow_mut().push((label, count));
+        Ok(count)
     }
 
     /// The nodes a pattern starts from when no seek serves it: those of its required label, or

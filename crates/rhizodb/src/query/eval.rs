@@ -92,6 +92,10 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
     /// The property indexes looked up so far, each with its ID or none.
     pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
+    /// The node counts read so far, per required label or none for every node. A count stays
+    /// as first read for the rest of the statement, as only the choice of where a pattern
+    /// starts reads it.
+    pub(crate) node_counts: RefCell<Vec<(Option<Token<Label>>, u64)>>,
     /// The adjacency segments read last.
     pub(crate) adjacency: RefCell<AdjacencyReader>,
     /// The relationship types looked up so far that have a token.
@@ -124,6 +128,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             labels: RefCell::default(),
             label_tokens: RefCell::default(),
             property_indexes: RefCell::default(),
+            node_counts: RefCell::default(),
             adjacency: RefCell::default(),
             rel_type_tokens: RefCell::default(),
             morsel: None,
