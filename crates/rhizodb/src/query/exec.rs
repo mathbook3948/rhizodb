@@ -20,9 +20,11 @@ use crate::temporal::Clocks;
 use super::aggregate::Groups;
 use super::compare::sort_order;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::datum::PathIds;
 use super::datum::dismantle;
 use super::datum::from_parameter;
+use super::datum::owned;
 use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
@@ -57,10 +59,16 @@ pub(crate) fn run_read<T: ReadTransaction>(
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
 ) -> Result<QueryResult, Error> {
-    read_program(tx, program, parameters, now, |env, clause, next, rows| {
-        env.read_clauses(clause, next, rows)
-    })
+    read_program(
+        tx,
+        program,
+        parameters,
+        now,
+        limits,
+        |env, clause, next, rows| env.read_clauses(clause, next, rows),
+    )
 }
 
 /// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does.
@@ -69,6 +77,7 @@ pub(crate) fn read_program<T: ReadTransaction>(
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
     read: impl Fn(
         &Env<'_, T>,
         &ReadClause,
@@ -85,6 +94,7 @@ pub(crate) fn read_program<T: ReadTransaction>(
         now,
         &graveyard,
         &patterns,
+        limits,
     );
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -100,11 +110,13 @@ pub(crate) fn run_write<W: WriteTransaction>(
     program: &Program<Clause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    Env::new(&*tx, slots, parameters, now, &graveyard, &patterns).check_closed(&program.closed)?;
+    Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits)
+        .check_closed(&program.closed)?;
     let mut writer = Writer {
         tx,
         slots,
@@ -112,13 +124,14 @@ pub(crate) fn run_write<W: WriteTransaction>(
         now,
         patterns: &patterns,
         graveyard: &mut graveyard,
+        limits,
         tokens: Vec::new(),
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
-    let env = Env::new(&*tx, slots, parameters, now, &graveyard, &patterns);
+    let env = Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits);
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
@@ -397,7 +410,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     let items = match self.eval(expr, &row)? {
                         Datum::Null => Arc::default(),
                         Datum::List(items) => items,
-                        other => Arc::new(vec![other]),
+                        other => Arc::new(vec![other].into()),
                     };
                     for item in items.iter() {
                         let mut next = row.clone();
@@ -690,6 +703,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 self.now,
                 self.graveyard,
                 self.patterns,
+                self.limits,
             )
         };
         let row = vec![Datum::Null; self.slots];
@@ -768,12 +782,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
             Datum::Temporal(value) => Value::Temporal(value),
-            Datum::List(items) => {
-                Value::List(self.list_value(Arc::unwrap_or_clone(items), graveyard)?)
-            }
-            Datum::Map(entries) => {
-                Value::Map(self.map_value(Arc::unwrap_or_clone(entries), graveyard)?)
-            }
+            Datum::List(items) => Value::List(self.list_value(owned(items), graveyard)?),
+            Datum::Map(entries) => Value::Map(self.map_value(owned(entries), graveyard)?),
             Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
             Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
             Datum::Path(path) => Value::Path(self.path_value(path, graveyard)?),
@@ -824,7 +834,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Node {
             id,
-            labels: self.label_names(&record)?.into_iter().collect(),
+            labels: self
+                .label_names(record.labels.iter().copied())?
+                .into_iter()
+                .collect(),
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,
         })
     }
@@ -840,7 +853,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Relationship {
             id,
-            relationship_type: self.tx.token_name(record.rel_type)?,
+            relationship_type: self.tx.token_name(record.rel_type)?.to_string(),
             start: record.source,
             end: record.target,
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,

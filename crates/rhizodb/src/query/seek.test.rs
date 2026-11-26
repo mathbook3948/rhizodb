@@ -131,8 +131,8 @@ fn query_value() -> impl Strategy<Value = Datum> {
     prop_oneof![
         8 => plain.clone(),
         1 => Just(Datum::Null),
-        1 => plain.clone().prop_map(|value| Datum::Map(Arc::new(BTreeMap::from([(Arc::from("k"), value)])))),
-        1 => plain.prop_map(|value| Datum::List(Arc::new(vec![value, Datum::Null]))),
+        1 => plain.clone().prop_map(|value| Datum::map(BTreeMap::from([(Arc::from("k"), value)]))),
+        1 => plain.prop_map(|value| Datum::list(vec![value, Datum::Null])),
     ]
 }
 

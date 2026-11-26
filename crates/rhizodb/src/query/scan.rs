@@ -4,7 +4,6 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
-use std::sync::Arc;
 
 use memchr::memmem;
 
@@ -29,6 +28,7 @@ use super::aggregate::Part;
 use super::compare::equals;
 use super::compare::sort_order;
 use super::datum::Datum;
+use super::datum::owned;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::and;
@@ -344,9 +344,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                     return Ok(None);
                 };
                 match self.value(list)? {
-                    Some(Value::Fixed(Datum::List(items))) => {
-                        Pred::In(needle, Some(Arc::unwrap_or_clone(items)))
-                    }
+                    Some(Value::Fixed(Datum::List(items))) => Pred::In(needle, Some(owned(items))),
                     Some(Value::Fixed(Datum::Null)) => Pred::In(needle, None),
                     _ => return Ok(None),
                 }

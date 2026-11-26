@@ -203,26 +203,43 @@ pub(crate) struct Graph<S> {
 
 type ColumnDeltas = Mutex<BTreeMap<u64, usize>>;
 
-/// The tokens of every name space by name, as committed. A committed token never changes, and
-/// no element of a snapshot taken before a token was committed refers to it.
+/// The tokens of every name space by name and by ID, as committed. A committed token never
+/// changes, and no element of a snapshot taken before a token was committed refers to it.
 #[derive(Debug, Default)]
 pub(crate) struct CommittedTokens {
-    by_name: RwLock<[HashMap<String, u32>; 3]>,
+    spaces: RwLock<[TokenSpace; 3]>,
+}
+
+#[derive(Debug, Default)]
+struct TokenSpace {
+    by_name: HashMap<Arc<str>, u32>,
+    by_id: HashMap<u32, Arc<str>>,
 }
 
 impl CommittedTokens {
     fn get<K: TokenKind>(&self, name: &str) -> Option<Token<K>> {
-        let by_name = self.by_name.read().unwrap_or_else(PoisonError::into_inner);
-        by_name
+        let spaces = self.spaces.read().unwrap_or_else(PoisonError::into_inner);
+        spaces
             .get(usize::from(K::TAG))?
+            .by_name
             .get(name)
             .map(|id| Token::new(*id))
     }
 
-    fn insert<K: TokenKind>(&self, name: &str, token: Token<K>) {
-        let mut by_name = self.by_name.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(names) = by_name.get_mut(usize::from(K::TAG)) {
-            names.insert(name.to_owned(), token.id());
+    fn name<K: TokenKind>(&self, token: Token<K>) -> Option<Arc<str>> {
+        let spaces = self.spaces.read().unwrap_or_else(PoisonError::into_inner);
+        spaces
+            .get(usize::from(K::TAG))?
+            .by_id
+            .get(&token.id())
+            .cloned()
+    }
+
+    fn insert<K: TokenKind>(&self, name: Arc<str>, token: Token<K>) {
+        let mut spaces = self.spaces.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(space) = spaces.get_mut(usize::from(K::TAG)) {
+            space.by_id.insert(token.id(), Arc::clone(&name));
+            space.by_name.insert(name, token.id());
         }
     }
 }
@@ -681,6 +698,24 @@ impl<T: ReadTransaction> GraphTx<T> {
         key: Token<PropertyKey>,
     ) -> Result<Option<Option<PropertyValue>>, GraphError> {
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::property(bytes, key)?))
+    }
+
+    /// The type of a relationship, decoding none of its properties. `None` means the
+    /// relationship does not exist.
+    pub(crate) fn relationship_type(
+        &self,
+        id: RelationshipId,
+    ) -> Result<Option<Token<RelationshipType>>, GraphError> {
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::rel_type(bytes)?))
+    }
+
+    /// The property keys of a relationship, ascending, decoding none of its values. `None`
+    /// means the relationship does not exist.
+    pub(crate) fn relationship_keys(
+        &self,
+        id: RelationshipId,
+    ) -> Result<Option<Vec<Token<PropertyKey>>>, GraphError> {
+        self.with_relationship(id, |bytes| Ok(RelationshipRecord::keys(bytes)?))
     }
 
     pub(crate) fn relationship(
@@ -1300,21 +1335,36 @@ impl<T: ReadTransaction> GraphTx<T> {
             .map(|bytes| decode_u32(&bytes).map(Token::new))
             .transpose()?;
         if let Some(token) = token {
-            if self.reads_committed_tokens {
-                self.tokens.insert(name, token);
-            } else {
-                self.own_tokens.insert(name, token);
-            }
+            self.remember_token(Arc::from(name), token);
         }
         Ok(token)
     }
 
-    pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<String, GraphError> {
+    pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<Arc<str>, GraphError> {
+        if let Some(name) = self
+            .tokens
+            .name(token)
+            .or_else(|| self.own_tokens.name(token))
+        {
+            return Ok(name);
+        }
         let bytes = self
             .transaction
             .get(Table::TokenById, &keys::token_id_key(K::TAG, token.id()))?
             .ok_or(GraphError::Corrupt("token has no name"))?;
-        String::from_utf8(bytes).map_err(|_| GraphError::Decode(DecodeError::InvalidUtf8))
+        let name: Arc<str> = String::from_utf8(bytes)
+            .map_err(|_| GraphError::Decode(DecodeError::InvalidUtf8))?
+            .into();
+        self.remember_token(Arc::clone(&name), token);
+        Ok(name)
+    }
+
+    fn remember_token<K: TokenKind>(&self, name: Arc<str>, token: Token<K>) {
+        if self.reads_committed_tokens {
+            self.tokens.insert(name, token);
+        } else {
+            self.own_tokens.insert(name, token);
+        }
     }
 }
 
@@ -1630,7 +1680,7 @@ impl<T: WriteTransaction> GraphTx<T> {
             name.as_bytes(),
         )?;
         let token = Token::new(id);
-        self.own_tokens.insert(name, token);
+        self.own_tokens.insert(Arc::from(name), token);
         Ok(token)
     }
 

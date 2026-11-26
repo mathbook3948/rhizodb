@@ -9,8 +9,8 @@ use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
 use super::compare::equals;
-use super::datum;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::eval::Env;
 use super::eval::arithmetic;
 use super::eval::float_text;
@@ -114,8 +114,6 @@ pub(crate) enum Function {
     EuclideanSimilarity,
     Temporal(TemporalFunction),
 }
-
-const MAX_RANGE_LENGTH: i128 = 10_000_000;
 
 type Accepted = &'static [Shape];
 
@@ -713,7 +711,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     })?,
                     Some(other) => return Err(invalid(&other)),
                 };
-                Ok(Datum::String(normalized(&text, form)))
+                self.limits.text(normalized(&text, form))
             }
             Function::Pi => Ok(Datum::Float(std::f64::consts::PI)),
             Function::E => Ok(Datum::Float(std::f64::consts::E)),
@@ -724,38 +722,43 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Labels => match first {
-                Datum::Node(id) => Ok(Datum::List(Arc::new(
-                    self.label_names(&self.node(id)?)?
+                Datum::Node(id) => Ok(Datum::list(
+                    self.node_label_names(id)?
                         .into_iter()
                         .map(Datum::String)
                         .collect(),
-                ))),
+                )),
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
-                Datum::Relationship(id) => Ok(Datum::String(self.relationship_type(id)?)),
+                Datum::Relationship(id) => {
+                    Ok(Datum::String(self.relationship_type(id)?.to_string()))
+                }
                 other => Err(invalid(&other)),
             },
-            Function::Keys | Function::Properties => {
-                let entries = match first {
-                    Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?),
-                    Datum::Relationship(id) => {
-                        Arc::new(self.property_map(&self.relationship(id)?.properties)?)
-                    }
-                    Datum::Map(entries) => entries,
+            Function::Keys => {
+                let names = match first {
+                    Datum::Node(id) => self.node_keys(id)?,
+                    Datum::Relationship(id) => self.relationship_keys(id)?,
+                    Datum::Map(entries) => entries.keys().cloned().collect(),
                     other => return Err(invalid(&other)),
                 };
-                Ok(if function == Function::Keys {
-                    Datum::List(Arc::new(
-                        entries
-                            .keys()
-                            .map(|key| Datum::String(key.to_string()))
-                            .collect(),
-                    ))
-                } else {
-                    Datum::Map(entries)
-                })
+                Ok(Datum::list(
+                    names
+                        .iter()
+                        .map(|name| Datum::String(name.to_string()))
+                        .collect(),
+                ))
             }
+            Function::Properties => Ok(Datum::Map(match first {
+                Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?.into()),
+                Datum::Relationship(id) => Arc::new(
+                    self.property_map(&self.relationship(id)?.properties)?
+                        .into(),
+                ),
+                Datum::Map(entries) => entries,
+                other => return Err(invalid(&other)),
+            })),
             Function::Size => match first {
                 Datum::List(items) => Ok(integer(items.len())),
                 Datum::String(text) => Ok(integer(text.chars().count())),
@@ -769,7 +772,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Datum::List(items) => Ok(match function {
                     Function::Head => items.first().cloned().unwrap_or(Datum::Null),
                     Function::Last => items.last().cloned().unwrap_or(Datum::Null),
-                    _ => Datum::List(Arc::new(items.iter().skip(1).cloned().collect())),
+                    _ => Datum::list(items.iter().skip(1).cloned().collect()),
                 }),
                 other => Err(invalid(&other)),
             },
@@ -781,7 +784,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Datum::String(text) => Ok(Datum::String(text.chars().rev().collect())),
                 other => Err(invalid(&other)),
             },
-            Function::Range => range(first, second, third),
+            Function::Range => range(first, second, third, self.limits),
             Function::ToInteger => to_integer(first),
             Function::ToFloat => to_float(first),
             Function::ToString => to_string(first),
@@ -869,26 +872,26 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Nodes => match first {
-                Datum::Path(path) => Ok(Datum::List(Arc::new(
+                Datum::Path(path) => Ok(Datum::list(
                     path.nodes.into_iter().map(Datum::Node).collect(),
-                ))),
+                )),
                 other => Err(invalid(&other)),
             },
             Function::Relationships => match first {
-                Datum::Path(path) => Ok(Datum::List(Arc::new(
+                Datum::Path(path) => Ok(Datum::list(
                     path.relationships
                         .into_iter()
                         .map(Datum::Relationship)
                         .collect(),
-                ))),
+                )),
                 other => Err(invalid(&other)),
             },
             Function::ToUpper | Function::ToLower => match first {
-                Datum::String(text) => Ok(Datum::String(if function == Function::ToUpper {
+                Datum::String(text) => self.limits.text(if function == Function::ToUpper {
                     text.to_uppercase()
                 } else {
                     text.to_lowercase()
-                })),
+                }),
                 other => Err(invalid(&other)),
             },
             Function::Trim | Function::BTrim | Function::LTrim | Function::RTrim => {
@@ -971,7 +974,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     } else {
                         text.matches(from.as_str()).count()
                     };
-                    datum::check_string_bytes(
+                    self.limits.check_bytes(
                         text.len()
                             .saturating_add(matches.saturating_mul(to.len() - from.len())),
                     )?;
@@ -984,19 +987,29 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             Function::Split => {
                 let text = string_argument(function, first)?;
+                self.limits.check_bytes(text.len())?;
+                if text.len() >= self.limits.items {
+                    self.limits.check_items(match &second {
+                        Some(Datum::String(delimiter)) if delimiter.is_empty() => {
+                            text.chars().count()
+                        }
+                        Some(Datum::String(delimiter)) => {
+                            text.matches(delimiter.as_str()).count() + 1
+                        }
+                        _ => 0,
+                    })?;
+                }
                 match second {
-                    Some(Datum::String(delimiter)) if delimiter.is_empty() => {
-                        Ok(Datum::List(Arc::new(
-                            text.chars()
-                                .map(|char| Datum::String(char.to_string()))
-                                .collect(),
-                        )))
-                    }
-                    Some(Datum::String(delimiter)) => Ok(Datum::List(Arc::new(
+                    Some(Datum::String(delimiter)) if delimiter.is_empty() => Ok(Datum::list(
+                        text.chars()
+                            .map(|char| Datum::String(char.to_string()))
+                            .collect(),
+                    )),
+                    Some(Datum::String(delimiter)) => Ok(Datum::list(
                         text.split(delimiter.as_str())
                             .map(|part| Datum::String(part.to_owned()))
                             .collect(),
-                    ))),
+                    )),
                     Some(Datum::Null) | None => Ok(Datum::Null),
                     Some(other) => Err(invalid(&other)),
                 }
@@ -1056,7 +1069,12 @@ fn round_half_up(value: f64) -> f64 {
     }
 }
 
-fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum, Error> {
+fn range(
+    start: Datum,
+    end: Option<Datum>,
+    step: Option<Datum>,
+    limits: Limits,
+) -> Result<Datum, Error> {
     let integer = |value: Option<Datum>| match value {
         Some(Datum::Integer(value)) => Ok(Some(value)),
         Some(Datum::Null) => Ok(None),
@@ -1086,17 +1104,17 @@ fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum,
     } else {
         distance / i128::from(step).abs() + 1
     };
-    if length > MAX_RANGE_LENGTH {
+    if length > i128::try_from(limits.items).unwrap_or(i128::MAX) {
         return Err(Error::new(
             ErrorKind::NumberOutOfRange,
-            format!("range() would build more than {MAX_RANGE_LENGTH} elements"),
+            format!("range() would build more than {} elements", limits.items),
         ));
     }
     let items = (0..length)
         .map_while(|index| i64::try_from(i128::from(start) + index * i128::from(step)).ok())
         .map(Datum::Integer)
         .collect();
-    Ok(Datum::List(Arc::new(items)))
+    Ok(Datum::list(items))
 }
 
 fn to_integer(value: Datum) -> Result<Datum, Error> {

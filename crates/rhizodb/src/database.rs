@@ -14,6 +14,7 @@ use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
 use crate::procedure::Procedure;
 use crate::query;
+use crate::query::Limits;
 use crate::query::Parallelism;
 use crate::query::Statements;
 use crate::replication::Position;
@@ -74,6 +75,7 @@ pub struct OpenOptions {
     parallelism: Parallelism,
     engine: EngineOptions,
     force_install: bool,
+    limits: Limits,
 }
 
 impl Default for OpenOptions {
@@ -84,6 +86,7 @@ impl Default for OpenOptions {
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
             force_install: false,
+            limits: Limits::default(),
         }
     }
 }
@@ -203,12 +206,47 @@ impl OpenOptions {
         self
     }
 
+    /// How many list items and map entries one value that a query builds may hold, counted
+    /// through every list and map nested in it, which defaults to 10,000,000. It also caps how
+    /// many elements `range()` gives. An operator, function, list comprehension, or `collect()`
+    /// whose value would pass it fails with
+    /// [`ErrorKind::NumberOutOfRange`](crate::ErrorKind::NumberOutOfRange), so one query cannot
+    /// exhaust the host's memory by growing a value. Values the host passes as parameters or
+    /// stores as properties are not limited by it until a query builds a larger value from them.
+    ///
+    /// ```
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    ///
+    /// let db = OpenOptions::new().max_value_items(1_000).in_memory()?;
+    /// let none = Parameters::new();
+    /// db.execute("RETURN [x IN range(1, 10) | range(1, 99)]", &none)?;
+    /// let error = db
+    ///     .execute("RETURN [x IN range(1, 10) | range(1, 100)]", &none)
+    ///     .unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::NumberOutOfRange);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn max_value_items(mut self, items: usize) -> Self {
+        self.limits.items = items;
+        self
+    }
+
+    /// How many bytes of strings and byte strings one value that a query builds may hold,
+    /// counted through every list and map nested in it, which defaults to 256 MiB. A value that
+    /// would pass it fails as [`OpenOptions::max_value_items`] describes.
+    pub fn max_value_bytes(mut self, bytes: usize) -> Self {
+        self.limits.bytes = bytes;
+        self
+    }
+
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
         Ok(Database::from_parts(
             graph_on(in_memory_backend(self.engine)?, self.replica)?,
-            Statements::new(self.parallelism),
+            Statements::new(self.parallelism, self.limits),
         ))
     }
 
@@ -227,7 +265,7 @@ impl OpenOptions {
         }
         Ok(Database::from_parts(
             graph_on(open_backend(path, self.engine)?, self.replica)?,
-            Statements::new(self.parallelism),
+            Statements::new(self.parallelism, self.limits),
         ))
     }
 
@@ -242,7 +280,7 @@ impl OpenOptions {
             .map_err(StorageError::from)?;
         Ok(Database::from_parts(
             graph_on(installed, true)?,
-            Statements::new(self.parallelism),
+            Statements::new(self.parallelism, self.limits),
         ))
     }
 }

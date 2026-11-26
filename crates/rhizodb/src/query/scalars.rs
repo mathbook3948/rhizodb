@@ -182,12 +182,12 @@ pub(crate) fn convert_list(
     convert: impl Fn(Datum) -> Option<Datum>,
 ) -> Result<Datum, Error> {
     match value {
-        Datum::List(items) => Ok(Datum::List(Arc::new(
+        Datum::List(items) => Ok(Datum::list(
             Arc::unwrap_or_clone(items)
                 .into_iter()
                 .map(|item| convert(item).unwrap_or(Datum::Null))
                 .collect(),
-        ))),
+        )),
         other => Err(Error::rejecting_type(
             ErrorKind::InvalidArgumentValue,
             format!("{name}() takes a list, not a {}", other.type_name()),

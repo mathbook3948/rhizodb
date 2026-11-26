@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use proptest::prelude::*;
 
 use super::*;
@@ -36,7 +34,7 @@ fn datum() -> impl Strategy<Value = Datum> {
         (0u64..3).prop_map(|id| Datum::Node(NodeId(id))),
     ];
     leaf.prop_recursive(2, 6, 3, |inner| {
-        prop::collection::vec(inner, 0..3).prop_map(|items| Datum::List(Arc::new(items)))
+        prop::collection::vec(inner, 0..3).prop_map(Datum::list)
     })
 }
 
