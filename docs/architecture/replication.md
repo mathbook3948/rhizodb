@@ -44,6 +44,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `changes_since` fails with `TooFarBehind` when the segment that holds the next record is gone, including one removed while it reads.
 - `position`, `changes_since`, and `apply` read the database id and replication fields from a copy beside the durable state, so they never wait on a checkpoint.
 - An install compares the snapshot's term with the highest term the replaced file's header, history, and log segments hold, so a term begun after the last checkpoint counts after a crash.
+- An install over a file whose history cannot be read fails as `CorruptData` unless it is forced, so it fails closed and a forced install resyncs a damaged replica.
 - `changes_since` checks the asker's term, writer id, and chain hash against its own history and fails with `Diverged` where they differ.
 - A position past the database's last change in its newest term, or in a later term, gets no changes instead of an error.
 - A writer that hears of a higher term from a peer's position keeps that term in its header and becomes fenced, so a host passes only positions of authenticated peers.

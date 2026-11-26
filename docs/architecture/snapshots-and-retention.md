@@ -33,6 +33,7 @@ A replica starts from a copy of the database file and then follows the log from 
 - An installed database removes the old log's segments as it opens, since its header is clean.
 - The installed image's header names a replica with a fresh incarnation, keeps the checkpoint's chain hash, and records as the highest term seen the higher of the replaced database's and the snapshot's, so a stale writer's changes are fenced after any install.
 - Install refuses a snapshot whose newest term is older than the term the replaced database has seen, unless the host forces it.
+- Install refuses, as corrupt data, to replace a database that holds data but whose history of terms cannot be read, unless the host forces it, so a damaged file never lets an older snapshot pass and a forced install resyncs it.
 - Install refuses to replace a database that holds the changes of another database than the snapshot's, unless the host forces it, and a database whose last checkpoint holds no change counts as none.
 - A snapshot's position names the term and writer that the pinned tree's history records for its LSN, and the chain hash its header records.
 - Acknowledging a position of a newer term fences a writer as a promotion elsewhere would.

@@ -187,9 +187,12 @@ impl OpenOptions {
     /// history than the snapshot holds, refused with
     /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced), and one that holds the changes of
     /// another database, refused with
-    /// [`ErrorKind::DifferentDatabase`](crate::ErrorKind::DifferentDatabase). A snapshot of an
-    /// older term comes from a writer that a later one replaced, so a host forces it only to roll
-    /// a node back on purpose, and forces another database only to reuse the file for it.
+    /// [`ErrorKind::DifferentDatabase`](crate::ErrorKind::DifferentDatabase), and one whose
+    /// history of terms cannot be read, refused with
+    /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData). A snapshot of an older term
+    /// comes from a writer that a later one replaced, so a host forces it only to roll a node
+    /// back on purpose, forces another database only to reuse the file for it, and forces a
+    /// damaged database to resync it from the snapshot.
     pub fn force_install(mut self, force: bool) -> Self {
         self.force_install = force;
         self
@@ -573,7 +576,8 @@ impl Database {
     ///
     /// It fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) when a chunk of
     /// the stream fails its checksum, comes from another offset or another snapshot, or the
-    /// stream ends early, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when reading `input`
+    /// stream ends early, or when the database at `path` is too damaged to tell which terms it
+    /// has seen, which [`OpenOptions::force_install`] resyncs, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when reading `input`
     /// fails. A transfer that was cut off can be retried with a reader that resumes from the
     /// offset it reached, since the snapshot gives the same bytes at every offset.
     ///

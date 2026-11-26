@@ -510,6 +510,10 @@ pub(crate) fn install<F: FileSystem + 'static>(
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let holds_data = match &existing {
+        Some(file) => !file.is_empty()?,
+        None => false,
+    };
     let local = existing
         .as_ref()
         .and_then(|file| read_header(file).ok())
@@ -517,17 +521,24 @@ pub(crate) fn install<F: FileSystem + 'static>(
     let (existing, held, local_history) = match existing {
         Some(file) if local.is_some() => match load(file, &options) {
             Ok(loaded) => {
-                let term = loaded.newest_term().unwrap_or(0);
+                let term = loaded.newest_term().ok();
                 (None, Some(loaded), term)
             }
             Err(_) => {
                 let file = fs.open(name, block_size()?)?;
                 file.lock()?;
-                (Some(file), None, 0)
+                (Some(file), None, None)
             }
         },
-        other => (other, None, 0),
+        other => (other, None, None),
     };
+    if holds_data && local_history.is_none() && !force {
+        return Err(EngineError::corrupt(
+            "the database the install would replace holds a history of terms that cannot be \
+             read, so an older snapshot cannot be told apart; install with force to resync it",
+        ));
+    }
+    let local_history = local_history.unwrap_or(0);
     let local_logged = local.map_or(0, |header| {
         replica::newest_logged_term(&*fs, name, header.database_id)
     });

@@ -850,6 +850,45 @@ fn an_install_refuses_a_snapshot_older_than_the_terms_the_locked_database_began(
 }
 
 #[test]
+fn installing_over_a_database_whose_history_cannot_be_read_fails_unless_forced() {
+    let (_fs, source, expected) = loaded_source(3, 10);
+    let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let (target, _) = old_target();
+    let file = target
+        .open(
+            TARGET,
+            crate::engine::block_file::BlockSize::new(crate::engine::layout::BLOCK).unwrap(),
+        )
+        .unwrap();
+    for slot in 0..2 {
+        file.write(slot, &vec![0xA5; crate::engine::layout::BLOCK])
+            .unwrap();
+    }
+    file.sync().unwrap();
+    drop(file);
+    let error = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        false,
+    )
+    .unwrap_err();
+    let error = StorageError::from(error);
+    assert_eq!(error.kind(), ErrorKind::CorruptData);
+    assert!(error.to_string().contains("force"), "{error}");
+    let installed = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(dump(&installed), expected);
+}
+
+#[test]
 fn installing_over_another_database_fails_unless_forced_and_keeps_it() {
     let (_fs, source, expected) = loaded_source(3, 10);
     let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
