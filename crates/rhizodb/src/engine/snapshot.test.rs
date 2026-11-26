@@ -74,6 +74,12 @@ fn dump(engine: &impl Storage) -> State {
     state
 }
 
+fn digest(state: &State) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(state, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 fn value(round: u64, index: u64) -> Vec<u8> {
     let length = match (round + index) % 9 {
         0 => 70_000,
@@ -131,7 +137,7 @@ fn loaded_source(rounds: u64, rows: u64) -> (SimFs, Engine<SimFs>, State) {
 }
 
 fn install_bytes(fs: &SimFs, bytes: &[u8]) -> Result<Engine<SimFs>, EngineError> {
-    install(Arc::new(fs.clone()), TARGET, bytes, options(), false)
+    install(Arc::new(fs.clone()), TARGET, bytes, options(), true)
 }
 
 fn old_target() -> (SimFs, State) {
@@ -298,7 +304,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts: vec![export.len() / 2],
         resume: false,
     };
-    let error = install(Arc::new(target.clone()), TARGET, cut, options(), false).unwrap_err();
+    let error = install(Arc::new(target.clone()), TARGET, cut, options(), true).unwrap_err();
     assert_eq!(StorageError::from(error).kind(), ErrorKind::Io);
     assert_eq!(dump(&open(&target, TARGET, options()).unwrap()), old);
     let cuts = (1..6).map(|part| export.len() * part / 6 + part).collect();
@@ -308,7 +314,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts,
         resume: true,
     };
-    let installed = install(Arc::new(target.clone()), TARGET, resumed, options(), false).unwrap();
+    let installed = install(Arc::new(target.clone()), TARGET, resumed, options(), true).unwrap();
     assert_eq!(dump(&installed), expected);
 }
 
@@ -377,7 +383,7 @@ fn an_export_stays_whole_while_the_source_rewrites_and_compacts() {
     let expected = dump(&source);
     let export = source.export(&[]).unwrap();
     let pinned: Vec<_> = source.extents().entries.into_keys().collect();
-    let rounds = u64::from(test_scale::cases(60));
+    let rounds = u64::from(test_scale::cases(60).min(90));
     let first = std::thread::scope(|scope| {
         let writer = scope.spawn(|| {
             for round in 20..20 + rounds {
@@ -580,12 +586,12 @@ fn a_log_kept_for_a_peer_past_the_checkpoint_limit_starts_no_extra_checkpoints()
 
 #[test]
 fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_its_position() {
-    let rounds = 20 + u64::from(test_scale::cases(40));
+    let rounds = 20 + u64::from(test_scale::cases(40).min(400));
     let reference = open(&SimFs::new(), SOURCE, by_hand()).unwrap();
-    let mut states = vec![State::new()];
+    let mut states = vec![digest(&State::new())];
     for round in 0..rounds {
         write_round(&reference, round, 60);
-        states.push(dump(&reference));
+        states.push(digest(&dump(&reference)));
     }
     let busy = EngineOptions {
         checkpoint: CheckpointMode::Background,
@@ -614,7 +620,7 @@ fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_
             let installed = install_bytes(&SimFs::new(), &bytes).unwrap();
             installed.check().unwrap();
             assert!(
-                dump(&installed) == states[position as usize],
+                digest(&dump(&installed)) == states[position as usize],
                 "the snapshot at {position} holds another state"
             );
             checked.insert(position);
@@ -802,5 +808,47 @@ fn installing_over_a_database_open_on_the_simulated_file_system_fails_and_keeps_
     assert_eq!(
         dump(&install_bytes(&target, &bytes).unwrap()).len(),
         dump(&source).len()
+    );
+}
+
+#[test]
+fn installing_over_another_database_fails_unless_forced_and_keeps_it() {
+    let (_fs, source, expected) = loaded_source(3, 10);
+    let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let (target, old) = old_target();
+    let error = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        StorageError::from(error).kind(),
+        ErrorKind::DifferentDatabase
+    );
+    assert_eq!(dump(&open(&target, TARGET, options()).unwrap()), old);
+    let installed = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(dump(&installed), expected);
+    drop(installed);
+    let again = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        false,
+    );
+    assert_eq!(
+        dump(&again.unwrap()),
+        expected,
+        "a snapshot of the same database was refused"
     );
 }

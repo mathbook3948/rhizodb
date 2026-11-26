@@ -179,11 +179,14 @@ impl OpenOptions {
         self
     }
 
-    /// Whether [`OpenOptions::install_snapshot`] replaces a database that has seen a newer term
-    /// of its history than the snapshot holds, which it refuses with
-    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced) unless this is set to `true`. A snapshot
-    /// of an older term comes from a writer that a later one replaced, so a host forces it only
-    /// to roll a node back on purpose.
+    /// Whether [`OpenOptions::install_snapshot`] replaces a database it would otherwise keep,
+    /// which it does not unless this is set to `true`: one that has seen a newer term of its
+    /// history than the snapshot holds, refused with
+    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced), and one that holds the changes of
+    /// another database, refused with
+    /// [`ErrorKind::DifferentDatabase`](crate::ErrorKind::DifferentDatabase). A snapshot of an
+    /// older term comes from a writer that a later one replaced, so a host forces it only to roll
+    /// a node back on purpose, and forces another database only to reuse the file for it.
     pub fn force_install(mut self, force: bool) -> Self {
         self.force_install = force;
         self
