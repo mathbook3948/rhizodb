@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::storage::Peek;
 use crate::value::DecodeError;
 
 use super::GraphError;
@@ -32,7 +34,8 @@ const WIDE_OFFSETS: u8 = 1;
 pub(crate) const PART_BYTES: usize = super::columns::PART_BYTES;
 /// The most deltas one segment of one relationship type keeps beside its parts.
 pub(crate) const MAX_DELTAS: usize = 4;
-/// The largest delta a commit writes. A commit whose delta would be larger rewrites the segment.
+/// The largest delta a commit writes for a slot that shares its part. A commit whose delta would
+/// be larger rewrites the segment.
 pub(crate) const DELTA_BYTES: usize = PART_BYTES / 2;
 
 const CHECKSUM_MISMATCH: GraphError =
@@ -53,7 +56,35 @@ pub(crate) type Stored = (Vec<u8>, Vec<u8>);
 #[cfg(test)]
 pub(crate) type Slots = Vec<(usize, Vec<Edge>)>;
 
-type Held = (Box<[u8]>, Box<[u8]>);
+/// A stored adjacency value that a reader or an edit holds: its bytes, or only its length when it
+/// is larger than a part may be, so a read or a commit that does not need the one slot such a
+/// part holds never reads it.
+#[derive(Clone, Debug)]
+pub(crate) enum Lazy {
+    Bytes(Box<[u8]>),
+    Apart(usize),
+}
+
+impl Lazy {
+    pub(crate) fn of(peek: Peek<'_>) -> Self {
+        match peek {
+            Peek::Bytes(bytes) if bytes.len() <= PART_BYTES => Lazy::Bytes(bytes.into()),
+            Peek::Bytes(bytes) => Lazy::Apart(bytes.len()),
+            Peek::Apart(length) => Lazy::Apart(length),
+        }
+    }
+}
+
+/// Reads the stored value under an adjacency key that a scan left unread.
+pub(crate) type Fetch<'a> = &'a dyn Fn(&[u8]) -> Result<Box<[u8]>, GraphError>;
+
+/// The largest delta a commit writes for a slot stored in a part of `length` bytes: half a part,
+/// or, for a slot far larger than a part, the square root of eight times the part's length, which
+/// balances the delta a hub gaining one relationship a commit rewrites at every commit against
+/// the part it rewrites once the delta outgrows this bound.
+pub(crate) fn delta_bound(length: usize) -> usize {
+    DELTA_BYTES.max((8 * length).isqrt())
+}
 
 /// Which end of its relationships a node's adjacency lists: the relationships it is the source
 /// of, or the ones it is the target of.
@@ -881,10 +912,11 @@ impl SlotRead {
 }
 
 /// One segment of one relationship type in a write transaction: its stored parts and deltas,
-/// and what this transaction changed, kept as each slot's change against the stored parts.
+/// and what this transaction changed, kept as each slot's change against the stored parts. A part
+/// larger than a part may be holds one slot, and the edit reads it only when it needs that slot.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SegmentEdit {
-    parts: Vec<Held>,
+    parts: Vec<(Box<[u8]>, Lazy)>,
     part_at: Vec<u8>,
     span: usize,
     changes: BTreeMap<usize, Change>,
@@ -900,16 +932,24 @@ pub(crate) struct Flush {
     pub(crate) delete: Vec<Vec<u8>>,
 }
 
+#[derive(Debug)]
+struct Layout {
+    parts: Vec<Stored>,
+    retained: BTreeSet<usize>,
+}
+
 impl SegmentEdit {
-    /// The segment as stored, from its entries in key order, each checked against its
-    /// checksum. Every delta must amend the parts, which must agree on their span.
-    pub(crate) fn load<'e>(
+    /// The segment as stored, from its entries in key order, each checked against its checksum
+    /// unless it is a part the edit has not read. Every delta must amend the parts, which must
+    /// agree on their span.
+    pub(crate) fn load(
         id: &SegmentId,
-        entries: impl IntoIterator<Item = (&'e [u8], &'e [u8])>,
+        entries: Vec<(Box<[u8]>, Lazy)>,
+        fetch: Fetch<'_>,
     ) -> Result<Self, GraphError> {
         let mut edit = Self::default();
         for (key, value) in entries {
-            let (held, entry) = parse_key(key)?;
+            let (held, entry) = parse_key(&key)?;
             if held != *id {
                 return Err(BAD_KEY);
             }
@@ -920,18 +960,28 @@ impl SegmentEdit {
                             "an adjacency delta sorts after its segment",
                         ));
                     }
-                    edit.changes.insert(position, Change::parse(key, value)?);
+                    let bytes = match value {
+                        Lazy::Bytes(bytes) => bytes,
+                        Lazy::Apart(_) => fetch(&key)?,
+                    };
+                    edit.changes.insert(position, Change::parse(&key, &bytes)?);
                     edit.stored_deltas.insert(position);
                 }
                 Entry::Part { span, index } => {
-                    PartRef::parse(key, value)?;
+                    let value = match value {
+                        Lazy::Apart(_) if span > 1 => Lazy::Bytes(fetch(&key)?),
+                        value => value,
+                    };
+                    if let Lazy::Bytes(bytes) = &value {
+                        PartRef::parse(&key, bytes)?;
+                    }
                     if edit.span != 0 && edit.span != span {
                         return Err(SPANS_DISAGREE);
                     }
                     edit.span = span;
                     edit.part_at.resize(SEGMENT_SLOTS, u8::MAX);
                     edit.part_at[index] = edit.parts.len() as u8;
-                    edit.parts.push((key.into(), value.into()));
+                    edit.parts.push((key, value));
                 }
             }
         }
@@ -939,23 +989,67 @@ impl SegmentEdit {
             return Err(DELTA_WITHOUT_PARTS);
         }
         for position in edit.changes.keys() {
-            edit.visit(*position, &mut |_| {})?;
+            if !edit.is_apart(*position) {
+                edit.visit(*position, &mut |_| {}, fetch)?;
+            }
         }
         Ok(edit)
     }
 
-    fn part_of(&self, position: usize) -> Option<&Held> {
+    fn part_of(&self, position: usize) -> Option<(&[u8], &Lazy)> {
         let index = position.checked_div(self.span)?;
         let at = self.part_at.get(index)?;
-        self.parts.get(usize::from(*at))
+        let (key, value) = self.parts.get(usize::from(*at))?;
+        Some((key, value))
     }
 
-    fn stored_cached(&mut self, position: usize) -> Result<&[Edge], GraphError> {
+    fn is_apart(&self, position: usize) -> bool {
+        matches!(self.part_of(position), Some((_, Lazy::Apart(_))))
+    }
+
+    fn with_part<T>(
+        &self,
+        position: usize,
+        fetch: Fetch<'_>,
+        read: impl FnOnce(PartRef<'_>) -> Result<T, GraphError>,
+    ) -> Result<Option<T>, GraphError> {
+        match self.part_of(position) {
+            None => Ok(None),
+            Some((key, Lazy::Bytes(bytes))) => read(PartRef::trusted(key, bytes)?).map(Some),
+            Some((key, Lazy::Apart(_))) => {
+                let bytes = fetch(key)?;
+                read(PartRef::parse(key, &bytes)?).map(Some)
+            }
+        }
+    }
+
+    fn held(&self) -> Result<Vec<usize>, GraphError> {
+        let mut positions = Vec::new();
+        for (key, value) in &self.parts {
+            match value {
+                Lazy::Bytes(bytes) => positions.extend(PartRef::trusted(key, bytes)?.held()),
+                Lazy::Apart(_) => {
+                    if let (_, Entry::Part { span, index }) = parse_key(key)? {
+                        positions.push(span * index);
+                    }
+                }
+            }
+        }
+        Ok(positions)
+    }
+
+    fn delta_bound(&self, position: usize) -> usize {
+        match self.part_of(position) {
+            Some((_, Lazy::Apart(length))) => delta_bound(*length),
+            _ => DELTA_BYTES,
+        }
+    }
+
+    fn stored_cached(&mut self, position: usize, fetch: Fetch<'_>) -> Result<&[Edge], GraphError> {
         if !self.stored_slots.contains_key(&position) {
-            let edges = match self.part_of(position) {
-                Some((key, bytes)) => PartRef::trusted(key, bytes)?.slot(position)?,
-                None => Vec::new(),
-            };
+            let edges = self
+                .with_part(position, fetch, |part| part.slot(position))?
+                .unwrap_or_default();
             self.stored_slots.insert(position, edges);
         }
         Ok(self.stored_slots.get(&position).map_or(&[], Vec::as_slice))
@@ -967,15 +1061,17 @@ impl SegmentEdit {
         &self,
         position: usize,
         emit: &mut impl FnMut(Edge),
+        fetch: Fetch<'_>,
     ) -> Result<(), GraphError> {
         let mut amended = Amended::new(self.changes.get(&position));
         if let Some(edges) = self.stored_slots.get(&position) {
             for edge in edges {
                 amended.stored(*edge, emit)?;
             }
-        } else if let Some((key, bytes)) = self.part_of(position) {
-            PartRef::trusted(key, bytes)?
-                .visit_slot(position, |edge| amended.stored(edge, emit))?;
+        } else {
+            self.with_part(position, fetch, |part| {
+                part.visit_slot(position, |edge| amended.stored(edge, emit))
+            })?;
         }
         amended.finish(emit)
     }
@@ -992,6 +1088,7 @@ impl SegmentEdit {
         &mut self,
         position: usize,
         relationship: RelationshipId,
+        fetch: Fetch<'_>,
     ) -> Result<(), GraphError> {
         self.touched.insert(position);
         if let Some(change) = self.changes.get_mut(&position)
@@ -1003,7 +1100,7 @@ impl SegmentEdit {
             return Ok(());
         }
         let stored = self
-            .stored_cached(position)?
+            .stored_cached(position, fetch)?
             .binary_search_by_key(&relationship, |edge| edge.relationship)
             .is_ok();
         let removed = &mut self.changes.entry(position).or_default().removed;
@@ -1021,17 +1118,15 @@ impl SegmentEdit {
     #[cfg(test)]
     /// Every slot of the segment as the transaction sees it, for the positions that have
     /// relationships.
-    pub(crate) fn slots(&self) -> Result<Slots, GraphError> {
+    pub(crate) fn slots(&self, fetch: Fetch<'_>) -> Result<Slots, GraphError> {
         let mut positions: Vec<usize> = self.changes.keys().copied().collect();
-        for (key, bytes) in &self.parts {
-            positions.extend(PartRef::trusted(key, bytes)?.held());
-        }
+        positions.extend(self.held()?);
         positions.sort_unstable();
         positions.dedup();
         let mut out = Vec::with_capacity(positions.len());
         for position in positions {
             let mut edges = Vec::new();
-            self.visit(position, &mut |edge| edges.push(edge))?;
+            self.visit(position, &mut |edge| edges.push(edge), fetch)?;
             if !edges.is_empty() {
                 out.push((position, edges));
             }
@@ -1043,37 +1138,40 @@ impl SegmentEdit {
         if self.changes.values().any(|change| !change.added.is_empty()) {
             return Ok(false);
         }
-        for (key, bytes) in &self.parts {
-            if PartRef::trusted(key, bytes)?
-                .held()
-                .any(|position| !self.changes.contains_key(&position))
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        Ok(self
+            .held()?
+            .iter()
+            .all(|position| self.changes.contains_key(position)))
     }
 
     /// What commit stores: deltas beside the stored parts when the segment has parts that keep
-    /// a relationship and at most `MAX_DELTAS` deltas, none over `DELTA_BYTES`. Otherwise the
+    /// a relationship and at most `MAX_DELTAS` deltas, none over its bound. Otherwise the
     /// segment is laid out again, with the slots no change touched copied as they are stored,
-    /// and only the parts that differ from the stored ones are written.
-    pub(crate) fn flush(self, id: &SegmentId) -> Result<Flush, GraphError> {
+    /// and only the parts that differ from the stored ones are written. Up to `MAX_DELTAS` slots
+    /// whose part is larger than a part may be, the largest first, keep a delta within its bound
+    /// through that, and their parts stay as stored, unread, so a commit beside a hub never
+    /// folds the hub's delta. No other slot fits a part beside such a part, so every part then
+    /// covers one slot.
+    pub(crate) fn flush(self, id: &SegmentId, fetch: Fetch<'_>) -> Result<Flush, GraphError> {
         let deltas = self
             .changes
             .values()
             .filter(|change| !change.is_empty())
             .count();
-        let oversized = self
-            .touched
-            .iter()
-            .filter_map(|position| self.changes.get(position))
-            .any(|change| change.encoded_len() > DELTA_BYTES);
-        let rewrite = self.parts.is_empty() || deltas > MAX_DELTAS || oversized;
-        if rewrite || self.may_be_emptied()? {
-            let parts = self.lay_out_again(id)?;
-            if rewrite || parts.is_empty() {
-                return Ok(self.replace(id, parts));
+        let oversized = self.touched.iter().any(|position| {
+            self.changes
+                .get(position)
+                .is_some_and(|change| change.encoded_len() > self.delta_bound(*position))
+        });
+        if self.parts.is_empty() || deltas > MAX_DELTAS || oversized {
+            let kept = self.kept_deltas();
+            let layout = self.lay_out_again(id, &kept, fetch)?;
+            return Ok(self.replace(id, layout, &kept));
+        }
+        if self.may_be_emptied()? {
+            let layout = self.lay_out_again(id, &BTreeSet::new(), fetch)?;
+            if layout.parts.is_empty() && layout.retained.is_empty() {
+                return Ok(self.replace(id, layout, &BTreeSet::new()));
             }
         }
         let mut flush = Flush::default();
@@ -1090,54 +1188,101 @@ impl SegmentEdit {
         Ok(flush)
     }
 
-    fn lay_out_again(&self, id: &SegmentId) -> Result<Vec<Stored>, GraphError> {
+    fn kept_deltas(&self) -> BTreeSet<usize> {
+        let mut kept: Vec<(usize, usize)> = self
+            .changes
+            .iter()
+            .filter(|(position, change)| {
+                !change.is_empty() && change.encoded_len() <= self.delta_bound(**position)
+            })
+            .filter_map(|(position, _)| match self.part_of(*position) {
+                Some((_, Lazy::Apart(length))) => Some((*length, *position)),
+                _ => None,
+            })
+            .collect();
+        kept.sort_unstable_by(|left, right| right.cmp(left));
+        kept.into_iter()
+            .take(MAX_DELTAS)
+            .map(|(_, position)| position)
+            .collect()
+    }
+
+    fn lay_out_again(
+        &self,
+        id: &SegmentId,
+        kept: &BTreeSet<usize>,
+        fetch: Fetch<'_>,
+    ) -> Result<Layout, GraphError> {
         let mut positions: Vec<usize> = self.changes.keys().copied().collect();
-        for (key, bytes) in &self.parts {
-            positions.extend(PartRef::trusted(key, bytes)?.held());
-        }
+        positions.extend(self.held()?);
         positions.sort_unstable();
         positions.dedup();
-        let mut changed = Vec::new();
-        for position in positions
-            .iter()
-            .filter(|position| self.changes.contains_key(position))
-        {
-            let mut edges = Vec::new();
-            self.visit(*position, &mut |edge| edges.push(edge))?;
-            let mut bytes = Vec::with_capacity(edges_len(&edges));
-            put_edges(&mut bytes, &edges);
-            changed.push((*position, bytes));
-        }
-        let mut slots: Vec<(usize, &[u8])> = Vec::with_capacity(positions.len());
-        let mut changed_slots = changed.iter().peekable();
+        let mut retained = BTreeSet::new();
+        let mut slots: Vec<(usize, Cow<'_, [u8]>)> = Vec::with_capacity(positions.len());
         for position in positions {
-            let bytes = match changed_slots.next_if(|(at, _)| *at == position) {
-                Some((_, bytes)) => bytes.as_slice(),
-                None => match self.part_of(position) {
-                    Some((key, bytes)) => PartRef::trusted(key, bytes)?.encoded(position),
-                    None => &[],
-                },
+            let change = self.changes.get(&position);
+            if self.is_apart(position)
+                && (kept.contains(&position) || change.is_none_or(Change::is_empty))
+            {
+                retained.insert(position);
+                continue;
+            }
+            let bytes = match (change, self.part_of(position)) {
+                (None, Some((key, Lazy::Bytes(bytes)))) => {
+                    Cow::Borrowed(PartRef::trusted(key, bytes)?.encoded(position))
+                }
+                _ => {
+                    let mut edges = Vec::new();
+                    self.visit(position, &mut |edge| edges.push(edge), fetch)?;
+                    let mut bytes = Vec::with_capacity(edges_len(&edges));
+                    put_edges(&mut bytes, &edges);
+                    Cow::Owned(bytes)
+                }
             };
             if !bytes.is_empty() {
                 slots.push((position, bytes));
             }
         }
-        Ok(lay_out(id, &slots, None))
+        let borrowed: Vec<(usize, &[u8])> = slots
+            .iter()
+            .map(|(position, bytes)| (*position, bytes.as_ref()))
+            .collect();
+        let span = (!retained.is_empty()).then_some(1);
+        Ok(Layout {
+            parts: lay_out(id, &borrowed, span),
+            retained,
+        })
     }
 
-    fn replace(&self, id: &SegmentId, parts: Vec<Stored>) -> Flush {
+    fn replace(&self, id: &SegmentId, layout: Layout, kept: &BTreeSet<usize>) -> Flush {
         let mut flush = Flush::default();
-        for position in &self.stored_deltas {
+        for position in self.stored_deltas.difference(kept) {
             flush.delete.push(id.delta_key(*position).to_vec());
         }
+        for position in kept.intersection(&self.touched) {
+            if let Some(change) = self.changes.get(position) {
+                let key = id.delta_key(*position);
+                flush.put.push((key.to_vec(), change.encode(&key)));
+            }
+        }
+        let retained: Vec<[u8; PART_KEY]> = layout
+            .retained
+            .iter()
+            .map(|position| id.part_key(1, *position))
+            .collect();
         for (key, _) in &self.parts {
-            if !parts.iter().any(|(new, _)| new.as_slice() == key.as_ref()) {
+            let laid_out = layout
+                .parts
+                .iter()
+                .any(|(new, _)| new.as_slice() == key.as_ref());
+            if !laid_out && !retained.iter().any(|held| held.as_slice() == key.as_ref()) {
                 flush.delete.push(key.to_vec());
             }
         }
-        for (key, bytes) in parts {
+        for (key, bytes) in layout.parts {
             let same = self.parts.iter().any(|(held, stored)| {
-                held.as_ref() == key.as_slice() && stored.as_ref() == bytes.as_slice()
+                held.as_ref() == key.as_slice()
+                    && matches!(stored, Lazy::Bytes(stored) if stored.as_ref() == bytes.as_slice())
             });
             if !same {
                 flush.put.push((key, bytes));
@@ -1166,7 +1311,7 @@ struct Recent {
 }
 
 /// A stored entry a reader holds, and its layout once a read checked it.
-pub(crate) type Verified = (Box<[u8]>, Box<[u8]>, Option<Checked>);
+pub(crate) type Verified = (Box<[u8]>, Lazy, Option<Checked>);
 
 /// The segments to read in one pass: those of one side, group, and relationship type, or of
 /// every type, from the segment of `first` up to `segments` segments on.

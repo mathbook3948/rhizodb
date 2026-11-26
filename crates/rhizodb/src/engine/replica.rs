@@ -26,6 +26,7 @@ use crate::engine::header::Header;
 use crate::engine::header::Replication;
 use crate::engine::layout::TableId;
 use crate::engine::layout::WAL_BLOCK;
+use crate::engine::node::CellValue;
 use crate::engine::staged::Staged;
 use crate::engine::view::Layers;
 use crate::engine::view::View;
@@ -124,7 +125,11 @@ pub(crate) fn epochs_in(view: &View) -> Result<Vec<Epoch>, EngineError> {
         Bound::Unbounded,
         Bound::Unbounded,
         &mut |key, value| {
-            let epoch = decode_epoch(key, value).map_err(StorageError::from)?;
+            let epoch = match value {
+                CellValue::Inline(value) => decode_epoch(key, value),
+                CellValue::External(blob) => decode_epoch(key, &view.load(&blob)?),
+            }
+            .map_err(StorageError::from)?;
             if epochs
                 .last()
                 .is_some_and(|last| last.start_lsn >= epoch.start_lsn || last.term >= epoch.term)

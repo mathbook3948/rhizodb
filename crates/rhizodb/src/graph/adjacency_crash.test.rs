@@ -53,6 +53,50 @@ fn prepare(fs: &SimFs, small: u64) -> Model {
     model
 }
 
+const BIG_HUB: u64 = 5 * GROUP + 2;
+
+fn prepare_big_hub(fs: &SimFs) -> Model {
+    let mut model = prepare(fs, 0);
+    let graph = open(fs);
+    let mut write = graph.write().unwrap();
+    create_node(&mut write, &mut model, BIG_HUB);
+    let ids = nodes(&model);
+    for at in 0..20_000 {
+        create_rel(&mut write, &mut model, BIG_HUB, ids[at % ids.len()], 0);
+    }
+    write.commit().unwrap();
+    let (segment, position) = adjacency::locate(Side::Outgoing, NodeId(BIG_HUB), 0);
+    let stored = |key: &[u8]| {
+        let read = graph.read().unwrap();
+        let value = read.transaction.get(Table::Adjacency, key).unwrap();
+        value.map_or(0, |value| value.len())
+    };
+    let bound = adjacency::delta_bound(stored(&segment.part_key(1, position)));
+    let mut at = 0;
+    while stored(&segment.delta_key(position)) + 40 < bound {
+        let mut write = graph.write().unwrap();
+        create_rel(&mut write, &mut model, BIG_HUB, ids[at * 7 % ids.len()], 0);
+        write.commit().unwrap();
+        at += 1;
+    }
+    assert!(stored(&segment.delta_key(position)) > adjacency::DELTA_BYTES);
+    model
+}
+
+fn grow_the_big_hub(write: &mut Write<'_>, model: &mut Model) {
+    for other in nodes(model).into_iter().take(40) {
+        create_rel(write, model, BIG_HUB, other, 0);
+    }
+}
+
+fn beside_the_big_hub(write: &mut Write<'_>, model: &mut Model) {
+    create_rel(write, model, BIG_HUB, 1, 0);
+    for at in 1..=adjacency::MAX_DELTAS as u64 + 1 {
+        let node = create_node(write, model, BIG_HUB + at);
+        create_rel(write, model, node, 2, 0);
+    }
+}
+
 fn one_relationship(write: &mut Write<'_>, model: &mut Model) {
     create_rel(write, model, 3, GROUP + 2, 2);
 }
@@ -118,8 +162,12 @@ fn modes(seeds: u64) -> Vec<Crash> {
 }
 
 fn crash_at_every_operation(small: u64, work: Work) {
+    crash_at_every_operation_after(|fs| prepare(fs, small), work);
+}
+
+fn crash_at_every_operation_after(prepare: impl FnOnce(&SimFs) -> Model, work: Work) {
     let prepared = SimFs::new();
-    let before = prepare(&prepared, small);
+    let before = prepare(&prepared);
     let mut after = before.clone();
     let operations = {
         let fs = prepared.crash(Crash::KeepUnsynced);
@@ -247,4 +295,16 @@ fn a_crash_inside_a_commit_that_grows_a_hub_leaves_the_graph_before_or_after_it(
 #[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_empties_a_segment_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, empty_a_segment);
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn a_crash_inside_a_commit_that_folds_a_big_hub_leaves_the_graph_before_or_after_it() {
+    crash_at_every_operation_after(prepare_big_hub, grow_the_big_hub);
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn a_crash_inside_a_commit_that_folds_beside_a_big_hub_leaves_the_graph_before_or_after_it() {
+    crash_at_every_operation_after(prepare_big_hub, beside_the_big_hub);
 }

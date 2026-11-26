@@ -34,10 +34,14 @@ fn an_error_of_the_visitor_stops_the_merge() {
         (bytes(b"c"), Some(bytes(b"3"))),
     ];
     let mut seen = Vec::new();
-    let result = merge_over(&upper, |lower| lower(b"b", b"2"), &mut |key, _| {
-        seen.push(key.to_vec());
-        if key == b"b" { Err("stop") } else { Ok(()) }
-    });
+    let result = merge_over(
+        &upper,
+        |lower| lower(b"b", CellValue::Inline(b"2")),
+        &mut |key, _| {
+            seen.push(key.to_vec());
+            if key == b"b" { Err("stop") } else { Ok(()) }
+        },
+    );
     assert_eq!(result, Err("stop"));
     assert_eq!(seen, [b"a".to_vec(), b"b".to_vec()]);
 }
@@ -72,11 +76,14 @@ proptest! {
             &slots(&upper),
             |visit| {
                 for (key, value) in &lower {
-                    visit(key, value)?;
+                    visit(key, CellValue::Inline(value))?;
                 }
                 Ok(())
             },
             &mut |key, value| {
+                let CellValue::Inline(value) = value else {
+                    return Err(());
+                };
                 merged.push((key.to_vec(), value.to_vec()));
                 Ok(())
             },

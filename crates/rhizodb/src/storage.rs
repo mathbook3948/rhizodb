@@ -175,6 +175,15 @@ pub(crate) fn copy_tables<S: Storage>(
     }
 }
 
+/// A value as a scan that leaves the values stored apart from their keys unread meets it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Peek<'a> {
+    /// The value, which the store held at hand.
+    Bytes(&'a [u8]),
+    /// The length of a value stored apart, which [`ReadTransaction::get_with`] reads.
+    Apart(usize),
+}
+
 pub(crate) trait ReadTransaction {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
@@ -215,6 +224,31 @@ pub(crate) trait ReadTransaction {
         end: &[u8],
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
+
+    /// [`visit_prefix`](Self::visit_prefix), giving only the length of each value the store
+    /// keeps apart from its key, so a scan that needs few of those values reads none of them.
+    fn visit_prefix_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.visit_prefix(table, prefix, |key, value| visit(key, Peek::Bytes(value)))
+    }
+
+    /// [`visit_range`](Self::visit_range), giving only the length of each value the store
+    /// keeps apart from its key.
+    fn visit_range_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        mut visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.visit_range(table, start, end, |key, value| {
+            visit(key, Peek::Bytes(value))
+        })
+    }
 }
 
 /// The size of a database on disk and how its cache serves reads, as a backend reports them.

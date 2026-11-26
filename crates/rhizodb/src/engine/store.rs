@@ -21,6 +21,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
+use super::blob::BlobRef;
 use super::blob::RunRef;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
@@ -49,6 +50,7 @@ use super::layout::TableId;
 use super::memtable::Bytes;
 use super::memtable::Memtable;
 use super::memtable::Slot;
+use super::node::CellValue;
 use super::page::page_seed;
 use super::pages::PageSource;
 use super::pages::Pages;
@@ -74,6 +76,7 @@ use super::wal_format::term_batch_record;
 use crate::error::ErrorKind;
 use crate::storage::Entry;
 use crate::storage::Maintenance;
+use crate::storage::Peek;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::StorageError;
@@ -1979,16 +1982,7 @@ fn end_bound(end: &Option<Vec<u8>>) -> Bound<&[u8]> {
     }
 }
 
-fn collect(
-    scan: impl FnOnce(Visit<'_, StorageError>) -> Result<(), StorageError>,
-) -> Result<Vec<Entry>, StorageError> {
-    let mut entries = Vec::new();
-    scan(&mut |key, value| {
-        entries.push((key.to_vec(), value.to_vec()));
-        Ok(())
-    })?;
-    Ok(entries)
-}
+type Bounds<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
 
 trait Reads {
     fn lookup<T>(
@@ -2005,6 +1999,8 @@ trait Reads {
         end: Bound<&[u8]>,
         visit: Visit<'_, E>,
     ) -> Result<(), E>;
+
+    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError>;
 }
 
 impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
@@ -2025,6 +2021,10 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
         self.view.scan(table, start, end, visit)
+    }
+
+    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+        self.view.load(blob)
     }
 }
 
@@ -2047,38 +2047,66 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
     ) -> Result<(), E> {
         self.staged.scan(table, start, end, visit)
     }
+
+    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+        self.staged.view.load(blob)
+    }
+}
+
+fn walk_values<R: Reads, E: From<StorageError>>(
+    reads: &R,
+    table: Table,
+    (start, end): Bounds<'_>,
+    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+) -> Result<(), E> {
+    reads.walk(
+        TableId::of(table),
+        start,
+        end,
+        &mut |key, value| match value {
+            CellValue::Inline(value) => visit(key, value),
+            CellValue::External(blob) => {
+                visit(key, &reads.load(&blob).map_err(StorageError::from)?)
+            }
+        },
+    )
+}
+
+fn walk_peeks<R: Reads, E: From<StorageError>>(
+    reads: &R,
+    table: Table,
+    (start, end): Bounds<'_>,
+    mut visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    reads.walk(
+        TableId::of(table),
+        start,
+        end,
+        &mut |key, value| match value {
+            CellValue::Inline(value) => visit(key, Peek::Bytes(value)),
+            CellValue::External(blob) => match usize::try_from(blob.length) {
+                Ok(length) => visit(key, Peek::Apart(length)),
+                Err(_) => Err(StorageError::from(EngineError::TooLarge).into()),
+            },
+        },
+    )
+}
+
+fn collect<R: Reads>(
+    reads: &R,
+    table: Table,
+    bounds: Bounds<'_>,
+) -> Result<Vec<Entry>, StorageError> {
+    let mut entries = Vec::new();
+    walk_values(reads, table, bounds, |key, value| {
+        entries.push((key.to_vec(), value.to_vec()));
+        Ok::<(), StorageError>(())
+    })?;
+    Ok(entries)
 }
 
 fn get<R: Reads>(reads: &R, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
     Ok(reads.lookup(TableId::of(table), key, <[u8]>::to_vec)?)
-}
-
-fn scan_prefix<R: Reads>(
-    reads: &R,
-    table: Table,
-    prefix: &[u8],
-) -> Result<Vec<Entry>, StorageError> {
-    let (start, end) = prefix_bounds(prefix);
-    collect(|visit| reads.walk(TableId::of(table), start, end_bound(&end), visit))
-}
-
-fn scan_range<R: Reads>(
-    reads: &R,
-    table: Table,
-    start: &[u8],
-    end: &[u8],
-) -> Result<Vec<Entry>, StorageError> {
-    if start >= end {
-        return Ok(Vec::new());
-    }
-    collect(|visit| {
-        reads.walk(
-            TableId::of(table),
-            Bound::Included(start),
-            Bound::Excluded(end),
-            visit,
-        )
-    })
 }
 
 fn get_with<R: Reads, T, E: From<StorageError>>(
@@ -2093,34 +2121,6 @@ fn get_with<R: Reads, T, E: From<StorageError>>(
         .transpose()
 }
 
-fn visit_prefix<R: Reads, E: From<StorageError>>(
-    reads: &R,
-    table: Table,
-    prefix: &[u8],
-    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
-) -> Result<(), E> {
-    let (start, end) = prefix_bounds(prefix);
-    reads.walk(TableId::of(table), start, end_bound(&end), &mut visit)
-}
-
-fn visit_range<R: Reads, E: From<StorageError>>(
-    reads: &R,
-    table: Table,
-    start: &[u8],
-    end: &[u8],
-    mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
-) -> Result<(), E> {
-    if start >= end {
-        return Ok(());
-    }
-    reads.walk(
-        TableId::of(table),
-        Bound::Included(start),
-        Bound::Excluded(end),
-        &mut visit,
-    )
-}
-
 macro_rules! read_transaction {
     ($type:ident) => {
         impl<F: FileSystem + 'static> ReadTransaction for $type<'_, F> {
@@ -2129,7 +2129,8 @@ macro_rules! read_transaction {
             }
 
             fn scan_prefix(&self, table: Table, prefix: &[u8]) -> Result<Vec<Entry>, StorageError> {
-                scan_prefix(self, table, prefix)
+                let (start, end) = prefix_bounds(prefix);
+                collect(self, table, (start, end_bound(&end)))
             }
 
             fn scan_range(
@@ -2138,7 +2139,10 @@ macro_rules! read_transaction {
                 start: &[u8],
                 end: &[u8],
             ) -> Result<Vec<Entry>, StorageError> {
-                scan_range(self, table, start, end)
+                if start >= end {
+                    return Ok(Vec::new());
+                }
+                collect(self, table, (Bound::Included(start), Bound::Excluded(end)))
             }
 
             fn get_with<R, E: From<StorageError>>(
@@ -2156,7 +2160,8 @@ macro_rules! read_transaction {
                 prefix: &[u8],
                 visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
             ) -> Result<(), E> {
-                visit_prefix(self, table, prefix, visit)
+                let (start, end) = prefix_bounds(prefix);
+                walk_values(self, table, (start, end_bound(&end)), visit)
             }
 
             fn visit_range<E: From<StorageError>>(
@@ -2166,7 +2171,35 @@ macro_rules! read_transaction {
                 end: &[u8],
                 visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
             ) -> Result<(), E> {
-                visit_range(self, table, start, end, visit)
+                if start >= end {
+                    return Ok(());
+                }
+                let bounds = (Bound::Included(start), Bound::Excluded(end));
+                walk_values(self, table, bounds, visit)
+            }
+
+            fn visit_prefix_peek<E: From<StorageError>>(
+                &self,
+                table: Table,
+                prefix: &[u8],
+                visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+            ) -> Result<(), E> {
+                let (start, end) = prefix_bounds(prefix);
+                walk_peeks(self, table, (start, end_bound(&end)), visit)
+            }
+
+            fn visit_range_peek<E: From<StorageError>>(
+                &self,
+                table: Table,
+                start: &[u8],
+                end: &[u8],
+                visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+            ) -> Result<(), E> {
+                if start >= end {
+                    return Ok(());
+                }
+                let bounds = (Bound::Included(start), Bound::Excluded(end));
+                walk_peeks(self, table, bounds, visit)
             }
         }
     };
