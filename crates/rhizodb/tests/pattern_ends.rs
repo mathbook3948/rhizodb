@@ -118,24 +118,14 @@ fn a_query_reads_the_relationships_and_properties_it_wrote_itself() {
     let db = graph();
     let rows = run(
         &db,
-        "UNWIND range(1, 4) AS i CALL (i) { MATCH (a:N {k: 1})-[:T]->(x) WITH a, i, count(x) AS n CREATE (a)-[:T]->(:N {k: 10 + i}) RETURN n } RETURN i, n ORDER BY i",
+        "UNWIND range(1, 200) AS i MATCH (a:N {k: 1})-[:T]->(x) CREATE (a)-[:T]->(:N {k: 1000}) WITH DISTINCT a, i MATCH (a)-[:T]->(y) RETURN count(*)",
     );
-    let counts: Vec<i64> = rows
-        .iter()
-        .map(|row| match row.as_slice() {
-            [_, Value::Integer(n)] => *n,
-            other => panic!("expected two integers, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(counts, [2, 3, 4, 5]);
+    assert_eq!(rows, [vec![Value::Integer(200 * 402)]]);
     let rows = run(
         &db,
-        "UNWIND range(1, 4) AS i CALL (i) { MATCH (:N {k: 1})-[r:T]->(:N {k: 2}) WITH r, r.w AS w SET r.w = w + 1 RETURN w } RETURN w ORDER BY w",
+        "UNWIND range(1, 200) AS i MATCH (:N {k: 1})-[r:T]->(:N {k: 2}) WITH r, i, r.w AS before SET r.w = r.w + 1 WITH r, i, before MATCH (:N {k: 1})-[s:T]->(:N {k: 2}) RETURN min(before), max(s.w)",
     );
-    assert_eq!(
-        rows,
-        (1..5).map(|w| vec![Value::Integer(w)]).collect::<Vec<_>>()
-    );
+    assert_eq!(rows, [vec![Value::Integer(1), Value::Integer(201)]]);
 }
 
 #[test]

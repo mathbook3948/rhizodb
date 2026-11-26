@@ -62,6 +62,7 @@ pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
 pub(crate) use relationships::RelationshipReader;
+pub(crate) use relationships::Sightings;
 pub(crate) use value_key::Bound;
 pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
@@ -328,8 +329,6 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
-            relationship_writes: 0,
-            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -381,8 +380,6 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
-            relationship_writes: 0,
-            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -412,8 +409,6 @@ pub(crate) struct GraphTx<T> {
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
-    relationship_writes: u64,
-    adjacency_writes: u64,
     record_buffer: Vec<u8>,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
@@ -441,8 +436,6 @@ impl<T> GraphTx<T> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
-            relationship_writes: 0,
-            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -540,12 +533,6 @@ impl<T: ReadTransaction> GraphTx<T> {
             .flatten())
     }
 
-    /// How many times this transaction changed adjacency, so a reader that keeps what adjacency
-    /// held knows when to forget it.
-    pub(crate) fn adjacency_writes(&self) -> u64 {
-        self.adjacency_writes
-    }
-
     /// The value of property `key` of relationship `id`, as
     /// [`relationship_property`](Self::relationship_property) gives it, read through `reader`.
     pub(crate) fn relationship_property_in(
@@ -579,7 +566,6 @@ impl<T: ReadTransaction> GraphTx<T> {
         if let Some(edit) = self.relationship_chunks.get(&chunk) {
             return edit.get(slot).map(read).transpose();
         }
-        reader.follow(self.relationship_writes);
         let key = relationships::chunk_key(chunk);
         let bytes = match reader.holding(chunk) {
             Holding::Loaded(bytes) => bytes,
@@ -1325,7 +1311,6 @@ impl<T: WriteTransaction> GraphTx<T> {
         id: RelationshipId,
         record: Option<&RelationshipRecord>,
     ) -> Result<(), GraphError> {
-        self.relationship_writes += 1;
         let (chunk, slot) = relationships::locate(id);
         let edit = match self.relationship_chunks.entry(chunk) {
             btree_map::Entry::Occupied(held) => held.into_mut(),
@@ -1357,7 +1342,6 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
-        self.adjacency_writes += 1;
         match self.adjacency.entry(id) {
             btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
             btree_map::Entry::Vacant(vacant) => {

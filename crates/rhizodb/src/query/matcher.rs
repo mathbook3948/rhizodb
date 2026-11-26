@@ -1,4 +1,6 @@
 use std::convert::Infallible;
+use std::hash::BuildHasher;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 
 use crate::error::Error;
@@ -9,6 +11,7 @@ use crate::graph::Adjacent;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
+use crate::graph::Sightings;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::value::PropertyValue;
@@ -29,6 +32,7 @@ use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
 use super::plan::Slot;
 use super::scan::ById;
+use super::scan::IdHasher;
 use super::seek::Sought;
 
 /// Receives each complete match. Returning `false` stops the search.
@@ -385,17 +389,17 @@ impl<T: ReadTransaction> Env<'_, T> {
             self.hop_into(node, pattern, read, &mut found)?;
             return Ok(Adjacents::Owned(found.into_iter()));
         };
-        memo.follow(self.tx.adjacency_writes());
-        match memo.held.get(&key) {
-            Some(Some(shared)) => return Ok(Adjacents::Shared(Arc::clone(shared), 0)),
-            Some(None) => {}
-            None => {
-                memo.held.insert(key, None);
-                drop(memo);
-                let mut found = Vec::new();
-                self.hop_into(node, pattern, read, &mut found)?;
-                return Ok(Adjacents::Owned(found.into_iter()));
-            }
+        if let Some(shared) = memo.held.get(&key) {
+            return Ok(Adjacents::Shared(Arc::clone(shared), 0));
+        }
+        if !memo
+            .sightings
+            .again(BuildHasherDefault::<IdHasher>::default().hash_one(key))
+        {
+            drop(memo);
+            let mut found = Vec::new();
+            self.hop_into(node, pattern, read, &mut found)?;
+            return Ok(Adjacents::Owned(found.into_iter()));
         }
         drop(memo);
         let mut found = Vec::new();
@@ -418,23 +422,16 @@ type HopKey = (
 
 /// The relationships a query read at nodes it expanded more than once, so a traversal that
 /// reaches a node again, as one that closes a cycle does, reads its adjacency from storage at
-/// most twice. It forgets them all once it holds `HELD_ADJACENTS`, and whenever the
-/// transaction changed adjacency since it read them.
+/// most twice. It forgets them all once it holds `HELD_ADJACENTS`. A query expands through a new
+/// memo after any clause that writes.
 #[derive(Debug, Default)]
 pub(crate) struct HopMemo {
-    held: ById<HopKey, Option<Arc<Vec<Adjacent>>>>,
+    held: ById<HopKey, Arc<Vec<Adjacent>>>,
+    sightings: Sightings,
     adjacents: usize,
-    writes: u64,
 }
 
 impl HopMemo {
-    fn follow(&mut self, writes: u64) {
-        if self.writes != writes {
-            self.forget();
-            self.writes = writes;
-        }
-    }
-
     fn forget(&mut self) {
         self.held.clear();
         self.adjacents = 0;
@@ -445,7 +442,7 @@ impl HopMemo {
             self.forget();
         }
         self.adjacents += adjacents.len();
-        self.held.insert(key, Some(adjacents));
+        self.held.insert(key, adjacents);
     }
 }
 

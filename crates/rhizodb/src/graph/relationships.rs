@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 
@@ -109,23 +108,53 @@ impl<'a> ChunkRef<'a> {
 }
 
 const READER_BYTES: usize = 64 << 20;
+const SIGHTING_BITS: u32 = 14;
+const UNTRACKED: u32 = 64;
+const MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Which keys a query read before, held as hashes in a fixed table so that noting a key costs no
+/// allocation per key. A query's first `UNTRACKED` reads are never noted, so a point query
+/// allocates no table. Two keys that share a slot can make a key look read before, which only
+/// makes a reader hold what it would have read anyway.
+#[derive(Debug, Default)]
+pub(crate) struct Sightings {
+    reads: u32,
+    hashes: Vec<u64>,
+}
+
+impl Sightings {
+    /// Whether the key with `hash` was noted before, which it notes.
+    pub(crate) fn again(&mut self, hash: u64) -> bool {
+        if self.reads < UNTRACKED {
+            self.reads += 1;
+            return false;
+        }
+        if self.hashes.is_empty() {
+            self.hashes = vec![0; 1 << SIGHTING_BITS];
+        }
+        let hash = hash | 1;
+        let slot = (hash >> (u64::BITS - SIGHTING_BITS)) as usize;
+        match self.hashes.get_mut(slot) {
+            Some(held) if *held == hash => true,
+            Some(held) => {
+                *held = hash;
+                false
+            }
+            None => false,
+        }
+    }
+}
 
 /// The stored relationship chunks one query read more than once, so it reads such a chunk from
 /// storage once however many of its relationships it reads. The first read of a chunk reads it
 /// in place, so a traversal that reads one relationship of each chunk copies nothing. It forgets
-/// them all once it holds more than `READER_BYTES`, and whenever the transaction stored a
-/// relationship since it read them.
+/// them all once it holds more than `READER_BYTES`. A query reads through a new reader after any
+/// clause that writes, and the edits of a write transaction are read before it.
 #[derive(Debug, Default)]
 pub(crate) struct RelationshipReader {
-    chunks: HashMap<u64, Held, BuildHasherDefault<ChunkHasher>>,
+    chunks: HashMap<u64, Option<Box<[u8]>>, BuildHasherDefault<ChunkHasher>>,
+    sightings: Sightings,
     bytes: usize,
-    writes: u64,
-}
-
-#[derive(Debug)]
-enum Held {
-    Probed,
-    Loaded(Option<Box<[u8]>>),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -138,49 +167,40 @@ impl Hasher for ChunkHasher {
 
     fn write(&mut self, bytes: &[u8]) {
         for byte in bytes {
-            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(MIX);
         }
     }
 
     fn write_u64(&mut self, value: u64) {
-        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = (self.0 ^ value).wrapping_mul(MIX);
     }
 }
 
 /// What a [`RelationshipReader`] holds of one chunk.
 #[derive(Debug)]
 pub(crate) enum Holding<'a> {
-    /// Not read before, which the reader now notes.
+    /// Not read before, as far as the reader knows.
     Nothing,
-    /// Read once before, so it is worth loading.
+    /// Read before, so it is worth loading.
     Probed,
     /// Loaded, or known to be absent.
     Loaded(Option<&'a [u8]>),
 }
 
 impl RelationshipReader {
-    pub(crate) fn follow(&mut self, writes: u64) {
-        if self.writes != writes {
-            self.forget();
-            self.writes = writes;
-        }
-    }
-
     fn forget(&mut self) {
         self.chunks.clear();
         self.bytes = 0;
     }
 
     pub(crate) fn holding(&mut self, chunk: u64) -> Holding<'_> {
-        match self.chunks.entry(chunk) {
-            Entry::Vacant(vacant) => {
-                vacant.insert(Held::Probed);
-                Holding::Nothing
-            }
-            Entry::Occupied(held) => match held.into_mut() {
-                Held::Probed => Holding::Probed,
-                Held::Loaded(bytes) => Holding::Loaded(bytes.as_deref()),
-            },
+        if self.chunks.contains_key(&chunk) {
+            return Holding::Loaded(self.chunks.get(&chunk).and_then(Option::as_deref));
+        }
+        if self.sightings.again(chunk.wrapping_mul(MIX)) {
+            Holding::Probed
+        } else {
+            Holding::Nothing
         }
     }
 
@@ -190,15 +210,11 @@ impl RelationshipReader {
             self.forget();
         }
         self.bytes += size;
-        match self
-            .chunks
+        self.chunks
             .entry(chunk)
-            .insert_entry(Held::Loaded(bytes))
+            .insert_entry(bytes)
             .into_mut()
-        {
-            Held::Loaded(bytes) => bytes.as_deref(),
-            Held::Probed => None,
-        }
+            .as_deref()
     }
 }
 
