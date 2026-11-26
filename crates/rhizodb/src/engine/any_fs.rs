@@ -165,7 +165,15 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| EngineError::Unsupported(format!("the database path {}", path.display())))?;
+        .ok_or_else(|| {
+            EngineError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the database path {} names no file in UTF-8",
+                    path.display()
+                ),
+            ))
+        })?;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => Path::new(".").to_path_buf(),

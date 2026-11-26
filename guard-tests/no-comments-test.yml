@@ -1,0 +1,7 @@
+id: no-comments
+valid:
+  - "/// A contract.\npub fn f() {}"
+  - "// ast-grep-ignore\nfn f() {}"
+invalid:
+  - "// a note\nfn f() {}"
+  - "/* mentions ast-grep-ignore */\nfn f() {}"

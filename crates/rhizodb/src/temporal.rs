@@ -621,6 +621,17 @@ impl Temporal {
         }
     }
 
+    pub(crate) fn constructor(&self) -> &'static str {
+        match self {
+            Temporal::Date(_) => "date",
+            Temporal::LocalTime(_) => "localtime",
+            Temporal::Time(_) => "time",
+            Temporal::LocalDateTime(_) => "localdatetime",
+            Temporal::DateTime(_) => "datetime",
+            Temporal::Duration(_) => "duration",
+        }
+    }
+
     /// The name of the type as error messages give it.
     pub(crate) fn type_name(&self) -> &'static str {
         match self {

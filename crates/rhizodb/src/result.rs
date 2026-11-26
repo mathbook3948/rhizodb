@@ -98,8 +98,13 @@ impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Para
 ///
 /// # Display
 ///
-/// A value displays in the notation of GQL literals, so an output line reads like the query that
-/// could have produced it. The text is for people to read, not a format to parse.
+/// A value displays as GQL text, so an output line reads like the query that could have produced
+/// it. For `Null`, `Boolean`, `Integer`, a finite `Float`, `String`, `Temporal`, and lists and
+/// maps of them, the text is an expression that evaluates back to an equal value, and that holds
+/// in every later release. A datetime in a named zone reads back through the zone rules of the
+/// build that reads it, so a changed rule can move it to another instant. `Bytes`, a non-finite
+/// `Float`, and anything holding a node, relationship, or path display for people to read, and
+/// their text may change.
 ///
 /// | Value | Output |
 /// | --- | --- |
@@ -111,7 +116,7 @@ impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Para
 /// | `List` | `[1, 'a']`, `[]` |
 /// | `Map` | `{k: 1, m: {}}` in key order, `{}`; a key that is not a plain name is in backticks |
 /// | `Node`, `Relationship`, `Path` | as documented on those types |
-/// | `Temporal` | its own display, such as `2024-02-29` or `PT1H`, unquoted |
+/// | `Temporal` | a constructor call such as `date('2024-02-29')` or `duration('PT1H')` |
 ///
 /// A float always has a fraction or an exponent, so it never reads as an integer, and a string is
 /// always quoted, so it never reads as a temporal.
@@ -127,7 +132,7 @@ impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Para
 ///     &Parameters::new(),
 /// )?;
 /// let shown: Vec<String> = result.rows()[0].iter().map(Value::to_string).collect();
-/// assert_eq!(shown, ["1", "1.0", r"'it\'s'", "[null, true]", "{k: 'v'}", "2024-02-29"]);
+/// assert_eq!(shown, ["1", "1.0", r"'it\'s'", "[null, true]", "{k: 'v'}", "date('2024-02-29')"]);
 /// assert_eq!(Value::Bytes(vec![0, 255]).to_string(), "X'00ff'");
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
@@ -422,7 +427,9 @@ impl fmt::Display for Value {
             Self::Node(node) => node.fmt(formatter),
             Self::Relationship(relationship) => relationship.fmt(formatter),
             Self::Path(path) => path.fmt(formatter),
-            Self::Temporal(temporal) => temporal.fmt(formatter),
+            Self::Temporal(temporal) => {
+                write!(formatter, "{}('{temporal}')", temporal.constructor())
+            }
         }
     }
 }

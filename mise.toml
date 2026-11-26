@@ -12,10 +12,11 @@ run = [
   "cargo fmt --all --check",
   "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
   "ast-grep scan --no-ignore hidden",
+  "ast-grep test --skip-snapshot-tests",
   "cargo run --quiet --package xtask -- forbidden-chars",
   "cargo run --quiet --package xtask -- docs",
   "cargo run --quiet --package xtask -- hooks",
-  "cargo deny check licenses",
+  "cargo deny check licenses bans sources",
   "cargo deny --manifest-path crates/differential/Cargo.toml check licenses",
   "cargo fmt --manifest-path crates/bench/Cargo.toml --check",
   "cargo deny --manifest-path crates/bench/Cargo.toml check licenses",
@@ -35,9 +36,9 @@ run = [
 ]
 
 [tasks.storage-deep]
-description = "Run the storage, engine, database crash, dump, node meta, property column, and adjacency tests with 100 times the random cases that check runs, as the nightly workflow does"
+description = "Run the storage, engine, database crash, dump, node meta, property column, adjacency, index key, and scan tests with 100 times the random cases that check runs, as the nightly workflow does"
 env = { RHIZODB_TEST_SCALE = "100" }
-run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::upgrade"
+run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::upgrade query::keys query::scan"
 
 [tasks.random-deep]
 description = "Run the randomized integration tests (isolation history check, kill-and-reopen, model of random transactions, damaged files, concurrent writers and readers, large transactions, killed backups, query reference evaluator, heap growth, snapshots held across checkpoints, shuttle schedules) with 100 times the cases that check runs, or RHIZODB_TEST_SCALE times when it is set, then every integration test with each read query that can split forced across four threads"
@@ -45,8 +46,13 @@ env = { RHIZODB_TEST_SCALE = "{{ get_env(name='RHIZODB_TEST_SCALE', default='100
 run = [
   "cargo test --release --package rhizodb --test isolation --test kill_recovery --test model_ops --test corrupt_file --test concurrency --test resource_limits --test backup --test query_oracle --test memory_growth --test snapshot_stress",
   "cargo test --release --package interleavings",
-  "RHIZODB_TEST_PARALLEL=1 RHIZODB_TEST_SCALE=1 cargo test --release --package rhizodb --tests",
+  { task = "parallel-deep" },
 ]
+
+[tasks.parallel-deep]
+description = "Run every integration test with each read query that can split forced across four threads"
+env = { RHIZODB_TEST_PARALLEL = "1", RHIZODB_TEST_SCALE = "1" }
+run = "cargo test --release --package rhizodb --tests"
 
 [tasks.soak]
 description = "Kill a writing child process at random points for RHIZODB_SOAK_SECS seconds (default 3600), and check every reopened file against what the child reported"

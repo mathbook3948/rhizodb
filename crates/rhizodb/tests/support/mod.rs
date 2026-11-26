@@ -127,6 +127,31 @@ pub fn seed() -> u64 {
     seed
 }
 
+/// The seeds listed one per line in `text`, skipping blank lines.
+pub fn parse_seeds(text: &str) -> Vec<u64> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.parse()
+                .unwrap_or_else(|_| panic!("`{line}` is not a seed"))
+        })
+        .collect()
+}
+
+/// The seeds checked in under `tests/seed-regressions/<test>.txt`, each one a failure that
+/// `RHIZODB_TEST_SEED` once replayed, so every run replays it before its own cases.
+pub fn regression_seeds(test: &str) -> Vec<u64> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/seed-regressions")
+        .join(format!("{test}.txt"));
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_seeds(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("{}: {error}", path.display()),
+    }
+}
+
 /// SplitMix64, a small seeded generator, so randomized tests need no extra crate.
 #[derive(Clone, Debug)]
 pub struct Rng(u64);

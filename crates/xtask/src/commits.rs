@@ -62,13 +62,17 @@ pub fn parse_subject(subject: &str) -> Option<Subject<'_>> {
     TYPES.contains(&kind).then_some(Subject { kind, breaking })
 }
 
-pub fn commit_problems(subject: &str, changed_files: &[&str]) -> Vec<String> {
+pub fn message_problems(subject: &str, changed_files: &[&str]) -> Vec<String> {
     if UNCHECKED_PREFIXES
         .iter()
         .any(|prefix| subject.starts_with(prefix))
     {
         return Vec::new();
     }
+    commit_problems(subject, changed_files)
+}
+
+pub fn commit_problems(subject: &str, changed_files: &[&str]) -> Vec<String> {
     let Some(parsed) = parse_subject(subject) else {
         return vec![format!(
             "subject must be `<type>(<scope>)?: <description>` with a type out of {}, got `{subject}`",
@@ -110,7 +114,7 @@ pub fn check_message(
     let message = fs::read_to_string(message_file)?;
     let subject = message.lines().next().unwrap_or_default();
     let staged = git(workspace_root, &["diff", "--cached", "--name-only"])?;
-    Ok(commit_problems(
+    Ok(message_problems(
         subject,
         &staged.lines().collect::<Vec<_>>(),
     ))
