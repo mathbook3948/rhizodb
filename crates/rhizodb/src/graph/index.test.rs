@@ -1224,17 +1224,39 @@ fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
             })
             .unwrap();
     }
+    write
+        .create_keyword_index("more words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
     write.commit().unwrap();
     entry_writes.set(0);
     let mut write = graph.write().unwrap();
-    assert!(write.drop_index("words").unwrap());
     assert!(write.drop_index("points").unwrap());
     write.commit().unwrap();
     assert!(
-        entry_writes.get() <= 2 * ENTRY_TABLES.len(),
+        entry_writes.get() <= ENTRY_TABLES.len(),
         "{} entry writes",
         entry_writes.get()
     );
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction.scan_prefix(Table::Vectors, &[]).unwrap(),
+        vec![]
+    );
+    for neighbour in ["words", "more words"] {
+        assert_eq!(
+            read.keyword_search(neighbour, ElementKind::Node, "graph", 1000)
+                .unwrap()
+                .len(),
+            200,
+            "{neighbour}"
+        );
+    }
+    drop(read);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    assert!(write.drop_index("more words").unwrap());
+    write.commit().unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     for table in ENTRY_TABLES {
@@ -1251,12 +1273,14 @@ fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
         .put(
             Table::Metadata,
             keys::NEXT_INDEX_ID_KEY,
-            &u64::from(u32::MAX).to_be_bytes(),
+            &u64::from(u32::MAX - 1).to_be_bytes(),
         )
         .unwrap();
-    write
-        .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
-        .unwrap();
+    for name in ["below", "words"] {
+        write
+            .create_keyword_index(name, IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+    }
     let label = write.intern_token("Doc").unwrap();
     let text = write.intern_token("text").unwrap();
     write
@@ -1271,8 +1295,19 @@ fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
     write.commit().unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("below", ElementKind::Node, "graph", 10)
+            .unwrap()
+            .len(),
+        1
+    );
     for table in ENTRY_TABLES {
-        assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
+        for (key, _) in read.transaction.scan_prefix(table, &[]).unwrap() {
+            assert!(
+                key.starts_with(&keys::index_prefix(u32::MAX - 1)),
+                "{table:?} keeps {key:?}"
+            );
+        }
     }
 }
 
