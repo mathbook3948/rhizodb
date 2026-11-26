@@ -72,12 +72,16 @@ fn a_range_holds_tombstones_and_respects_bounds() {
     let memtable = Memtable::default();
     memtable.apply(1, [put(b"a", b"1"), put(b"b", b"2"), put(b"c", b"3")], 0);
     memtable.apply(2, [delete(b"b")], 0);
-    let range = memtable.range(TABLE, Bound::Included(b"a"), Bound::Excluded(b"c"), 2);
+    let range: Vec<_> = memtable
+        .range(TABLE, Bound::Included(b"a"), Bound::Excluded(b"c"), 2)
+        .collect();
     assert_eq!(
         range,
         [(bytes(b"a"), Some(bytes(b"1"))), (bytes(b"b"), None)]
     );
-    let before = memtable.range(TABLE, Bound::Unbounded, Bound::Unbounded, 1);
+    let before: Vec<_> = memtable
+        .range(TABLE, Bound::Unbounded, Bound::Unbounded, 1)
+        .collect();
     assert_eq!(before.len(), 3);
     assert!(before.iter().all(|(_, slot)| slot.is_some()));
     for (start, end) in [
@@ -94,8 +98,32 @@ fn a_range_holds_tombstones_and_respects_bounds() {
             Bound::Excluded(b"b".as_slice()),
         ),
     ] {
-        assert!(memtable.range(TABLE, start, end, 2).is_empty());
+        assert_eq!(memtable.range(TABLE, start, end, 2).count(), 0);
     }
+}
+
+#[test]
+fn a_range_keeps_its_snapshot_across_commits_between_batches() {
+    let memtable = Memtable::default();
+    let key = |at: u32| at.to_be_bytes();
+    memtable.apply(1, (0..1000).map(|at| put(&key(at), b"old")), 0);
+    let mut range = memtable.range(TABLE, Bound::Unbounded, Bound::Unbounded, 1);
+    let mut seen: Vec<_> = range.by_ref().take(20).collect();
+    memtable.apply(
+        2,
+        (0..1000)
+            .filter(|at| at % 3 == 0)
+            .map(|at| delete(&key(at)))
+            .chain((0..1000).map(|at| put(&[&key(at)[..], b"+"].concat(), b"new"))),
+        1,
+    );
+    memtable.apply(3, (0..1000).map(|at| put(&key(at), b"newer")), 1);
+    seen.extend(range);
+    let expected: Vec<_> = (0..1000)
+        .map(|at| (bytes(&key(at)), Some(bytes(b"old"))))
+        .collect();
+    assert_eq!(seen, expected);
+    assert!(memtable.copied.load(Ordering::Relaxed) < 2000);
 }
 
 #[test]
@@ -116,7 +144,11 @@ fn a_buried_tombstone_goes_once_every_snapshot_sees_it() {
     memtable.apply(1, [put(b"a", b"1")], 0);
     memtable.apply(2, [delete(b"a")], 0);
     memtable.bury(2, [(TABLE, bytes(b"a"))]);
-    let all = |snapshot| memtable.range(TABLE, Bound::Unbounded, Bound::Unbounded, snapshot);
+    let all = |snapshot| {
+        memtable
+            .range(TABLE, Bound::Unbounded, Bound::Unbounded, snapshot)
+            .collect::<Vec<_>>()
+    };
 
     memtable.apply(3, [put(b"b", b"2")], 1);
     assert_eq!(memtable.get(TABLE, b"a", 1), Lookup::Found(bytes(b"1")));
@@ -229,7 +261,6 @@ proptest! {
             }
             let ranged: BTreeMap<u8, u8> = memtable
                 .range(TABLE, Bound::Unbounded, Bound::Unbounded, snapshot)
-                .into_iter()
                 .filter_map(|(key, slot)| slot.map(|value| (key[0], value[0])))
                 .collect();
             prop_assert_eq!(&ranged, state);
@@ -267,7 +298,6 @@ proptest! {
         let end_bound = if inclusive { Bound::Included(end.as_slice()) } else { Bound::Excluded(end.as_slice()) };
         let ranged: Vec<Vec<u8>> = memtable
             .range(TABLE, Bound::Included(start.as_slice()), end_bound, 1)
-            .into_iter()
             .map(|(key, _)| key.to_vec())
             .collect();
         let expected: Vec<Vec<u8>> = keys

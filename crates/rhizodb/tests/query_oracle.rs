@@ -790,6 +790,130 @@ fn check_paths(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
     Ok(())
 }
 
+fn same_bag(runner: &mut dyn Runner, query: &str, leftmost: &str) -> Result<(), String> {
+    let want = ints_sorted(&runner.run(leftmost)?)?;
+    expect_bag(runner, query, want)
+}
+
+/// Each query begins at a node right of its leftmost one, because the row binds it or an index
+/// may serve it. Each is compared with a form of it that begins at its leftmost node.
+fn check_starts(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Result<(), String> {
+    if graph.rels.len() > 40 {
+        return Ok(());
+    }
+    let label = *choices.pick(&LABELS);
+    let ty = *choices.pick(&TYPES);
+    let (key, value) = match choices.below(3) {
+        0 => ("x", int_value(choices)),
+        1 => ("t", V::Bool(choices.chance(1, 2))),
+        _ => ("z", mixed_value(choices)),
+    };
+    let scope = node_scope();
+    let value = render(&E::Lit(value), &scope);
+    let (left, right) = *choices.pick(&[("-", "->"), ("<-", "-"), ("-", "-")]);
+    let lo = choices.below(2);
+    let hi = lo + choices.below(3);
+    let pairs = [
+        (
+            "MATCH (b) MATCH (a)-[r]->(b) RETURN a.k, r.k, b.k".to_owned(),
+            "MATCH (b) MATCH (b)<-[r]-(a) RETURN a.k, r.k, b.k".to_owned(),
+        ),
+        (
+            format!(
+                "MATCH (m) MATCH (a)-[r:{ty}]-(m){left}[s]{right}(b) RETURN a.k, r.k, m.k, s.k, b.k"
+            ),
+            format!(
+                "MATCH (m) MATCH (m)-[r:{ty}]-(a), (m){left}[s]{right}(b) RETURN a.k, r.k, m.k, s.k, b.k"
+            ),
+        ),
+        (
+            format!(
+                "MATCH (b) MATCH (a){left}[rs*{lo}..{hi}]{right}(b) RETURN a.k, [x IN rs | x.k], b.k"
+            ),
+            format!("MATCH (a){left}[rs*{lo}..{hi}]{right}(b) RETURN a.k, [x IN rs | x.k], b.k"),
+        ),
+        (
+            format!(
+                "MATCH (m) MATCH p = (a){left}[*{lo}..{hi}]{right}(m)-[:{ty}]->(b) \
+                 RETURN [n IN nodes(p) | n.k], [x IN relationships(p) | x.k]"
+            ),
+            format!(
+                "MATCH p = (a){left}[*{lo}..{hi}]{right}(m)-[:{ty}]->(b) \
+                 RETURN [n IN nodes(p) | n.k], [x IN relationships(p) | x.k]"
+            ),
+        ),
+        (
+            format!(
+                "MATCH (m) MATCH (a)-[rs*{lo}..{hi}]-(m)<-[s]-(a) RETURN a.k, [x IN rs | x.k], s.k, m.k"
+            ),
+            format!("MATCH (a)-[rs*{lo}..{hi}]-(m)<-[s]-(a) RETURN a.k, [x IN rs | x.k], s.k, m.k"),
+        ),
+        (
+            format!(
+                "MATCH (n) OPTIONAL MATCH (a)-[r:{ty}]->(b)-[s]->(n) RETURN n.k, a.k, r.k, b.k, s.k"
+            ),
+            format!(
+                "MATCH (n) OPTIONAL MATCH (n)<-[s]-(b)<-[r:{ty}]-(a) RETURN n.k, a.k, r.k, b.k, s.k"
+            ),
+        ),
+        (
+            format!("MATCH (a)-[r]->(b:{label} {{{key}: {value}}}) RETURN a.k, r.k, b.k"),
+            format!(
+                "MATCH (a)-[r]->(b) WHERE b:{label} AND b.{key} = {value} RETURN a.k, r.k, b.k"
+            ),
+        ),
+        (
+            format!(
+                "MATCH p = (a:{label})-[r]-(m)-[s:{ty}]->(b:{label}) WHERE b.{key} IN [{value}] \
+                 RETURN [n IN nodes(p) | n.k], r.k, s.k"
+            ),
+            format!(
+                "MATCH p = (a:{label})-[r]-(m)-[s:{ty}]->(b) WHERE b:{label} AND b.{key} IN [{value}] \
+                 RETURN [n IN nodes(p) | n.k], r.k, s.k"
+            ),
+        ),
+        (
+            format!("MATCH (a)-[r]->(b:{label}) WHERE b.{key} >= {value} RETURN a.k, b.k"),
+            format!("MATCH (a)-[r]->(b) WHERE b:{label} AND b.{key} >= {value} RETURN a.k, b.k"),
+        ),
+        (
+            "MATCH (c) WITH id(c) AS i MATCH (a)-[r]->(b) WHERE id(b) = i RETURN a.k, r.k, b.k"
+                .to_owned(),
+            "MATCH (c) MATCH (a)-[r]->(b) WHERE b = c RETURN a.k, r.k, b.k".to_owned(),
+        ),
+        (
+            format!("MATCH (a)-[s]->(m)<-[r:R]-(b) WHERE r.w = {value} RETURN a.k, s.k, r.k, b.k"),
+            format!(
+                "MATCH (a)-[s]->(m)<-[r]-(b) WHERE type(r) = 'R' AND r.w = {value} \
+                 RETURN a.k, s.k, r.k, b.k"
+            ),
+        ),
+        (
+            format!("MATCH (a) WHERE EXISTS {{ (b)-[:{ty}]->(a) }} RETURN a.k"),
+            format!("MATCH (a) WHERE EXISTS {{ (a)<-[:{ty}]-(b) }} RETURN a.k"),
+        ),
+        (
+            format!("MATCH (a) RETURN a.k, COUNT {{ (b)-[r]-(c)-[s:{ty}]->(a) }}"),
+            format!("MATCH (a) RETURN a.k, COUNT {{ (a)<-[s:{ty}]-(c)-[r]-(b) }}"),
+        ),
+    ];
+    let (query, leftmost) = choices.pick(&pairs);
+    same_bag(runner, query, leftmost)?;
+    let mut followed: Vec<Vec<i64>> = graph
+        .rels
+        .values()
+        .filter(|rel| rel.ty == ty)
+        .map(|rel| vec![rel.src])
+        .collect();
+    followed.sort();
+    followed.dedup();
+    expect_bag(
+        runner,
+        &format!("MATCH (b) MATCH (a)-[:{ty}]->(b) RETURN DISTINCT a.k"),
+        followed,
+    )
+}
+
 fn check_update(tx: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Result<(), String> {
     let scope = node_scope();
     let p = expr(Ty::Bool, 2, &scope, choices);
@@ -886,7 +1010,8 @@ fn check_round(runner: &mut dyn Runner, graph: &Graph, choices: &mut Rng) -> Res
     check_grouping(runner, graph, choices)?;
     check_pattern(runner, graph, choices)?;
     check_optional(runner, graph, choices)?;
-    check_paths(runner, graph, choices)
+    check_paths(runner, graph, choices)?;
+    check_starts(runner, graph, choices)
 }
 
 const INDEXES: [(&str, IndexTarget<'static>, &str); 6] = [

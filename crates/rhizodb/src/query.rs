@@ -9,6 +9,7 @@ mod exec;
 mod functions;
 mod keys;
 mod matcher;
+mod orient;
 mod parallel;
 mod plan;
 mod regex;

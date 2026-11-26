@@ -91,6 +91,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Every reader registers its snapshot, and a commit drops each version that no registered snapshot or later one can see.
 - A commit's tombstone of a key that neither the frozen memtable nor the tree holds is dropped with its key's versions once every registered snapshot sees the commit.
 - A write transaction keeps its operations in order, for the log, and each written key's value now, for its own reads and for the memtable.
+- A scan copies memtable entries out in batches that grow as it reads, each under its own read lock, so a scan that stops early copies about as many entries as it read, and no lock is held while the caller handles an entry.
 - A range delete puts a tombstone in the memtable for each key it removes, and replaying its log operation finds the same keys.
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
 - A commit's timestamp is the wall clock in microseconds, or one past the previous commit's when the clock has not moved past it.

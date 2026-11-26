@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
+use crate::storage::StorageError;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
 use crate::value::DecodeError;
@@ -296,6 +297,23 @@ pub(crate) enum ElementKind {
 pub(crate) enum Target {
     Label(Token<Label>),
     RelationshipType(Token<RelationshipType>),
+}
+
+enum Visit {
+    Over,
+    Failed(GraphError),
+}
+
+impl From<StorageError> for Visit {
+    fn from(error: StorageError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
+impl From<DecodeError> for Visit {
+    fn from(error: DecodeError) -> Self {
+        Self::Failed(error.into())
+    }
 }
 
 impl Target {
@@ -991,6 +1009,39 @@ impl<T: ReadTransaction> GraphTx<T> {
         elements.sort_unstable();
         elements.dedup();
         Ok(elements)
+    }
+
+    /// [`property_seek`](Self::property_seek), or `None` as soon as the ranges hold more than
+    /// `limit` entries, without reading the rest.
+    pub(crate) fn property_seek_within(
+        &self,
+        index: u32,
+        ranges: &[KeyRange],
+        limit: usize,
+    ) -> Result<Option<Vec<u64>>, GraphError> {
+        let mut elements = Vec::new();
+        for range in ranges {
+            let visited = self.transaction.visit_range(
+                Table::PropertyEntries,
+                &keys::property_entry_bound(index, &range.start),
+                &keys::property_entry_bound(index, &range.end),
+                |key, _| {
+                    if elements.len() == limit {
+                        return Err(Visit::Over);
+                    }
+                    elements.push(keys::parse_property_entry_element(key)?);
+                    Ok(())
+                },
+            );
+            match visited {
+                Ok(()) => {}
+                Err(Visit::Over) => return Ok(None),
+                Err(Visit::Failed(error)) => return Err(error),
+            }
+        }
+        elements.sort_unstable();
+        elements.dedup();
+        Ok(Some(elements))
     }
 
     fn covered_ids(&self, target: Target) -> Result<Vec<u64>, GraphError> {

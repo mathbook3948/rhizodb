@@ -1050,7 +1050,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(hop) = HopScan::of(found) else {
             return Ok(None);
         };
-        if self.check.is_some() || self.seek_possible(hop.scan.part)? {
+        if self.check.is_some()
+            || self.seek_possible(hop.scan.part)?
+            || self.may_move(hop.scan.part)?
+        {
             return Ok(None);
         }
         let start = hop.scan.slot;
