@@ -1,6 +1,4 @@
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt::Write as _;
 use std::io;
 use std::io::BufRead;
@@ -24,7 +22,6 @@ use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Target;
 use crate::graph::Token;
-use crate::graph::TokenKind;
 use crate::graph::VectorMetric;
 use crate::storage::ReadTransaction;
 use crate::storage::Storage;
@@ -63,25 +60,6 @@ fn invalid(line: u64, message: impl std::fmt::Display) -> Error {
     )
 }
 
-#[derive(Default)]
-struct Names {
-    by_token: HashMap<(u8, u32), String>,
-}
-
-impl Names {
-    fn get<K: TokenKind, T: ReadTransaction>(
-        &mut self,
-        tx: &GraphTx<T>,
-        token: Token<K>,
-    ) -> Result<&str, GraphError> {
-        let name = match self.by_token.entry((K::TAG, token.id())) {
-            Entry::Occupied(held) => held.into_mut(),
-            Entry::Vacant(free) => free.insert(tx.token_name(token)?),
-        };
-        Ok(name.as_str())
-    }
-}
-
 /// Writes every index definition, node, and relationship that `tx` sees to `out` as a dump.
 pub(crate) fn export<T: ReadTransaction>(tx: &GraphTx<T>, out: impl Write) -> Result<(), Error> {
     let mut out = BufWriter::new(out);
@@ -93,9 +71,8 @@ pub(crate) fn export<T: ReadTransaction>(tx: &GraphTx<T>, out: impl Write) -> Re
          \"next_node_id\":{next_node},\"next_relationship_id\":{next_relationship}}}"
     );
     emit(&mut out, &mut line).map_err(io_error)?;
-    let mut names = Names::default();
     for (name, index) in tx.indexes()? {
-        write_index(&mut line, tx, &mut names, &name, &index.definition)?;
+        write_index(&mut line, tx, &name, &index.definition)?;
         emit(&mut out, &mut line).map_err(io_error)?;
     }
     let mut failed: Option<io::Error> = None;
@@ -106,7 +83,7 @@ pub(crate) fn export<T: ReadTransaction>(tx: &GraphTx<T>, out: impl Write) -> Re
         line.push_str(",\"labels\":[");
         let mut sorted = labels
             .iter()
-            .map(|label| names.get(tx, *label).map(str::to_owned))
+            .map(|label| tx.token_name(*label))
             .collect::<Result<Vec<_>, _>>()?;
         sorted.sort();
         for (at, label) in sorted.iter().enumerate() {
@@ -116,7 +93,7 @@ pub(crate) fn export<T: ReadTransaction>(tx: &GraphTx<T>, out: impl Write) -> Re
             json::write_string(&mut line, label);
         }
         line.push_str("],\"properties\":");
-        write_properties(&mut line, tx, &mut names, &properties)?;
+        write_properties(&mut line, tx, &properties)?;
         line.push('}');
         nodes += 1;
         emit(&mut out, &mut line).map_err(|error| {
@@ -133,14 +110,14 @@ pub(crate) fn export<T: ReadTransaction>(tx: &GraphTx<T>, out: impl Write) -> Re
         line.push_str("{\"type\":\"relationship\",\"id\":");
         let _ = write!(line, "{}", id.as_u64());
         line.push_str(",\"relationship_type\":");
-        json::write_string(&mut line, names.get(tx, record.rel_type)?);
+        json::write_string(&mut line, &tx.token_name(record.rel_type)?);
         let _ = write!(
             line,
             ",\"start\":{},\"end\":{},\"properties\":",
             record.source.as_u64(),
             record.target.as_u64()
         );
-        write_properties(&mut line, tx, &mut names, &record.properties)?;
+        write_properties(&mut line, tx, &record.properties)?;
         line.push('}');
         relationships += 1;
         emit(&mut out, &mut line).map_err(|error| {
@@ -170,7 +147,6 @@ fn emit(out: &mut impl Write, line: &mut String) -> io::Result<()> {
 fn write_index<T: ReadTransaction>(
     line: &mut String,
     tx: &GraphTx<T>,
-    names: &mut Names,
     name: &str,
     definition: &crate::graph::IndexDefinition,
 ) -> Result<(), GraphError> {
@@ -185,18 +161,18 @@ fn write_index<T: ReadTransaction>(
     match definition.target {
         Target::Label(label) => {
             line.push_str(",\"label\":");
-            json::write_string(line, names.get(tx, label)?);
+            json::write_string(line, &tx.token_name(label)?);
         }
         Target::RelationshipType(rel_type) => {
             line.push_str(",\"relationship_type\":");
-            json::write_string(line, names.get(tx, rel_type)?);
+            json::write_string(line, &tx.token_name(rel_type)?);
         }
     }
     match &definition.kind {
         IndexKind::Keyword { properties } => {
             let mut sorted = properties
                 .iter()
-                .map(|key| names.get(tx, *key).map(str::to_owned))
+                .map(|key| tx.token_name(*key))
                 .collect::<Result<Vec<_>, _>>()?;
             sorted.sort();
             line.push_str(",\"properties\":[");
@@ -214,7 +190,7 @@ fn write_index<T: ReadTransaction>(
             metric,
         } => {
             line.push_str(",\"property\":");
-            json::write_string(line, names.get(tx, *property)?);
+            json::write_string(line, &tx.token_name(*property)?);
             let _ = write!(
                 line,
                 ",\"dimension\":{dimension},\"metric\":\"{}\"",
@@ -223,7 +199,7 @@ fn write_index<T: ReadTransaction>(
         }
         IndexKind::Property { property } => {
             line.push_str(",\"property\":");
-            json::write_string(line, names.get(tx, *property)?);
+            json::write_string(line, &tx.token_name(*property)?);
         }
     }
     line.push('}');
@@ -241,12 +217,11 @@ fn metric_name(metric: VectorMetric) -> &'static str {
 fn write_properties<T: ReadTransaction>(
     line: &mut String,
     tx: &GraphTx<T>,
-    names: &mut Names,
     properties: &Properties,
 ) -> Result<(), GraphError> {
     let mut sorted = properties
         .iter()
-        .map(|(key, value)| Ok((names.get(tx, *key)?.to_owned(), value)))
+        .map(|(key, value)| Ok((tx.token_name(*key)?, value)))
         .collect::<Result<Vec<_>, GraphError>>()?;
     sorted.sort_by(|left, right| left.0.cmp(&right.0));
     line.push('{');

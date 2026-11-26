@@ -257,13 +257,42 @@ fn tokens_are_interned_once_per_kind_and_resolve_back_to_names() {
     assert_ne!(first, other);
     assert_eq!(as_key.id(), first.id());
     let read = graph.read().unwrap();
-    assert_eq!(read.token_name(other).unwrap(), "other");
-    assert_eq!(read.token_name(as_key).unwrap(), "name");
+    assert_eq!(&*read.token_name(other).unwrap(), "other");
+    assert_eq!(&*read.token_name(as_key).unwrap(), "name");
     assert_eq!(read.lookup_token::<Label>("other").unwrap(), Some(other));
     assert_eq!(
         read.lookup_token::<RelationshipType>("other").unwrap(),
         None
     );
+}
+
+#[test]
+fn a_token_id_a_rolled_back_transaction_used_names_the_token_committed_with_it_later() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let kept: Token<Label> = write.intern_token("Kept").unwrap();
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(&*read.token_name(kept).unwrap(), "Kept");
+
+    let mut ghost = graph.write().unwrap();
+    let ghost_token: Token<Label> = ghost.intern_token("Ghost").unwrap();
+    assert_eq!(&*ghost.token_name(ghost_token).unwrap(), "Ghost");
+    assert_eq!(&*ghost.token_name(kept).unwrap(), "Kept");
+    assert_eq!(read.lookup_token::<Label>("Ghost").unwrap(), None);
+    ghost.rollback().unwrap();
+
+    let mut real = graph.write().unwrap();
+    let real_token: Token<Label> = real.intern_token("Real").unwrap();
+    assert_eq!(real_token, ghost_token);
+    real.commit().unwrap();
+    assert_eq!(read.lookup_token::<Label>("Ghost").unwrap(), None);
+    let later = graph.read().unwrap();
+    assert_eq!(&*later.token_name(real_token).unwrap(), "Real");
+    assert_eq!(later.lookup_token::<Label>("Ghost").unwrap(), None);
+    let write = graph.write().unwrap();
+    assert_eq!(&*write.token_name(real_token).unwrap(), "Real");
+    assert_eq!(write.lookup_token::<Label>("Ghost").unwrap(), None);
 }
 
 #[test]

@@ -252,38 +252,42 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
     }
 
-    fn probe_segment(
-        &self,
-        id: ColumnId,
-        slot: usize,
-    ) -> Result<Option<PropertyValue>, GraphError> {
-        self.segment_cell(id, slot, |cell| cell.map(Cell::to_value).transpose())
-    }
-
     fn segment_value(
         &self,
         reader: &mut ColumnReader,
         id: ColumnId,
         slot: usize,
     ) -> Result<Option<PropertyValue>, GraphError> {
+        self.segment_read(reader, id, slot, |cell| {
+            cell.map(Cell::to_value).transpose()
+        })
+    }
+
+    fn segment_read<R>(
+        &self,
+        reader: &mut ColumnReader,
+        id: ColumnId,
+        slot: usize,
+        read: impl Fn(Option<Cell<'_>>) -> Result<R, GraphError>,
+    ) -> Result<R, GraphError> {
         let index = match reader.columns.binary_search_by_key(&id, |(held, _)| *held) {
             Ok(index) => index,
             Err(index) => {
                 reader.columns.insert(index, (id, Cached::Probed(1)));
-                return self.probe_segment(id, slot);
+                return self.segment_cell(id, slot, read);
             }
         };
         let cached = &mut reader.columns[index].1;
         if let Cached::Probed(probes) = cached {
             if *probes < columns::PROBES {
                 *probes += 1;
-                return self.probe_segment(id, slot);
+                return self.segment_cell(id, slot, read);
             }
             *cached = Cached::Loaded(self.load_column(id)?);
         }
         match cached {
-            Cached::Loaded(column) => column.cell_at(slot)?.map(Cell::to_value).transpose(),
-            Cached::Probed(_) => self.probe_segment(id, slot),
+            Cached::Loaded(column) => read(column.cell_at(slot)?),
+            Cached::Probed(_) => self.segment_cell(id, slot, read),
         }
     }
 
@@ -430,6 +434,44 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         Ok(properties)
+    }
+
+    /// The keys of every property of the node with ID `id`, ascending, decoding none of the
+    /// values. `None` means there is no such node.
+    pub(crate) fn node_property_keys(
+        &self,
+        labels: &mut LabelReader,
+        reader: &mut ColumnReader,
+        id: NodeId,
+    ) -> Result<Option<Vec<Token<PropertyKey>>>, GraphError> {
+        if self.with_labels(labels, id, |_| ())?.is_none() {
+            return Ok(None);
+        }
+        let (group, slot) = meta::locate(id);
+        let edit = self.columns.get(&group);
+        let mut keys = Vec::new();
+        for token in self.node_keys(reader, group, slot)? {
+            let held = if let Some(cell) = edit
+                .map(|edit| edit.current_cell(slot, token))
+                .transpose()?
+                .flatten()
+            {
+                cell.is_some()
+            } else if let Some(cell) = self
+                .stored_delta(reader, group, slot)?
+                .map(|delta| delta.get(token))
+                .transpose()?
+                .flatten()
+            {
+                cell.is_some()
+            } else {
+                self.segment_read(reader, (group, token), slot, |cell| Ok(cell.is_some()))?
+            };
+            if held {
+                keys.push(token);
+            }
+        }
+        Ok(Some(keys))
     }
 
     /// One property of the node with ID `id`. The outer `None` means there is no such node. A

@@ -36,6 +36,28 @@ fn token<K>(reader: &mut Reader<'_>) -> Result<Token<K>, DecodeError> {
 }
 
 impl RelationshipRecord {
+    /// The type in an encoded relationship record, decoding nothing after it.
+    pub(crate) fn rel_type(bytes: &[u8]) -> Result<Token<RelationshipType>, DecodeError> {
+        token(&mut Reader::new(bytes))
+    }
+
+    /// The property keys in an encoded relationship record, ascending, decoding none of the
+    /// values.
+    pub(crate) fn keys(bytes: &[u8]) -> Result<Vec<Token<PropertyKey>>, DecodeError> {
+        let mut reader = Reader::new(bytes);
+        token::<RelationshipType>(&mut reader)?;
+        reader.varint_u64()?;
+        reader.varint_u64()?;
+        let count = reader.varint()?;
+        let mut keys = Vec::new();
+        for _ in 0..count {
+            keys.push(token(&mut reader)?);
+            reader.skip_value()?;
+        }
+        reader.finish()?;
+        Ok(keys)
+    }
+
     /// The value of `key` in an encoded relationship record, decoding none of the other values.
     pub(crate) fn property(
         bytes: &[u8],
