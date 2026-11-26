@@ -20,7 +20,7 @@ The crate is developed and released from its own repository, and hosts depend on
 - Every workflow pins each action to a full commit SHA, which a guard rule checks.
 - `CHANGELOG.md` keeps an `Unreleased` section, and each user-visible change adds a line to it in the same pull request.
 - A `feat` or breaking commit adds that line in the same commit, unless it changes only the unpublished crates, the fuzz targets, the docs, the CI workflows, or `mise.toml`.
-- Cutting a release renames `Unreleased` to the new version, and that section becomes the GitHub release notes.
+- Cutting a release renames `Unreleased` to the new version, which becomes the GitHub release notes, and opens a new empty `Unreleased` above it.
 - Every pull request checks that the crate packages and builds from its packaged files alone.
 - The minimum supported Rust version is the toolchain that `mise.toml` pins, declared as `rust-version`, so every check runs on it.
 - Raising the minimum supported Rust version is a change the changelog lists, and below 1.0 it may ship in any release.
