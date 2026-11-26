@@ -643,10 +643,10 @@ fn segment_log(fs: &SimFs, name: &str) -> Vec<(u128, u64)> {
         let Ok(header) = SegmentHeader::decode(&bytes[..WAL_BLOCK]) else {
             continue;
         };
-        let mut at = WAL_BLOCK;
+        let mut at = header.unit();
         while let Ok((record, length)) = decode_record(header.record_seed(), &bytes[at..]) {
             records.push((header.database_id, record.lsn));
-            at += padded(length);
+            at += padded(length, header.unit());
         }
     }
     records

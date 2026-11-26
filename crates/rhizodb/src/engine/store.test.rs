@@ -1221,10 +1221,6 @@ struct GatedFile {
 }
 
 impl BlockFile for GatedFile {
-    fn block_size(&self) -> BlockSize {
-        self.file.block_size()
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.gate.pass();
         self.file.read(first, buffer)

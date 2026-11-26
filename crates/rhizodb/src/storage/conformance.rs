@@ -293,7 +293,9 @@ fn every_table_keeps_its_own_entries<H: Harness>(harness: &mut H) {
     let store = harness.open();
     let mut write = store.begin_write().unwrap();
     for table in Table::ALL {
-        write.put(table, b"key", table.name().as_bytes()).unwrap();
+        write
+            .put(table, b"key", format!("{table:?}").as_bytes())
+            .unwrap();
     }
     write.commit().unwrap();
     let mut write = store.begin_write().unwrap();
@@ -305,7 +307,7 @@ fn every_table_keeps_its_own_entries<H: Harness>(harness: &mut H) {
     for table in &Table::ALL[1..] {
         assert_eq!(
             dump(&read, *table),
-            entries(&[(b"key", table.name().as_bytes())])
+            entries(&[(b"key", format!("{table:?}").as_bytes())])
         );
     }
 }
@@ -718,7 +720,9 @@ fn commits_survive_a_reopen_and_the_rest_does_not<H: Harness>(harness: &mut H) {
     let large = patterned(70_000, 3);
     let mut write = store.begin_write().unwrap();
     for table in graph_tables() {
-        write.put(table, b"kept", table.name().as_bytes()).unwrap();
+        write
+            .put(table, b"kept", format!("{table:?}").as_bytes())
+            .unwrap();
     }
     write.put(Table::Vectors, b"large", &large).unwrap();
     write.commit().unwrap();
@@ -736,13 +740,13 @@ fn commits_survive_a_reopen_and_the_rest_does_not<H: Harness>(harness: &mut H) {
     let read = store.begin_read().unwrap();
     assert_eq!(
         dump(&read, Table::Nodes),
-        entries(&[(b"kept", b"nodes"), (b"second", b"2")])
+        entries(&[(b"kept", b"Nodes"), (b"second", b"2")])
     );
     assert_eq!(read.get(Table::Vectors, b"large").unwrap(), Some(large));
     for table in graph_tables() {
         assert_eq!(
             read.get(table, b"kept").unwrap(),
-            Some(table.name().as_bytes().to_vec())
+            Some(format!("{table:?}").into_bytes())
         );
     }
     drop(read);

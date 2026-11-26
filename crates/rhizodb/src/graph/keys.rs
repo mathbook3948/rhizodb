@@ -1,12 +1,6 @@
 use crate::value::DecodeError;
 use crate::value::Reader;
 
-use super::ids::Label;
-use super::ids::NodeId;
-use super::ids::RelationshipId;
-use super::ids::RelationshipType;
-use super::ids::Token;
-
 pub(crate) const FORMAT_VERSION_KEY: &[u8] = b"format_version";
 pub(crate) const NEXT_NODE_ID_KEY: &[u8] = b"next_node_id";
 pub(crate) const NEXT_RELATIONSHIP_ID_KEY: &[u8] = b"next_relationship_id";
@@ -33,40 +27,6 @@ pub(crate) fn token_id_key(tag: u8, id: u32) -> [u8; 5] {
 
 pub(crate) fn element_key(id: u64) -> [u8; 8] {
     id.to_be_bytes()
-}
-
-/// A key of the adjacency tables of format versions before adjacency segments.
-#[cfg(test)]
-pub(crate) fn adjacency_key(
-    node: NodeId,
-    rel_type: Token<RelationshipType>,
-    relationship: RelationshipId,
-) -> [u8; 20] {
-    let mut key = [0u8; 20];
-    key[..8].copy_from_slice(&node.0.to_be_bytes());
-    key[8..12].copy_from_slice(&rel_type.id().to_be_bytes());
-    key[12..].copy_from_slice(&relationship.0.to_be_bytes());
-    key
-}
-
-/// The node, relationship type, and relationship of a key of the adjacency tables of format
-/// versions before adjacency segments.
-pub(crate) fn parse_adjacency_key(
-    key: &[u8],
-) -> Result<(NodeId, Token<RelationshipType>, RelationshipId), DecodeError> {
-    let mut reader = Reader::new(key);
-    let node = NodeId(reader.u64()?);
-    let rel_type = Token::new(reader.u32()?);
-    let relationship = RelationshipId(reader.u64()?);
-    reader.finish()?;
-    Ok((node, rel_type, relationship))
-}
-
-pub(crate) fn label_key(label: Token<Label>, node: NodeId) -> [u8; 12] {
-    let mut key = [0u8; 12];
-    key[..4].copy_from_slice(&label.id().to_be_bytes());
-    key[4..].copy_from_slice(&node.0.to_be_bytes());
-    key
 }
 
 pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";

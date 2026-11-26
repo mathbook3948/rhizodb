@@ -129,10 +129,6 @@ impl FileSystem for MemFs {
 }
 
 impl BlockFile for MemFile {
-    fn block_size(&self) -> BlockSize {
-        self.size
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         read_blocks(&lock(&self.bytes), self.size, first, buffer)
     }

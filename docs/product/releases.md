@@ -13,10 +13,16 @@ The crate is developed and released from its own repository, and hosts depend on
 - Below 1.0, a breaking change to the public API or the on-disk format raises the minor version.
 - A release is a tag `v<version>` on `main` whose version equals the crate version in `Cargo.toml`.
 - Pushing such a tag runs the full check on every supported platform, then publishes the crate to crates.io and creates a GitHub release.
+- A maintainer or an agent that cannot push tags runs the `tag` workflow on `main`, which tags the crate version of `main`'s head through the GitHub API, and then runs the release workflow by hand on that tag, since a tag the workflow token creates starts no workflow by itself.
+- Running the release workflow by hand on `main` releases the crate version of `main`'s head the same way, and its GitHub release creates the tag, but a `release` environment that admits only tags refuses it.
+- Before it publishes, the release workflow runs `mise run random` on the tagged commit with three times its usual cases, since a tag may come before that commit's randomized run on `main`.
 - A release that stopped partway finishes when its workflow is run again, skipping the steps that already happened.
+- The crates.io token is a secret of the `release` environment, which needs a reviewer's approval, and only the step that uploads sets it.
+- A job without the token packages the crate and builds it from its packaged files, and the publish job installs only the pinned Rust toolchain and uploads the package unbuilt, so no dependency's build script runs on the runner that holds the token.
+- Every workflow pins each action to a full commit SHA, which a guard rule checks.
 - `CHANGELOG.md` keeps an `Unreleased` section, and each user-visible change adds a line to it in the same pull request.
 - A `feat` or breaking commit adds that line in the same commit, unless it changes only the unpublished crates, the fuzz targets, the docs, the CI workflows, or `mise.toml`.
-- Cutting a release renames `Unreleased` to the new version, and that section becomes the GitHub release notes.
+- Cutting a release renames `Unreleased` to the new version, which becomes the GitHub release notes, and opens a new empty `Unreleased` above it.
 - Every pull request checks that the crate packages and builds from its packaged files alone.
 - The minimum supported Rust version is the toolchain that `mise.toml` pins, declared as `rust-version`, so every check runs on it.
 - Raising the minimum supported Rust version is a change the changelog lists, and below 1.0 it may ship in any release.

@@ -37,7 +37,6 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every storage backend passes one conformance suite written against the storage trait.
 - Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
 - The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
-- The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
 - Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at points sampled from a seed that changes every run, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
 - Those workload tests try at most 16 reorders of unsynced writes at each point, since each reorder reopens and checks the database.
 - The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
@@ -49,7 +48,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A commit that writes property column chunks or deltas is failed at each of its storage operations in turn, and the graph recovered from every power loss must be the one before or after it.
 - Property column chunks and deltas are corrupted byte by byte, in their encoding, in their stored entries, and in the database file, and every read must then fail as corrupt data or answer as before.
 - Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
-- Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
+- Every format upgrade from a version that RhizoDB's own engine wrote is tested on a fixture that a checked-in program writes with the last commit whose engine wrote that version.
 - Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
 - Every push to `main` runs each randomized test with a fixed number of cases, and a nightly workflow runs a hundred times as many of the storage and integration tests on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run of that test, on `main` and nightly, replays it.
@@ -58,8 +57,6 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
 - The fuzz run fails on any panic that escapes RhizoDB, any hang, and any run out of memory.
-- The damaged file fuzz target replaces libFuzzer's abort on every panic, so a panic that the redb guard catches is not a crash.
-- A panic is injected at each backend operation of a redb commit in turn, and the reopened file must hold the state before or after the commit.
 - The writer slot and the index catalog are explored across thread interleavings with shuttle models that copy each protocol, in a crate of their own, since the library uses `std` primitives.
 - Every call a host can make wrongly, such as opening a file twice, forgetting or moving a transaction, a procedure that panics or calls back into its database, and invalid parameters or index definitions, must fail with an error kind, never panic out of RhizoDB, hang, or corrupt the file.
 - Inputs at and past each resource limit run on a 1 MiB stack, the most a query may use, in debug and release builds, and in a child process where a stack overflow would end the run, so it fails one test instead.

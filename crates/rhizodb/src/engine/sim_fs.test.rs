@@ -315,20 +315,24 @@ fn an_error_aimed_at_one_file_counts_and_fails_only_that_file() {
 }
 
 #[test]
-fn a_failed_sync_fails_every_later_sync_of_that_file() {
+fn a_failed_sync_loses_the_writes_since_the_last_sync_and_later_syncs_succeed() {
     let fs = SimFs::new();
-    let file = synced_file(&fs, "db", &[page(1)]);
-    let other = synced_file(&fs, "other", &[page(1)]);
+    let file = synced_file(&fs, "db", &[page(1), page(1)]);
     file.write(0, [page(2)].as_flattened()).unwrap();
     fs.fail_file_after("db", 0, Failure::Once).unwrap();
     assert!(file.sync().is_err());
-    assert!(file.sync().is_err());
-    file.write(0, [page(3)].as_flattened()).unwrap();
-    assert!(file.sync().is_err());
-    other.sync().unwrap();
-    assert_eq!(pages(&fs.crash(Crash::DropUnsynced), "db"), [page(1)]);
-    let reopened = fs.crash(Crash::DropUnsynced);
-    reopened.open("db", size()).unwrap().sync().unwrap();
+    assert_eq!(pages(&fs, "db"), [page(2), page(1)]);
+    file.sync().unwrap();
+    assert_eq!(
+        pages(&fs.crash(Crash::DropUnsynced), "db"),
+        [page(1), page(1)]
+    );
+    file.write(1, [page(3)].as_flattened()).unwrap();
+    fs.open("db", size()).unwrap().sync().unwrap();
+    assert_eq!(
+        pages(&fs.crash(Crash::DropUnsynced), "db"),
+        [page(1), page(3)]
+    );
 }
 
 #[test]
@@ -445,4 +449,33 @@ fn a_lock_keeps_other_handles_out_until_its_handle_closes() {
             .lock()
             .is_ok()
     );
+}
+
+#[test]
+fn a_scrambled_tear_may_garble_synced_sectors_of_its_4_kib_unit_and_no_others() {
+    let small = BlockSize::new(SECTOR_SIZE).unwrap();
+    let mut garbled_neighbour = false;
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        let file = fs.create("wal-0", small).unwrap();
+        file.write(0, &[1; 2 * BLOCK]).unwrap();
+        file.sync().unwrap();
+        fs.sync_names().unwrap();
+        file.write(3, &[2; SECTOR_SIZE]).unwrap();
+        let crashed = fs.crash(Crash::Scramble { seed });
+        let image = crashed.open("wal-0", small).unwrap();
+        let mut bytes = vec![0; 2 * BLOCK];
+        image.read(0, &mut bytes).unwrap();
+        let (sectors, _) = bytes.as_chunks::<SECTOR_SIZE>();
+        assert!(
+            sectors[8..]
+                .iter()
+                .all(|sector| *sector == [1; SECTOR_SIZE])
+        );
+        garbled_neighbour |= sectors[..8]
+            .iter()
+            .enumerate()
+            .any(|(index, sector)| index != 3 && *sector != [1; SECTOR_SIZE]);
+    }
+    assert!(garbled_neighbour);
 }

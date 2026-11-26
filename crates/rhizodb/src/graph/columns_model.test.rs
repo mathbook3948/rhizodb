@@ -9,8 +9,8 @@ use proptest::test_runner::TestCaseError;
 use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 use crate::value::tests::same_bits;
 
@@ -81,8 +81,8 @@ pub(super) fn values_of(seed: u64) -> Values {
     values
 }
 
-pub(super) fn open(fs: &SimFs) -> Graph<RedbStorage> {
-    let graph = Graph::open(sim_backend::storage(fs).unwrap()).unwrap();
+pub(super) fn open(fs: &SimFs) -> Graph<TestStorage> {
+    let graph = Graph::open(test_engine::on_sim(fs).unwrap()).unwrap();
     let missing = graph
         .read()
         .unwrap()
@@ -491,7 +491,7 @@ fn segment_values(
     held
 }
 
-fn graph_of(count: u64, values: impl Fn(u64) -> Values) -> (SimFs, Graph<RedbStorage>, Model) {
+fn graph_of(count: u64, values: impl Fn(u64) -> Values) -> (SimFs, Graph<TestStorage>, Model) {
     let fs = SimFs::new();
     let graph = open(&fs);
     let mut model = Model::default();
@@ -953,7 +953,8 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
             .map(|_| {
                 scope.spawn(|| {
                     let mut seen = 0;
-                    while !done.load(Ordering::Acquire) {
+                    loop {
+                        let finished = done.load(Ordering::Acquire);
                         let read = graph.read().unwrap();
                         let version = version_of(&read, b);
                         let expected = Arc::clone(&lock(&versions)[version]);
@@ -962,8 +963,10 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
                         assert_eq!(version_of(&read, b), version);
                         check(&read, &expected).unwrap();
                         seen = seen.max(version);
+                        if finished {
+                            break seen;
+                        }
                     }
-                    seen
                 })
             })
             .collect();
@@ -1016,7 +1019,7 @@ fn readers_during_column_writes_see_the_snapshot_they_began_at() {
 fn a_commit_that_changes_more_nodes_than_a_group_has_room_for_deltas_folds_even_without_a_difference()
  {
     let (fs, graph, mut model) = graph_of(300, only_b(PropertyValue::Integer(1)));
-    let entries = |graph: &Graph<RedbStorage>| {
+    let entries = |graph: &Graph<TestStorage>| {
         graph
             .read()
             .unwrap()

@@ -4,12 +4,13 @@ Defines what RhizoDB is.
 
 ## Background
 
-dotori needs to store people, places, tasks, and their relationships for years and find them fast. No graph database is both light enough to embed and stable, so RhizoDB is built for it as a separate project.
+Programs need to keep entities and their relationships in-process for years and find them fast.
+No graph database is both light enough to embed and stable, so RhizoDB is built as a project of its own to fill that gap.
 
 ## Decisions
 
 - The crate is `rhizodb`, developed and released from its own repository.
-- It is a general-purpose graph database with no knowledge of dotori or memory. dotori uses it as a dependency.
+- It is a general-purpose graph database with no knowledge of the applications that use it as a dependency.
 - It is embedded and runs inside the host program with no separate server.
 - It is a schemaless property graph.
 - The query language follows GQL.

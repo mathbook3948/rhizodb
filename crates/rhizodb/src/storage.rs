@@ -9,9 +9,8 @@ pub(crate) mod backup;
 pub(crate) mod conformance;
 #[cfg(test)]
 pub(crate) mod model;
-pub(crate) mod redb_backend;
 #[cfg(test)]
-pub(crate) mod sim_backend;
+pub(crate) mod test_engine;
 
 macro_rules! tables {
     ($($(#[$meta:meta])* $variant:ident,)*) => {
@@ -70,32 +69,6 @@ impl Table {
                 | Table::Outgoing
                 | Table::Incoming
         )
-    }
-
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Table::Metadata => "metadata",
-            Table::TokenByName => "token_by_name",
-            Table::TokenById => "token_by_id",
-            Table::Nodes => "nodes",
-            Table::Relationships => "relationships",
-            Table::Outgoing => "outgoing",
-            Table::Incoming => "incoming",
-            Table::LabelIndex => "label_index",
-            Table::Indexes => "indexes",
-            Table::KeywordPostings => "keyword_postings",
-            Table::KeywordDocuments => "keyword_documents",
-            Table::KeywordTotals => "keyword_totals",
-            Table::Vectors => "vectors",
-            Table::PropertyEntries => "property_entries",
-            Table::NodeChunks => "node_chunks",
-            Table::LabelSets => "label_sets",
-            Table::LabelSetByTokens => "label_set_by_tokens",
-            Table::NodeColumns => "node_columns",
-            Table::Adjacency => "adjacency",
-            Table::RelationshipChunks => "relationship_chunks",
-            Table::ReplicationHistory => "replication_history",
-        }
     }
 }
 

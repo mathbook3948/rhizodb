@@ -532,3 +532,40 @@ fn a_replica_refuses_the_changes_of_an_unrelated_database() {
     );
     assert_eq!(dump(&replica), dump(&x));
 }
+
+#[test]
+fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.rhizodb");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/engine-1-1.rhizodb"),
+        &path,
+    )
+    .unwrap();
+    drop(Database::open(&path).unwrap());
+    let writer = Database::open(&path).unwrap();
+    assert_eq!(writer.role(), Role::Writer);
+    assert!(writer.history().entries().is_empty());
+    assert_eq!(writer.position().term(), 0);
+    writer.promote(1, b"w").unwrap();
+    let snapshot = writer.snapshot().unwrap();
+    let mut bytes = vec![0; usize::try_from(snapshot.len()).unwrap()];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        offset += snapshot
+            .read_at(offset as u64, &mut bytes[offset..])
+            .unwrap();
+    }
+    drop(snapshot);
+    let replica =
+        Database::install_snapshot(dir.path().join("replica.rhizodb"), bytes.as_slice()).unwrap();
+    writer
+        .execute("INSERT (:Added {v: 1})", &Parameters::new())
+        .unwrap();
+    assert_eq!(sync(&writer, &replica), writer.position());
+    assert_eq!(dump(&replica), dump(&writer));
+    drop(writer);
+    let reopened = Database::open(&path).unwrap();
+    assert_eq!(reopened.role(), Role::Fenced);
+    assert_eq!(reopened.history().entries().len(), 1);
+}

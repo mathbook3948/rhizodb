@@ -238,7 +238,7 @@ mod tests;
 
 /// Recomputes every checksum of bytes shaped like changes, so a fuzzer's damage reaches the
 /// decoders behind them. Bytes too short to hold the shape come back as they were.
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(test, fuzzing))]
 pub(crate) fn reseal_for_fuzzing(mut bytes: Vec<u8>) -> Vec<u8> {
     use super::wal_format::RECORD_LIMIT;
     let Some(&length) = bytes.get(MAGIC.len() + 41) else {

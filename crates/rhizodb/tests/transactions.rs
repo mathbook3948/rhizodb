@@ -152,7 +152,7 @@ fn a_second_write_transaction_waits_until_the_first_ends() {
 #[test]
 fn a_committed_write_transaction_survives_reopening() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph.redb");
+    let path = dir.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         let mut tx = db.begin_write().unwrap();

@@ -27,7 +27,7 @@ pub use database::OpenOptions;
 pub use error::Error;
 pub use error::ErrorKind;
 pub use gql::error::SyntaxErrorKind;
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub use gql::parse_for_fuzzing;
 pub use graph::IndexTarget;
@@ -61,7 +61,7 @@ pub use temporal::Temporal;
 pub use temporal::Time;
 pub use transaction::ReadTransaction;
 pub use transaction::WriteTransaction;
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub use value::read_value_for_fuzzing;
 
@@ -72,7 +72,7 @@ pub struct Readme;
 
 /// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value
 /// encodes to other bytes.
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::decode_formats(bytes)
@@ -80,7 +80,7 @@ pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
 
 /// Damages a database file of RhizoDB's own engine by `bytes`, opens it, and reads every entry,
 /// for the fuzzer. Fails when the damage changed what reads return without an error.
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::open_damaged_file(bytes)
@@ -88,7 +88,7 @@ pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> 
 
 /// Damages a batch of replication changes by `bytes`, reseals it, decodes it, applies it to a
 /// replica, and reads the replica, for the fuzzer. Fails when decoded changes keep other bytes.
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn apply_changes_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     replication::apply_changes_for_fuzzing(bytes)

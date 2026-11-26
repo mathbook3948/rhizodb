@@ -611,7 +611,7 @@ fn skip_and_limit_at_the_integer_maximum_neither_overflow_nor_allocate() {
 #[test]
 fn a_property_of_eight_megabytes_and_a_list_of_half_a_million_survive_reopening() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let text = "ü".repeat(4 << 20);
     let items: Vec<Value> = (0..500_000).map(Value::Integer).collect();
     {
@@ -667,7 +667,7 @@ fn names_of_a_megabyte_are_stored_and_read_back() {
 #[ignore = "left out of mise run check, run by mise run random"]
 fn a_write_transaction_of_many_statements_and_nodes_commits_whole_or_rolls_back_whole() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let batches = cases(2).min(50) as i64;
     let per_batch = 10_000;
     {

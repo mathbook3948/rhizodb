@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use rhizodb::Database;
-use rhizodb::Error;
 use rhizodb::ErrorKind;
 use rhizodb::IndexTarget;
 use rhizodb::Parameters;
@@ -109,39 +108,16 @@ pub fn damage(mut file: Vec<u8>, bytes: &[u8]) -> Vec<u8> {
 
 /// Writes the damaged `file` to `path`, opens it, runs every probe, and returns the kind of
 /// each failure. Any outcome but a panic or a hang is acceptable, since the damage may make the
-/// file unreadable. Once the storage engine panics, every later probe must fail as corrupt
-/// data, and the file must open again after the database is dropped.
+/// file unreadable.
 pub fn open_and_probe(path: &Path, file: &[u8]) -> Vec<ErrorKind> {
     std::fs::write(path, file).unwrap();
     let db = match Database::open(path) {
         Ok(db) => db,
         Err(error) => return vec![error.kind()],
     };
-    let mut failures = Vec::new();
-    let mut poisoned = false;
-    for query in PROBES {
-        let Err(error) = db.execute(query, &Parameters::new()) else {
-            assert!(!poisoned, "`{query}` ran after the storage engine panicked");
-            continue;
-        };
-        assert!(
-            !poisoned || error.kind() == ErrorKind::CorruptData,
-            "`{query}` failed with {:?} after the storage engine panicked: {error}",
-            error.kind()
-        );
-        poisoned |= is_engine_panic(&error);
-        failures.push(error.kind());
-    }
-    drop(db);
-    if poisoned && let Err(error) = Database::open(path) {
-        assert!(
-            !error.to_string().contains("already open"),
-            "the file stayed locked after the poisoned database was dropped: {error}"
-        );
-    }
-    failures
-}
-
-fn is_engine_panic(error: &Error) -> bool {
-    error.kind() == ErrorKind::CorruptData && error.to_string().contains("storage engine panicked")
+    PROBES
+        .iter()
+        .filter_map(|query| db.execute(query, &Parameters::new()).err())
+        .map(|error| error.kind())
+        .collect()
 }

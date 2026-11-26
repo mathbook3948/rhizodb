@@ -29,6 +29,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - The history is never trimmed.
 - Batches of changes write only graph tables, and only configuration records write the history table.
 - The header keeps the file's incarnation, whether a file with no history is a replica, the highest term the file has heard of, the chain hash at the checkpoint's LSN, and the database id the file follows.
+- These header fields, the log kept for peers, and the replication history come with engine format minor 4, and a file of an earlier minor opens as a writer with no history and no peers and draws its incarnation when it starts its next log.
 - A new file and an installed copy get a new random incarnation, so a copy of a file never passes as the file that began a term.
 - A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer, and every other file is a replica.
 - A writer opens fenced after every restart and takes writes again only once the host promotes it with its own newest term and writer id.
@@ -70,3 +71,4 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 ## Open
 
 - How a replica of a newer build follows a writer that has not upgraded the graph's format yet, since a replica cannot write the upgrade.
+- How a snapshot taken between an upgrade and the writer's next checkpoint, which holds the older graph format a replica cannot upgrade, becomes installable without waiting for that checkpoint.

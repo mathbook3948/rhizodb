@@ -7,12 +7,15 @@ use crate::engine::sim_fs::SimFs;
 use crate::engine::wal_format::Body;
 use crate::engine::wal_format::Kind;
 use crate::engine::wal_format::OpRef;
+use crate::engine::wal_format::RECORD_UNIT;
 use crate::engine::wal_format::batch_record;
 use crate::engine::wal_format::record_prefix;
 use crate::test_scale;
 
 const BASE: &str = "graph.rhizo";
-const TARGET: u64 = 4096;
+const TARGET: u64 = 8 * RECORD_UNIT as u64;
+
+const FIRST: u64 = HEADER_BLOCKS;
 
 fn identity() -> LogIdentity {
     LogIdentity {
@@ -124,7 +127,7 @@ fn appended_records_replay_in_order_across_segments() {
     let (mut recovered, seen) = lsns(&fs.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
     assert_eq!(seen, (1..=60).collect::<Vec<_>>());
     assert_eq!(recovered.next_lsn(), 61);
-    assert_eq!(recovered.size(), wal.size());
+    assert!(recovered.size() <= wal.size());
     recovered.append(record(61), 61).unwrap();
 }
 
@@ -143,7 +146,6 @@ fn recovery_replays_only_the_records_after_the_checkpoint() {
         let crashed = fs.crash(crash);
         let (_, seen) = lsns(&crashed, &checkpoint).unwrap();
         assert_eq!(seen, (26..=40).collect::<Vec<_>>());
-        assert_eq!(segment_files(&crashed, BASE).unwrap()[0], first);
     }
 }
 
@@ -224,7 +226,13 @@ fn damage(fs: &SimFs, sequence: u64, block: u64, byte: usize) {
 
 #[test]
 fn damage_before_the_last_segment_is_corruption() {
-    for (block, byte) in [(0, 30), (1, 0), (1, 20), (1, 70), (2, 100)] {
+    for (block, byte) in [
+        (0, 30),
+        (FIRST, 0),
+        (FIRST, 20),
+        (FIRST, 70),
+        (2 * FIRST, 0),
+    ] {
         let fs = filled(40);
         damage(&fs, 2, block, byte);
         let error = lsns(&fs, &header(0, 1)).expect_err("damage was not noticed");
@@ -234,13 +242,13 @@ fn damage_before_the_last_segment_is_corruption() {
 
 #[test]
 fn damage_to_the_last_record_ends_the_log_there() {
-    let fs = filled(40);
-    let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
-    let file = fs
-        .open(&segment_name(BASE, last), wal_block().unwrap())
-        .unwrap();
-    let blocks = file.block_count().unwrap();
-    damage(&fs, last, blocks - 1, 20);
+    let fs = SimFs::new();
+    let mut written = fresh(&fs);
+    for lsn in 1..=40 {
+        written.append(record(lsn), lsn).unwrap();
+    }
+    let last = written.active_segment().unwrap();
+    damage(&fs, last.sequence, last.blocks - FIRST, 20);
     let (mut wal, seen) = lsns(&fs, &header(0, 1)).unwrap();
     assert_eq!(seen, (1..=39).collect::<Vec<_>>());
     wal.append(record(40), 0).unwrap();
@@ -253,7 +261,7 @@ fn damage_before_a_synced_record_of_the_last_segment_is_corruption() {
     for byte in [0, 20, 60] {
         let fs = filled(40);
         let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
-        damage(&fs, last, 1, byte);
+        damage(&fs, last, FIRST, byte);
         let error = lsns(&fs, &header(0, 1)).expect_err("damage was not noticed");
         assert!(error.is_corrupt(), "byte {byte}: {error}");
     }
@@ -365,7 +373,7 @@ fn a_torn_first_segment_header_is_corruption() {
 }
 
 #[test]
-fn stale_segments_below_the_first_needed_are_removed() {
+fn stale_segments_below_the_first_needed_are_left_for_the_caller() {
     let fs = SimFs::new();
     let mut wal = fresh(&fs);
     for lsn in 1..=40 {
@@ -373,9 +381,10 @@ fn stale_segments_below_the_first_needed_are_removed() {
     }
     let first = wal.first_needed(20);
     assert!(first > 2);
-    let (_, seen) = lsns(&fs, &header(20, first)).unwrap();
+    let (wal, seen) = lsns(&fs, &header(20, first)).unwrap();
     assert_eq!(seen, (21..=40).collect::<Vec<_>>());
-    assert_eq!(segment_files(&fs, BASE).unwrap()[0], first);
+    assert_eq!(segment_files(&fs, BASE).unwrap()[0], 1);
+    assert_eq!(wal.first_needed(0), first);
 }
 
 #[test]
@@ -391,7 +400,7 @@ fn removing_the_whole_log_leaves_no_segment() {
     );
 }
 
-const WORKLOAD: u64 = 30;
+const WORKLOAD: u64 = 40;
 
 fn append_and_checkpoint_until_failure(fs: &SimFs, fail_at: Option<u64>) -> (Header, u64, bool) {
     let mut wal = fresh(fs);
@@ -441,7 +450,7 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
         let (durable, acked, in_flight) = append_and_checkpoint_until_failure(&fs, Some(fail_at));
         for crash in crashes(seeds) {
             let crashed = fs.crash(crash);
-            let before = log_bytes(&crashed);
+            let before = log_bytes(&crashed, durable.wal.first_segment);
             let (mut wal, seen) = lsns(&crashed, &durable)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
             let first = durable.checkpoint_lsn + 1;
@@ -463,10 +472,10 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
                     lost_in_flight += 1;
                 }
             }
-            if log_bytes(&crashed) < before {
+            if log_bytes(&crashed, durable.wal.first_segment) < before {
                 cut_tails += 1;
             }
-            assert_eq!(log_bytes(&crashed), wal.size());
+            assert_eq!(log_bytes(&crashed, durable.wal.first_segment), wal.size());
             wal.append(record(last), 0).unwrap();
             wal.append(record(last + 1), 0).unwrap();
             let (_, again) = lsns(&crashed.crash(crash), &durable).unwrap();
@@ -481,10 +490,11 @@ fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
     assert!(kept_in_flight > 0 && lost_in_flight > 0 && cut_tails > 0);
 }
 
-fn log_bytes(fs: &SimFs) -> u64 {
+fn log_bytes(fs: &SimFs, first: u64) -> u64 {
     segment_files(fs, BASE)
         .unwrap()
         .into_iter()
+        .filter(|sequence| *sequence >= first)
         .map(|sequence| {
             let file = fs
                 .open(&segment_name(BASE, sequence), wal_block().unwrap())
@@ -509,4 +519,156 @@ fn a_damaged_header_of_a_last_segment_that_holds_records_is_corruption() {
             "the segment was removed"
         );
     }
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn a_torn_tail_of_random_bytes_that_read_as_record_lengths_is_cut_off_quickly() {
+    let fs = filled(2);
+    let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
+    let file = fs
+        .open(&segment_name(BASE, last), wal_block().unwrap())
+        .unwrap();
+    let at = file.block_count().unwrap();
+    let mut torn = vec![0u8; 16 << 20];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for byte in torn.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    let length = torn.len();
+    for start in (0..length).step_by(WAL_BLOCK) {
+        let claimed = u32::try_from(length - start).unwrap();
+        torn[start..start + 4].copy_from_slice(&claimed.to_le_bytes());
+    }
+    file.write(at, &torn).unwrap();
+    let started = std::time::Instant::now();
+    let (_, seen) = lsns(&fs, &header(0, 1)).unwrap();
+    assert_eq!(seen, [1, 2]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "recovery took {:?}",
+        started.elapsed()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_segment_longer_than_any_the_log_writes_is_corruption() {
+    let directory = tempfile::tempdir().unwrap();
+    let fs = Arc::new(crate::engine::os_fs::OsFs::new(directory.path()));
+    let mut wal = Wal::create(
+        Arc::clone(&fs),
+        BASE,
+        identity(),
+        1,
+        1,
+        0,
+        TARGET,
+        Vec::new(),
+    )
+    .unwrap();
+    wal.append(record(1), 1).unwrap();
+    drop(wal);
+    let file = fs
+        .open(&segment_name(BASE, 1), wal_block().unwrap())
+        .unwrap();
+    file.set_block_count((1 << 40) / WAL_BLOCK as u64).unwrap();
+    drop(file);
+    let error = Wal::recover(fs, BASE, &header(0, 1), 0, TARGET, |_| Ok(()))
+        .expect_err("an oversized segment was read");
+    assert!(error.is_corrupt(), "{error}");
+}
+
+#[test]
+fn a_segment_of_an_earlier_build_replays_and_takes_appends_in_its_own_blocks() {
+    let fs = SimFs::new();
+    let header_block = SegmentHeader {
+        minor: 2,
+        sequence: 1,
+        first_lsn: 1,
+        database_id: identity().database_id,
+        salt: identity().salt,
+        ..SegmentHeader::default()
+    };
+    let file = fs
+        .create(&segment_name(BASE, 1), wal_block().unwrap())
+        .unwrap();
+    let mut bytes = header_block.encode();
+    for lsn in 1..=3 {
+        let mut sealed = record(lsn);
+        seal_record(header_block.record_seed(), &mut sealed).unwrap();
+        sealed.resize(padded(sealed.len(), WAL_BLOCK), 0);
+        bytes.extend_from_slice(&sealed);
+    }
+    file.write(0, &bytes).unwrap();
+    file.sync().unwrap();
+    fs.sync_names().unwrap();
+    let (mut wal, seen) = lsns(&fs, &header(0, 1)).unwrap();
+    assert_eq!(seen, [1, 2, 3]);
+    wal.append(record(4), 4).unwrap();
+    let (_, again) = lsns(&fs.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
+    assert_eq!(again, [1, 2, 3, 4]);
+}
+
+#[test]
+fn a_power_loss_at_any_sync_around_a_preallocation_keeps_each_acknowledged_record() {
+    let target = 4 << 20;
+    let records = (PREALLOCATED / FIRST) + 8;
+    let mut extended = false;
+    for fail_at in records - 12..records {
+        let fs = SimFs::new();
+        let mut wal = Wal::create(
+            Arc::new(fs.clone()),
+            BASE,
+            identity(),
+            1,
+            1,
+            0,
+            target,
+            Vec::new(),
+        )
+        .unwrap();
+        fs.fail_sync_after(fail_at, Failure::FromThenOn);
+        let mut acked = 0;
+        for lsn in 1..=records {
+            if wal.append(record(lsn), lsn).is_err() {
+                break;
+            }
+            acked = lsn;
+        }
+        extended |= acked > PREALLOCATED / FIRST;
+        for crash in crashes(4) {
+            let crashed = fs.crash(crash);
+            let mut seen = Vec::new();
+            let mut recovered = Wal::recover(
+                Arc::new(crashed.clone()),
+                BASE,
+                &header(0, 1),
+                0,
+                target,
+                |record| {
+                    seen.push(record.lsn);
+                    Ok(())
+                },
+            )
+            .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            let last = seen.len() as u64;
+            assert_eq!(
+                seen,
+                (1..=last).collect::<Vec<_>>(),
+                "fail at {fail_at}, {crash:?}"
+            );
+            assert!(
+                last == acked || last == acked + 1,
+                "fail at {fail_at}, {crash:?}: acknowledged {acked}, recovered {last}"
+            );
+            recovered.append(record(last + 1), 0).unwrap();
+            let (_, again) = lsns(&crashed.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
+            assert_eq!(again, (1..=last + 1).collect::<Vec<_>>());
+        }
+    }
+    assert!(extended, "no append reached past the first preallocation");
 }

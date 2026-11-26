@@ -430,15 +430,6 @@ impl Index {
         Ok((id, target, reader))
     }
 
-    /// Reads a definition stored before format version 5, which names a label and no target
-    /// tag, because every index then covered the nodes that carry a label.
-    pub(crate) fn decode_label_only(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(bytes);
-        let id = reader.u32()?;
-        let target = Target::Label(Token::new(reader.u32()?));
-        Self::decode_kind(id, target, reader)
-    }
-
     fn decode_kind(id: u32, target: Target, mut reader: Reader<'_>) -> Result<Self, DecodeError> {
         let kind = match reader.u8()? {
             KIND_KEYWORD => {
@@ -1190,23 +1181,13 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Rewrites every index definition stored before format version 5, which names a label and
-    /// no target tag, in the current layout.
-    pub(crate) fn tag_index_targets(&mut self) -> Result<(), GraphError> {
-        for (name, bytes) in self.transaction.scan_prefix(Table::Indexes, &[])? {
-            let index = Index::decode_label_only(&bytes)?;
-            self.put_index_definition(&name, &index)?;
-        }
-        Ok(())
-    }
-
     /// Records the current tokenizer, first rebuilding every keyword index from the elements it
-    /// covers when `stale` is set or the stored entries came from another tokenizer. Returns
-    /// whether anything was written.
-    pub(crate) fn adopt_current_tokenizer(&mut self, stale: bool) -> Result<bool, GraphError> {
+    /// covers when the stored entries came from another tokenizer. Returns whether anything was
+    /// written.
+    pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
         let fingerprint = tokenize::fingerprint();
         let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
-        if !stale && stored.as_deref() == Some(fingerprint.as_slice()) {
+        if stored.as_deref() == Some(fingerprint.as_slice()) {
             return Ok(false);
         }
         for (_, index) in self.indexes()? {

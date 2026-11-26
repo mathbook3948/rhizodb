@@ -284,7 +284,8 @@ pub struct DatabaseStats {
     /// The extents inside the file that hold nothing, which later writes reuse and
     /// [`Database::compact`] cuts off when they end the file.
     pub free_extents: u64,
-    /// The bytes of the write-ahead log beside the file, which a checkpoint empties.
+    /// The bytes the write-ahead log beside the file takes on disk. A checkpoint removes the
+    /// segments it no longer needs, and the segment in use keeps up to 1 MiB allocated ahead.
     pub wal_bytes: u64,
     /// The page reads the cache served since the database was opened.
     pub cache_hits: u64,
@@ -321,17 +322,10 @@ impl Database {
     /// `Database`, in this process or another, holds the file on a file system with file locks,
     /// and with
     /// [`ErrorKind::UnsupportedFormatVersion`](crate::ErrorKind::UnsupportedFormatVersion) when
-    /// the file records a format version newer than this build reads. A damaged file fails with
+    /// the file records a format version newer than this build reads, or older than the oldest
+    /// it upgrades. A damaged file fails with
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
     /// reads the damage, since every page carries a checksum.
-    ///
-    /// A file that an earlier build of RhizoDB stored with redb is converted on open: its tables
-    /// are copied into a new file of the current format, which then replaces it. The old
-    /// file stays as it was until the copy is whole and synced, so a crash during the conversion
-    /// leaves one or the other. A damaged old file fails the open with `CorruptData` and is left
-    /// as it was. redb can panic on some damage, and RhizoDB catches that panic as
-    /// `CorruptData`, which needs the host built with `panic = "unwind"`, the default. RhizoDB
-    /// installs no panic hook, so the host's hook still reports the caught panic.
     ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     ///

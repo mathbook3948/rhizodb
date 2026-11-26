@@ -32,7 +32,6 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
-use super::convert;
 use super::error::EngineError;
 use super::extent::Blocks;
 use super::extent::ExtentTable;
@@ -114,7 +113,7 @@ pub(crate) enum CheckpointMode {
     /// On a thread of the engine's own, while commits go on.
     Background,
     /// On the committing thread, so a test sees the same operations every run.
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     Inline,
 }
 
@@ -243,6 +242,7 @@ struct Shared<F: FileSystem> {
     quarantine: Mutex<BTreeMap<u64, u64>>,
     freed: Mutex<BTreeMap<u64, Vec<(ExtentId, Blocks)>>>,
     poisoned: AtomicBool,
+    keeping_free_space: AtomicBool,
     wal_bytes: AtomicU64,
     compacted_bytes: AtomicU64,
     needed: AtomicU64,
@@ -612,6 +612,153 @@ fn replay_into(
 
 const RETIRED_POLL: Duration = Duration::from_millis(50);
 
+fn remove_segments_before<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    sequence: u64,
+) -> Result<(), EngineError> {
+    for earlier in segment_files(fs, name)?
+        .into_iter()
+        .filter(|earlier| *earlier < sequence)
+    {
+        fs.remove(&segment_name(name, earlier))?;
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a new log takes the header, the log kept for peers, and where it starts at once"
+)]
+fn start_log<F: FileSystem>(
+    fs: &Arc<F>,
+    name: &str,
+    pages: &Pages<F::File>,
+    header: &Header,
+    retained: &Retained,
+    last_lsn: u64,
+    hlc: u64,
+    segment_target: u64,
+) -> Result<(Wal<F>, Header), EngineError> {
+    let identity = LogIdentity {
+        database_id: header.database_id,
+        shard_id: header.shard_id,
+        salt: random_u64(),
+    };
+    let kept = if retained.from == 0 {
+        Vec::new()
+    } else {
+        let until = segment_files(&**fs, name)?
+            .last()
+            .map_or(0, |sequence| sequence + 1);
+        retained_segments(&**fs, name, identity, retained.from, until, last_lsn + 1)?
+    };
+    let sequence = kept
+        .last()
+        .map_or(header.wal.first_segment, Segment::sequence)
+        .max(header.wal.first_segment)
+        + 1;
+    for later in segment_files(&**fs, name)?
+        .into_iter()
+        .filter(|later| *later >= sequence)
+    {
+        fs.remove(&segment_name(name, later))?;
+    }
+    let wal = Wal::create(
+        Arc::clone(fs),
+        name,
+        identity,
+        sequence,
+        last_lsn + 1,
+        hlc,
+        segment_target,
+        kept,
+    )?;
+    let header = Header {
+        generation: header.generation + 1,
+        wal: WalIdentity {
+            first_segment: sequence,
+            salt: identity.salt,
+        },
+        clean: false,
+        replication: Replication {
+            incarnation: match header.replication.incarnation {
+                0 => new_incarnation(),
+                incarnation => incarnation,
+            },
+            ..header.replication
+        },
+        ..*header
+    };
+    let kept = Retained {
+        from: if retained.peers.is_empty() {
+            0
+        } else {
+            wal.first_sequence()
+        },
+        peers: retained.peers.clone(),
+    };
+    pages.write_header(&header, &kept)?;
+    remove_segments_before(&**fs, name, wal.first_sequence())?;
+    Ok((wal, header))
+}
+
+fn make_recovery_durable<F: FileSystem + 'static>(
+    shared: &Shared<F>,
+    fs: &Arc<F>,
+    name: &str,
+) -> Result<(), EngineError> {
+    let mut writer = lock(&shared.writer);
+    shared.keeping_free_space.store(true, Ordering::Release);
+    for _ in 0..2 {
+        if lock(&shared.durable).header.clean {
+            break;
+        }
+        if let Some(job) = shared.freeze(&mut writer) {
+            shared.run_checkpoint(job, true);
+        }
+        if shared.is_poisoned() {
+            return Err(shared.refusal());
+        }
+    }
+    shared.keeping_free_space.store(false, Ordering::Release);
+    let mut durable = lock(&shared.durable);
+    if !durable.header.clean {
+        return Err(EngineError::Poisoned);
+    }
+    lock(&shared.droppable).take();
+    drop(writer.wal.take());
+    let hlc = hybrid_clock_after(writer.last_hlc);
+    let (wal, header) = start_log(
+        fs,
+        name,
+        &shared.pages,
+        &durable.header,
+        &shared.retained_area(),
+        writer.last_lsn,
+        hlc,
+        shared.options.segment_target,
+    )?;
+    shared
+        .needed
+        .store(header.wal.first_segment, Ordering::Relaxed);
+    durable.header = header;
+    drop(durable);
+    writer.last_hlc = hlc;
+    shared.wal_bytes.store(wal.size(), Ordering::Relaxed);
+    shared
+        .log_first
+        .store(wal.first_sequence(), Ordering::Relaxed);
+    writer.wal = Some(wal);
+    if shared.holds_too_much_free_space() {
+        shared.compact_unless_held();
+    }
+    if shared.is_poisoned() {
+        return Err(shared.refusal());
+    }
+    Ok(())
+}
+
 fn checkpoint_worker<F: FileSystem + 'static>(
     shared: &Shared<F>,
     receiver: &mpsc::Receiver<Task<F>>,
@@ -646,15 +793,13 @@ fn checkpoint_worker<F: FileSystem + 'static>(
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
-    /// Opens the database file `name` on `fs`, creating it when there is none, converting it
-    /// when it holds a redb database, and replays the log of an unclean shutdown before it
-    /// returns.
+    /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
+    /// log of an unclean shutdown before it returns.
     pub(crate) fn open(
         fs: Arc<F>,
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         Self::open_loaded(fs, name, load(file, &options)?, options)
     }
@@ -685,65 +830,19 @@ impl<F: FileSystem + 'static> Engine<F> {
             hlc: header.checkpoint_hlc,
             chain: header.replication.checkpoint_chain,
         };
+        let recovered = !header.clean;
         let (wal, header) = if header.clean {
-            let identity = LogIdentity {
-                database_id: header.database_id,
-                shard_id: header.shard_id,
-                salt: random_u64(),
-            };
-            let kept = if retained.from == 0 {
-                for sequence in segment_files(&*fs, name)? {
-                    fs.remove(&segment_name(name, sequence))?;
-                }
-                Vec::new()
-            } else {
-                let until = segment_files(&*fs, name)?
-                    .last()
-                    .map_or(0, |sequence| sequence + 1);
-                retained_segments(&*fs, name, identity, retained.from, until, replayed.lsn + 1)?
-            };
-            let sequence = kept
-                .last()
-                .map_or(header.wal.first_segment, Segment::sequence)
-                .max(header.wal.first_segment)
-                + 1;
             replayed.hlc = hybrid_clock_after(replayed.hlc);
-            let wal = Wal::create(
-                Arc::clone(&fs),
+            start_log(
+                &fs,
                 name,
-                identity,
-                sequence,
-                replayed.lsn + 1,
+                &pages,
+                &header,
+                &retained,
+                replayed.lsn,
                 replayed.hlc,
                 options.segment_target,
-                kept,
-            )?;
-            let header = Header {
-                generation: header.generation + 1,
-                wal: WalIdentity {
-                    first_segment: sequence,
-                    salt: identity.salt,
-                },
-                clean: false,
-                replication: Replication {
-                    incarnation: match header.replication.incarnation {
-                        0 => new_incarnation(),
-                        incarnation => incarnation,
-                    },
-                    ..header.replication
-                },
-                ..header
-            };
-            let kept = Retained {
-                from: if retained.peers.is_empty() {
-                    0
-                } else {
-                    wal.first_sequence()
-                },
-                peers: retained.peers.clone(),
-            };
-            pages.write_header(&header, &kept)?;
-            (wal, header)
+            )?
         } else {
             let wal = Wal::recover(
                 Arc::clone(&fs),
@@ -753,20 +852,6 @@ impl<F: FileSystem + 'static> Engine<F> {
                 options.segment_target,
                 |record| replay_into(&layers, &mut replayed, record),
             )?;
-            let header = if header.replication.incarnation == 0 {
-                let header = Header {
-                    generation: header.generation + 1,
-                    replication: Replication {
-                        incarnation: new_incarnation(),
-                        ..header.replication
-                    },
-                    ..header
-                };
-                pages.write_header(&header, &retained)?;
-                header
-            } else {
-                header
-            };
             (wal, header)
         };
         let Replayed {
@@ -814,6 +899,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             quarantine: Mutex::new(BTreeMap::new()),
             freed: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
+            keeping_free_space: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
             needed: AtomicU64::new(needed),
             log_first: AtomicU64::new(log_first),
@@ -823,8 +909,11 @@ impl<F: FileSystem + 'static> Engine<F> {
             }),
             compaction_due: AtomicBool::new(false),
         });
+        if recovered {
+            make_recovery_durable(&shared, &fs, name)?;
+        }
         let (jobs, worker) = match options.checkpoint {
-            #[cfg(any(test, feature = "fuzzing"))]
+            #[cfg(any(test, fuzzing))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
                 let (sender, receiver) = mpsc::channel::<Task<F>>();
@@ -990,7 +1079,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
@@ -1309,7 +1398,9 @@ impl<F: FileSystem + 'static> Shared<F> {
                 let trimmed = self.trim(&mut lock(&self.durable));
                 if let Err(error) = trimmed {
                     self.poison_with(&error);
-                } else if self.holds_too_much_free_space() {
+                } else if !self.keeping_free_space.load(Ordering::Acquire)
+                    && self.holds_too_much_free_space()
+                {
                     self.compact_unless_held();
                 }
             }
@@ -1594,12 +1685,20 @@ impl<F: FileSystem + 'static> Shared<F> {
     fn extents_to_place(&self, extents: &ExtentTable) -> ExtentTable {
         let oldest = self.oldest_tree();
         let mut extents = extents.clone();
+        if self.keeping_free_space.load(Ordering::Acquire) {
+            extents.reusable = BTreeSet::new();
+            extents.holes = Vec::new();
+            return extents;
+        }
         extents.reusable = self.reusable_slots(&extents, oldest);
         extents.holes = self.reusable_holes(&extents, oldest);
         extents
     }
 
     fn trim(&self, durable: &mut Durable) -> Result<(), EngineError> {
+        if self.keeping_free_space.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let removable = self.reusable_slots(&durable.extents, self.oldest_tree());
         if let Some((slot, written)) = durable.extents.trim(&removable) {
             self.pages.truncate_after(slot, written)?;

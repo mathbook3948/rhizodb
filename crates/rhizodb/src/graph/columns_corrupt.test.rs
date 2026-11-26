@@ -7,7 +7,7 @@ use super::columns_model_tests::set;
 use super::columns_model_tests::values_of;
 use super::*;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 use crate::value::tests::same_bits;
 
@@ -172,7 +172,7 @@ fn corrupt_and_check<S: Storage>(
     failed
 }
 
-fn healthy() -> (SimFs, Graph<RedbStorage>, Model) {
+fn healthy() -> (SimFs, Graph<TestStorage>, Model) {
     let fs = SimFs::new();
     let graph = open(&fs);
     let model = graph_with_segments_and_deltas(&graph);
@@ -256,52 +256,4 @@ fn a_column_entry_stored_under_another_key_fails_reads_that_need_it() {
             assert!(failed > 0, "{key:?} under another key fails some read");
         }
     }
-}
-
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn a_changed_byte_of_a_column_in_the_database_file_fails_reads_or_answers_as_before() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph.redb");
-    let (model, entries) = {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
-        let mut write = graph.write().unwrap();
-        for key in KEYS {
-            write.intern_token::<PropertyKey>(key).unwrap();
-        }
-        write.commit().unwrap();
-        let model = graph_with_segments_and_deltas(&graph);
-        let entries = column_entries(&graph.read().unwrap());
-        (model, entries)
-    };
-    let pristine = std::fs::read(&path).unwrap();
-    let mut changed_any = 0;
-    for (_, value) in &entries {
-        let found: Vec<usize> = pristine
-            .windows(value.len())
-            .enumerate()
-            .filter(|(_, window)| *window == value.as_slice())
-            .map(|(at, _)| at)
-            .collect();
-        assert!(!found.is_empty(), "the file holds each column entry");
-        for start in found {
-            for at in positions(value.len(), 6) {
-                let mut file = pristine.clone();
-                file[start + at] ^= 0x5a;
-                std::fs::write(&path, &file).unwrap();
-                let Ok(storage) = RedbStorage::open_unchecked(&path) else {
-                    continue;
-                };
-                let Ok(graph) = Graph::open(storage) else {
-                    continue;
-                };
-                let Ok(read) = graph.read() else {
-                    continue;
-                };
-                answers_or_fails(&read, &model);
-                changed_any += 1;
-            }
-        }
-    }
-    assert!(changed_any > 0);
 }

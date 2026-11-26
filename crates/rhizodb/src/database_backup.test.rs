@@ -222,33 +222,32 @@ fn backups_taken_while_a_writer_commits_each_hold_one_commit_whole() {
 #[test]
 fn a_failed_copy_leaves_no_file_behind() {
     use crate::storage::StorageError;
-    use crate::storage::redb_backend::RedbRead;
-    use crate::storage::redb_backend::RedbStorage;
-    use crate::storage::redb_backend::RedbWrite;
+    use crate::storage::test_engine;
+    use crate::storage::test_engine::TestStorage;
 
     #[derive(Debug)]
-    struct FailingCopy(RedbStorage);
+    struct FailingCopy(TestStorage);
 
     impl crate::storage::Storage for FailingCopy {
-        type Read<'a> = RedbRead;
-        type Write<'a> = RedbWrite;
+        type Read<'a> = <TestStorage as crate::storage::Storage>::Read<'a>;
+        type Write<'a> = <TestStorage as crate::storage::Storage>::Write<'a>;
 
-        fn begin_read(&self) -> Result<RedbRead, StorageError> {
+        fn begin_read(&self) -> Result<Self::Read<'_>, StorageError> {
             self.0.begin_read()
         }
 
-        fn begin_write(&self) -> Result<RedbWrite, StorageError> {
+        fn begin_write(&self) -> Result<Self::Write<'_>, StorageError> {
             self.0.begin_write()
         }
 
-        fn write_copy(snapshot: &RedbRead, path: &Path) -> Result<(), StorageError> {
-            RedbStorage::write_copy(snapshot, path)?;
+        fn write_copy(snapshot: &Self::Read<'_>, path: &Path) -> Result<(), StorageError> {
+            TestStorage::write_copy(snapshot, path)?;
             Err(StorageError::new(std::io::Error::other("injected")))
         }
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let storage = FailingCopy(RedbStorage::in_memory().unwrap());
+    let storage = FailingCopy(test_engine::in_memory());
     let target = directory.path().join("copy");
     assert!(crate::storage::backup::write(&storage, &target).is_err());
     assert!(names_in(directory.path()).is_empty());

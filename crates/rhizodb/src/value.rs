@@ -235,7 +235,7 @@ pub(crate) fn put_varint_u64(out: &mut Vec<u8>, value: u64) {
 /// Reads one stored property value from the start of `bytes` both by decoding it and by
 /// skipping it. Returns the decoded value encoded again with how many bytes decoding took, and
 /// how many bytes skipping took. Only the fuzz targets call it.
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn read_value_for_fuzzing(bytes: &[u8]) -> (Option<(Vec<u8>, usize)>, Option<usize>) {
     let mut decoding = Reader::new(bytes);

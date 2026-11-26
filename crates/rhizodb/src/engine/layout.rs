@@ -7,8 +7,7 @@ use super::error::EngineError;
 /// The size of every block of the database file.
 pub(crate) const BLOCK: usize = 4096;
 
-/// The size of every block of a log segment, one sector, so an append never rewrites a sector
-/// that holds an earlier synced record.
+/// The size of every block of a log segment, one sector.
 pub(crate) const WAL_BLOCK: usize = 512;
 
 /// The blocks of one extent, 4 MiB.

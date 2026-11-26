@@ -7,10 +7,9 @@ pub(crate) mod changes;
 pub(crate) mod check;
 pub(crate) mod checkpoint;
 pub(crate) mod codec;
-pub(crate) mod convert;
 pub(crate) mod error;
 pub(crate) mod extent;
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(test, fuzzing))]
 pub(crate) mod fuzz;
 pub(crate) mod header;
 pub(crate) mod layout;
@@ -33,10 +32,6 @@ pub(crate) mod wal_format;
 #[cfg(test)]
 #[path = "engine/crash.test.rs"]
 mod crash_tests;
-
-#[cfg(test)]
-#[path = "engine/differential.test.rs"]
-mod differential_tests;
 
 #[cfg(test)]
 #[path = "engine/bench.test.rs"]

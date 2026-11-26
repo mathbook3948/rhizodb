@@ -783,8 +783,9 @@ fn read_segment(
 ) -> Result<bool, EngineError> {
     let seed = header.record_seed();
     let blocks = file.block_count()?;
+    let unit = header.unit();
     let mut lsn = header.first_lsn;
-    let mut at = 1;
+    let mut at = (unit / WAL_BLOCK) as u64;
     let mut buffer = vec![0; WAL_BLOCK];
     while at < blocks && lsn <= upto {
         buffer.resize(WAL_BLOCK, 0);
@@ -795,11 +796,11 @@ fn read_segment(
         if !(RECORD_HEADER..=RECORD_LIMIT).contains(&length) {
             break;
         }
-        let span = (padded(length) / WAL_BLOCK) as u64;
+        let span = (padded(length, unit) / WAL_BLOCK) as u64;
         if span == 0 || at + span > blocks {
             break;
         }
-        buffer.resize(padded(length), 0);
+        buffer.resize(padded(length, unit), 0);
         file.read(at, &mut buffer)?;
         let (record, length) = match decode_record(seed, &buffer) {
             Ok(decoded) => decoded,

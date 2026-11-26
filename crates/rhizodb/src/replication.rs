@@ -720,7 +720,7 @@ impl Database {
 /// Damages a batch of valid changes by `bytes`, reseals its checksums, decodes it, applies it to
 /// a replica, and reads the replica, for the fuzzer. Fails when decoded changes encode to other
 /// bytes. A panic is the failure the fuzzer looks for.
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(any(test, fuzzing))]
 pub(crate) fn apply_changes_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     use std::sync::OnceLock;
 
