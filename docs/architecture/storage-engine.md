@@ -40,9 +40,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The simulated file system is deterministic for a given seed.
 - The simulated file system holds several files and can inject faults into one of them alone.
 - A simulated crash keeps every synced write and may drop, reorder, or tear at 512-byte sectors each write since the last sync.
+- A write torn with garbage may also garble the other sectors of its 4 KiB unit, synced ones included, as a device that rewrites a whole page or sector does.
 - A simulated crash may lose a change of file length, a create, a rename, or a remove that was not synced.
 - The simulated file system can fail every operation after a chosen count, once or from then on.
-- A failed fsync in the simulated file system fails every later fsync of that file.
+- A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
+- A failed sync of the simulated file system's names fails every later one.
 - Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
 - The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
 - No backup of the redb file is kept after the conversion.
@@ -70,18 +72,24 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Page checksums are seeded with the database id, so a page copied from another database is corruption.
 - Tables have stable numeric ids, with 1 to 255 for the engine, 256 to 511 for the graph's tables, and the rest reserved.
 - Log segments are files named after the database file with `-wal-` and the segment number in 16 hex digits.
-- Log segments are made of 512-byte blocks, and each record starts a block of its own, so an append never rewrites a synced sector.
+- Log segments are made of 512-byte blocks, and the header and each record start a 4 KiB unit of their own, so an append never rewrites a page or a 4 KiB device sector that holds synced data.
+- A segment header of engine format minor 3 or later records the 4 KiB unit its records start at, and a segment of an earlier minor, whose records start at 512-byte blocks, replays and takes appends at those blocks.
+- A segment grows in steps of 1 MiB of synced zeros, up to the segment target, so an append writes into allocated blocks instead of growing the file.
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
 - Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts, and so is a damaged header of a last segment that holds such a record.
+- Recovery looks for such a record only where the LSN field holds an LSN a record there could carry, and hashes nothing else, so a torn tail of random bytes is scanned in linear time.
 - A log that ends before the checkpoint's LSN is corruption.
+- A segment longer than the segment target and longer than a header and the longest record is corruption, refused before recovery reads it.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
 - On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets a refusal of access at any step of creating the database waits and tries again as it does for a locked staging file.
-- Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
+- Opening a cleanly closed database starts a log with a new salt, which a header without the clean flag records before any commit, and removes leftover segments once that header is durable.
+- Opening a database after an unclean shutdown writes every replayed commit into the file under a clean header and then starts a new log as for a cleanly closed database, so no commit rests on log records or a header that only the page cache held, and a power loss before that header is durable leaves the old log as it was.
+- That checkpoint places nothing in free blocks or free slots and cuts nothing off the file, since the header the open read may be one only the page cache held, and the older header in the other slot may still reach those blocks.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
@@ -171,3 +179,4 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
+- How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header.
