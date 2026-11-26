@@ -514,15 +514,27 @@ pub(crate) fn install<F: FileSystem + 'static>(
         .as_ref()
         .and_then(|file| read_header(file).ok())
         .map(|(header, _)| header);
-    let local_history = fs
-        .open(name, block_size()?)
-        .ok()
-        .and_then(|file| load(file, &options).ok())
-        .and_then(|loaded| loaded.newest_term().ok())
-        .unwrap_or(0);
+    let (existing, held, local_history) = match existing {
+        Some(file) if local.is_some() => match load(file, &options) {
+            Ok(loaded) => {
+                let term = loaded.newest_term().unwrap_or(0);
+                (None, Some(loaded), term)
+            }
+            Err(_) => {
+                let file = fs.open(name, block_size()?)?;
+                file.lock()?;
+                (Some(file), None, 0)
+            }
+        },
+        other => (other, None, 0),
+    };
+    let local_logged = local.map_or(0, |header| {
+        replica::newest_logged_term(&*fs, name, header.database_id)
+    });
     let local_term = local
         .map_or(0, |header| header.replication.seen_term)
-        .max(local_history);
+        .max(local_history)
+        .max(local_logged);
     let local_lineage = local.as_ref().map_or(0, lineage);
     let staging = staging_name(name);
     let file = open_or_create_staging(&*fs, &staging)?.ok_or_else(|| {
@@ -568,6 +580,7 @@ pub(crate) fn install<F: FileSystem + 'static>(
     };
     if cfg!(windows) {
         drop(loaded);
+        drop(held);
         drop(existing);
         fs.rename(&staging, name)?;
         fs.sync_names()?;
@@ -575,6 +588,7 @@ pub(crate) fn install<F: FileSystem + 'static>(
     }
     fs.rename(&staging, name)?;
     fs.sync_names()?;
+    drop(held);
     drop(existing);
     Engine::open_loaded(fs, name, loaded, options)
 }

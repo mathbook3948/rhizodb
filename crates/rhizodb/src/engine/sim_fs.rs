@@ -121,6 +121,16 @@ fn not_found(name: &str) -> io::Error {
 }
 
 impl State {
+    fn unlocked_for(&self, inode: usize, handle: u64) -> io::Result<()> {
+        match self.locks.get(&inode) {
+            Some(holder) if *holder != handle => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "another handle holds the lock on the simulated file",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn operate(&mut self, inode: Option<usize>, sync: bool) -> io::Result<()> {
         self.operations += 1;
         let Some(fault) = &mut self.fault else {
@@ -546,12 +556,14 @@ impl Drop for SimFile {
 impl BlockFile for SimFile {
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
     }
 
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let start = byte_index(self.size.offset(first)?)?;
         state.fits(self.inode, start + buffer.len())?;
@@ -595,6 +607,7 @@ impl BlockFile for SimFile {
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let length = byte_index(self.size.offset(count)?)?;
         state.fits(self.inode, length)?;

@@ -152,7 +152,16 @@ impl Header {
         let mut out = Vec::with_capacity(BLOCK);
         out.extend_from_slice(&MAGIC);
         put_u16(&mut out, FORMAT_MAJOR);
-        put_u16(&mut out, self.minor);
+        let carries_replication =
+            self.replication != Replication::default() || *retained != Retained::default();
+        put_u16(
+            &mut out,
+            if carries_replication {
+                FORMAT_MINOR
+            } else {
+                self.minor
+            },
+        );
         put_u32(&mut out, BLOCK as u32);
         put_u32(&mut out, EXTENT_BLOCKS);
         put_u32(&mut out, 0);

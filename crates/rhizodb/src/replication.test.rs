@@ -331,6 +331,56 @@ mod crash {
         assert_eq!(export(&fresh), export(&writer));
     }
 
+    fn snapshot_bytes(db: &Database) -> Vec<u8> {
+        let snapshot = db.snapshot().unwrap();
+        let mut bytes = vec![0; snapshot.len() as usize];
+        let mut at = 0;
+        while at < bytes.len() {
+            at += snapshot.read_at(at as u64, &mut bytes[at..]).unwrap();
+        }
+        bytes
+    }
+
+    fn install_on(fs: &SimFs, bytes: &[u8]) -> Result<Database, crate::Error> {
+        let roomy = EngineOptions {
+            memtable_limit: 1 << 30,
+            wal_limit: 1 << 40,
+            ..options()
+        };
+        let engine = crate::engine::snapshot::install(
+            Arc::new(AnyFs::Sim(fs.clone())),
+            NAME,
+            bytes,
+            roomy,
+            false,
+        )
+        .map_err(crate::storage::StorageError::from)?;
+        Ok(Database::from_parts(
+            crate::database::graph_on(engine, true)?,
+            Statements::default(),
+        ))
+    }
+
+    #[test]
+    fn an_install_after_a_crash_refuses_a_snapshot_older_than_a_term_only_the_log_holds() {
+        let writer = open_on(&SimFs::new(), false);
+        writer.promote(3, b"a").unwrap();
+        insert(&writer, 1);
+        writer.compact().unwrap();
+        let old = snapshot_bytes(&writer);
+        let target = SimFs::new();
+        let replica = install_on(&target, &old).unwrap();
+        let next = install_on(&SimFs::new(), &old).unwrap();
+        next.promote(5, b"b").unwrap();
+        insert(&next, 2);
+        sync(&next, &replica).unwrap();
+        assert_eq!(replica.position().term(), 5);
+        let crashed = target.crash(Crash::KeepUnsynced);
+        drop(replica);
+        let error = install_on(&crashed, &old).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Fenced);
+    }
+
     #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);

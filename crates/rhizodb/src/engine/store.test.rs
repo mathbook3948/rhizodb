@@ -206,7 +206,10 @@ fn an_explicit_checkpoint_drops_the_log_and_keeps_every_commit() {
 type LiveBlocks = std::collections::BTreeMap<(ExtentId, u32), Vec<u8>>;
 
 fn live_blocks(fs: &SimFs, extents: &ExtentTable) -> LiveBlocks {
-    let file = fs.open(NAME, block_size().unwrap()).unwrap();
+    let file = fs
+        .crash(Crash::KeepUnsynced)
+        .open(NAME, block_size().unwrap())
+        .unwrap();
     let mut blocks = LiveBlocks::new();
     for (id, entry) in &extents.entries {
         for (start, length) in entry.used.ranges() {
