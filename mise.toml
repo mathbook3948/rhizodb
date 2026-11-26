@@ -18,9 +18,9 @@ run = [
   "cargo run --quiet --package xtask -- hooks",
   "cargo run --quiet --package xtask -- readme",
   "cargo deny check licenses bans sources",
-  "cargo deny --manifest-path crates/differential/Cargo.toml check licenses",
+  "cargo deny --manifest-path crates/differential/Cargo.toml check licenses bans sources",
   "cargo fmt --manifest-path crates/bench/Cargo.toml --check",
-  "cargo deny --manifest-path crates/bench/Cargo.toml check licenses",
+  "cargo deny --manifest-path crates/bench/Cargo.toml check licenses bans sources",
 ]
 
 [tasks.check]
