@@ -509,6 +509,12 @@ impl Database {
     /// fails. A transfer that was cut off can be retried with a reader that resumes from the
     /// offset it reached, since the snapshot gives the same bytes at every offset.
     ///
+    /// On Unix the rename is synced into its directory before this returns. On other platforms
+    /// the directory cannot be synced, so a crash right after an install may leave the database
+    /// that was there before, and on Windows another open may take the file between the rename
+    /// and this open, which then fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen).
+    ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::install_snapshot`].
     pub fn install_snapshot(path: impl AsRef<Path>, input: impl Read) -> Result<Self, Error> {
         OpenOptions::new().install_snapshot(path, input)

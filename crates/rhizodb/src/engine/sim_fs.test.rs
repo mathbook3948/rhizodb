@@ -426,3 +426,23 @@ fn files_of_different_block_sizes_live_side_by_side() {
     assert_eq!(database.block_count().unwrap(), 2);
     assert_eq!(fs.open("wal-0", size()).unwrap().block_count().unwrap(), 0);
 }
+
+#[test]
+fn a_lock_keeps_other_handles_out_until_its_handle_closes() {
+    let fs = SimFs::new();
+    let size = BlockSize::new(512).unwrap();
+    let first = fs.create("locked", size).unwrap();
+    first.lock().unwrap();
+    first.lock().unwrap();
+    let second = fs.open("locked", size).unwrap();
+    assert_eq!(second.lock().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    drop(first);
+    second.lock().unwrap();
+    assert!(
+        fs.crash(Crash::KeepUnsynced)
+            .open("locked", size)
+            .unwrap()
+            .lock()
+            .is_ok()
+    );
+}

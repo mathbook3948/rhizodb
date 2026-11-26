@@ -779,3 +779,25 @@ fn an_install_over_a_database_with_a_kept_log_leaves_none_of_it_to_serve() {
         }
     }
 }
+
+#[test]
+fn installing_over_a_database_open_on_the_simulated_file_system_fails_and_keeps_it() {
+    let (_fs, source, _) = loaded_source(3, 10);
+    let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let target = SimFs::new();
+    let held = open(&target, TARGET, by_hand()).unwrap();
+    write_round(&held, 1, 5);
+    let before = dump(&held);
+    let error = install_bytes(&target, &bytes).unwrap_err();
+    assert_eq!(
+        StorageError::from(error).kind(),
+        ErrorKind::DatabaseAlreadyOpen
+    );
+    assert_eq!(dump(&held), before);
+    write_round(&held, 2, 5);
+    drop(held);
+    assert_eq!(
+        dump(&install_bytes(&target, &bytes).unwrap()).len(),
+        dump(&source).len()
+    );
+}

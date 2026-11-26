@@ -424,7 +424,9 @@ fn write_file<R: Read>(file: &impl BlockFile, input: R) -> Result<Manifest, Engi
 
 /// Writes the snapshot `input` streams into a staging file beside `name`, syncs it, checks
 /// every page it holds, renames it over `name`, and opens it. Until the rename, `name` and its
-/// log stay as they were, so a crash or a failure leaves the old database or none.
+/// log stay as they were, so a crash or a failure leaves the old database or none. Windows
+/// renames no file that a handle holds open, so there both files are closed before the rename
+/// and the database is opened again after it.
 pub(crate) fn install<F: FileSystem + 'static>(
     fs: Arc<F>,
     name: &str,
@@ -459,6 +461,13 @@ pub(crate) fn install<F: FileSystem + 'static>(
             return Err(error);
         }
     };
+    if cfg!(windows) {
+        drop(loaded);
+        drop(existing);
+        fs.rename(&staging, name)?;
+        fs.sync_names()?;
+        return Engine::open(fs, name, options);
+    }
     fs.rename(&staging, name)?;
     fs.sync_names()?;
     drop(existing);

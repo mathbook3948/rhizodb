@@ -29,6 +29,7 @@ pub(crate) struct SimFile {
     state: Arc<Mutex<State>>,
     inode: usize,
     size: BlockSize,
+    handle: u64,
 }
 
 /// Which of the writes since the last sync a simulated power loss keeps.
@@ -67,6 +68,8 @@ struct State {
     operations: u64,
     fault: Option<Fault>,
     capacity: Option<u64>,
+    handles: u64,
+    locks: BTreeMap<usize, u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -289,11 +292,14 @@ impl SimFs {
         }
     }
 
-    fn file(&self, inode: usize, size: BlockSize) -> SimFile {
+    fn file(&self, state: &mut State, inode: usize, size: BlockSize) -> SimFile {
+        state.handles += 1;
+        let handle = state.handles;
         SimFile {
             state: Arc::clone(&self.state),
             inode,
             size,
+            handle,
         }
     }
 }
@@ -406,14 +412,14 @@ impl FileSystem for SimFs {
             name: name.to_owned(),
             inode,
         });
-        Ok(self.file(inode, size))
+        Ok(self.file(&mut state, inode, size))
     }
 
     fn open(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
         state.operate(None)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
-        Ok(self.file(inode, size))
+        Ok(self.file(&mut state, inode, size))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -462,6 +468,15 @@ impl FileSystem for SimFs {
     }
 }
 
+impl Drop for SimFile {
+    fn drop(&mut self) {
+        let mut state = lock(&self.state);
+        if state.locks.get(&self.inode) == Some(&self.handle) {
+            state.locks.remove(&self.inode);
+        }
+    }
+}
+
 impl BlockFile for SimFile {
     fn block_size(&self) -> BlockSize {
         self.size
@@ -503,7 +518,17 @@ impl BlockFile for SimFile {
     }
 
     fn lock(&self) -> io::Result<()> {
-        Ok(())
+        let mut state = lock(&self.state);
+        match state.locks.get(&self.inode) {
+            Some(holder) if *holder != self.handle => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another handle holds the lock on the simulated file",
+            )),
+            _ => {
+                state.locks.insert(self.inode, self.handle);
+                Ok(())
+            }
+        }
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
