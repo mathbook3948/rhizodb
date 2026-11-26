@@ -41,6 +41,11 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Automatic space reclaim: after a checkpoint, a clean close's included, a file that holds more than twice its live data plus 4 MiB, and has grown by its live data since the last compaction, is compacted, so a long-running host's file does not grow without bound and a database that lost most of its data gives the space back by the time it closes.
 - `OpenOptions::replica`, which opens a database as a replica that serves reads and refuses every local write with the new `ErrorKind::ReplicaReadOnly`, so a replica changes only through its writer's changes.
 - `Position`, the place of a database in its history of changes as a term, a writer id, and a log sequence number, which converts to and from bytes, and the new error kinds `Fenced`, `Diverged`, `TooFarBehind`, and `Gap` that replication reports.
+- `Database::snapshot` pins the last checkpoint as a `Snapshot`, a stream of checksummed chunks read at any offset with `Snapshot::read_at`, so a transfer that is cut off resumes where it stopped. Writes, deletes, and compaction go on while it is read, and taking one forces no checkpoint.
+- `Database::install_snapshot` and `OpenOptions::install_snapshot` write a snapshot stream to a database file and open it as a replica. The stream is synced and checked page by page before it replaces the file, so a crash or a failure leaves the old database or the whole snapshot, and a damaged chunk fails as `ErrorKind::CorruptData`.
+- `Database::acknowledge` keeps the write-ahead log after a peer's `Position` for that peer, and `Database::forget_peer` releases it. `OpenOptions::max_retained_bytes`, 1 GiB by default, caps the log kept for peers and snapshots, past which the peers furthest behind are released.
+- `ErrorKind::InvalidPeerId` for a peer id that is empty or longer than 64 bytes.
+- `OpenOptions::snapshot_time_limit`, one hour by default, after which the database releases a `Snapshot` still alive and reading it fails with the new `ErrorKind::SnapshotExpired`, and `DatabaseStats::held_bytes`, the space that open snapshots and read transactions keep the file from reusing.
 
 ### Changed
 

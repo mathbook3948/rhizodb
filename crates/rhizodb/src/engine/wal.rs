@@ -299,6 +299,28 @@ impl<F: FileSystem> Wal<F> {
             .sum()
     }
 
+    /// The bytes of the segments from `sequence` on.
+    pub(crate) fn size_from(&self, sequence: u64) -> u64 {
+        self.size_between(sequence, u64::MAX)
+    }
+
+    /// The bytes of the segments from `first` up to, but not including, `end`.
+    pub(crate) fn size_between(&self, first: u64, end: u64) -> u64 {
+        self.segments_oldest_first
+            .iter()
+            .filter(|segment| (first..end).contains(&segment.sequence))
+            .map(|segment| segment.blocks * WAL_BLOCK as u64)
+            .sum()
+    }
+
+    /// The LSN of the oldest record the log still holds, or of the next record when it holds
+    /// none.
+    pub(crate) fn first_lsn(&self) -> u64 {
+        self.segments_oldest_first
+            .first()
+            .map_or(self.next_lsn, |segment| segment.first_lsn)
+    }
+
     /// Appends `record`, whose prefix and body are in place, seals it for the segment it lands
     /// in, and returns once it is durable. A record that would push a segment holding records
     /// past the target size starts a new segment.

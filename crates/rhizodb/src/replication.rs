@@ -36,6 +36,13 @@ impl Position {
         Self::default()
     }
 
+    pub(crate) fn at_lsn(lsn: u64) -> Self {
+        Self {
+            lsn,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn new(term: u64, writer_id: &[u8], lsn: u64) -> Result<Self, Error> {
         check_epoch(term, writer_id)?;
         Ok(Self {

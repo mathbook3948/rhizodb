@@ -49,7 +49,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
 - A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
-- `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
+- `OpenOptions` holds no engine setting but the log it keeps for peers, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
 - Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
 - `stats` reports the file's bytes and live bytes, its live and free extents, the log's bytes, and the block cache's hits and misses since the open.

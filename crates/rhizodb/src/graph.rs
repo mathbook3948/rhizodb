@@ -316,7 +316,6 @@ impl<S: Storage> Graph<S> {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn storage(&self) -> &S {
         &self.storage
     }

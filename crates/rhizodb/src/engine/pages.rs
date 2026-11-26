@@ -154,6 +154,12 @@ impl<B: BlockFile> Pages<B> {
         Ok(())
     }
 
+    /// Fills `buffer` with the file's blocks from block `first` on, past the cache.
+    pub(crate) fn read_blocks(&self, first: u64, buffer: &mut [u8]) -> Result<(), EngineError> {
+        self.file.read(first, buffer)?;
+        Ok(())
+    }
+
     /// The bytes of the database file.
     pub(crate) fn file_bytes(&self) -> Result<u64, EngineError> {
         Ok(self.file.block_count()? * BLOCK as u64)

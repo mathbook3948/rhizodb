@@ -63,6 +63,7 @@ use super::wal::segment_files;
 use super::wal::segment_name;
 use super::wal_format::Body;
 use super::wal_format::batch_record;
+use crate::error::ErrorKind;
 use crate::storage::Entry;
 use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
@@ -125,6 +126,11 @@ pub(crate) struct EngineOptions {
     pub(crate) reclaim_slack: u64,
     /// The fewest blocks a stage of a checkpoint frees before its header is written.
     pub(crate) stage_floor: u64,
+    /// The most bytes of log segments that recovery no longer needs and that acknowledged peers
+    /// keep.
+    pub(crate) max_retained_bytes: u64,
+    /// How long an export may pin a checkpoint before the engine releases it.
+    pub(crate) pin_limit: Duration,
 }
 
 impl Default for EngineOptions {
@@ -137,11 +143,13 @@ impl Default for EngineOptions {
             cache_pages: (1 << 30) / BLOCK,
             reclaim_slack: 0,
             stage_floor: 256,
+            max_retained_bytes: 1 << 30,
+            pin_limit: Duration::from_secs(3600),
         }
     }
 }
 
-fn block_size() -> Result<BlockSize, EngineError> {
+pub(crate) fn block_size() -> Result<BlockSize, EngineError> {
     BlockSize::new(BLOCK).ok_or(EngineError::TooLarge)
 }
 
@@ -149,7 +157,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn random_u64() -> u64 {
+pub(crate) fn random_u64() -> u64 {
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u128(now_nanos());
     hasher.write_u32(std::process::id());
@@ -219,6 +227,38 @@ struct Shared<F: FileSystem> {
     poisoned: AtomicBool,
     wal_bytes: AtomicU64,
     compacted_bytes: AtomicU64,
+    needed: AtomicU64,
+    retention: Mutex<Retention>,
+}
+
+#[derive(Debug, Default)]
+struct Retention {
+    peers: BTreeMap<Vec<u8>, u64>,
+    pins: BTreeMap<u64, Pin>,
+    next_pin: u64,
+}
+
+#[derive(Debug)]
+struct Pin {
+    tree: Arc<Tree>,
+    lsn: u64,
+    deadline: Instant,
+}
+
+impl Retention {
+    fn oldest_peer(&self) -> Option<u64> {
+        self.peers.values().min().copied()
+    }
+
+    fn oldest_pin(&self) -> Option<u64> {
+        self.pins.values().map(|pin| pin.lsn).min()
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        let before = self.pins.len();
+        self.pins.retain(|_, pin| pin.deadline > now);
+        self.pins.len() != before
+    }
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
@@ -291,7 +331,7 @@ fn existing_database<F: FileSystem>(fs: &F, name: &str) -> Result<Existing<F::Fi
     }
 }
 
-fn open_or_create_staging<F: FileSystem>(
+pub(crate) fn open_or_create_staging<F: FileSystem>(
     fs: &F,
     staging: &str,
 ) -> Result<Option<F::File>, EngineError> {
@@ -394,6 +434,83 @@ fn find_live_blocks(
     Ok(())
 }
 
+/// A database file read up to its tree: the header, the catalog, and the extent table.
+#[derive(Debug)]
+pub(crate) struct Loaded<B: BlockFile> {
+    pages: Arc<Pages<B>>,
+    header: Header,
+    tree: Tree,
+    extents: ExtentTable,
+    catalog: Vec<RunRef>,
+}
+
+impl<B: BlockFile + 'static> Loaded<B> {
+    /// Checks every invariant of the loaded file, as [`Engine::check`] does.
+    pub(crate) fn check(&self) -> Result<CheckReport, EngineError> {
+        check::check(&self.header, &self.extents, &self.catalog, &self.tree)
+    }
+}
+
+/// Reads the header, catalog, and extent table of `file`.
+pub(crate) fn load<B: BlockFile + 'static>(
+    file: B,
+    options: &EngineOptions,
+) -> Result<Loaded<B>, EngineError> {
+    let header = read_header(&file)?;
+    let pages = Arc::new(Pages::new(
+        file,
+        page_seed(header.database_id),
+        options.cache_pages,
+    ));
+    let source: Arc<dyn PageSource> = Arc::clone(&pages) as Arc<dyn PageSource>;
+    let (tree, extents, catalog) = if header.catalog.is_null() {
+        if header.open.iter().any(|open| !open.id.is_none()) || header.checkpoint_lsn != 0 {
+            return Err(EngineError::corrupt(
+                "a header without a catalog records extents",
+            ));
+        }
+        let extents = ExtentTable {
+            next_extent: header.next_extent,
+            ..ExtentTable::default()
+        };
+        let tree = Tree::new(header.generation, BTreeMap::new(), Arc::clone(&source));
+        (tree, extents, Vec::new())
+    } else {
+        for open in header.open.iter().filter(|open| !open.id.is_none()) {
+            pages.place_extent(open.id, open.slot);
+        }
+        let first = RunRef {
+            at: header.catalog,
+            blocks: 1,
+            lsn: header.catalog_lsn,
+        };
+        let (catalog, runs) =
+            load_catalog(&source, first, &|id, slot| pages.place_extent(id, slot))?;
+        if catalog.extents.next_extent != header.next_extent {
+            return Err(EngineError::corrupt(
+                "the header and catalog disagree on extents",
+            ));
+        }
+        catalog.extents.check_open(&header.open)?;
+        for (id, entry) in &catalog.extents.entries {
+            pages.place_extent(*id, entry.slot);
+        }
+        let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
+        let mut extents = catalog.extents;
+        if let Some(counts) = catalog.live_counts {
+            find_live_blocks(&header, &mut extents, &counts, &runs, &tree)?;
+        }
+        (tree, extents, runs)
+    };
+    Ok(Loaded {
+        pages,
+        header,
+        tree,
+        extents,
+        catalog,
+    })
+}
+
 fn replay_into(
     layers: &Arc<Layers>,
     last_lsn: &mut u64,
@@ -463,52 +580,24 @@ impl<F: FileSystem + 'static> Engine<F> {
     ) -> Result<Self, EngineError> {
         convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
-        let header = read_header(&file)?;
-        let pages = Arc::new(Pages::new(
-            file,
-            page_seed(header.database_id),
-            options.cache_pages,
-        ));
-        let source: Arc<dyn PageSource> = Arc::clone(&pages) as Arc<dyn PageSource>;
-        let (tree, extents, catalog) = if header.catalog.is_null() {
-            if header.open.iter().any(|open| !open.id.is_none()) || header.checkpoint_lsn != 0 {
-                return Err(EngineError::corrupt(
-                    "a header without a catalog records extents",
-                ));
-            }
-            let extents = ExtentTable {
-                next_extent: header.next_extent,
-                ..ExtentTable::default()
-            };
-            let tree = Tree::new(header.generation, BTreeMap::new(), Arc::clone(&source));
-            (tree, extents, Vec::new())
-        } else {
-            for open in header.open.iter().filter(|open| !open.id.is_none()) {
-                pages.place_extent(open.id, open.slot);
-            }
-            let first = RunRef {
-                at: header.catalog,
-                blocks: 1,
-                lsn: header.catalog_lsn,
-            };
-            let (catalog, runs) =
-                load_catalog(&source, first, &|id, slot| pages.place_extent(id, slot))?;
-            if catalog.extents.next_extent != header.next_extent {
-                return Err(EngineError::corrupt(
-                    "the header and catalog disagree on extents",
-                ));
-            }
-            catalog.extents.check_open(&header.open)?;
-            for (id, entry) in &catalog.extents.entries {
-                pages.place_extent(*id, entry.slot);
-            }
-            let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
-            let mut extents = catalog.extents;
-            if let Some(counts) = catalog.live_counts {
-                find_live_blocks(&header, &mut extents, &counts, &runs, &tree)?;
-            }
-            (tree, extents, runs)
-        };
+        Self::open_loaded(fs, name, load(file, &options)?, options)
+    }
+
+    /// Opens the database `loaded` read from the locked file named `name`, as [`Engine::open`]
+    /// does once it holds the file.
+    pub(crate) fn open_loaded(
+        fs: Arc<F>,
+        name: &str,
+        loaded: Loaded<F::File>,
+        options: EngineOptions,
+    ) -> Result<Self, EngineError> {
+        let Loaded {
+            pages,
+            header,
+            tree,
+            extents,
+            catalog,
+        } = loaded;
         let tree = Arc::new(tree);
         let layers = Arc::new(Layers {
             active: Arc::new(Memtable::default()),
@@ -558,6 +647,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             )?;
             (wal, header)
         };
+        let needed = header.wal.first_segment;
         let shared = Arc::new(Shared {
             options,
             pages,
@@ -586,6 +676,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             freed: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
+            needed: AtomicU64::new(needed),
+            retention: Mutex::new(Retention::default()),
         });
         let (jobs, worker) = match options.checkpoint {
             #[cfg(any(test, feature = "fuzzing"))]
@@ -662,13 +754,18 @@ impl<F: FileSystem + 'static> Engine<F> {
         layers.active.apply(lsn, changes, horizon);
         layers.active.bury(lsn, graves);
         lock(&shared.published).view.snapshot = lsn;
-        let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
-        shared.wal_bytes.store(wal_size, Ordering::Relaxed);
+        let (wal_bytes, wal_size) = writer.wal.as_ref().map_or((0, 0), |wal| {
+            (
+                wal.size(),
+                wal.size_from(shared.needed.load(Ordering::Relaxed)),
+            )
+        });
+        shared.wal_bytes.store(wal_bytes, Ordering::Relaxed);
         let memtable = layers.active.bytes();
         drop(layers);
         if memtable > shared.options.memtable_limit || wal_size > shared.options.wal_limit {
             self.start_checkpoint(writer);
-            if memtable > 2 * shared.options.memtable_limit {
+            if memtable > shared.options.memtable_limit.saturating_mul(2) {
                 shared.wait_for_checkpoint();
             }
         }
@@ -682,7 +779,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         let Some(wal) = writer.wal.as_mut() else {
             return;
         };
-        let detached = wal.detach_before(sequence);
+        let detached = wal.detach_before(self.shared.retained_from(wal, sequence));
         self.shared.wal_bytes.store(wal.size(), Ordering::Relaxed);
         if detached.is_empty() {
             return;
@@ -794,6 +891,72 @@ impl<F: FileSystem + 'static> Engine<F> {
         Ok(())
     }
 
+    /// Keeps the log after `lsn` for `peer`, in place of what it kept for that peer before,
+    /// until the retained log passes the cap.
+    pub(crate) fn acknowledge(&self, peer: &[u8], lsn: u64) {
+        lock(&self.shared.retention)
+            .peers
+            .insert(peer.to_vec(), lsn);
+        self.shared.reconsider_retention();
+    }
+
+    /// Stops keeping the log for `peer`, and returns whether it kept any.
+    pub(crate) fn forget(&self, peer: &[u8]) -> bool {
+        let forgotten = lock(&self.shared.retention).peers.remove(peer).is_some();
+        self.shared.reconsider_retention();
+        forgotten
+    }
+
+    /// Pins the last durable checkpoint: no block it reaches is written or cut off, and the log
+    /// after it is kept as an acknowledged peer's would be, until the pin is dropped.
+    pub(crate) fn pin(&self) -> Result<Pinned<'_, F>, EngineError> {
+        let shared = &*self.shared;
+        if shared.is_poisoned() {
+            return Err(shared.refusal());
+        }
+        let durable = lock(&shared.durable);
+        if durable.header.staged_lsn != 0 {
+            return Err(EngineError::corrupt(
+                "the last durable checkpoint wrote only some of its stages",
+            ));
+        }
+        let header = Header {
+            clean: true,
+            ..durable.header
+        };
+        let extents = durable.extents.clone();
+        let id = {
+            let mut retention = lock(&shared.retention);
+            let id = retention.next_pin;
+            retention.next_pin += 1;
+            retention.pins.insert(
+                id,
+                Pin {
+                    tree: Arc::clone(&durable.tree),
+                    lsn: header.checkpoint_lsn,
+                    deadline: Instant::now() + shared.options.pin_limit,
+                },
+            );
+            id
+        };
+        drop(durable);
+        Ok(Pinned {
+            engine: self,
+            id,
+            header,
+            extents,
+        })
+    }
+
+    #[cfg(test)]
+    /// The LSN of the oldest record the log still holds.
+    pub(crate) fn log_start(&self) -> u64 {
+        lock(&self.shared.writer)
+            .wal
+            .as_ref()
+            .map_or(0, Wal::first_lsn)
+    }
+
     #[cfg(test)]
     pub(crate) fn extents(&self) -> ExtentTable {
         lock(&self.shared.durable).extents.clone()
@@ -844,11 +1007,52 @@ impl<F: FileSystem + 'static> Shared<F> {
             return;
         };
         if let Some(wal) = writer.wal.as_mut() {
-            if wal.drop_before(sequence).is_err() {
+            if wal.drop_before(self.retained_from(wal, sequence)).is_err() {
                 self.poison();
             }
             self.wal_bytes.store(wal.size(), Ordering::Relaxed);
         }
+    }
+
+    fn retained_from(&self, wal: &Wal<F>, needed: u64) -> u64 {
+        let mut retention = lock(&self.retention);
+        retention.expire(Instant::now());
+        let first = wal.first_lsn();
+        retention.peers.retain(|_, lsn| *lsn + 1 >= first);
+        let pinned = retention
+            .oldest_pin()
+            .map_or(needed, |lsn| wal.first_needed(lsn).min(needed));
+        while let Some(oldest) = retention.oldest_peer() {
+            let from = wal.first_needed(oldest);
+            if from >= needed {
+                break;
+            }
+            if wal.size_between(from, needed) <= self.options.max_retained_bytes {
+                return from.min(pinned);
+            }
+            retention.peers.retain(|_, lsn| *lsn != oldest);
+        }
+        pinned
+    }
+
+    fn held_blocks(&self) -> u64 {
+        let oldest = self.oldest_tree();
+        let blocks: u64 = lock(&self.freed)
+            .iter()
+            .filter(|(generation, _)| **generation > oldest)
+            .flat_map(|(_, freed)| freed.iter())
+            .map(|(_, blocks)| u64::from(blocks.count()))
+            .sum();
+        let slots = lock(&self.quarantine)
+            .values()
+            .filter(|dropped| **dropped > oldest)
+            .count() as u64;
+        blocks + slots * u64::from(EXTENT_BLOCKS)
+    }
+
+    fn reconsider_retention(&self) {
+        let needed = self.needed.load(Ordering::Relaxed);
+        lock(&self.droppable).get_or_insert(needed);
     }
 
     fn freeze(&self, writer: &mut Writer<F>) -> Option<Job> {
@@ -891,6 +1095,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                     tree,
                 });
                 drop(published);
+                self.needed.store(job.first_segment, Ordering::Relaxed);
                 *lock(&self.droppable) = Some(job.first_segment);
                 let trimmed = self.trim(&mut lock(&self.durable));
                 if let Err(error) = trimmed {
@@ -1080,6 +1285,9 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn oldest_tree(&self) -> u64 {
+        if lock(&self.retention).expire(Instant::now()) {
+            self.reconsider_retention();
+        }
         let mut trees = lock(&self.trees);
         trees.retain(|tree| tree.strong_count() > 0);
         trees
@@ -1253,6 +1461,52 @@ impl<F: FileSystem + 'static> Drop for Engine<F> {
     }
 }
 
+/// A durable checkpoint that [`Engine::pin`] keeps whole: its header, written as a clean one,
+/// and its extent table.
+#[derive(Debug)]
+pub(crate) struct Pinned<'a, F: FileSystem + 'static> {
+    engine: &'a Engine<F>,
+    id: u64,
+    pub(crate) header: Header,
+    pub(crate) extents: ExtentTable,
+}
+
+impl<F: FileSystem + 'static> Pinned<'_, F> {
+    /// Fills `buffer` with the file's blocks from block `first` on, as they are on disk.
+    /// Fails once the pin outlived the engine's limit and was released, since its blocks may
+    /// then hold newer pages.
+    pub(crate) fn read(&self, first: u64, buffer: &mut [u8]) -> Result<(), EngineError> {
+        let _held = self.hold()?;
+        self.engine.shared.pages.read_blocks(first, buffer)
+    }
+
+    /// The pinned tree, which keeps its blocks while it is held, or a failure once the pin was
+    /// released.
+    pub(crate) fn hold(&self) -> Result<Arc<Tree>, EngineError> {
+        let shared = &*self.engine.shared;
+        let held = lock(&shared.retention)
+            .pins
+            .get(&self.id)
+            .map(|pin| Arc::clone(&pin.tree));
+        held.ok_or_else(|| {
+            EngineError::Storage(StorageError::of_kind(
+                ErrorKind::SnapshotExpired,
+                io::Error::other(format!(
+                    "the snapshot outlived its limit of {:?} and was released",
+                    shared.options.pin_limit
+                )),
+            ))
+        })
+    }
+}
+
+impl<F: FileSystem + 'static> Drop for Pinned<'_, F> {
+    fn drop(&mut self) {
+        lock(&self.engine.shared.retention).pins.remove(&self.id);
+        self.engine.shared.reconsider_retention();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct EngineRead<'a, F: FileSystem + 'static> {
     engine: &'a Engine<F>,
@@ -1340,6 +1594,7 @@ impl<F: FileSystem + 'static> Maintenance for Engine<F> {
             wal_bytes: shared.wal_bytes.load(Ordering::Relaxed),
             cache_hits,
             cache_misses,
+            held_bytes: shared.held_blocks() * BLOCK as u64,
         })
     }
 

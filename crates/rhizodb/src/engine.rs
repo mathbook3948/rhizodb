@@ -21,6 +21,7 @@ pub(crate) mod page;
 pub(crate) mod pages;
 #[cfg(test)]
 pub(crate) mod sim_fs;
+pub(crate) mod snapshot;
 pub(crate) mod staged;
 pub(crate) mod store;
 pub(crate) mod tree;

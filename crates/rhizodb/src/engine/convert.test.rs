@@ -24,6 +24,8 @@ fn options() -> EngineOptions {
         cache_pages: 64,
         reclaim_slack: EngineOptions::default().reclaim_slack,
         stage_floor: EngineOptions::default().stage_floor,
+        max_retained_bytes: EngineOptions::default().max_retained_bytes,
+        pin_limit: EngineOptions::default().pin_limit,
     }
 }
 
