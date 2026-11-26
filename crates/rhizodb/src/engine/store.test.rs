@@ -1167,3 +1167,160 @@ fn a_compaction_that_a_reader_would_hinder_waits_for_it_on_the_checkpoint_thread
     assert_eq!(everything(&engine).unwrap().len(), 400 * 4);
     engine.check().unwrap();
 }
+
+#[derive(Debug, Default)]
+struct Gate {
+    state: std::sync::Mutex<(bool, bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+impl Gate {
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        if !state.0 {
+            return;
+        }
+        state.0 = false;
+        state.1 = true;
+        self.changed.notify_all();
+        while !state.2 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn arm(&self) {
+        *self.state.lock().unwrap() = (true, false, false);
+    }
+
+    fn wait_until_held(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().2 = true;
+        self.changed.notify_all();
+    }
+}
+
+#[derive(Debug)]
+struct GatedFile {
+    file: <SimFs as FileSystem>::File,
+    gate: Arc<Gate>,
+}
+
+impl BlockFile for GatedFile {
+    fn block_size(&self) -> BlockSize {
+        self.file.block_size()
+    }
+
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.gate.pass();
+        self.file.read(first, buffer)
+    }
+
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
+        self.file.write(first, buffer)
+    }
+
+    fn block_count(&self) -> io::Result<u64> {
+        self.file.block_count()
+    }
+
+    fn is_empty(&self) -> io::Result<bool> {
+        self.file.is_empty()
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        self.file.lock()
+    }
+
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
+        self.file.set_block_count(count)
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        self.file.sync()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GatedFs {
+    fs: SimFs,
+    gate: Arc<Gate>,
+}
+
+impl FileSystem for GatedFs {
+    type File = GatedFile;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<GatedFile> {
+        Ok(GatedFile {
+            file: self.fs.create(name, size)?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<GatedFile> {
+        Ok(GatedFile {
+            file: self.fs.open(name, size)?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        self.fs.remove(name)
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn a_checkpoint_does_not_wait_for_a_check_that_is_reading_the_file() {
+    let gate = Arc::new(Gate::default());
+    let fs = GatedFs {
+        fs: SimFs::new(),
+        gate: Arc::clone(&gate),
+    };
+    let engine =
+        Arc::new(Engine::open(Arc::new(fs), NAME, manual(CheckpointMode::Inline)).unwrap());
+    fill(&*engine, 40);
+    engine.checkpoint().unwrap();
+    let mut cold = engine.begin_write().unwrap();
+    cold.put(Table::Nodes, b"cold", b"v").unwrap();
+    cold.commit().unwrap();
+    gate.arm();
+    let checking = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || engine.check().map(|report| report.pages))
+    };
+    gate.wait_until_held();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let checkpointing = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let outcome = engine.checkpoint();
+            let _ = done.send(());
+            outcome
+        })
+    };
+    let waited = finished.recv_timeout(Duration::from_secs(5));
+    gate.open();
+
+    assert!(waited.is_ok(), "the checkpoint waited for the check");
+    checkpointing.join().unwrap().unwrap();
+    assert!(checking.join().unwrap().unwrap() > 0);
+    engine.check().unwrap();
+}

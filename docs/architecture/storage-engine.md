@@ -160,6 +160,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Every test of `Database` runs on the engine, and each redb fixture is converted as it is opened.
 - The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
+- `check` takes the durable header, extent table, catalog, and tree, then walks them without the lock that checkpoints take, and the tree it holds keeps its blocks from reuse until it ends.
 
 ## Open
 

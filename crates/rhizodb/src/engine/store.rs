@@ -761,13 +761,16 @@ impl<F: FileSystem + 'static> Engine<F> {
 
     /// Checks every invariant of the database file as the last durable checkpoint left it.
     pub(crate) fn check(&self) -> Result<CheckReport, EngineError> {
-        let durable = lock(&self.shared.durable);
-        check::check(
-            &durable.header,
-            &durable.extents,
-            &durable.catalog,
-            &durable.tree,
-        )
+        let (header, extents, catalog, tree) = {
+            let durable = lock(&self.shared.durable);
+            (
+                durable.header,
+                durable.extents.clone(),
+                durable.catalog.clone(),
+                Arc::clone(&durable.tree),
+            )
+        };
+        check::check(&header, &extents, &catalog, &tree)
     }
 
     /// Writes every commit into the database file, copies every table into as few extents as
