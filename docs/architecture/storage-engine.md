@@ -147,7 +147,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A stage's header keeps the LSN the log replays from and records the LSN its tree holds, and a crash after it replays the log over that tree, which ends in the same state since every logged operation sets or removes its keys outright.
 - Each stage publishes its tree, so a reader that begins during a staged checkpoint reads the frozen memtable over the newest stage.
 - Commits go on into a new memtable while a background checkpoint or compaction runs, and a commit waits for it once the new memtable reaches twice the limit.
-- A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
+- A checkpoint starts when the memtable passes 64 MiB or the log passes 16 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - With background checkpoints, the writer only drops those segments from the log's list and the checkpoint thread removes their files, so no commit waits for the removal.
 - The background checkpoint thread keeps each memtable it wrote until no snapshot holds it and frees it then, so no commit or reader frees a frozen memtable.

@@ -135,7 +135,7 @@ impl Default for EngineOptions {
         Self {
             segment_target: 16 << 20,
             memtable_limit: 64 << 20,
-            wal_limit: 256 << 20,
+            wal_limit: 16 << 20,
             checkpoint: CheckpointMode::Background,
             cache_pages: (1 << 30) / BLOCK,
             reclaim_slack: 0,
