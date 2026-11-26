@@ -1746,11 +1746,10 @@ impl Binder<'_> {
             return Ok(Some(Expr::Slot(*slot)));
         }
         if let Mode::Grouped(grouping) = mode {
-            if let Some((key, slot)) = grouping
-                .keys
-                .iter()
-                .find(|(key, _)| same_meaning(key, &grouping.input, expr, scope))
-            {
+            if let Some((key, slot)) = grouping.keys.iter().find(|(key, _)| {
+                same_meaning(key, &grouping.input, expr, scope)
+                    && (contains_aggregate(key) || !free_variables(key).is_empty())
+            }) {
                 if !is_simple_key(key) && !contains_aggregate(key) {
                     return Err(error(
                         ErrorKind::AmbiguousAggregationExpression,

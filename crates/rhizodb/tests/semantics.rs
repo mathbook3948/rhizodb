@@ -1,6 +1,7 @@
 mod support;
 
 use rhizodb::ErrorKind;
+use rhizodb::Parameters;
 use rhizodb::Value;
 use support::*;
 
@@ -194,6 +195,40 @@ fn implicit_grouping_keys_are_the_non_aggregated_items() {
         "UNWIND [1, 2, 3, 4] AS x RETURN x % 2 AS parity, sum(x) AS total ORDER BY parity",
     );
     assert_eq!(rows, [vec![int(0), int(6)], vec![int(1), int(4)]]);
+}
+
+#[test]
+fn a_constant_grouping_key_does_not_block_the_same_constant_inside_an_aggregate() {
+    let db = db();
+    let params = Parameters::new().with("t", 2);
+    for (query, expected) in [
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 1 AS one, count(*) + 1 AS c",
+            vec![int(1), int(4)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 0 AS base, coalesce(sum(x), 0) AS total",
+            vec![int(0), int(6)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN $t AS t, count(*) * $t AS w",
+            vec![int(2), int(6)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN 1 AS one, count(*) AS c ORDER BY c + 1",
+            vec![int(1), int(3)],
+        ),
+        (
+            "UNWIND [1, 2, 3] AS x RETURN date() AS today, max(date()) <= date() AS fresh",
+            vec![single(&db, "RETURN date()"), boolean(true)],
+        ),
+    ] {
+        assert_eq!(
+            db.execute(query, &params).unwrap().rows(),
+            [expected],
+            "{query}"
+        );
+    }
 }
 
 #[test]
