@@ -181,6 +181,24 @@ fn control_characters_never_reach_a_term() {
 }
 
 #[test]
+fn invisible_format_characters_inside_a_word_are_dropped() {
+    for text in [
+        "Ver\u{ad}sicherung",
+        "Ver\u{2060}sicherung",
+        "Ver\u{feff}sicherung",
+        "Versi\u{200e}cherung",
+    ] {
+        assert_eq!(document(text), ["versicherung"], "{text:?}");
+        assert_eq!(query(text), ["versicherung"], "{text:?}");
+    }
+    assert_eq!(query("東\u{2060}京"), query("東京"));
+    assert_eq!(
+        document("한\u{200d}국"),
+        ["한\u{200d}국", "한\u{200d}", "국"]
+    );
+}
+
+#[test]
 fn composed_and_decomposed_text_give_the_same_terms() {
     assert_eq!(document("cafe\u{301} Åsa"), document("café A\u{30a}sa"));
     assert_eq!(document("cafe\u{301}"), ["café"]);
@@ -352,6 +370,9 @@ const POOL: &[char] = &[
     '*',
     '-',
     '_',
+    '\u{ad}',
+    '\u{2060}',
+    '\u{e0041}',
     '\u{1f469}',
     '\u{1f4bb}',
     '\u{fb01}',

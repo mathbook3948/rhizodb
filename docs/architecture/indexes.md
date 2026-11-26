@@ -35,6 +35,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Equal scores come in ascending element ID order.
 - A keyword index covers one or more properties, and an element's document is the terms of all of them together.
 - A keyword index reads strings and lists of strings, and ignores values of other types.
+- Invisible format characters, the default ignorable code points other than the zero-width joiner, the zero-width non-joiner, and the Hangul fillers, are removed from text before anything else.
 - Text is put in Unicode normalization form NFKC before it is split.
 - Text splits into words at Unicode word boundaries.
 - Words are lowercased.
