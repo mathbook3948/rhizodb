@@ -113,6 +113,7 @@ fn a_compact_integer_takes_its_zigzag_varint_until_that_is_as_long_as_the_fixed_
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn every_value_round_trips_bit_exactly_in_its_compact_form(value in property_value()) {
         let encoded = compact(&value);
         prop_assert!(encoded.len() <= value.encode().len());
@@ -123,12 +124,14 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn every_value_round_trips_bit_exactly(value in property_value()) {
         let decoded = PropertyValue::decode(&value.encode()).unwrap();
         prop_assert!(same_bits(&value, &decoded));
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn skipping_a_list_of_runs_of_one_type_lands_on_the_next_value(
         runs in prop::collection::vec((property_value(), 1usize..12), 0..6),
         cut in any::<prop::sample::Index>(),
@@ -148,6 +151,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
         let _ = PropertyValue::decode(&bytes);
     }
@@ -183,6 +187,7 @@ fn unknown_tag_is_rejected() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_list_of_single_precision_floats_round_trips_bit_exactly(
         bits in prop::collection::vec(any::<u32>(), 0..80),
     ) {

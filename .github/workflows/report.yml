@@ -1,0 +1,42 @@
+name: report
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  issues:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: log-*
+          path: logs
+      - run: cargo run --quiet --package xtask -- failures logs reports "$WORKFLOW"
+        env:
+          WORKFLOW: ${{ github.workflow }}
+      - name: Open an issue for each failure or comment on the open one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue list --state open --label bug --limit 500 --json number,title > open.json
+          for report in reports/*.md; do
+            title="$(head -n 1 "$report")"
+            { tail -n +2 "$report"; printf '\nRun: %s\nCommit: %s\n' "$RUN_URL" "$GITHUB_SHA"; } > body.md
+            number="$(jq -r --arg title "$title" '[.[] | select(.title == $title)][0].number // empty' open.json)"
+            if [ -n "$number" ]; then
+              gh issue comment "$number" --body-file body.md
+            else
+              gh issue create --title "$title" --label bug --body-file body.md
+            fi
+          done

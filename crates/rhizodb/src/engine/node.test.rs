@@ -195,6 +195,7 @@ fn entry_strategy() -> impl Strategy<Value = (Vec<u8>, StoredValue)> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_page_of_cells_round_trips(
         entries in proptest::collection::btree_map(any::<u8>(), entry_strategy(), 1..4),
     ) {
@@ -217,6 +218,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_but_resealed_page_never_panics(
         content_seed in any::<u8>(),
         damage in vec((0usize..BLOCK, any::<u8>()), 1..20),
@@ -294,12 +296,14 @@ fn long_key_loader(
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn compare_bytes_orders_as_slices_do(left in key_strategy(), right in key_strategy()) {
         prop_assert_eq!(compare_bytes(&left, &right), left.cmp(&right));
         prop_assert_eq!(compare_bytes(&left, &left), Ordering::Equal);
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_leaf_finds_the_first_key_at_or_above_the_target(
         keys in page_keys(),
         targets in vec(key_strategy(), 1..20),
@@ -328,6 +332,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_fixed_leaf_finds_the_first_key_at_or_above_the_target(
         keys in proptest::collection::btree_set(vec(0u8..4, 9), 1..30),
         targets in vec(key_strategy(), 1..20),
@@ -347,6 +352,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_branch_finds_the_child_whose_range_holds_the_target(
         lows in page_keys(),
         targets in vec(key_strategy(), 1..20),

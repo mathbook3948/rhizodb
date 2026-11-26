@@ -134,12 +134,14 @@ fn readers_and_writers(check: Check) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 #[should_panic]
 fn a_reader_that_checks_only_before_its_snapshot_can_get_stale_definitions() {
     shuttle::check_random(|| readers_and_writers(Check::Before), schedules());
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_transaction_sees_the_index_definitions_of_its_snapshot() {
     shuttle::check_random(|| readers_and_writers(Check::BeforeAndAfter), schedules());
     shuttle::check_pct(

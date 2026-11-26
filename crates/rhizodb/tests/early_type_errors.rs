@@ -595,6 +595,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(2048))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_type_error_the_text_check_reports_holds_whatever_values_the_value_errors_stand_for(
         case in closed(true),
         fillings in prop::collection::vec(0usize..4, 1..8),
@@ -616,6 +617,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_type_error_a_constant_expression_raises_is_one_the_text_check_reports(
         case in closed(false),
         filling in 0usize..4,

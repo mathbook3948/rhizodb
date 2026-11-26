@@ -79,6 +79,7 @@ fn check_backup(path: &Path, i: i64) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_killed_backup_leaves_its_target_absent_or_whole() {
     for trial in 0..cases(FAST_TRIALS) {
         let directory = tempfile::tempdir().unwrap();

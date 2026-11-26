@@ -59,11 +59,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(128)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_redb_backend_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut RedbFile::new(), &ops)?;
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_redb_backend_on_the_simulated_file_system_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(), &ops)?;
     }

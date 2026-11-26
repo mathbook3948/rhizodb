@@ -16,6 +16,17 @@ fn every_graph_table_has_its_own_id_in_the_graph_range() {
 }
 
 #[test]
+fn every_table_is_listed_once_in_declaration_order() {
+    for (at, table) in Table::ALL.into_iter().enumerate() {
+        assert_eq!(table as usize, at, "{table:?}");
+    }
+    assert_eq!(
+        Table::ALL.last().map(|table| *table as usize + 1),
+        Some(Table::ALL.len())
+    );
+}
+
+#[test]
 fn the_table_ids_never_change() {
     let ids: Vec<u16> = Table::ALL
         .into_iter()
@@ -66,6 +77,7 @@ fn extents_lie_after_the_header_slots() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_block_ref_round_trips(extent in 1u64..(1 << 44), block in 0u32..EXTENT_BLOCKS) {
         let reference = BlockRef::new(ExtentId(extent), block).unwrap();
         prop_assert_eq!(BlockRef::from_raw(reference.raw()).unwrap(), reference);
@@ -74,6 +86,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_raw_block_ref_decodes_or_fails_without_panicking(raw in any::<u64>()) {
         if let Ok(reference) = BlockRef::from_raw(raw) {
             prop_assert_eq!(reference.raw(), raw);

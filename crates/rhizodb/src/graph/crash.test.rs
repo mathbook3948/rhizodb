@@ -409,6 +409,7 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_database_survives_the_writer_being_killed_at_varied_points() {
     let started = Instant::now();
     let directory = tempfile::tempdir().unwrap();

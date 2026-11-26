@@ -664,6 +664,7 @@ fn names_of_a_megabyte_are_stored_and_read_back() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_write_transaction_of_many_statements_and_nodes_commits_whole_or_rolls_back_whole() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.redb");
@@ -767,6 +768,7 @@ fn fastest_on_a_node_with_properties(count: i64, work: &str, wide: Wide) -> Dura
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_number() {
     for work in [
         "MATCH (n:Wide) RETURN size(keys(properties(n)))",
@@ -812,6 +814,7 @@ fn fastest_on_a_relationship_with_properties(count: i64, work: &str) -> Duration
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number() {
     for work in [
         "MATCH ()-[r:WIDE]->() SET r = {}",
@@ -915,6 +918,7 @@ fn fastest(db: &Database, query: &str) -> Duration {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_chain_of_let_or_with_clauses_takes_time_linear_in_its_length() {
     let db = db();
     let lets = |count: usize| {
@@ -956,6 +960,7 @@ fn label_matches_in_one_transaction(statements: i64) -> Duration {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_label_scan_in_a_write_transaction_skips_the_nodes_it_created_without_the_label() {
     let small = (0..3)
         .map(|_| label_matches_in_one_transaction(2_000))

@@ -51,8 +51,8 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
 - Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
 - Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
-- CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
-- A failing case a randomized test finds is checked in, and every later run replays it.
+- Every push to `main` runs each randomized test with a fixed number of cases, and a nightly workflow runs a hundred times as many of the storage and integration tests on every CI platform.
+- A failing case a randomized test finds is checked in, and every later run of that test, on `main` and nightly, replays it.
 - A seeded integration test whose cases a seed replays exactly runs each seed listed in its file under `tests/seed-regressions` before its own.
 - The parser, the value decoder, damaged database files, random write transactions, and dump import are fuzzed.
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
