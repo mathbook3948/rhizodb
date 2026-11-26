@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -118,6 +119,7 @@ pub(crate) enum GraphError {
     Decode(DecodeError),
     Corrupt(&'static str),
     UnsupportedFormatVersion(u32),
+    UpgradePending(u32),
     IdSpaceExhausted,
     NodeNotFound(NodeId),
     RelationshipNotFound(RelationshipId),
@@ -139,6 +141,16 @@ impl fmt::Display for GraphError {
             Self::UnsupportedFormatVersion(found) => {
                 write!(formatter, "unsupported database format version {found}")
             }
+            Self::UpgradePending(found) if *found == FORMAT_VERSION => write!(
+                formatter,
+                "the database's keyword indexes follow another tokenizer, which this build reads \
+                 only once the database's writer rebuilds them"
+            ),
+            Self::UpgradePending(found) => write!(
+                formatter,
+                "the database holds graph format {found}, which this build reads only once the \
+                 database's writer upgrades it to format {FORMAT_VERSION}"
+            ),
             Self::IdSpaceExhausted => write!(formatter, "no identifiers left to allocate"),
             Self::NodeNotFound(node) => write!(formatter, "node {} does not exist", node.0),
             Self::RelationshipNotFound(relationship) => {
@@ -208,6 +220,7 @@ pub(crate) struct Graph<S> {
     storage: S,
     writers: Arc<Writers>,
     replica: AtomicBool,
+    pending: AtomicU32,
     committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -270,61 +283,21 @@ impl<S: Storage> Graph<S> {
     /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
     /// and so fails instead of writing the format version or an upgrade.
     pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
-        let rewrote = {
-            let mut tx = GraphTx::bare(storage.begin_write()?);
-            let found = match tx
-                .transaction
-                .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
-            {
-                None => None,
-                Some(bytes) => Some(decode_u32(&bytes)?),
-            };
-            let upgrade = match found {
-                Some(FORMAT_VERSION) => false,
-                Some(found) if !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) => {
-                    return Err(GraphError::UnsupportedFormatVersion(found));
-                }
-                _ => true,
-            };
-            if replica && upgrade && found.is_some() {
-                return Err(GraphError::NotWriter(
-                    "upgrade a database written in an older format",
-                ));
-            }
-            if let Some(found) = found
-                && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
-            {
-                tx.move_relationships_to_chunks()?;
-            }
-            if found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
-                tx.move_postings_to_blocks()?;
-            }
-            if upgrade {
-                tx.transaction.put(
-                    Table::Metadata,
-                    keys::FORMAT_VERSION_KEY,
-                    &FORMAT_VERSION.to_be_bytes(),
-                )?;
-            }
-            let changed = tx.adopt_current_tokenizer()?;
-            if replica && changed && found.is_some() {
-                return Err(GraphError::NotWriter(
-                    "rebuild keyword indexes for this build's tokenizer",
-                ));
-            }
-            if !replica && (changed || upgrade) {
-                tx.commit()?;
-            }
-            !replica && found.is_some() && (changed || upgrade)
+        let pending = if replica {
+            Self::pending_format(&storage)?
+        } else {
+            Self::upgrade(&storage)?;
+            None
         };
-        if rewrote {
-            storage.checkpoint()?;
-        }
-        let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
+        let definitions = match pending {
+            Some(_) => Arc::from(Vec::new()),
+            None => GraphTx::bare(storage.begin_read()?).index_definitions()?,
+        };
         Ok(Self {
             storage,
             writers: Arc::default(),
             replica: AtomicBool::new(replica),
+            pending: AtomicU32::new(pending.unwrap_or(0)),
             committed_index_definitions: Arc::new(CommittedCatalog {
                 definitions: Mutex::new(definitions),
                 changes: AtomicU64::new(0),
@@ -334,6 +307,109 @@ impl<S: Storage> Graph<S> {
             committed_label_sets: Arc::default(),
             committed_column_deltas: Arc::default(),
         })
+    }
+
+    fn stored_format(tx: &GraphTx<impl ReadTransaction>) -> Result<Option<u32>, GraphError> {
+        let found = match tx
+            .transaction
+            .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
+        {
+            None => None,
+            Some(bytes) => Some(decode_u32(&bytes)?),
+        };
+        match found {
+            Some(found)
+                if found != FORMAT_VERSION
+                    && !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) =>
+            {
+                Err(GraphError::UnsupportedFormatVersion(found))
+            }
+            found => Ok(found),
+        }
+    }
+
+    fn pending_format(storage: &S) -> Result<Option<u32>, GraphError> {
+        let tx = GraphTx::bare(storage.begin_read()?);
+        let Some(found) = Self::stored_format(&tx)? else {
+            return Ok(None);
+        };
+        Ok((found != FORMAT_VERSION || !tx.holds_current_tokenizer()?).then_some(found))
+    }
+
+    fn upgrade(storage: &S) -> Result<(), GraphError> {
+        let rewrote = {
+            let mut tx = GraphTx::bare(storage.begin_write()?);
+            let found = Self::stored_format(&tx)?;
+            let upgrade = found != Some(FORMAT_VERSION);
+            if let Some(found) = found
+                && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
+            {
+                tx.move_relationships_to_chunks()?;
+            }
+            if found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
+                tx.move_postings_to_blocks()?;
+            }
+            let changed = tx.adopt_current_tokenizer()?;
+            if upgrade {
+                tx.transaction.put(
+                    Table::Metadata,
+                    keys::FORMAT_VERSION_KEY,
+                    &FORMAT_VERSION.to_be_bytes(),
+                )?;
+            }
+            if changed || upgrade {
+                tx.commit()?;
+            }
+            found.is_some() && (changed || upgrade)
+        };
+        if rewrote {
+            storage.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn ready(&self) -> Result<(), GraphError> {
+        match self.pending.load(Ordering::Acquire) {
+            0 => Ok(()),
+            found => Err(GraphError::UpgradePending(found)),
+        }
+    }
+
+    /// Whether the graph waits for its writer's upgrade before it serves reads.
+    pub(crate) fn upgrade_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire) != 0
+    }
+
+    /// Ends the wait for an upgrade once the file holds this build's format and tokenizer: as
+    /// the writer it upgrades the graph itself, and otherwise it reads whether the writer's
+    /// upgrade arrived. The index definitions are reloaded before any reader begins.
+    pub(crate) fn finish_pending_upgrade(&self, as_writer: bool) -> Result<(), GraphError> {
+        if !self.upgrade_pending() {
+            return Ok(());
+        }
+        if as_writer {
+            Self::upgrade(&self.storage)?;
+        } else if let Some(found) = Self::pending_format(&self.storage)? {
+            self.pending.store(found, Ordering::Release);
+            return Ok(());
+        }
+        let committed = &self.committed_index_definitions;
+        let publishing = lock(&committed.publishing);
+        committed.changes.fetch_add(1, Ordering::SeqCst);
+        let reloaded = self
+            .storage
+            .begin_read()
+            .map_err(GraphError::from)
+            .and_then(|read| GraphTx::bare(read).index_definitions());
+        if let Ok(definitions) = &reloaded {
+            *lock(&committed.definitions) = Arc::clone(definitions);
+        }
+        committed.changes.fetch_add(1, Ordering::SeqCst);
+        drop(publishing);
+        reloaded?;
+        lock(&self.committed_column_deltas).clear();
+        self.pending.store(0, Ordering::Release);
+        Ok(())
     }
 
     pub(crate) fn storage(&self) -> &S {
@@ -347,6 +423,7 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        self.ready()?;
         let committed = &self.committed_index_definitions;
         let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
@@ -427,6 +504,11 @@ impl<S: Storage> Graph<S> {
             return Err(GraphError::WriterOnThisThread);
         }
         lock(&self.committed_column_deltas).clear();
+        if self.upgrade_pending() {
+            let result = work(&self.storage);
+            self.finish_pending_upgrade(false)?;
+            return Ok(result);
+        }
         if !indexes {
             return Ok(work(&self.storage));
         }
@@ -487,6 +569,7 @@ impl<S: Storage> Graph<S> {
         if self.replica.load(Ordering::Acquire) {
             return Err(GraphError::NotWriter("write to the graph"));
         }
+        self.ready()?;
         let current = thread::current().id();
         let transaction = loop {
             {

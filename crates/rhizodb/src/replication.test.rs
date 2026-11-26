@@ -805,4 +805,220 @@ mod crash {
             }
         }
     }
+
+    mod pending {
+        use super::*;
+        use crate::engine::layout::TableId;
+        use crate::engine::wal_format::Body;
+        use crate::engine::wal_format::Op;
+        use crate::storage::ReadTransaction;
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+
+        const OLDER: u32 = 13;
+
+        fn store(db: &Database, key: &[u8], value: &[u8]) {
+            let mut write = db.graph.storage().begin_write().unwrap();
+            write.put(Table::Metadata, key, value).unwrap();
+            write.commit().unwrap();
+        }
+
+        fn stored(db: &Database, key: &[u8]) -> Option<Vec<u8>> {
+            db.graph
+                .storage()
+                .begin_read()
+                .unwrap()
+                .get(Table::Metadata, key)
+                .unwrap()
+        }
+
+        fn count(db: &Database) -> Result<Vec<Vec<Value>>, crate::Error> {
+            db.execute("MATCH (n:N) RETURN count(n)", &Parameters::new())
+                .map(|result| result.rows().to_vec())
+        }
+
+        fn search(db: &Database) -> Vec<Vec<Value>> {
+            db.execute(
+            "CALL db.index.keyword.queryNodes('text', 'river', 100) YIELD node RETURN id(node) ORDER BY id(node)",
+            &Parameters::new(),
+        )
+        .unwrap()
+        .rows()
+        .to_vec()
+        }
+
+        fn older_pair(keyword: bool) -> (SimFs, SimFs) {
+            let writer_fs = SimFs::new();
+            let replica_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            if keyword {
+                writer
+                    .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                    .unwrap();
+            }
+            for k in 0..6 {
+                writer
+                    .execute(
+                        "INSERT (:N {k: $k, text: 'a river runs'})",
+                        &Parameters::from([("k".to_owned(), Value::Integer(k))]),
+                    )
+                    .unwrap();
+            }
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            if keyword {
+                store(&writer, b"tokenizer", b"another tokenizer");
+            } else {
+                store(&writer, b"format_version", &OLDER.to_be_bytes());
+            }
+            sync(&writer, &replica).unwrap();
+            (writer_fs, replica_fs)
+        }
+
+        #[test]
+        fn a_replica_of_an_older_format_waits_for_its_writers_upgrade_and_then_serves_reads() {
+            let (writer_fs, replica_fs) = older_pair(false);
+            let replica = open_on(&replica_fs, false);
+            assert_eq!(replica.role(), Role::Replica);
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("format 13"), "{error}");
+            replica.check().unwrap();
+            assert_eq!(replica.history().entries().len(), 1);
+            let writer = open_on(&writer_fs, false);
+            assert_eq!(writer.role(), Role::Fenced);
+            assert_eq!(
+                count(&writer).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            let before = replica.position();
+            writer.promote(1, b"w").unwrap();
+            assert_eq!(count(&writer).unwrap(), [vec![Value::Integer(6)]]);
+            let upgrade = writer.changes_since(&before, 1 << 20).unwrap();
+            let version_puts: Vec<usize> = upgrade
+            .decoded
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, change)| match &change.record.body {
+                Body::Batch(ops) => ops.iter().any(|op| {
+                    matches!(op, Op::Put { table, key, .. }
+                        if *table == TableId::of(Table::Metadata) && key.as_slice() == b"format_version")
+                }),
+                _ => false,
+            })
+            .map(|(index, _)| index)
+            .collect();
+            assert_eq!(version_puts, [upgrade.decoded.records.len() - 1]);
+            insert(&writer, 7);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(7)]]);
+            assert_eq!(export(&replica), export(&writer));
+            integrity(&replica);
+        }
+
+        #[test]
+        fn a_replica_of_an_older_tokenizer_waits_for_the_rebuilt_keyword_indexes() {
+            let (writer_fs, replica_fs) = older_pair(true);
+            let replica = open_on(&replica_fs, false);
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("tokenizer"), "{error}");
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            sync(&writer, &replica).unwrap();
+            assert_eq!(search(&replica), search(&writer));
+            assert_eq!(search(&replica).len(), 6);
+            assert_eq!(
+                stored(&replica, b"tokenizer"),
+                stored(&writer, b"tokenizer")
+            );
+            integrity(&replica);
+        }
+
+        #[test]
+        fn a_snapshot_of_a_replica_waiting_for_an_upgrade_installs_waiting_and_holds_the_older_format()
+         {
+            let (_writer_fs, replica_fs) = older_pair(false);
+            let replica = open_on(&replica_fs, false);
+            let bytes = snapshot_bytes(&replica);
+            let installed = install_on(&SimFs::new(), &bytes).unwrap();
+            assert_eq!(
+                count(&installed).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            assert_eq!(
+                stored(&installed, b"format_version"),
+                Some(OLDER.to_be_bytes().to_vec())
+            );
+            installed.check().unwrap();
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn a_crash_at_any_write_of_the_apply_that_ends_the_wait_leaves_it_waiting_or_ended() {
+            let (writer_fs, replica_fs) = older_pair(true);
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 8);
+            let probe = replica_fs.crash(Crash::KeepUnsynced);
+            let replica = open_on(&probe, false);
+            let before = probe.operations();
+            sync(&writer, &replica).unwrap();
+            let operations = probe.operations() - before;
+            drop(replica);
+            for failing in 0..operations {
+                for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                    let fs = replica_fs.crash(Crash::KeepUnsynced);
+                    let replica = open_on(&fs, false);
+                    fs.fail_after(failing, Failure::FromThenOn);
+                    drop(sync(&writer, &replica));
+                    let recovered = fs.crash(crash);
+                    drop(replica);
+                    let replica = open_on(&recovered, false);
+                    match count(&replica) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending, "{failing}")
+                        }
+                    }
+                    sync(&writer, &replica).unwrap();
+                    assert_eq!(search(&replica), search(&writer), "{failing}");
+                    assert_eq!(export(&replica), export(&writer), "{failing}");
+                    integrity(&replica);
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn a_crash_at_any_write_of_a_promotion_that_upgrades_leaves_a_writer_that_finishes_it() {
+            let (writer_fs, _replica_fs) = older_pair(true);
+            let probe = writer_fs.crash(Crash::KeepUnsynced);
+            let writer = open_on(&probe, false);
+            let before = probe.operations();
+            writer.promote(1, b"w").unwrap();
+            let operations = probe.operations() - before;
+            let expected = search(&writer);
+            drop(writer);
+            for failing in 0..operations {
+                for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                    let fs = writer_fs.crash(Crash::KeepUnsynced);
+                    let writer = open_on(&fs, false);
+                    fs.fail_after(failing, Failure::FromThenOn);
+                    drop(writer.promote(1, b"w"));
+                    let recovered = fs.crash(crash);
+                    drop(writer);
+                    let writer = open_on(&recovered, false);
+                    assert_eq!(writer.role(), Role::Fenced, "{failing}");
+                    writer.promote(1, b"w").unwrap();
+                    assert_eq!(search(&writer), expected, "{failing}");
+                    insert(&writer, 9);
+                    integrity(&writer);
+                }
+            }
+        }
+    }
 }

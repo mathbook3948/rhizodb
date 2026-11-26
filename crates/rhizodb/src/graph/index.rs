@@ -690,6 +690,12 @@ fn best(mut scored: Vec<(u64, f64)>, limit: usize) -> Vec<(u64, f64)> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
+    /// Whether the keyword indexes follow this build's tokenizer.
+    pub(crate) fn holds_current_tokenizer(&self) -> Result<bool, GraphError> {
+        let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
+        Ok(stored.as_deref() == Some(tokenize::fingerprint().as_slice()))
+    }
+
     /// Every index, by name.
     pub(crate) fn indexes(&self) -> Result<Vec<(String, Index)>, GraphError> {
         self.transaction

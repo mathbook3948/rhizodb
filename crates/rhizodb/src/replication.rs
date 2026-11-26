@@ -727,6 +727,7 @@ impl Database {
             .maintain(|engine| engine.promote(term, writer_id))?
             .map_err(engine_error)?;
         self.graph.set_replica(false);
+        self.graph.finish_pending_upgrade(true)?;
         self.graph.record_format_if_missing()?;
         Ok(self.position())
     }

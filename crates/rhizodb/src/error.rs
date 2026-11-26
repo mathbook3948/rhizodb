@@ -191,11 +191,15 @@ pub enum ErrorKind {
     /// relationship.
     DatabaseNotEmpty,
     /// A database that is not the writer was asked to write: a query that updates the graph, a
-    /// write transaction or its commit, an index change, an import, or an upgrade of a file
-    /// written in an older format. A [replica](crate::Role::Replica) changes only through its
-    /// writer's changes, and a [fenced](crate::Role::Fenced) writer takes writes again only once
-    /// the host promotes it.
+    /// write transaction or its commit, an index change, or an import. A
+    /// [replica](crate::Role::Replica) changes only through its writer's changes, and a
+    /// [fenced](crate::Role::Fenced) writer takes writes again only once the host promotes it.
     NotWriter,
+    /// A database that is not the writer holds a graph format or keyword index tokenizer older
+    /// than this build's, which only its writer can upgrade, so it serves no read or write of
+    /// the graph yet. It still applies and serves changes, and it serves reads again once it
+    /// applies its writer's upgrade, or once the host promotes it, which upgrades it.
+    FormatUpgradePending,
     /// A change or a promotion carries a term lower than the highest term this database has
     /// seen, so it comes from a writer that a later one replaced.
     Fenced,
@@ -396,6 +400,7 @@ impl From<GraphError> for Error {
             GraphError::Storage(error) => error.kind(),
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,
+            GraphError::UpgradePending(_) => ErrorKind::FormatUpgradePending,
             GraphError::IdSpaceExhausted => ErrorKind::IdSpaceExhausted,
             GraphError::NodeNotFound(_) | GraphError::RelationshipNotFound(_) => {
                 ErrorKind::DeletedEntityAccess
