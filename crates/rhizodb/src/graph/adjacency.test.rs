@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use proptest::prelude::*;
@@ -392,11 +393,7 @@ fn a_delta_that_does_not_amend_its_segment_is_caught() {
             change.encode(&ID.delta_key(position)),
         );
         assert!(read_slot(&stored, position).is_err(), "{change:?}");
-        let error = SegmentEdit::load(
-            &ID,
-            stored.iter().map(|(k, v)| (k.as_slice(), v.as_slice())),
-        )
-        .unwrap_err();
+        let error = SegmentEdit::load(&ID, entries(&stored), &fetch_from(&stored)).unwrap_err();
         assert!(is_corruption(&error));
     }
 }
@@ -410,10 +407,7 @@ fn a_delta_without_parts_is_caught() {
     let stored = store([(ID.delta_key(1).to_vec(), change.encode(&ID.delta_key(1)))]);
     assert!(fails_with(read_slot(&stored, 1), DELTA_WITHOUT_PARTS));
     assert!(fails_with(
-        SegmentEdit::load(
-            &ID,
-            stored.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
-        ),
+        SegmentEdit::load(&ID, entries(&stored), &fetch_from(&stored)),
         DELTA_WITHOUT_PARTS
     ));
 }
@@ -425,16 +419,31 @@ fn parts_that_disagree_on_their_span_are_caught() {
     stored.extend(encode_segment_by(&ID, &borrowed(&slots), MIDDLE));
     assert!(fails_with(read_slot(&stored, 0), SPANS_DISAGREE));
     assert!(fails_with(
-        SegmentEdit::load(
-            &ID,
-            stored.iter().map(|(k, v)| (k.as_slice(), v.as_slice()))
-        ),
+        SegmentEdit::load(&ID, entries(&stored), &fetch_from(&stored)),
         SPANS_DISAGREE
     ));
 }
 
+fn entries(stored: &BTreeMap<Vec<u8>, Vec<u8>>) -> Vec<(Box<[u8]>, Lazy)> {
+    stored
+        .iter()
+        .map(|(key, value)| (key.as_slice().into(), Lazy::of(Peek::Bytes(value))))
+        .collect()
+}
+
+fn fetch_from(
+    stored: &BTreeMap<Vec<u8>, Vec<u8>>,
+) -> impl Fn(&[u8]) -> Result<Box<[u8]>, GraphError> + '_ {
+    |key| {
+        stored
+            .get(key)
+            .map(|value| value.as_slice().into())
+            .ok_or(BAD_KEY)
+    }
+}
+
 fn apply(stored: &mut BTreeMap<Vec<u8>, Vec<u8>>, edit: SegmentEdit) -> bool {
-    let flush = edit.flush(&ID).unwrap();
+    let flush = edit.flush(&ID, &fetch_from(stored)).unwrap();
     let is_part = |key: &[u8]| matches!(parse_key(key).unwrap().1, Entry::Part { .. });
     let rewrote = flush.delete.iter().any(|key| is_part(key))
         || flush.put.iter().any(|(key, _)| is_part(key));
@@ -446,16 +455,13 @@ fn apply(stored: &mut BTreeMap<Vec<u8>, Vec<u8>>, edit: SegmentEdit) -> bool {
 }
 
 fn load(stored: &BTreeMap<Vec<u8>, Vec<u8>>) -> SegmentEdit {
-    SegmentEdit::load(
-        &ID,
-        stored.iter().map(|(k, v)| (k.as_slice(), v.as_slice())),
-    )
-    .unwrap()
+    SegmentEdit::load(&ID, entries(stored), &fetch_from(stored)).unwrap()
 }
 
-fn seen(edit: &SegmentEdit, position: usize) -> Vec<Edge> {
+fn seen(edit: &SegmentEdit, stored: &BTreeMap<Vec<u8>, Vec<u8>>, position: usize) -> Vec<Edge> {
     let mut edges = Vec::new();
-    edit.visit(position, &mut |edge| edges.push(edge)).unwrap();
+    edit.visit(position, &mut |edge| edges.push(edge), &fetch_from(stored))
+        .unwrap();
     edges
 }
 
@@ -520,13 +526,15 @@ fn a_delta_that_grows_past_its_bound_folds_into_the_parts() {
 fn undoing_a_change_in_a_later_commit_deletes_its_delta() {
     let mut stored = store(encode(&[(0, vec![edge(0, 0), edge(1, 0)])]));
     let mut edit = load(&stored);
-    edit.remove(0, RelationshipId(1)).unwrap();
+    edit.remove(0, RelationshipId(1), &fetch_from(&stored))
+        .unwrap();
     edit.add(0, edge(2, 5));
     assert!(!apply(&mut stored, edit));
     assert_eq!(stored.len(), 2);
     let mut edit = load(&stored);
-    edit.remove(0, RelationshipId(2)).unwrap();
-    assert_eq!(seen(&edit, 0), vec![edge(0, 0)]);
+    edit.remove(0, RelationshipId(2), &fetch_from(&stored))
+        .unwrap();
+    assert_eq!(seen(&edit, &stored, 0), vec![edge(0, 0)]);
     assert!(!apply(&mut stored, edit));
     assert_eq!(read_slot(&stored, 0).unwrap(), vec![edge(0, 0)]);
     assert_eq!(stored.len(), 2);
@@ -537,14 +545,21 @@ fn removing_a_relationship_a_slot_does_not_hold_is_corruption() {
     let stored = store(encode(&[(0, vec![edge(0, 0)])]));
     let mut edit = load(&stored);
     assert!(is_corruption(
-        &edit.remove(0, RelationshipId(1)).unwrap_err()
+        &edit
+            .remove(0, RelationshipId(1), &fetch_from(&stored))
+            .unwrap_err()
     ));
     assert!(is_corruption(
-        &edit.remove(5, RelationshipId(0)).unwrap_err()
+        &edit
+            .remove(5, RelationshipId(0), &fetch_from(&stored))
+            .unwrap_err()
     ));
-    edit.remove(0, RelationshipId(0)).unwrap();
+    edit.remove(0, RelationshipId(0), &fetch_from(&stored))
+        .unwrap();
     assert!(is_corruption(
-        &edit.remove(0, RelationshipId(0)).unwrap_err()
+        &edit
+            .remove(0, RelationshipId(0), &fetch_from(&stored))
+            .unwrap_err()
     ));
 }
 
@@ -556,7 +571,8 @@ fn removing_every_relationship_of_a_segment_deletes_it_once_it_folds() {
     let mut stored = store(encode(&slots));
     let mut edit = load(&stored);
     for at in 0..SEGMENT_SLOTS {
-        edit.remove(at, RelationshipId(at as u64)).unwrap();
+        edit.remove(at, RelationshipId(at as u64), &fetch_from(&stored))
+            .unwrap();
     }
     assert!(apply(&mut stored, edit));
     assert!(stored.is_empty());
@@ -585,12 +601,28 @@ fn hub_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn check_against_model(ops: &[Op], bulk: usize) -> Result<(), TestCaseError> {
+fn big_hub_op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        6 => (0u64..5_000).prop_map(|other| Op::Add(0, other)),
+        2 => (1..SEGMENT_SLOTS, 0u64..5_000).prop_map(|(at, other)| Op::Add(at, other)),
+        1 => (0..SEGMENT_SLOTS, any::<usize>()).prop_map(|(at, pick)| Op::Remove(at, pick)),
+        1 => Just(Op::Commit),
+    ]
+}
+
+fn check_against_model(
+    ops: &[Op],
+    (bulk, hubs): (usize, usize),
+    each_op: bool,
+) -> Result<(), TestCaseError> {
     let mut model: BTreeMap<usize, Vec<Edge>> = BTreeMap::new();
     let mut stored = BTreeMap::new();
     let mut next = 0u64;
     for at in 0..bulk {
-        model.entry(at % 3).or_default().push(edge(next, next % 97));
+        model
+            .entry(at % hubs)
+            .or_default()
+            .push(edge(next, next % 97));
         next += 1;
     }
     let slots: Vec<(usize, Vec<Edge>)> = model.clone().into_iter().collect();
@@ -609,7 +641,8 @@ fn check_against_model(ops: &[Op], bulk: usize) -> Result<(), TestCaseError> {
                     continue;
                 };
                 let removed = edges.remove(pick % edges.len());
-                edit.remove(*at, removed.relationship).unwrap();
+                edit.remove(*at, removed.relationship, &fetch_from(&stored))
+                    .unwrap();
             }
             Op::Commit => {
                 apply(&mut stored, std::mem::take(&mut edit));
@@ -621,9 +654,11 @@ fn check_against_model(ops: &[Op], bulk: usize) -> Result<(), TestCaseError> {
                 edit = load(&stored);
             }
         }
-        for at in 0..SEGMENT_SLOTS {
-            let expected = model.get(&at).cloned().unwrap_or_default();
-            prop_assert_eq!(seen(&edit, at), expected);
+        if each_op || matches!(op, Op::Commit) {
+            for at in 0..SEGMENT_SLOTS {
+                let expected = model.get(&at).cloned().unwrap_or_default();
+                prop_assert_eq!(seen(&edit, &stored, at), expected);
+            }
         }
     }
     apply(&mut stored, edit);
@@ -647,13 +682,22 @@ proptest! {
     #[test]
     #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_edit_reads_and_stores_what_a_model_holds(ops in prop::collection::vec(op(), 0..120)) {
-        check_against_model(&ops, 0)?;
+        check_against_model(&ops, (0, 3), true)?;
     }
 
     #[test]
     #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_edit_keeps_hubs_as_a_model_does(ops in prop::collection::vec(hub_op(), 0..60), bulk in 0usize..3_000) {
-        check_against_model(&ops, bulk)?;
+        check_against_model(&ops, (bulk, 3), true)?;
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn a_segment_edit_keeps_a_hub_past_half_a_part_as_a_model_does(
+        ops in prop::collection::vec(big_hub_op(), 0..1_200),
+        bulk in 16_000usize..48_000,
+    ) {
+        check_against_model(&ops, (bulk, 1), false)?;
     }
 
     #[test]
@@ -714,13 +758,16 @@ fn a_small_commit_that_removes_the_last_relationships_deletes_the_segment() {
         (9, vec![edge(1, 0), edge(2, 0)]),
     ]));
     let mut edit = load(&stored);
-    edit.remove(9, RelationshipId(2)).unwrap();
+    edit.remove(9, RelationshipId(2), &fetch_from(&stored))
+        .unwrap();
     assert!(!apply(&mut stored, edit));
     let mut edit = load(&stored);
-    edit.remove(0, RelationshipId(0)).unwrap();
+    edit.remove(0, RelationshipId(0), &fetch_from(&stored))
+        .unwrap();
     assert!(!apply(&mut stored, edit));
     let mut edit = load(&stored);
-    edit.remove(9, RelationshipId(1)).unwrap();
+    edit.remove(9, RelationshipId(1), &fetch_from(&stored))
+        .unwrap();
     assert!(apply(&mut stored, edit));
     assert!(stored.is_empty());
 }
@@ -736,7 +783,7 @@ fn a_fold_beside_a_hub_writes_only_the_parts_that_change() {
     for at in 1..=MAX_DELTAS + 1 {
         edit.add(at, edge(100_000 + at as u64, 2));
     }
-    let flush = edit.flush(&ID).unwrap();
+    let flush = edit.flush(&ID, &fetch_from(&stored)).unwrap();
     assert!(flush.put.iter().all(|(key, _)| *key != hub_key));
     assert!(flush.delete.iter().all(|key| *key != hub_key));
     assert!(!flush.put.is_empty());
@@ -755,4 +802,112 @@ fn a_fold_beside_a_hub_writes_only_the_parts_that_change() {
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     assert_eq!(encode(&decode(&parts)), parts);
+}
+
+fn is_part(key: &[u8]) -> bool {
+    matches!(parse_key(key).unwrap().1, Entry::Part { .. })
+}
+
+fn commit_reading(
+    stored: &mut BTreeMap<Vec<u8>, Vec<u8>>,
+    fetched: &RefCell<Vec<Vec<u8>>>,
+    change: impl FnOnce(&mut SegmentEdit, Fetch<'_>),
+) -> bool {
+    let flush = {
+        let held = &*stored;
+        let fetch = |key: &[u8]| {
+            fetched.borrow_mut().push(key.to_vec());
+            fetch_from(held)(key)
+        };
+        let mut edit = SegmentEdit::load(&ID, entries(held), &fetch).unwrap();
+        change(&mut edit, &fetch);
+        edit.flush(&ID, &fetch).unwrap()
+    };
+    let rewrote = flush.put.iter().any(|(key, _)| is_part(key));
+    for key in flush.delete {
+        assert!(stored.remove(&key).is_some(), "{key:?} is not stored");
+    }
+    stored.extend(flush.put);
+    rewrote
+}
+
+#[test]
+fn commits_beside_a_hub_neither_read_nor_write_the_hub_part() {
+    let mut slots = vec![(0, hub(5_000))];
+    slots.extend((1..SEGMENT_SLOTS).map(|at| (at, vec![edge(at as u64, 1)])));
+    let mut stored = store(encode(&slots));
+    let hub_key = ID.part_key(1, 0).to_vec();
+    let hub_part = stored.get(&hub_key).cloned().unwrap();
+    let fetched = RefCell::new(Vec::new());
+    let mut expected: BTreeMap<usize, Vec<Edge>> = slots.into_iter().collect();
+    let mut folds = 0;
+    for commit in 0..60usize {
+        let at = if commit % 4 == 0 {
+            0
+        } else {
+            1 + commit % (SEGMENT_SLOTS - 1)
+        };
+        let added = edge(2_000_000 + commit as u64, 2);
+        expected.entry(at).or_default().push(added);
+        let delete = (commit % 7 == 6 && at != 0).then(|| expected.get_mut(&at).unwrap().remove(0));
+        folds += usize::from(commit_reading(&mut stored, &fetched, |edit, fetch| {
+            edit.add(at, added);
+            if let Some(gone) = delete {
+                edit.remove(at, gone.relationship, fetch).unwrap();
+            }
+        }));
+        for (position, edges) in &expected {
+            assert_eq!(&read_slot(&stored, *position).unwrap(), edges);
+        }
+    }
+    assert!(
+        folds > 3,
+        "the neighbours folded their deltas {folds} times"
+    );
+    assert!(stored.contains_key(ID.delta_key(0).as_slice()));
+    assert_eq!(stored.get(&hub_key), Some(&hub_part));
+    assert!(fetched.borrow().iter().all(|key| *key != hub_key));
+}
+
+#[test]
+fn a_hub_gaining_one_relationship_a_commit_lets_its_delta_grow_with_its_part() {
+    let mut stored = store(encode(&[(0, hub(50_000)), (1, vec![edge(1, 1)])]));
+    let hub_key = ID.part_key(1, 0).to_vec();
+    let fetched = RefCell::new(Vec::new());
+    let mut expected = hub(50_000);
+    let mut rewrites = 0;
+    let mut largest = 0;
+    let commits = 2_000;
+    for at in 0..commits {
+        let added = edge(2_000_000 + at as u64, 7);
+        expected.push(added);
+        if commit_reading(&mut stored, &fetched, |edit, _| edit.add(0, added)) {
+            rewrites += 1;
+        }
+        let part = stored.get(&hub_key).unwrap().len();
+        if let Some(delta) = stored.get(ID.delta_key(0).as_slice()) {
+            assert!(
+                delta.len() <= delta_bound(part),
+                "{} over {part}",
+                delta.len()
+            );
+            largest = largest.max(delta.len());
+        }
+    }
+    assert!(
+        largest > DELTA_BYTES,
+        "the largest delta held {largest} bytes"
+    );
+    assert!(
+        (1..=commits / (DELTA_BYTES / 2) / 2).contains(&rewrites),
+        "the hub part was written {rewrites} times"
+    );
+    let reads = fetched
+        .borrow()
+        .iter()
+        .filter(|key| **key == hub_key)
+        .count();
+    assert_eq!(reads, rewrites);
+    assert_eq!(read_slot(&stored, 0).unwrap(), expected);
+    assert_eq!(read_slot(&stored, 1).unwrap(), vec![edge(1, 1)]);
 }

@@ -106,7 +106,7 @@ impl Store {
             Bound::Unbounded,
             Bound::Unbounded,
             &mut |key, value| {
-                scanned.push((key.to_vec(), value.to_vec()));
+                scanned.push((key.to_vec(), loaded(&tree, value)));
                 Ok(())
             },
         )
@@ -141,6 +141,13 @@ impl Store {
             prop_assert_eq!(ranged, vec![end.clone()]);
         }
         Ok(())
+    }
+}
+
+fn loaded(tree: &Tree, value: CellValue<'_>) -> Vec<u8> {
+    match value {
+        CellValue::Inline(value) => value.to_vec(),
+        CellValue::External(blob) => tree.load_value(&blob).unwrap(),
     }
 }
 
@@ -411,7 +418,7 @@ proptest! {
                 start.as_ref().map(Vec::as_slice),
                 end.as_ref().map(Vec::as_slice),
                 &mut |key, value| {
-                    scanned.push((key.to_vec(), value.to_vec()));
+                    scanned.push((key.to_vec(), loaded(&tree, value)));
                     Ok(())
                 },
                 &finger,
