@@ -189,6 +189,26 @@ pub enum ErrorKind {
     /// A dump was imported into a database that holds an index or has ever held a node or a
     /// relationship.
     DatabaseNotEmpty,
+    /// A database opened as a replica, with [`OpenOptions::replica`], was asked to write: a
+    /// query that updates the graph, a write transaction, an index change, an import, or an
+    /// upgrade of a file written in an older format. A replica changes only through the
+    /// changes of its writer.
+    ///
+    /// [`OpenOptions::replica`]: crate::OpenOptions::replica
+    ReplicaReadOnly,
+    /// A change or a promotion carries a term lower than the highest term this database has
+    /// seen, so it comes from a writer that a later one replaced.
+    Fenced,
+    /// Two databases hold different changes at the same place of their history: a change, or
+    /// a [`Position`](crate::Position), names another writer or term than the one this database
+    /// recorded for that log sequence number. Neither side is chosen, and the host decides
+    /// which one installs a snapshot of the other.
+    Diverged,
+    /// The changes after a [`Position`](crate::Position) are no longer kept, so the database
+    /// behind it must install a snapshot instead.
+    TooFarBehind,
+    /// Changes to apply do not start right after the last change the database holds.
+    Gap,
 }
 
 impl ErrorKind {
@@ -326,6 +346,7 @@ impl From<GraphError> for Error {
             GraphError::IndexExists(_) => ErrorKind::IndexAlreadyExists,
             GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
             GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
+            GraphError::ReplicaReadOnly(_) => ErrorKind::ReplicaReadOnly,
         };
         Self {
             kind,

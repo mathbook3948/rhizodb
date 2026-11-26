@@ -39,6 +39,8 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
 - `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
 - Automatic space reclaim: after a checkpoint, a clean close's included, a file that holds more than twice its live data plus 4 MiB, and has grown by its live data since the last compaction, is compacted, so a long-running host's file does not grow without bound and a database that lost most of its data gives the space back by the time it closes.
+- `OpenOptions::replica`, which opens a database as a replica that serves reads and refuses every local write with the new `ErrorKind::ReplicaReadOnly`, so a replica changes only through its writer's changes.
+- `Position`, the place of a database in its history of changes as a term, a writer id, and a log sequence number, which converts to and from bytes, and the new error kinds `Fenced`, `Diverged`, `TooFarBehind`, and `Gap` that replication reports.
 
 ### Changed
 
