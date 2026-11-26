@@ -136,6 +136,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A clean close that compacted writes one more clean header, so the file it leaves needs no log.
 - The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
+- An automatic compaction waits while a snapshot or a write holds a tree older than the durable one, since its second copy could reuse no slot its first copy empties, and the background thread starts it once those trees are gone, while inline checkpoints try again at the next checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
 - A checkpoint makes its work durable in stages: once a stage has freed an eighth of the file's live blocks, and at least 256, it syncs the file and writes a header, so the next stage reuses the blocks it freed and a rewrite of most of the file does not double it.

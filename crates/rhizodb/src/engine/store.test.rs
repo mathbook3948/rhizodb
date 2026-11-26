@@ -1113,3 +1113,57 @@ fn a_catalog_that_claims_slots_far_past_the_end_of_the_file_opens_without_them()
     engine.check().unwrap();
     assert!(everything(&engine).unwrap().len() >= expected.len());
 }
+
+#[test]
+fn a_compaction_that_a_reader_would_hinder_waits_for_it_on_the_checkpoint_thread() {
+    let fs = SimFs::new();
+    let options = EngineOptions {
+        memtable_limit: 256 << 10,
+        wal_limit: 1 << 20,
+        ..tiny(CheckpointMode::Background)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    let key = |round: u32, item: u32| (round * 200 + item).to_be_bytes();
+    for round in 0..400 {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..200 {
+            write
+                .put(Table::Nodes, &key(round, item), &[round as u8; 300])
+                .unwrap();
+        }
+        write.commit().unwrap();
+    }
+    engine.shared.wait_for_checkpoint();
+    let loaded = file_bytes(&fs);
+    let pinned = engine.begin_read().unwrap();
+    let mut write = engine.begin_write().unwrap();
+    for round in 0..400 {
+        for item in (0..200).filter(|item| item % 50 != 0) {
+            write.delete(Table::Nodes, &key(round, item)).unwrap();
+        }
+    }
+    write.commit().unwrap();
+    engine.shared.wait_for_checkpoint();
+
+    assert!(
+        file_bytes(&fs) <= loaded + loaded / 8,
+        "a compaction under a reader grew the file from {loaded} to {} bytes",
+        file_bytes(&fs)
+    );
+    assert_eq!(
+        pinned.scan_prefix(Table::Nodes, &[]).unwrap().len(),
+        400 * 200
+    );
+    drop(pinned);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while file_bytes(&fs) > loaded / 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        file_bytes(&fs) <= loaded / 4,
+        "the file kept {} of {loaded} bytes once the reader was gone",
+        file_bytes(&fs)
+    );
+    assert_eq!(everything(&engine).unwrap().len(), 400 * 4);
+    engine.check().unwrap();
+}

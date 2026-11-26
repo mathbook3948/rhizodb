@@ -219,6 +219,7 @@ struct Shared<F: FileSystem> {
     poisoned: AtomicBool,
     wal_bytes: AtomicU64,
     compacted_bytes: AtomicU64,
+    compaction_due: AtomicBool,
 }
 
 /// RhizoDB's own storage engine over one database file and its write-ahead log.
@@ -422,13 +423,14 @@ fn checkpoint_worker<F: FileSystem + 'static>(
 ) {
     let mut retired: Vec<Arc<Memtable>> = Vec::new();
     loop {
-        let task = if retired.is_empty() {
+        let task = if retired.is_empty() && !shared.compaction_due.load(Ordering::Acquire) {
             receiver.recv().ok()
         } else {
             match receiver.recv_timeout(RETIRED_POLL) {
                 Ok(task) => Some(task),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     retired.retain(|memtable| Arc::strong_count(memtable) > 1);
+                    shared.compact_when_due();
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => None,
@@ -583,6 +585,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             freed: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
+            compaction_due: AtomicBool::new(false),
         });
         let (jobs, worker) = match options.checkpoint {
             #[cfg(any(test, feature = "fuzzing"))]
@@ -888,13 +891,50 @@ impl<F: FileSystem + 'static> Shared<F> {
                 let trimmed = self.trim(&mut lock(&self.durable));
                 if let Err(error) = trimmed {
                     self.poison_with(&error);
-                } else if self.holds_too_much_free_space()
-                    && let Err(error) = self.compact()
-                {
-                    self.poison_with(&error);
+                } else if self.holds_too_much_free_space() {
+                    self.compact_unless_held();
                 }
             }
             Err(error) => self.poison_with(&error),
+        }
+        finish.completed = true;
+    }
+
+    fn compact_unless_held(&self) {
+        let durable = lock(&self.durable).tree.generation;
+        if self.oldest_tree() < durable {
+            self.compaction_due.store(true, Ordering::Release);
+        } else {
+            self.compaction_due.store(false, Ordering::Release);
+            if let Err(error) = self.compact() {
+                self.poison_with(&error);
+            }
+        }
+    }
+
+    fn compact_when_due(&self) {
+        if !self.compaction_due.load(Ordering::Acquire) {
+            return;
+        }
+        {
+            let mut running = lock(&self.running);
+            if *running {
+                return;
+            }
+            if self.is_poisoned() {
+                self.compaction_due.store(false, Ordering::Release);
+                return;
+            }
+            *running = true;
+        }
+        let mut finish = EndCheckpointOnDrop {
+            shared: self,
+            completed: false,
+        };
+        if self.holds_too_much_free_space() {
+            self.compact_unless_held();
+        } else {
+            self.compaction_due.store(false, Ordering::Release);
         }
         finish.completed = true;
     }
