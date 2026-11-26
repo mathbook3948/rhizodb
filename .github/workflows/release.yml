@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -35,8 +35,8 @@ jobs:
               exit 1
             fi
             name="v$crate"
-            if git fetch --quiet origin "refs/tags/$name:refs/tags/$name" 2>/dev/null; then
-              if [ "$(git rev-parse "$name^{commit}")" != "$GITHUB_SHA" ]; then
+            if tagged="$(git rev-parse --quiet --verify "refs/tags/$name^{commit}")"; then
+              if [ "$tagged" != "$GITHUB_SHA" ]; then
                 echo "tag $name already names another commit" >&2
                 exit 1
               fi
@@ -190,4 +190,9 @@ jobs:
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
+          tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+          if [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "tag $TAG names $tagged, not the released commit $GITHUB_SHA" >&2
+            exit 1
           fi
