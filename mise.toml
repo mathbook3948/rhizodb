@@ -12,6 +12,7 @@ run = [
   "cargo fmt --all --check",
   "cargo fmt --manifest-path crates/differential/Cargo.toml --check",
   "ast-grep scan --no-ignore hidden",
+  "ast-grep test --skip-snapshot-tests",
   "cargo run --quiet --package xtask -- forbidden-chars",
   "cargo run --quiet --package xtask -- docs",
   "cargo run --quiet --package xtask -- hooks",
