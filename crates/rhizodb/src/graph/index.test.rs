@@ -297,6 +297,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn indexes_match_the_data_after_any_committed_or_rolled_back_writes(
         steps in prop::collection::vec((op(), any::<bool>()), 0..60),
         indexed_after in 0usize..10,

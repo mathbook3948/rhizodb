@@ -112,8 +112,9 @@ mise install
 mise run check
 ```
 
-`mise run check` runs formatting, lints, the tests, the examples, and the repository guards, as CI does on Linux, macOS, and Windows.
-The tests include the openCypher TCK, hand-written GQL scenarios, and crash tests.
+`mise run check` runs formatting, lints, the deterministic tests, the examples, and the repository guards, as CI does on Linux, macOS, and Windows for every pull request.
+The tests include the openCypher TCK and hand-written GQL scenarios.
+`mise run random` runs the randomized, crash, and stress tests that `mise run check` leaves out, as CI does for every push to `main`.
 `mise run differential` compares query results with LadybugDB, and the nightly workflow adds `mise run storage-deep`, `mise run random-deep`, `mise run soak`, and fuzzing.
 The design decisions are in [`docs/`](https://github.com/mathbook3948/rhizodb/blob/main/docs/README.md).
 To contribute, read [CONTRIBUTING](https://github.com/mathbook3948/rhizodb/blob/main/.github/CONTRIBUTING.md), and to report a security problem, follow the [security policy](https://github.com/mathbook3948/rhizodb/blob/main/.github/SECURITY.md).

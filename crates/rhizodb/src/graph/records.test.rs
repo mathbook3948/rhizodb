@@ -17,6 +17,7 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_node_record_decodes_the_properties_it_encodes(properties in properties()) {
         let record = NodeRecord { labels: BTreeSet::new(), properties };
         let decoded = NodeRecord::decode_properties(&record.encode()).unwrap();
@@ -27,6 +28,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_record_written_before_node_meta_reads_its_labels_and_properties(
         labels in prop::collection::btree_set((0u32..4).prop_map(Token::new), 0..3),
         properties in properties(),
@@ -44,6 +46,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn one_relationship_property_reads_what_the_whole_record_holds(
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
@@ -83,12 +86,14 @@ fn same_record(read: &RelationshipRecord, record: &RelationshipRecord) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_relationship_record_decodes_what_it_encodes(record in relationship()) {
         let read = RelationshipRecord::decode(&record.encode()).unwrap();
         prop_assert!(same_record(&read, &record));
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_relationship_record_of_the_fixed_layout_reads_as_it_was_written(record in relationship()) {
         let read = RelationshipRecord::decode_fixed(&record.encode_fixed()).unwrap();
         prop_assert!(same_record(&read, &record));

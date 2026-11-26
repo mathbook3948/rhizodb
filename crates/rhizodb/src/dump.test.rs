@@ -20,6 +20,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(512)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn every_value_reads_back_bit_exactly_and_writes_the_same_text(value in property_value()) {
         let (text, read) = round_trip(&value);
         prop_assert!(same_bits(&value, &read), "{text}");
@@ -29,6 +30,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_line_parses_or_fails_without_panicking(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
         let text = String::from_utf8_lossy(&bytes);
         if let Ok(parsed) = json::parse(&text) {
@@ -37,6 +39,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_string_reads_back(text in any::<String>()) {
         let mut written = String::new();
         json::write_string(&mut written, &text);
@@ -44,6 +47,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn every_finite_float_is_written_as_a_float(bits in any::<u64>()) {
         let value = f64::from_bits(bits);
         prop_assume!(value.is_finite());
@@ -351,6 +355,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(48)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_random_graph_imports_as_it_was_exported(
         ops in prop::collection::vec(op(), 0..60),
         indexes in 0u8..16,

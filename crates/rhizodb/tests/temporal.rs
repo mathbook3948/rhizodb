@@ -113,6 +113,65 @@ fn values_of_different_temporal_types_do_not_compare() {
 }
 
 #[test]
+fn a_datetime_string_with_an_offset_and_a_zone_keeps_the_instant_its_offset_gives() {
+    let db = db();
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-07-01T12:00+05:00[Europe/Paris]')"
+        ),
+        "2024-07-01T09:00+02:00[Europe/Paris]"
+    );
+    assert_eq!(
+        single(
+            &db,
+            "RETURN datetime('2024-07-01T12:00+05:00[Europe/Paris]').epochSeconds = \
+             datetime('2024-07-01T07:00Z').epochSeconds"
+        ),
+        boolean(true)
+    );
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-10-27T02:30+01:00[Europe/Paris]')"
+        ),
+        "2024-10-27T02:30+01:00[Europe/Paris]"
+    );
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-10-27T02:30+02:00[Europe/Paris]')"
+        ),
+        "2024-10-27T02:30+02:00[Europe/Paris]"
+    );
+}
+
+#[test]
+fn sub_second_components_that_do_not_fit_an_integer_overflow() {
+    let db = db();
+    for query in [
+        "RETURN duration.inSeconds(date('1700-01-01'), date('2024-01-01')).nanoseconds",
+        "RETURN duration({seconds: 9223372036854775807}).milliseconds",
+        "RETURN duration({seconds: -9223372036854775807}).microseconds",
+        "RETURN datetime({year: 300000000}).epochMillis",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::IntegerOverflow,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        run(
+            &db,
+            "RETURN duration({seconds: 9223372036, nanoseconds: 854775807}).nanoseconds, \
+             duration({seconds: 2}).milliseconds, datetime('1970-01-01T00:00:01.5Z').epochMillis"
+        ),
+        [vec![int(i64::MAX), int(2000), int(1500)]]
+    );
+}
+
+#[test]
 fn malformed_temporal_input_raises_its_own_error() {
     let db = db();
     for query in [
@@ -121,6 +180,9 @@ fn malformed_temporal_input_raises_its_own_error() {
         "RETURN duration('P1H')",
         "RETURN date('2015-01-01').hour",
         "RETURN date.truncate('hour', date('2015-01-01'))",
+        "RETURN date.truncate('millennium', date('-999999999-06-15'))",
+        "RETURN date.truncate('decade', date('-999999999-06-15'))",
+        "RETURN datetime.truncate('century', datetime('-999999999-06-15T10:00Z'))",
     ] {
         assert_eq!(
             error_kind(&db, query),

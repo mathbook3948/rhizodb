@@ -36,11 +36,13 @@ fn datum() -> impl Strategy<Value = Datum> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn order_is_antisymmetric(a in datum(), b in datum()) {
         prop_assert_eq!(order(&a, &b), order(&b, &a).reverse());
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn order_is_transitive(a in datum(), b in datum(), c in datum()) {
         if order(&a, &b) != Ordering::Greater && order(&b, &c) != Ordering::Greater {
             prop_assert_ne!(order(&a, &c), Ordering::Greater);
@@ -48,6 +50,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn equal_values_are_equivalent(a in datum(), b in datum()) {
         if equals(&a, &b) == Some(true) {
             prop_assert_eq!(order(&a, &b), Ordering::Equal);

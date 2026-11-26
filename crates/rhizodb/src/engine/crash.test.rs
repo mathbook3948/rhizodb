@@ -177,11 +177,13 @@ fn run_until_failure(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -> Run
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_keeps_each_acknowledged_commit() {
     fail_each_operation_then_lose_power(options(), 8);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_keeps_each_commit_checkpointed_at_once() {
     let every_commit = EngineOptions {
         memtable_limit: 0,
@@ -246,6 +248,7 @@ fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generatio
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_while_opening_leaves_the_database_whole() {
     let transactions = transactions(11, 12);
     let states = states(&transactions);
@@ -283,6 +286,7 @@ fn every_failure_while_opening_leaves_the_database_whole() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_new_database_appears_whole_or_not_at_all() {
     let total = {
         let fs = SimFs::new();
@@ -374,6 +378,7 @@ fn state_after(count: u64) -> State {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_commit() {
     let background = EngineOptions {
         checkpoint: CheckpointMode::Background,
@@ -449,6 +454,7 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
     let transactions = transactions(13, 30);
     let states = states(&transactions);
@@ -569,6 +575,7 @@ fn commit_then_checkpoint(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the_database_whole() {
     let transactions = transactions(17, 40);
     let states = states(&transactions);
@@ -602,6 +609,7 @@ fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the_database_whole() {
     let big = |index: usize| {
         (0..2u8)
@@ -653,6 +661,7 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_database_whole() {
     let load: Vec<Write> = (0..60u8)
         .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
@@ -689,6 +698,7 @@ fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_da
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole() {
     let load: Vec<Write> = (0..25u8)
         .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 200_000]))

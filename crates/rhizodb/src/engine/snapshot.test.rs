@@ -231,6 +231,7 @@ fn flipped(bytes: &[u8], at: usize) -> Vec<u8> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_damaged_or_cut_snapshot_fails_as_corrupt_data_and_keeps_the_old_database() {
     let (_fs, source, _) = loaded_source(8, 40);
     let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
@@ -328,6 +329,7 @@ fn crashes() -> Vec<Crash> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_then_power_loss_while_installing_leaves_the_old_database_or_the_new() {
     let (_fs, source, expected) = loaded_source(4, 20);
     let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
@@ -365,6 +367,7 @@ fn every_failure_then_power_loss_while_installing_leaves_the_old_database_or_the
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn an_export_stays_whole_while_the_source_rewrites_and_compacts() {
     let fs = SimFs::new();
     let busy = EngineOptions {
@@ -585,6 +588,7 @@ fn a_log_kept_for_a_peer_past_the_checkpoint_limit_starts_no_extra_checkpoints()
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_its_position() {
     let rounds = 20 + u64::from(test_scale::cases(40).min(400));
     let reference = open(&SimFs::new(), SOURCE, by_hand()).unwrap();

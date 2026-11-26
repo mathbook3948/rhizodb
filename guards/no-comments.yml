@@ -11,9 +11,9 @@ rule:
     - kind: block_comment
   not:
     any:
-      - regex: ^//[/!]
-      - regex: ^/\*[*!]
-      - regex: ast-grep-ignore
+      - regex: ^//(/([^/]|$)|!)
+      - regex: ^/\*(\*[^*/]|!)
+      - regex: ^// ast-grep-ignore
 ---
 id: doc-comments-on-public-api-only
 language: rust
@@ -22,8 +22,11 @@ message: Doc comments are for public API contracts only.
 files:
   - crates/*/src/**/*.rs
 rule:
-  kind: line_comment
-  regex: ^///
+  any:
+    - kind: line_comment
+      regex: ^///([^/]|$)
+    - kind: block_comment
+      regex: ^/\*\*[^*/]
   not:
     any:
       - precedes:
@@ -31,6 +34,7 @@ rule:
             not:
               any:
                 - kind: line_comment
+                - kind: block_comment
                 - kind: attribute_item
           has:
             kind: visibility_modifier

@@ -96,6 +96,7 @@ fn readers_and_writers() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_transaction_sees_the_index_definitions_of_its_snapshot() {
     shuttle::check_random(readers_and_writers, schedules());
     shuttle::check_pct(readers_and_writers, schedules(), 3);

@@ -44,6 +44,7 @@ fn an_error_of_the_visitor_stops_the_merge() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn merging_slots_lets_the_newer_side_win(
         newer in btree_map(key(), proptest::option::of(key()), 0..8),
         older in btree_map(key(), proptest::option::of(key()), 0..8),
@@ -54,6 +55,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn merging_over_a_lower_layer_matches_a_map(
         upper in btree_map(key(), proptest::option::of(key()), 0..8),
         lower in btree_map(key(), key(), 0..8),

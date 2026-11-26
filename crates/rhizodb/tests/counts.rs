@@ -207,6 +207,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn counts_from_node_meta_agree_with_counting_each_match(
         ops in prop::collection::vec(op(), 1..60),
     ) {

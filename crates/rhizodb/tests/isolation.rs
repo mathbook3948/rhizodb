@@ -569,27 +569,33 @@ fn check(db: Arc<Database>, seed: u64, per_thread: u64) -> BTreeMap<i64, Vec<i64
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn concurrent_transactions_in_memory_are_strictly_serializable() {
-    let seed = seed();
-    let _ = check(Arc::new(db()), seed, cases(FAST_TRANSACTIONS_PER_THREAD));
+    let replays = regression_seeds("concurrent_transactions_in_memory_are_strictly_serializable");
+    for seed in replays.into_iter().chain([seed()]) {
+        let _ = check(Arc::new(db()), seed, cases(FAST_TRANSACTIONS_PER_THREAD));
+    }
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn concurrent_transactions_on_a_file_are_strictly_serializable() {
-    let seed = seed();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("isolation.rhizodb");
-    let finals = check(
-        Arc::new(Database::open(&path).unwrap()),
-        seed,
-        cases(FAST_TRANSACTIONS_PER_THREAD),
-    );
-    let reopened = Database::open(&path).unwrap();
-    assert_eq!(
-        final_lists(&reopened),
-        finals,
-        "seed {seed}: reopening changed the lists"
-    );
+    let replays = regression_seeds("concurrent_transactions_on_a_file_are_strictly_serializable");
+    for seed in replays.into_iter().chain([seed()]) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("isolation.rhizodb");
+        let finals = check(
+            Arc::new(Database::open(&path).unwrap()),
+            seed,
+            cases(FAST_TRANSACTIONS_PER_THREAD),
+        );
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(
+            final_lists(&reopened),
+            finals,
+            "seed {seed}: reopening changed the lists"
+        );
+    }
 }
 
 fn txn(id: usize, ops: Vec<Op>, start: Instant, end: Instant) -> Txn {

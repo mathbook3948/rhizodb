@@ -18,16 +18,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse, value_decode, graph_ops]
+        target: [parse, value_decode, graph_ops, db_file, engine_formats, engine_file, replication_changes]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: rustup toolchain install nightly --profile minimal
-      - run: cargo +nightly install cargo-fuzz --locked
-      - run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: sh fuzz/run.sh 60 "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

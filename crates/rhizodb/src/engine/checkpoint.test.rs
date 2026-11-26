@@ -182,6 +182,28 @@ fn sequential_appends_fill_pages_and_grow_the_tree() {
 }
 
 #[test]
+fn small_appends_at_every_checkpoint_leave_full_pages_behind_them() {
+    let mut store = Store::new();
+    let mut model = Model::new();
+    let keys = 12_000u64;
+    for batch in 0..keys / 30 {
+        let changes: BTreeMap<_, _> = (batch * 30..(batch + 1) * 30)
+            .map(|id| (id.to_be_bytes().to_vec(), Some(value(12, id as u8))))
+            .collect();
+        apply(&mut model, &changes);
+        store.checkpoint(&changes);
+    }
+    store.verify(&model).unwrap();
+    let report = check(&store.header, &store.extents, &store.catalog, &store.tree()).unwrap();
+    let leaves_needed = (keys as usize * 18) / (BLOCK - 64);
+    assert!(
+        (report.pages as usize) < leaves_needed * 11 / 10 + 10,
+        "appends left part-full pages: {} pages for about {leaves_needed} leaves",
+        report.pages
+    );
+}
+
+#[test]
 fn deleting_almost_everything_shrinks_the_tree_and_frees_its_blocks() {
     let mut store = Store::new();
     let mut model = Model::new();
@@ -359,6 +381,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(24)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn scans_that_start_near_the_last_one_find_what_the_map_holds(
         long_keys in any::<bool>(),
         scans in vec((0u8..3, any::<u16>(), any::<bool>(), 0u8..3, 0u16..40, any::<bool>()), 1..80),
@@ -399,6 +422,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn checkpoints_of_random_changes_match_a_map((keys, batches) in batches()) {
         let mut store = Store::new();
         let mut model = Model::new();

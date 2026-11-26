@@ -1,0 +1,48 @@
+name: random
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  random:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - shell: bash
+        run: mise run random 2>&1 | tee random.log
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log-random-${{ matrix.os }}
+          path: random.log
+          if-no-files-found: ignore
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: proptest-regressions-${{ matrix.os }}
+          path: |
+            crates/rhizodb/proptest-regressions
+            crates/rhizodb/tests/*.proptest-regressions
+          if-no-files-found: ignore
+
+  report:
+    needs: random
+    if: failure() && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/report.yml

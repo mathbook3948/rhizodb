@@ -164,6 +164,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(32)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_engine_returns_the_bytes_redb_returns(steps in vec(step(), 1..400)) {
         compare(&steps)?;
     }

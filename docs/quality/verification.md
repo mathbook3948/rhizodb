@@ -30,6 +30,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Column names are not compared.
 - A null property of a LadybugDB node or relationship counts as absent.
 - A checked-in list names every query on which the engines do not agree, and a run fails when an outcome differs from it.
+- Each listed query that RhizoDB answers with rows also records a digest of those rows, taken under the same order and list rules as the comparison, so a run fails when RhizoDB's answer changes.
 - Each listed difference in returned rows carries the reason the engines differ.
 - A query that only one engine accepts is listed with the error it raised.
 - Consistency after a forced shutdown is tested.
@@ -37,7 +38,8 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
 - The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
 - The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
-- Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at each point, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
+- Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at points sampled from a seed that changes every run, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
+- Those workload tests try at most 16 reorders of unsynced writes at each point, since each reorder reopens and checks the database.
 - The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
 - A full disk is simulated by a backend that refuses to grow the file, and the database must fail writes as storage errors, keep reads, and open with every acknowledged step once space returns.
 - Node meta is checked against a model of node labels over random sequences of node and label edits, commits, rollbacks, reopens, and power losses.
@@ -49,9 +51,9 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Each checked-in damaged file input replays on the file it was found on, written by a checked-in program with the last commit of that file's format.
 - Every format upgrade is tested on a fixture that a checked-in program writes with the last commit of the older format.
 - Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
-- CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
-- A failing case a randomized test finds is checked in, and every later run replays it.
-- Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
+- Every push to `main` runs each randomized test with a fixed number of cases, and a nightly workflow runs a hundred times as many of the storage and integration tests on every CI platform.
+- A failing case a randomized test finds is checked in, and every later run of that test, on `main` and nightly, replays it.
+- A seeded integration test whose cases a seed replays exactly runs each seed listed in its file under `tests/seed-regressions` before its own.
 - The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
@@ -80,7 +82,9 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A crash at every write point of an apply must leave a position the writer passed, with its export, from which applying the same changes again converges.
 - A test kills a child process that applies changes to a replica on disk at varied points and checks each reopened replica the same way.
 - A fuzz target damages valid changes, reseals their checksums, decodes them, applies them to a replica, and reads it, and must never panic.
+- Every check rejects a wildcard version and a dependency from an unknown registry or git source, and warns on duplicate versions.
+- A nightly job checks the workspace's locked dependencies against the RustSec advisories, so a new advisory fails the nightly rather than every pull request.
 
 ## Open
 
-None
+- How power loss under a real file system is tested, such as on LazyFS in a nightly job, since the simulated file system models only the syncs the engine asks for and a killed process keeps the page cache.

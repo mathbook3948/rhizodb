@@ -115,7 +115,10 @@ fn errors_are_classified_by_which_engine_raised_them() {
 
     assert_eq!(
         compare(&ok, &raised("no"), Ordering::AnyOrder, Lists::Strict),
-        Outcome::LadybugRejects("Error: no".into())
+        Outcome::LadybugRejects {
+            error: "Error: no".into(),
+            rhizo: digest(&ok.clone().unwrap(), Ordering::AnyOrder, Lists::Strict),
+        }
     );
     assert_eq!(
         compare(&raised("no"), &ok, Ordering::AnyOrder, Lists::Strict),
@@ -134,7 +137,62 @@ fn errors_are_classified_by_which_engine_raised_them() {
 
 #[test]
 fn detail_fits_on_one_line() {
-    let outcome = Outcome::LadybugRejects("Parser exception:\n\tline 1".into());
+    let outcome = Outcome::LadybugRejects {
+        error: "Parser exception:\n\tline 1".into(),
+        rhizo: String::new(),
+    };
 
     assert_eq!(outcome.detail(), "Parser exception: line 1");
+}
+
+#[test]
+fn the_digest_follows_the_comparison_rules() {
+    let digest_of = |rows: Vec<Vec<Value>>, ordering, lists| {
+        digest(
+            &Rows {
+                columns: vec!["a".into()],
+                rows,
+            },
+            ordering,
+            lists,
+        )
+    };
+    let list = |values: &[i64]| {
+        vec![vec![Value::List(
+            values.iter().map(|&v| Value::Integer(v)).collect(),
+        )]]
+    };
+
+    assert_eq!(
+        digest_of(ints(&[1, 2]), Ordering::AnyOrder, Lists::Strict),
+        digest_of(ints(&[2, 1]), Ordering::AnyOrder, Lists::Strict)
+    );
+    assert_ne!(
+        digest_of(ints(&[1, 2]), Ordering::InOrder, Lists::Strict),
+        digest_of(ints(&[2, 1]), Ordering::InOrder, Lists::Strict)
+    );
+    assert_ne!(
+        digest_of(ints(&[3]), Ordering::AnyOrder, Lists::Strict),
+        digest_of(ints(&[2]), Ordering::AnyOrder, Lists::Strict)
+    );
+    assert_eq!(
+        digest_of(list(&[1, 2]), Ordering::AnyOrder, Lists::IgnoreElementOrder),
+        digest_of(list(&[2, 1]), Ordering::AnyOrder, Lists::IgnoreElementOrder)
+    );
+    assert_ne!(
+        digest_of(list(&[1, 2]), Ordering::AnyOrder, Lists::Strict),
+        digest_of(list(&[2, 1]), Ordering::AnyOrder, Lists::Strict)
+    );
+    assert_eq!(
+        digest_of(
+            vec![vec![Value::Float(0.1 + 0.2)]],
+            Ordering::AnyOrder,
+            Lists::Strict
+        ),
+        digest_of(
+            vec![vec![Value::Float(0.3)]],
+            Ordering::AnyOrder,
+            Lists::Strict
+        )
+    );
 }

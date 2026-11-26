@@ -73,11 +73,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(256)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_file_never_panics_or_reads_differently(damage in vec(any::<u8>(), 4..64)) {
         prop_assert_eq!(open_damaged_file(&damage), Ok(()));
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn arbitrary_bytes_never_break_a_decoder(choice in 0u8..10, rest in vec(any::<u8>(), 0..5000)) {
         let input = [[choice].as_slice(), &rest].concat();
         prop_assert_eq!(decode_formats(&input), Ok(()));

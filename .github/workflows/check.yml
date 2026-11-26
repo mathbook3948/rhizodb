@@ -4,12 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: check-${{ github.ref }}
+  group: check-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -40,7 +41,6 @@ jobs:
       - run: cargo publish --dry-run --package rhizodb --locked
 
   commits:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -49,6 +49,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: jdx/mise-action@v5
-      - run: cargo run --quiet --package xtask -- commits "origin/$BASE_REF"
+      - run: cargo run --quiet --package xtask -- commits "$BASE"
         env:
-          BASE_REF: ${{ github.base_ref }}
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}

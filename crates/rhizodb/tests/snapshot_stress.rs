@@ -154,11 +154,13 @@ fn stress(db: Arc<Database>, seconds: u64) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn snapshots_held_across_commits_and_checkpoints_stay_whole_in_memory() {
     stress(Arc::new(db()), cases(2));
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn snapshots_held_across_commits_and_checkpoints_stay_whole_on_a_file() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("snapshots.rhizodb");
