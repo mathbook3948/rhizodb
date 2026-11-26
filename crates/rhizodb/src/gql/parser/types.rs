@@ -60,7 +60,7 @@ impl Parser {
     fn type_term(&mut self) -> ParseResult<Vec<TypeMember>> {
         let mut members = if self.at_keyword("ANY") && self.punct_at(1, Punct::Lt) {
             self.pos += 2;
-            let inner = self.type_expr()?;
+            let inner = self.pipe_ending(None, Self::type_expr)?;
             self.expect_punct(Punct::Gt)?;
             inner.members
         } else {
@@ -89,7 +89,7 @@ impl Parser {
     pub(super) fn value_type(&mut self) -> ParseResult<ValueType> {
         if (self.at_keyword("LIST") || self.at_keyword("ARRAY")) && self.punct_at(1, Punct::Lt) {
             self.pos += 2;
-            let inner = self.type_expr()?;
+            let inner = self.pipe_ending(None, Self::type_expr)?;
             self.expect_punct(Punct::Gt)?;
             return Ok(ValueType::List(Box::new(inner)));
         }

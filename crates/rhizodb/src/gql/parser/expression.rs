@@ -83,7 +83,7 @@ impl Parser {
         condition
     }
 
-    fn pipe_ending<T>(
+    pub(super) fn pipe_ending<T>(
         &mut self,
         ends: Option<usize>,
         parse: impl FnOnce(&mut Self) -> ParseResult<T>,
@@ -425,8 +425,12 @@ impl Parser {
     }
 
     fn paren_starts_pattern(&self) -> bool {
+        self.paren_at_starts_pattern(self.pos)
+    }
+
+    fn paren_at_starts_pattern(&self, start: usize) -> bool {
         let mut open = 0usize;
-        for (index, token) in self.tokens.iter().enumerate().skip(self.pos) {
+        for (index, token) in self.tokens.iter().enumerate().skip(start) {
             match token.kind {
                 TokenKind::Punct(Punct::LParen) => open += 1,
                 TokenKind::Punct(Punct::RParen) => {
@@ -473,7 +477,10 @@ impl Parser {
 
     fn at_pattern_comprehension(&self) -> bool {
         (self.at_punct(Punct::LParen) && self.paren_starts_pattern())
-            || (self.at_word() && self.punct_at(1, Punct::Eq) && self.punct_at(2, Punct::LParen))
+            || (self.at_word()
+                && self.punct_at(1, Punct::Eq)
+                && self.punct_at(2, Punct::LParen)
+                && self.paren_at_starts_pattern(self.pos + 2))
     }
 
     fn pattern_comprehension(&mut self) -> ParseResult<Expr> {
@@ -502,15 +509,22 @@ impl Parser {
         if !self.at_clause_start() {
             return Err(self.unexpected());
         }
-        let query = self.nested(Self::single_query)?;
+        let query = self.inner_query()?;
         self.expect_punct(Punct::RBrace)?;
         Ok(query)
+    }
+
+    fn inner_query(&mut self) -> ParseResult<SingleQuery> {
+        let outer = std::mem::replace(&mut self.in_where, false);
+        let query = self.nested(Self::single_query);
+        self.in_where = outer;
+        query
     }
 
     fn subquery_body(&mut self) -> ParseResult<Subquery> {
         self.pos += 2;
         let body = if self.at_clause_start() {
-            Subquery::Query(self.nested(Self::single_query)?)
+            Subquery::Query(self.inner_query()?)
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
