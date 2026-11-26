@@ -118,12 +118,14 @@ fn two_writers(clear: Clear) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 #[should_panic]
 fn a_claim_that_always_empties_the_slot_loses_the_next_holder() {
     shuttle::check_random(|| two_writers(Clear::Always), schedules());
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn clearing_only_an_own_claim_keeps_the_holder_in_the_slot() {
     shuttle::check_random(|| two_writers(Clear::IfOwn), schedules());
     shuttle::check_pct(|| two_writers(Clear::IfOwn), schedules(), 3);

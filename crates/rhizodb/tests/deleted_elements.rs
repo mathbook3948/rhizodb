@@ -658,6 +658,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_later_clause_reads_a_deleted_element_as_it_reads_a_live_one(case in case()) {
         let oracle_db = build(&case.graph);
         let real_db = build(&case.graph);
@@ -678,6 +679,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn reading_the_properties_or_labels_of_a_deleted_element_fails_wherever_the_read_sits(
         graph in graph(),
         target in target(),

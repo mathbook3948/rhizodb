@@ -15,6 +15,7 @@ fn edits() -> impl Strategy<Value = Vec<(usize, Option<Vec<u8>>)>> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_chunk_reads_back_what_its_edits_left(edits in edits()) {
         let mut edit = ChunkEdit::default();
         let mut model = BTreeMap::new();
@@ -45,6 +46,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_chunk_fails_to_read_or_reads_some_records(
         edits in edits(),
         cut in any::<prop::sample::Index>(),

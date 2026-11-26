@@ -68,6 +68,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(512)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn rows_are_found_exactly_when_order_calls_them_equal(rows in prop::collection::vec(row(), 1..12)) {
         let mut index = KeyIndex::default();
         let mut distinct: Vec<Vec<Datum>> = Vec::new();
@@ -85,6 +86,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn equivalent_rows_share_a_hash(a in row(), b in row()) {
         if Key(a.clone()) == Key(b.clone()) {
             let state = Seed::default();

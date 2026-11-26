@@ -84,16 +84,19 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(96)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_engine_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(EngineOptions::default())(), &ops)?;
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_engine_checkpointing_inline_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(tiny(CheckpointMode::Inline))(), &ops)?;
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn the_engine_checkpointing_in_the_background_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(tiny(CheckpointMode::Background))(), &ops)?;
     }
@@ -267,6 +270,7 @@ fn a_block_the_durable_header_reaches_never_changes_and_freed_blocks_take_later_
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_damaged_byte_fails_as_corruption_or_reads_as_before() {
     let fs = SimFs::new();
     let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
@@ -321,6 +325,7 @@ fn every_damaged_byte_fails_as_corruption_or_reads_as_before() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn readers_keep_their_snapshots_while_background_checkpoints_publish_new_trees() {
     let fs = SimFs::new();
     let engine =
@@ -671,6 +676,7 @@ fn race_rounds() -> u64 {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_writer_sees_every_earlier_commit_while_checkpoints_publish() {
     for checkpoint in [CheckpointMode::Background, CheckpointMode::Inline] {
         assert_eq!(
@@ -682,6 +688,7 @@ fn a_writer_sees_every_earlier_commit_while_checkpoints_publish() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn range_deletes_stay_deleted_across_checkpoints_and_a_reopen() {
     for checkpoint in [CheckpointMode::Background, CheckpointMode::Inline] {
         assert_eq!(

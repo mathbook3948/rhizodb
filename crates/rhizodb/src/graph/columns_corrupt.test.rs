@@ -209,6 +209,7 @@ fn the_healthy_graph_keeps_segments_and_deltas_in_both_groups() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_changed_byte_in_any_column_entry_fails_reads_that_need_it_and_never_misanswers() {
     let (_fs, graph, model) = healthy();
     let entries = column_entries(&graph.read().unwrap());
@@ -258,6 +259,7 @@ fn a_column_entry_stored_under_another_key_fails_reads_that_need_it() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_changed_byte_of_a_column_in_the_database_file_fails_reads_or_answers_as_before() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.redb");

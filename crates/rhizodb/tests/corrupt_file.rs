@@ -169,6 +169,7 @@ fn every_fuzzer_input_that_damaged_a_file_fails_as_corrupt_data_without_a_panic(
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_single_damages_fail_without_a_panic() {
     let outcomes = probe(random_damages(
         "random_single_damages_fail_without_a_panic",
@@ -178,6 +179,7 @@ fn random_single_damages_fail_without_a_panic() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_multiple_damages_fail_without_a_panic() {
     let outcomes = probe(random_damages(
         "random_multiple_damages_fail_without_a_panic",

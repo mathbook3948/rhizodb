@@ -381,6 +381,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(24)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn scans_that_start_near_the_last_one_find_what_the_map_holds(
         long_keys in any::<bool>(),
         scans in vec((0u8..3, any::<u16>(), any::<bool>(), 0u8..3, 0u16..40, any::<bool>()), 1..80),
@@ -421,6 +422,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn checkpoints_of_random_changes_match_a_map((keys, batches) in batches()) {
         let mut store = Store::new();
         let mut model = Model::new();
