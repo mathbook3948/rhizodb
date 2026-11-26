@@ -656,16 +656,3 @@ fn arbitrary_garbage_never_panics() {
         let _ = parse(source);
     }
 }
-
-#[test]
-fn zz_probe_depth() {
-    for k in [5usize, 10, 15, 20, 25, 30, 40] {
-        let nested = format!("RETURN {}true{}", "(true OR ".repeat(k), ")".repeat(k));
-        let flat = format!("RETURN {}true{}", "(".repeat(k), ")".repeat(k));
-        println!(
-            "{k}: or={:?} paren={:?}",
-            parse(&nested).is_ok(),
-            parse(&flat).is_ok()
-        );
-    }
-}
