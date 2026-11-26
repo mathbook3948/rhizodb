@@ -3,6 +3,9 @@ use std::fs::File;
 use std::fs::TryLockError;
 use std::io;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
@@ -28,15 +31,31 @@ pub(crate) struct OsFile {
     size: BlockSize,
 }
 
+const LOCK_PATIENCE: Duration = Duration::from_millis(500);
+
+const LONGEST_LOCK_PAUSE: Duration = Duration::from_millis(10);
+
 fn lock_or_skip_where_unsupported(file: &File) -> io::Result<()> {
-    match file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(TryLockError::WouldBlock) => Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "the database file is already open",
-        )),
-        Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
-        Err(TryLockError::Error(error)) => Err(error),
+    let start = Instant::now();
+    let mut pause = Duration::from_micros(100);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) if start.elapsed() < LOCK_PATIENCE => {
+                thread::sleep(pause);
+                pause = pause.saturating_mul(2).min(LONGEST_LOCK_PAUSE);
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "the database file is already open",
+                ));
+            }
+            Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => {
+                return Ok(());
+            }
+            Err(TryLockError::Error(error)) => return Err(error),
+        }
     }
 }
 
@@ -87,10 +106,6 @@ impl FileSystem for OsFs {
         File::open(&self.directory)?.sync_all()
     }
 
-    fn path(&self, name: &str) -> Option<PathBuf> {
-        Some(self.directory.join(name))
-    }
-
     #[cfg(not(unix))]
     fn sync_names(&self) -> io::Result<()> {
         Ok(())
@@ -98,10 +113,6 @@ impl FileSystem for OsFs {
 }
 
 impl BlockFile for OsFile {
-    fn block_size(&self) -> BlockSize {
-        self.size
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.size.require_whole_blocks(buffer.len())?;
         read_exact_at(&self.file, buffer, self.size.offset(first)?)

@@ -42,19 +42,12 @@ Run one from a clone with `cargo run --example social`.
 
 RhizoDB is in early development, below 1.0, and is meant for Rust programs that want a graph store in-process, the way SQLite is a relational one.
 A breaking change to the API or the on-disk format raises the minor version and is listed in [CHANGELOG.md](https://github.com/mathbook3948/rhizodb/blob/main/CHANGELOG.md).
-A database written by an older version is upgraded in place when it is opened, and a file of an older build that stored its data with redb is converted to the current format.
+A database written by an older version is upgraded in place when it is opened.
 The [upgrade guide](https://docs.rs/rhizodb/latest/rhizodb/#upgrades) says what that means for backups.
 RhizoDB needs Rust 1.100 or later.
 
 ```bash
 cargo add rhizodb
-```
-
-Until the first release is on crates.io, depend on the Git repository instead:
-
-```toml
-[dependencies]
-rhizodb = { git = "https://github.com/mathbook3948/rhizodb" }
 ```
 
 ## Features

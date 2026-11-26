@@ -193,17 +193,10 @@ impl Database {
     /// `Database`, in this process or another, holds the file on a file system with file locks,
     /// and with
     /// [`ErrorKind::UnsupportedFormatVersion`](crate::ErrorKind::UnsupportedFormatVersion) when
-    /// the file records a format version newer than this build reads. A damaged file fails with
+    /// the file records a format version newer than this build reads, or older than the oldest
+    /// it upgrades. A damaged file fails with
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
     /// reads the damage, since every page carries a checksum.
-    ///
-    /// A file that an earlier build of RhizoDB stored with redb is converted on open: its tables
-    /// are copied into a new file of the current format, which then replaces it. The old
-    /// file stays as it was until the copy is whole and synced, so a crash during the conversion
-    /// leaves one or the other. A damaged old file fails the open with `CorruptData` and is left
-    /// as it was. redb can panic on some damage, and RhizoDB catches that panic as
-    /// `CorruptData`, which needs the host built with `panic = "unwind"`, the default. RhizoDB
-    /// installs no panic hook, so the host's hook still reports the caught panic.
     ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     ///

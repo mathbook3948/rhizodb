@@ -4,8 +4,8 @@ use proptest::test_runner::TestCaseError;
 use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 
 pub(super) const TYPES: [&str; 3] = ["A", "B", "C"];
@@ -18,10 +18,10 @@ pub(super) struct Model {
     pub(super) rels: BTreeMap<u64, (u64, u64, usize)>,
 }
 
-pub(super) type Write<'a> = GraphTx<<RedbStorage as Storage>::Write<'a>>;
+pub(super) type Write<'a> = GraphTx<<TestStorage as Storage>::Write<'a>>;
 
-pub(super) fn open(fs: &SimFs) -> Graph<RedbStorage> {
-    let graph = Graph::open(sim_backend::storage(fs).unwrap()).unwrap();
+pub(super) fn open(fs: &SimFs) -> Graph<TestStorage> {
+    let graph = Graph::open(test_engine::on_sim(fs).unwrap()).unwrap();
     let mut write = graph.write().unwrap();
     for name in TYPES {
         write.intern_token::<RelationshipType>(name).unwrap();

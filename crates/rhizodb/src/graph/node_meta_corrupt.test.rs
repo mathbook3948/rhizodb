@@ -7,7 +7,8 @@ use super::node_meta_tests::labels_of;
 use super::node_meta_tests::names;
 use super::node_meta_tests::token_names;
 use super::*;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 
 const GROUP: u64 = meta::SLOTS as u64;
@@ -171,8 +172,8 @@ fn corrupt_and_check<S: Storage>(
     check(&graph.read().unwrap(), model).unwrap();
 }
 
-fn healthy() -> (Graph<RedbStorage>, Model) {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+fn healthy() -> (Graph<TestStorage>, Model) {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let model = graph_with_chunks_and_deltas(&graph);
     check(&graph.read().unwrap(), &model).unwrap();
     (graph, model)
@@ -292,53 +293,3 @@ fn a_sealed_delta_that_does_not_amend_its_chunk_misleads_no_read_but_the_count()
 }
 
 type Entries = Vec<(Vec<u8>, Vec<u8>)>;
-
-fn file_with_graph(dir: &std::path::Path) -> (std::path::PathBuf, Model, Entries) {
-    let path = dir.join("graph.redb");
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
-    let model = graph_with_chunks_and_deltas(&graph);
-    let entries = node_meta(&graph.read().unwrap());
-    drop(graph);
-    (path, model, entries)
-}
-
-fn open_answers_or_fails(path: &std::path::Path, model: &Model) {
-    let Ok(storage) = RedbStorage::open_unchecked(path) else {
-        return;
-    };
-    let Ok(graph) = Graph::open(storage) else {
-        return;
-    };
-    let Ok(read) = graph.read() else {
-        return;
-    };
-    answers_or_fails(&read, model, true);
-}
-
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn a_changed_byte_of_node_meta_in_the_database_file_fails_reads_or_answers_as_before() {
-    let dir = tempfile::tempdir().unwrap();
-    let (path, model, entries) = file_with_graph(dir.path());
-    let pristine = std::fs::read(&path).unwrap();
-    let mut changed_any = 0;
-    for (_, value) in &entries {
-        let found: Vec<usize> = pristine
-            .windows(value.len())
-            .enumerate()
-            .filter(|(_, window)| *window == value.as_slice())
-            .map(|(at, _)| at)
-            .collect();
-        assert!(!found.is_empty(), "the file holds each node meta entry");
-        for start in found {
-            for at in positions(value.len(), 32) {
-                let mut file = pristine.clone();
-                file[start + at] ^= 0x5a;
-                std::fs::write(&path, &file).unwrap();
-                open_answers_or_fails(&path, &model);
-                changed_any += 1;
-            }
-        }
-    }
-    assert!(changed_any > 0);
-}

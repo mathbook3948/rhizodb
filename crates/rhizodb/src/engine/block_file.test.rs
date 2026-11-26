@@ -146,7 +146,6 @@ fn holds_blocks_of_any_size(fs: &impl FileSystem) {
         let size = BlockSize::new(bytes).unwrap();
         let name = format!("blocks-{bytes}");
         let file = fs.create(&name, size).unwrap();
-        assert_eq!(file.block_size(), size);
         let mut written = vec![0; 2 * bytes];
         written[..bytes].fill(5);
         written[bytes..].fill(6);

@@ -4,17 +4,16 @@ Decides the design of RhizoDB's own storage engine, which stores every database.
 
 ## Background
 
-redb's B-tree and allocator set a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore builds its own engine behind the storage trait, in phases, and leaves room for replication and for spreading data over several disks and servers.
+An off-the-shelf B-tree store sets a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore has its own engine behind the storage trait, and leaves room for replication and for spreading data over several disks and servers.
 
 ## Decisions
 
 - RhizoDB's own engine is the only storage backend of `Database`, on disk and in memory.
-- redb stays only to convert the files of earlier releases, with no cargo feature or open option that stores a database in redb.
-- The redb code that writes a database is compiled only for tests, where it is the reference the engine is checked against and a backend for the graph layer's own tests.
 - The engine is a module of the `rhizodb` crate.
-- The engine implements the same storage trait as the redb backend, and the swap changes no graph-layer behavior.
+- The engine implements the storage trait, and the graph layer reaches it only through that trait.
 - A database at rest is one file.
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
+- An open that finds the lock held tries again for half a second before it fails, since a child process the host spawns shares the lock until it starts its program.
 - On a file system without locks the engine opens a database unlocked.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
@@ -45,11 +44,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The simulated file system can fail every operation after a chosen count, once or from then on.
 - A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
 - A failed sync of the simulated file system's names fails every later one.
-- Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
-- The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
-- No backup of the redb file is kept after the conversion.
-- A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
-- A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
 - `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
@@ -162,12 +156,10 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
-- The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
-- Every test of `Database` runs on the engine, and each redb fixture is converted as it is opened.
-- The engine is checked byte for byte against the redb backend over random operations.
+- Every test of `Database` and of the graph layer runs on the engine.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 - `check` takes the durable header, extent table, catalog, and tree, then walks them without the lock that checkpoints take, and the tree it holds keeps its blocks from reuse until it ends.
 
@@ -177,7 +169,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
-- How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
+- How a point read that overlaps a background checkpoint keeps its speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
 - How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header and loses acknowledged commits without an error.

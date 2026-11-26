@@ -21,7 +21,8 @@ use crate::graph::Token;
 use crate::graph::VectorMetric;
 use crate::storage::ReadTransaction;
 use crate::storage::WriteTransaction;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::value::PropertyValue;
 
 const WORDS: [&str; 4] = ["alpha", "beta", "Gamma", "delta"];
@@ -621,11 +622,11 @@ fn verify(
     Ok(observed)
 }
 
-fn open(path: &Path) -> Graph<RedbStorage> {
-    Graph::open(RedbStorage::open(path).unwrap()).unwrap()
+fn open(path: &Path) -> Graph<TestStorage> {
+    Graph::open(test_engine::open(path)).unwrap()
 }
 
-fn names_of(graph: &Graph<RedbStorage>) -> Names {
+fn names_of(graph: &Graph<TestStorage>) -> Names {
     let mut tx = graph.write().unwrap();
     let names = Names {
         labels: LABEL_NAMES.map(|name| tx.intern_token(name).unwrap()),
@@ -638,7 +639,7 @@ fn names_of(graph: &Graph<RedbStorage>) -> Names {
 
 fn run(steps: &[Step]) -> Result<(), TestCaseError> {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("maintenance.redb");
+    let path = directory.path().join("maintenance.rhizodb");
     let mut graph = open(&path);
     let names = names_of(&graph);
     let mut model = Model::new();

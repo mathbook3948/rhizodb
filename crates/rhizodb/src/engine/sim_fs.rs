@@ -529,10 +529,6 @@ impl FileSystem for SimFs {
 }
 
 impl BlockFile for SimFile {
-    fn block_size(&self) -> BlockSize {
-        self.size
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(Some(self.inode), false)?;

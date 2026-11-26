@@ -29,58 +29,6 @@ pub(crate) struct RelationshipRecord {
     pub(crate) properties: Properties,
 }
 
-fn encode_properties(properties: &Properties, out: &mut Vec<u8>) {
-    put_varint(out, properties.len());
-    for (key, value) in properties {
-        out.extend_from_slice(&key.id().to_be_bytes());
-        value.encode_into(out);
-    }
-}
-
-fn decode_properties(reader: &mut Reader<'_>) -> Result<Properties, DecodeError> {
-    let count = reader.varint()?;
-    let mut properties = Properties::new();
-    for _ in 0..count {
-        let key = Token::new(reader.u32()?);
-        properties.insert(key, reader.value()?);
-    }
-    Ok(properties)
-}
-
-fn read_labels(reader: &mut Reader<'_>) -> Result<BTreeSet<Token<Label>>, DecodeError> {
-    let label_count = reader.varint()?;
-    let mut labels = BTreeSet::new();
-    for _ in 0..label_count {
-        labels.insert(Token::new(reader.u32()?));
-    }
-    Ok(labels)
-}
-
-impl NodeRecord {
-    /// The stored node record, which holds the properties. The labels go to node meta.
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_properties(&self.properties, &mut out);
-        out
-    }
-
-    pub(crate) fn decode_properties(bytes: &[u8]) -> Result<Properties, DecodeError> {
-        let mut reader = Reader::new(bytes);
-        let properties = decode_properties(&mut reader)?;
-        reader.finish()?;
-        Ok(properties)
-    }
-
-    /// A node record written before node meta, which held the labels ahead of the properties.
-    pub(crate) fn decode_with_labels(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(bytes);
-        let labels = read_labels(&mut reader)?;
-        let properties = decode_properties(&mut reader)?;
-        reader.finish()?;
-        Ok(Self { labels, properties })
-    }
-}
-
 fn token<K>(reader: &mut Reader<'_>) -> Result<Token<K>, DecodeError> {
     u32::try_from(reader.varint_u64()?)
         .map(Token::new)
@@ -138,33 +86,6 @@ impl RelationshipRecord {
             let key = token(&mut reader)?;
             properties.insert(key, reader.value()?);
         }
-        reader.finish()?;
-        Ok(Self {
-            rel_type,
-            source,
-            target,
-            properties,
-        })
-    }
-
-    /// The record as format 10 and earlier stored it, for tests that write an older format.
-    #[cfg(test)]
-    pub(crate) fn encode_fixed(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&self.rel_type.id().to_be_bytes());
-        out.extend_from_slice(&self.source.0.to_be_bytes());
-        out.extend_from_slice(&self.target.0.to_be_bytes());
-        encode_properties(&self.properties, &mut out);
-        out
-    }
-
-    /// A record written before format 11, with its type and ends at fixed width.
-    pub(crate) fn decode_fixed(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut reader = Reader::new(bytes);
-        let rel_type = Token::new(reader.u32()?);
-        let source = NodeId(reader.u64()?);
-        let target = NodeId(reader.u64()?);
-        let properties = decode_properties(&mut reader)?;
         reader.finish()?;
         Ok(Self {
             rel_type,

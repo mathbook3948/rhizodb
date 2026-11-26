@@ -98,6 +98,7 @@ impl<'db> ReadTransaction<'db> {
 /// share(&db.begin_write()?);
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
+#[must_use = "a write transaction rolls back when it is dropped without a commit"]
 pub struct WriteTransaction<'db> {
     tx: Option<GraphTx<<Backend as Storage>::Write<'db>>>,
     began: DateTime,

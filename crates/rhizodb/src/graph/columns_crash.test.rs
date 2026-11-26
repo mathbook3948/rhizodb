@@ -11,13 +11,13 @@ use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 
 const GROUP: u64 = meta::SLOTS as u64;
 
-type Work = fn(&mut GraphTx<<RedbStorage as Storage>::Write<'_>>, &mut Model);
+type Work = fn(&mut GraphTx<<TestStorage as Storage>::Write<'_>>, &mut Model);
 
 fn prepare(fs: &SimFs, small: u64) -> Model {
     let graph = open(fs);
@@ -41,11 +41,11 @@ fn prepare(fs: &SimFs, small: u64) -> Model {
     model
 }
 
-fn one_value(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn one_value(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     set(write, model, 4, "a", Some(PropertyValue::Integer(-77)));
 }
 
-fn one_node(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn one_node(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     create(write, model, true, values_of(0x0102_0304));
     set(
         write,
@@ -57,7 +57,7 @@ fn one_node(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mu
     set(write, model, 12, "b", None);
 }
 
-fn many_values(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn many_values(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     let ids: Vec<u64> = model.nodes.keys().copied().collect();
     for id in ids {
         set(write, model, id, "a", Some(PropertyValue::Float(id as f64)));
@@ -67,14 +67,14 @@ fn many_values(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: 
     }
 }
 
-fn delete_many(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn delete_many(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     let doomed: Vec<u64> = model.nodes.keys().copied().step_by(3).collect();
     for id in doomed {
         delete(write, model, id);
     }
 }
 
-fn empty_a_column(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn empty_a_column(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     let held: Vec<u64> = model
         .nodes
         .range(GROUP..2 * GROUP)
@@ -86,7 +86,7 @@ fn empty_a_column(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, mode
     set(write, model, 1, "d", Some(PropertyValue::Boolean(true)));
 }
 
-fn fold_deltas(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn fold_deltas(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     for id in (1..200).step_by(2).take(columns::MAX_DELTAS) {
         set(
             write,
@@ -137,7 +137,7 @@ fn crash_at_every_operation(small: u64, work: Work) {
             };
             for mode in modes(seeds) {
                 let recovered = fs.crash(mode);
-                let graph = match sim_backend::storage(&recovered)
+                let graph = match test_engine::on_sim(&recovered)
                     .map_err(GraphError::from)
                     .and_then(Graph::open)
                 {
@@ -272,6 +272,6 @@ fn no_writer_after_a_commit_that_failed_breaks_the_delta_limit_of_a_group() {
     }
 }
 
-fn b_token(write: &GraphTx<<RedbStorage as Storage>::Write<'_>>) -> Token<PropertyKey> {
+fn b_token(write: &GraphTx<<TestStorage as Storage>::Write<'_>>) -> Token<PropertyKey> {
     write.lookup_token::<PropertyKey>("b").unwrap().unwrap()
 }

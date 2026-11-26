@@ -23,7 +23,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A chunk holds a layout byte, a bitmap of the slots that hold a relationship, and each of those records in slot order after its length as a varint.
 - A chunk without relationships is not stored.
 - A write transaction loads a chunk the first time it changes it and writes the chunks it changed at commit, or all of them earlier once they hold more than 4 MiB of records.
-- Opening a database written before relationship chunks moves every relationship record into its chunk, encoding again the records written before varint relationship records, in the opening write transaction.
+- Opening a database written before relationship chunks moves every relationship record into its chunk, in the opening write transaction.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
 - An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.
 - A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.
@@ -41,7 +41,6 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A write transaction loads a segment, with its deltas, the first time it changes it, and keeps each changed slot as its change against the stored parts until commit.
 - A commit writes the segments it changed in key order.
 - Each adjacency part and delta carries a CRC-32 that covers its key, so a damaged entry or one read under another key is reported as corruption.
-- Opening a database written before adjacency segments moves its adjacency index entries into segments one row group at a time, in the opening write transaction.
 - Nodes fall into row groups of 4096 consecutive IDs.
 - Each row group with a live node has one node meta chunk, keyed by the group, that holds a live bitmap and each live node's label set.
 - A node's labels live only in node meta, and its properties live only in property columns.
@@ -64,7 +63,6 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A node meta chunk holds its group inside its first checksum, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
 - Node meta checksums are CRC-32, which needs no dependency outside the allowed licenses.
 - A write transaction reads each ID and token counter once and writes it once, at commit.
-- Opening a database written before node meta moves each node's labels into node meta and empties the old label index, in the opening write transaction.
 - Each row group keeps one property column per property key that a live node of the group holds, stored as segments of 64 slots.
 - A segment is stored as one or more parts, keyed by the group, the key, the segment, and the part, with each number in its fewest big-endian bytes.
 - A part stays small enough that the storage engine packs four or more parts with their keys into one page, so no stored value spans a page and reading one value copies little.
@@ -93,7 +91,6 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Listing a node's properties seeks to the first segment of each column of its group and reads the node's delta.
 - A part's checksum covers its key, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
 - Setting a property updates only the indexes on a label of the node that cover that property, and changing a label updates only the indexes on that label.
-- Opening a database written before property columns moves each node record's properties into property columns and deletes the records, in the opening write transaction.
 - Stored property values are null-free.
 - Setting a property to null removes it.
 - A stored value is a boolean, integer, float, string, byte string, temporal value, or a list of stored values.

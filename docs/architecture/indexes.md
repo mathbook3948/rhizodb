@@ -71,7 +71,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction.
 - That rebuild records the current tokenizer.
 - Changing what the tokenizer produces on purpose raises its version.
-- The word segmentation and normalization crates are each pinned to one exact version.
+- The word segmentation and normalization crates take any semver-compatible version, and one whose Unicode tables change the tokenizer's output rebuilds keyword indexes through the recorded tokenizer.
 - A vector index covers one property and has a fixed dimension and one metric: cosine, euclidean, or dot product.
 - An element is in a vector index when the property is a list of finite numbers of the index's dimension whose length is small enough that no score can overflow, and under cosine large enough that no product of lengths can underflow.
 - Any other value leaves the element out of the vector index without an error.

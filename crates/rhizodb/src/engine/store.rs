@@ -31,7 +31,6 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
-use super::convert;
 use super::error::EngineError;
 use super::extent::Blocks;
 use super::extent::ExtentTable;
@@ -104,7 +103,7 @@ pub(crate) enum CheckpointMode {
     /// On a thread of the engine's own, while commits go on.
     Background,
     /// On the committing thread, so a test sees the same operations every run.
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     Inline,
 }
 
@@ -559,15 +558,13 @@ fn checkpoint_worker<F: FileSystem + 'static>(
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
-    /// Opens the database file `name` on `fs`, creating it when there is none, converting it
-    /// when it holds a redb database, and replays the log of an unclean shutdown before it
-    /// returns.
+    /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
+    /// log of an unclean shutdown before it returns.
     pub(crate) fn open(
         fs: Arc<F>,
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         let header = read_header(&file)?;
         let pages = Arc::new(Pages::new(
@@ -681,7 +678,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             make_recovery_durable(&shared, &fs, name)?;
         }
         let (jobs, worker) = match options.checkpoint {
-            #[cfg(any(test, feature = "fuzzing"))]
+            #[cfg(any(test, fuzzing))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
                 let (sender, receiver) = mpsc::channel::<Task<F>>();
@@ -812,7 +809,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
