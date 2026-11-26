@@ -19,3 +19,20 @@ rule:
     has:
       kind: block_mapping_pair
       regex: persist-credentials:\s*false
+---
+id: action-pinned-by-sha
+language: yaml
+severity: error
+message: An action is pinned to a full commit SHA, followed by a `# vX.Y.Z` comment naming its release.
+files:
+  - .github/workflows/*.yml
+rule:
+  kind: block_mapping_pair
+  all:
+    - has:
+        field: key
+        regex: ^uses$
+    - has:
+        field: value
+        not:
+          regex: ^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$

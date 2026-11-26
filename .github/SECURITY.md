@@ -17,7 +17,8 @@ Report it through [GitHub private vulnerability reporting](https://github.com/ma
 - the query, the database file, or the code that shows the problem, and
 - what an attacker can do with it.
 
-The maintainer aims to acknowledge a report within 7 days and to share an assessment within 30 days. Replies come in the advisory, and you can follow the fix there.
+The maintainer aims to acknowledge a report within 7 days and to share an assessment within 30 days.
+Replies come in the advisory, and you can follow the fix there.
 
 ## In scope
 

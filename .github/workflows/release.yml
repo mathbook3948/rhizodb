@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
       - name: Check that the tag is on main and matches the crate version
         shell: bash
         run: |
@@ -48,7 +48,7 @@ jobs:
             echo "CHANGELOG.md has no notes under ## $version" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: notes
           path: notes.md
@@ -62,10 +62,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
       - run: mise run check
 
   randomized:
@@ -73,21 +73,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
       - run: mise run random-deep
         env:
-          RHIZODB_TEST_SCALE: "1"
+          RHIZODB_TEST_SCALE: "10"
+
+  package:
+    needs: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Rust toolchain that mise.toml pins
+        shell: bash
+        run: |
+          toolchain="$(sed -n 's/^rust = { version = "\([^"]*\)".*/\1/p' mise.toml)"
+          if [ -z "$toolchain" ]; then
+            echo "mise.toml pins no Rust version" >&2
+            exit 1
+          fi
+          rustup toolchain install "$toolchain" --profile minimal
+          rustup default "$toolchain"
+      - name: Package the crate and build it from its packaged files
+        shell: bash
+        run: cargo package --package rhizodb --locked
 
   publish:
-    needs: [check, randomized]
+    needs: [check, randomized, package]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the Rust toolchain that mise.toml pins
@@ -114,11 +136,7 @@ jobs:
           else
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Package and build the crate without the token
-        if: steps.published.outputs.done == 'false'
-        shell: bash
-        run: cargo package --package rhizodb --locked
-      - name: Publish the verified package
+      - name: Publish the package the package job verified
         if: steps.published.outputs.done == 'false'
         shell: bash
         env:
@@ -132,7 +150,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: notes
       - name: Create the GitHub release unless it exists
