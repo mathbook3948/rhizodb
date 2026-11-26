@@ -51,7 +51,6 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every fixture is opened through the public API, and its answers to a set of queries, printed by the commit that wrote it, must hold after the upgrade.
 - CI runs each randomized storage test with a fixed number of cases, and a nightly workflow runs a hundred times as many on every CI platform.
 - A failing case a randomized test finds is checked in, and every later run replays it.
-- Power loss under a real file system is tested on LazyFS in a nightly job, with no device-mapper targets.
 - The parser, the value decoder, damaged database files, and random write transactions are fuzzed.
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
@@ -77,4 +76,4 @@ A database that returns wrong results or loses data after a crash is worse than 
 
 ## Open
 
-None
+- How power loss under a real file system is tested, such as on LazyFS in a nightly job, since the simulated file system models only the syncs the engine asks for and a killed process keeps the page cache.
