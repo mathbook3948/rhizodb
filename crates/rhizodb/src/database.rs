@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::engine::any_fs;
 use crate::engine::any_fs::AnyFs;
+use crate::engine::layout::BLOCK;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
 use crate::error::Error;
@@ -22,12 +23,12 @@ use crate::transaction::WriteTransaction;
 
 pub(crate) type Backend = Engine<AnyFs>;
 
-fn open_backend(path: &Path) -> Result<Backend, Error> {
-    Ok(any_fs::open_path(path, EngineOptions::default()).map_err(StorageError::from)?)
+fn open_backend(path: &Path, engine: EngineOptions) -> Result<Backend, Error> {
+    Ok(any_fs::open_path(path, engine).map_err(StorageError::from)?)
 }
 
-fn in_memory_backend() -> Result<Backend, Error> {
-    Ok(any_fs::in_memory(EngineOptions::default()).map_err(StorageError::from)?)
+fn in_memory_backend(engine: EngineOptions) -> Result<Backend, Error> {
+    Ok(any_fs::in_memory(engine).map_err(StorageError::from)?)
 }
 
 /// How to open a database file, for settings beyond what [`Database::open`] chooses. Settings
@@ -51,6 +52,7 @@ fn in_memory_backend() -> Result<Backend, Error> {
 pub struct OpenOptions {
     create: bool,
     parallelism: Parallelism,
+    engine: EngineOptions,
 }
 
 impl Default for OpenOptions {
@@ -58,6 +60,7 @@ impl Default for OpenOptions {
         Self {
             create: true,
             parallelism: Parallelism::default(),
+            engine: EngineOptions::default(),
         }
     }
 }
@@ -111,11 +114,30 @@ impl OpenOptions {
         self
     }
 
+    /// How many bytes of file pages the database keeps in memory, which defaults to 1 GiB. A read
+    /// of a page the cache does not hold reads it from the file, and the cache then evicts a
+    /// page no read used recently, so a database larger than its cache works and only reads more
+    /// of the file. The size is rounded down to whole 4 KiB pages, and the cache holds at least
+    /// 256 KiB. Set it below the default where the host runs under a memory limit.
+    ///
+    /// ```
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    ///
+    /// let db = OpenOptions::new().cache_size(8 << 20).in_memory()?;
+    /// db.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn cache_size(mut self, bytes: usize) -> Self {
+        self.engine.cache_pages = bytes / BLOCK;
+        self
+    }
+
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
         Ok(Database {
-            graph: Graph::open(in_memory_backend()?)?,
+            graph: Graph::open(in_memory_backend(self.engine)?)?,
             statements: Statements::new(self.parallelism),
         })
     }
@@ -130,7 +152,7 @@ impl OpenOptions {
             ));
         }
         Ok(Database {
-            graph: Graph::open(open_backend(path)?)?,
+            graph: Graph::open(open_backend(path, self.engine)?)?,
             statements: Statements::new(self.parallelism),
         })
     }

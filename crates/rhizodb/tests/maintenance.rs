@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
+use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Value;
 use support::*;
@@ -101,6 +102,32 @@ fn stats_count_the_log_and_the_cache() {
     }
     let read = db.stats().unwrap();
     assert!(read.cache_hits > compacted.cache_hits, "{read:?}");
+}
+
+#[test]
+fn a_cache_smaller_than_the_file_reads_its_pages_again_and_returns_the_same_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.db");
+    let db = Database::open(&path).unwrap();
+    fill_with_long_values(&db);
+    fill(&db);
+    drop(db);
+    let total = "MATCH (n:Item) RETURN sum(size(n.text)) + sum(size(n.pad))";
+    let misses_of_two_scans = |db: &Database| {
+        let first = single(db, total);
+        let before = db.stats().unwrap().cache_misses;
+        assert_eq!(single(db, total), first);
+        (first, db.stats().unwrap().cache_misses - before)
+    };
+    let (full, again_full) = misses_of_two_scans(&Database::open(&path).unwrap());
+    let small = OpenOptions::new()
+        .cache_size(256 << 10)
+        .open(&path)
+        .unwrap();
+    let (capped, again_capped) = misses_of_two_scans(&small);
+    assert_eq!(capped, full);
+    assert_eq!(again_full, 0);
+    assert!(again_capped > 0, "{again_capped}");
 }
 
 #[test]
