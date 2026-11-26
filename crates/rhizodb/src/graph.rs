@@ -95,6 +95,16 @@ use relationships::ChunkEdit;
 use relationships::ChunkRef;
 
 const FORMAT_VERSION: u32 = 14;
+
+/// The graph format a write of `value` under `key` of the metadata table records, when it is
+/// newer than this build reads.
+pub(crate) fn newer_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
+    if key != keys::FORMAT_VERSION_KEY {
+        return None;
+    }
+    let version = u32::from_be_bytes(value.try_into().ok()?);
+    (version > FORMAT_VERSION).then_some(version)
+}
 const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;

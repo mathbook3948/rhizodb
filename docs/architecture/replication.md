@@ -59,6 +59,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `apply` fails with `Fenced` for a record of a term lower than the highest the replica has seen, and with `Diverged` for another writer in the newest term or for different changes where the replica holds some.
 - `apply` takes the first record of a term equal to the highest term the replica has heard of, since a file hears of a term from a peer before it receives that term's first record, and refuses one of a term no higher than its newest term.
 - A failed `apply` keeps every record before the one it refused.
+- `apply` refuses with `UnsupportedFormatVersion` the record that writes a graph format newer than this build reads, after it applies the records before it, so a replica of an older build never logs a format it would misread.
 - `apply` on a writer or a fenced writer fails with `NotReplica`.
 - `promote` with a term higher than every term seen writes a configuration record and makes the database the writer.
 - `promote` with the newest term and writer id writes nothing and makes the file that began that term the writer again, and fails with `Diverged` on a copy of that file or after a step down.

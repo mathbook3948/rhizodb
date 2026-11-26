@@ -652,6 +652,35 @@ mod crash {
         assert_eq!(error.kind(), ErrorKind::Diverged);
     }
 
+    #[test]
+    fn a_replica_refuses_a_graph_format_newer_than_it_reads_and_keeps_the_changes_before_it() {
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+        let writer = open_on(&SimFs::new(), false);
+        writer.promote(1, b"w").unwrap();
+        insert(&writer, 1);
+        let replica = open_on(&SimFs::new(), true);
+        sync(&writer, &replica).unwrap();
+        insert(&writer, 2);
+        let before_newer = writer.position();
+        let mut write = writer.graph.storage().begin_write().unwrap();
+        write
+            .put(Table::Metadata, b"format_version", &99u32.to_be_bytes())
+            .unwrap();
+        write.commit().unwrap();
+        insert(&writer, 3);
+        let changes = writer.changes_since(&replica.position(), 1 << 20).unwrap();
+        let error = replica.apply(&changes).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnsupportedFormatVersion);
+        assert_eq!(replica.position(), before_newer);
+        let rows = replica
+            .execute("MATCH (n:N) RETURN count(n)", &Parameters::new())
+            .unwrap();
+        assert_eq!(rows.rows(), [vec![Value::Integer(2)]]);
+        integrity(&replica);
+    }
+
     fn rejoin(old: &Database, next: &Database) -> Result<(), crate::Error> {
         old.acknowledge(b"next", &next.position())?;
         old.demote(std::time::Duration::from_secs(1))?;
