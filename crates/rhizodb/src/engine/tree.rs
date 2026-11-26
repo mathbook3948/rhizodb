@@ -22,6 +22,7 @@ use super::page::PageKind;
 use super::pages::PageSource;
 use super::pages::load_blob;
 use super::view::Visit;
+use super::view::Wanted;
 use crate::storage::StorageError;
 
 /// The deepest tree the engine reads, so a damaged pointer cycle cannot recurse forever.
@@ -138,10 +139,11 @@ fn ends_before(end: Bound<&[u8]>, key: &[u8]) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Range<'a> {
     start: Bound<&'a [u8]>,
     end: Bound<&'a [u8]>,
+    wanted: Wanted<'a>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,6 +325,7 @@ impl Tree {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
         let Some(root) = self.roots.get(&table) else {
@@ -331,7 +334,7 @@ impl Tree {
         self.descend(
             table,
             root,
-            Range { start, end },
+            Range { start, end, wanted },
             visit,
             &mut Vec::new(),
             None,
@@ -345,6 +348,7 @@ impl Tree {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
         finger: &Finger,
     ) -> Result<(), E> {
@@ -353,7 +357,14 @@ impl Tree {
         };
         let mut key = Vec::new();
         let Ok(mut held) = finger.0.try_lock() else {
-            return self.descend(table, root, Range { start, end }, visit, &mut key, None);
+            return self.descend(
+                table,
+                root,
+                Range { start, end, wanted },
+                visit,
+                &mut key,
+                None,
+            );
         };
         let target = match start {
             Bound::Included(target) | Bound::Excluded(target) => Some(target),
@@ -364,7 +375,7 @@ impl Tree {
             .as_ref()
             .filter(|leaf| leaf.table == table && target.is_some_and(|t| leaf.bounds.covers(t)))
         {
-            let range = Range { start, end };
+            let range = Range { start, end, wanted };
             if self.scan_page(table, &leaf.page, 0, None, range, visit, &mut key, None)?
                 == Flow::Done
             {
@@ -380,7 +391,7 @@ impl Tree {
         let outcome = self.descend(
             table,
             root,
-            Range { start, end },
+            Range { start, end, wanted },
             visit,
             &mut key,
             Some(&mut seek),
@@ -441,7 +452,7 @@ impl Tree {
         key: &mut Vec<u8>,
         seek: Option<&mut Seek>,
     ) -> Result<Flow, E> {
-        let Range { start, end } = range;
+        let Range { start, end, wanted } = range;
         let load = self.load_key();
         let node = Node::parse(&cached.header, &cached.bytes, table).map_err(lift)?;
         let first = match start {
@@ -474,6 +485,9 @@ impl Tree {
                 }
                 match node.value(index).map_err(lift)? {
                     CellValue::Inline(value) => visit(key, value)?,
+                    CellValue::External(_) if wanted.is_some_and(|wanted| !wanted(key)) => {
+                        visit(key, &[])?;
+                    }
                     CellValue::External(blob) => {
                         let value = load_blob(&*self.source, &blob, Role::Value).map_err(lift)?;
                         visit(key, &value)?;
@@ -499,6 +513,7 @@ impl Tree {
                     Bound::Unbounded
                 },
                 end,
+                wanted,
             };
             let mut child_seek = seek.take();
             if let Some(seek) = child_seek.as_deref_mut() {

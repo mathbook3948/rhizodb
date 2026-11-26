@@ -105,6 +105,7 @@ impl Store {
             TABLE,
             Bound::Unbounded,
             Bound::Unbounded,
+            None,
             &mut |key, value| {
                 scanned.push((key.to_vec(), value.to_vec()));
                 Ok(())
@@ -132,6 +133,7 @@ impl Store {
                 TABLE,
                 Bound::Excluded(start),
                 Bound::Included(end),
+                None,
                 &mut |key, _| {
                     ranged.push(key.to_vec());
                     Ok(())
@@ -387,6 +389,7 @@ proptest! {
                 TABLE,
                 start.as_ref().map(Vec::as_slice),
                 end.as_ref().map(Vec::as_slice),
+                None,
                 &mut |key, value| {
                     scanned.push((key.to_vec(), value.to_vec()));
                     Ok(())

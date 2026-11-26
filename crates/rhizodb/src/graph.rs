@@ -978,6 +978,7 @@ impl<T: ReadTransaction> GraphTx<T> {
         reader: &mut AdjacencyReader,
         side: Side,
         prefix: &[u8],
+        position: usize,
         mut visit: impl FnMut(&[u8], &[u8], &mut Option<adjacency::Checked>) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
         let entries = reader.entries(side, prefix, |window| {
@@ -1009,10 +1010,15 @@ impl<T: ReadTransaction> GraphTx<T> {
                 Ok(())
             }
             Entries::Stored => {
-                self.transaction
-                    .visit_prefix(Table::Adjacency, prefix, |key, value| {
-                        visit(key, value, &mut None)
-                    })
+                let covers = |key: &[u8]| {
+                    adjacency::parse_key(key).map_or(true, |(_, entry)| entry.covers(position))
+                };
+                self.transaction.visit_prefix_where(
+                    Table::Adjacency,
+                    prefix,
+                    &covers,
+                    |key, value| visit(key, value.unwrap_or_default(), &mut None),
+                )
             }
         }
     }
@@ -1044,6 +1050,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             reader,
             side,
             &adjacency::segment_prefix(side, first.group, first.segment),
+            position,
             |key, value, verified| {
                 let (id, entry) = adjacency::parse_key(key)?;
                 if edited == Some(id.rel_type) {
@@ -1099,10 +1106,16 @@ impl<T: ReadTransaction> GraphTx<T> {
             return edit.visit(position, &mut emit);
         }
         let mut read = SlotRead::default();
-        self.visit_adjacency_prefix(reader, id.side, &id.prefix(), |key, value, verified| {
-            let (_, entry) = adjacency::parse_key(key)?;
-            read.visit(entry, position, (key, value, verified), &mut emit)
-        })?;
+        self.visit_adjacency_prefix(
+            reader,
+            id.side,
+            &id.prefix(),
+            position,
+            |key, value, verified| {
+                let (_, entry) = adjacency::parse_key(key)?;
+                read.visit(entry, position, (key, value, verified), &mut emit)
+            },
+        )?;
         read.finish(&mut emit)
     }
 

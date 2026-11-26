@@ -9,6 +9,7 @@ use super::memtable::Slot;
 use super::memtable::bounds_are_ordered;
 use super::view::View;
 use super::view::Visit;
+use super::view::Wanted;
 use super::view::merge_over;
 use super::wal_format::Op;
 use super::wal_format::OpRef;
@@ -96,7 +97,7 @@ impl Staged {
         }
         let mut doomed = Vec::new();
         let bounds = (Bound::Included(start), Bound::Excluded(end));
-        self.scan(table, bounds.0, bounds.1, &mut |key, _| {
+        self.scan(table, bounds.0, bounds.1, None, &mut |key, _| {
             doomed.push(Arc::<[u8]>::from(key));
             Ok::<_, StorageError>(())
         })?;
@@ -148,6 +149,7 @@ impl Staged {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
         let upper: Vec<(Bytes, Slot)> = match self.overlay.get(&table) {
@@ -159,7 +161,7 @@ impl Staged {
         };
         merge_over(
             &upper,
-            |lower| self.view.scan(table, start, end, lower),
+            |lower| self.view.scan(table, start, end, wanted, lower),
             visit,
         )
     }

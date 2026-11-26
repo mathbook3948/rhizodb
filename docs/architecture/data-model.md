@@ -29,6 +29,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A segment lists each slot's relationships in ascending ID order, each ID after the first as its distance from the one before and each far node as a varint, all varints in their shortest form.
 - A segment is stored as parts that each cover the same run of slots, the longest under which every part fits a page, or one slot when none does, and a part without relationships is not stored.
 - A part's key holds its run of slots and its index, so a reader finds the part that holds a slot from the keys of one prefix scan.
+- A read of one node's adjacency reads the value of only the entries that cover its slot, so a node beside a hub in its segment does not read the hub's part.
 - A part holds the end offset of each of its slots but the last, two bytes each, or four when its relationships take more than 64 KiB.
 - Reading a node's adjacency of one type is one prefix scan of the segment, and of every type one prefix scan of the run of slots.
 - A query that reads the same adjacency prefix twice in a row keeps its entries for its next reads on that side, and still checks each entry only where a read meets it.

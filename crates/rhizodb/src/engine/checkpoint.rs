@@ -766,6 +766,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             table,
             Bound::Unbounded,
             Bound::Unbounded,
+            None,
             &mut |key, value| {
                 let key = Bytes::from(key);
                 let value = self.stored(table, &key, &Bytes::from(value))?;

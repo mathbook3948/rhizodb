@@ -55,6 +55,7 @@ use super::tree::Tree;
 use super::view::Layers;
 use super::view::View;
 use super::view::Visit;
+use super::view::Wanted;
 use super::view::prefix_end;
 use super::wal::Detached;
 use super::wal::LogIdentity;
@@ -1384,6 +1385,7 @@ trait Reads {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E>;
 }
@@ -1403,9 +1405,10 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
-        self.view.scan(table, start, end, visit)
+        self.view.scan(table, start, end, wanted, visit)
     }
 }
 
@@ -1424,9 +1427,10 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
-        self.staged.scan(table, start, end, visit)
+        self.staged.scan(table, start, end, wanted, visit)
     }
 }
 
@@ -1440,7 +1444,7 @@ fn scan_prefix<R: Reads>(
     prefix: &[u8],
 ) -> Result<Vec<Entry>, StorageError> {
     let (start, end) = prefix_bounds(prefix);
-    collect(|visit| reads.walk(TableId::of(table), start, end_bound(&end), visit))
+    collect(|visit| reads.walk(TableId::of(table), start, end_bound(&end), None, visit))
 }
 
 fn scan_range<R: Reads>(
@@ -1457,6 +1461,7 @@ fn scan_range<R: Reads>(
             TableId::of(table),
             Bound::Included(start),
             Bound::Excluded(end),
+            None,
             visit,
         )
     })
@@ -1481,7 +1486,24 @@ fn visit_prefix<R: Reads, E: From<StorageError>>(
     mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
 ) -> Result<(), E> {
     let (start, end) = prefix_bounds(prefix);
-    reads.walk(TableId::of(table), start, end_bound(&end), &mut visit)
+    reads.walk(TableId::of(table), start, end_bound(&end), None, &mut visit)
+}
+
+fn visit_prefix_where<R: Reads, E: From<StorageError>>(
+    reads: &R,
+    table: Table,
+    prefix: &[u8],
+    wanted: &dyn Fn(&[u8]) -> bool,
+    mut visit: impl FnMut(&[u8], Option<&[u8]>) -> Result<(), E>,
+) -> Result<(), E> {
+    let (start, end) = prefix_bounds(prefix);
+    reads.walk(
+        TableId::of(table),
+        start,
+        end_bound(&end),
+        Some(wanted),
+        &mut |key, value| visit(key, wanted(key).then_some(value)),
+    )
 }
 
 fn visit_range<R: Reads, E: From<StorageError>>(
@@ -1498,6 +1520,7 @@ fn visit_range<R: Reads, E: From<StorageError>>(
         TableId::of(table),
         Bound::Included(start),
         Bound::Excluded(end),
+        None,
         &mut visit,
     )
 }
@@ -1538,6 +1561,16 @@ macro_rules! read_transaction {
                 visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
             ) -> Result<(), E> {
                 visit_prefix(self, table, prefix, visit)
+            }
+
+            fn visit_prefix_where<E: From<StorageError>>(
+                &self,
+                table: Table,
+                prefix: &[u8],
+                wanted: &dyn Fn(&[u8]) -> bool,
+                visit: impl FnMut(&[u8], Option<&[u8]>) -> Result<(), E>,
+            ) -> Result<(), E> {
+                visit_prefix_where(self, table, prefix, wanted, visit)
             }
 
             fn visit_range<E: From<StorageError>>(

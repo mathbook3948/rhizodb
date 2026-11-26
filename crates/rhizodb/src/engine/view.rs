@@ -51,6 +51,10 @@ impl Clone for View {
 
 pub(crate) type Visit<'a, E> = &'a mut dyn FnMut(&[u8], &[u8]) -> Result<(), E>;
 
+/// The keys whose values a scan reads when they lie outside their page. A scan visits any other
+/// key with an empty value. `None` reads every value.
+pub(crate) type Wanted<'a> = Option<&'a dyn Fn(&[u8]) -> bool>;
+
 impl View {
     pub(crate) fn new(snapshot: u64, layers: Arc<Layers>) -> Self {
         Self {
@@ -100,6 +104,7 @@ impl View {
         table: TableId,
         start: Bound<&[u8]>,
         end: Bound<&[u8]>,
+        wanted: Wanted<'_>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
         let upper = self.memtable_range(table, start, end);
@@ -108,7 +113,7 @@ impl View {
             |lower| {
                 self.layers
                     .tree
-                    .scan_near(table, start, end, lower, &self.finger)
+                    .scan_near(table, start, end, wanted, lower, &self.finger)
             },
             visit,
         )

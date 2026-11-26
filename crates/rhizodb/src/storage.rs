@@ -244,6 +244,20 @@ pub(crate) trait ReadTransaction {
         visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E>;
 
+    /// [`ReadTransaction::visit_prefix`], with the value of only an entry whose key `wanted`
+    /// accepts, so a backend may skip reading the others.
+    fn visit_prefix_where<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        wanted: &dyn Fn(&[u8]) -> bool,
+        mut visit: impl FnMut(&[u8], Option<&[u8]>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.visit_prefix(table, prefix, |key, value| {
+            visit(key, wanted(key).then_some(value))
+        })
+    }
+
     /// Calls `visit` with every entry whose key is at least `start` and below `end`, in
     /// ascending key order, without copying them. An empty or reversed range visits nothing.
     fn visit_range<E: From<StorageError>>(

@@ -950,6 +950,53 @@ fn a_scan_of_a_reopened_file_reads_each_run_of_leaves_in_one_read() {
     );
 }
 
+#[test]
+fn a_filtered_prefix_visit_reads_only_the_values_it_wants() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let mut write = engine.begin_write().unwrap();
+    for key in 0..8u8 {
+        write
+            .put(Table::Nodes, &[key], &vec![key; 64 << 10])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    engine.close().unwrap();
+    let reopened = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let wanted = |key: &[u8]| key == [3];
+    fn visit(
+        seen: &mut Vec<(u8, Option<Vec<u8>>)>,
+    ) -> impl FnMut(&[u8], Option<&[u8]>) -> Result<(), StorageError> + '_ {
+        |key, value| {
+            seen.push((key[0], value.map(<[u8]>::to_vec)));
+            Ok(())
+        }
+    }
+
+    let read = reopened.begin_read().unwrap();
+    let before = fs.operations();
+    let mut seen = Vec::new();
+    read.visit_prefix_where(Table::Nodes, &[], &wanted, visit(&mut seen))
+        .unwrap();
+    let reads = fs.operations() - before;
+    let mut write = reopened.begin_write().unwrap();
+    write.put(Table::Nodes, &[3], b"own").unwrap();
+    write.put(Table::Nodes, &[5], b"own").unwrap();
+    let mut own = Vec::new();
+    write
+        .visit_prefix_where(Table::Nodes, &[], &wanted, visit(&mut own))
+        .unwrap();
+
+    let expected = |three: Vec<u8>| {
+        (0..8u8)
+            .map(|key| (key, (key == 3).then(|| three.clone())))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(seen, expected(vec![3; 64 << 10]));
+    assert!(reads <= 3, "{reads} reads for one of 8 values");
+    assert_eq!(own, expected(b"own".to_vec()));
+}
+
 fn load_items(engine: &Engine<SimFs>, round: u32) {
     for batch in 0..12u32 {
         let mut write = engine.begin_write().unwrap();

@@ -160,3 +160,45 @@ fn a_query_that_expands_nodes_again_after_adding_relationships_sees_them() {
     );
     assert_eq!(rows, [vec![Value::Integer(160), Value::Integer(160)]]);
 }
+
+#[test]
+fn the_neighbours_of_a_hub_read_their_own_relationships_from_a_reopened_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.db");
+    let db = rhizodb::Database::open(&path).unwrap();
+    run(&db, "UNWIND range(0, 15) AS k CREATE (:N {k: k})");
+    run(
+        &db,
+        "MATCH (h:N {k: 3}) UNWIND range(1, 3000) AS i CREATE (h)<-[:IN]-(:L)",
+    );
+    run(
+        &db,
+        "MATCH (n:N) WHERE n.k <> 3 UNWIND range(1, n.k) AS i CREATE (n)<-[:IN]-(:L), (n)-[:OUT]->(:L)",
+    );
+    drop(db);
+    let db = rhizodb::Database::open(&path).unwrap();
+    let counts = |db: &rhizodb::Database| {
+        ints(&run(
+            db,
+            "MATCH (n:N) OPTIONAL MATCH (n)<-[r:IN]-() WITH n, count(r) AS typed \
+             OPTIONAL MATCH (n)-[s]-() WITH n, typed, count(s) AS all \
+             RETURN typed * 10000 + all ORDER BY n.k",
+        ))
+    };
+    let expected = |hub: i64, five: i64| {
+        (0..16)
+            .map(|k| match k {
+                3 => hub * 10000 + hub,
+                5 => five * 10000 + five + 5,
+                0 => 0,
+                k => k * 10000 + 2 * k,
+            })
+            .collect::<Vec<i64>>()
+    };
+    assert_eq!(counts(&db), expected(3000, 5));
+    run(
+        &db,
+        "MATCH (n:N) WHERE n.k IN [3, 5] CREATE (n)<-[:IN]-(:L)",
+    );
+    assert_eq!(counts(&db), expected(3001, 6));
+}

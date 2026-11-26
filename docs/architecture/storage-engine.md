@@ -153,6 +153,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
 - A scan that misses the cache on a child of a branch reads that child with the children after it in the scan's range that lie within the next 32 blocks of the same extent, in one read, and keeps each of them that checks.
 - A point read takes no pages along, since its next read lies elsewhere in the file.
+- A prefix scan may name the keys whose values it wants, and reads no value stored outside its page for the other keys.
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
