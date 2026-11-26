@@ -2048,7 +2048,7 @@ impl Binder<'_> {
         let held = || Box::new(Expr::Slot(slot));
         let mut branches = Vec::new();
         for branch in &case.branches {
-            let mut condition: Option<Expr> = None;
+            let mut tests = Vec::new();
             for operand in &branch.when {
                 let test = match operand {
                     ast::WhenOperand::Value(value) => Expr::Comparison(
@@ -2063,14 +2063,9 @@ impl Binder<'_> {
                         negated: *negated,
                     },
                 };
-                condition = Some(match condition {
-                    Some(earlier) => {
-                        Expr::Binary(ast::BinaryOp::Or, Box::new(earlier), Box::new(test))
-                    }
-                    None => test,
-                });
+                tests.push(test);
             }
-            if let Some(condition) = condition {
+            if let Some(condition) = any_of(tests) {
                 branches.push((condition, self.expr(&branch.then, scope, mode)?));
             }
         }
@@ -2686,6 +2681,18 @@ fn aggregate_function(name: &str) -> Option<AggregateFunction> {
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(_, function)| *function)
+}
+
+fn any_of(mut tests: Vec<Expr>) -> Option<Expr> {
+    if tests.len() <= 1 {
+        return tests.pop();
+    }
+    let later = tests.split_off(tests.len().div_ceil(2));
+    Some(Expr::Binary(
+        ast::BinaryOp::Or,
+        Box::new(any_of(tests)?),
+        Box::new(any_of(later)?),
+    ))
 }
 
 fn ordered_input(

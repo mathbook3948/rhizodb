@@ -104,7 +104,12 @@ impl Parser {
     }
 
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
-        self.nested(|parser| parser.binary_chain(min_precedence))
+        self.nested(|parser| {
+            let outer = std::mem::replace(&mut parser.peak, parser.depth);
+            let chain = parser.binary_chain(min_precedence);
+            parser.peak = parser.peak.max(outer);
+            chain
+        })
     }
 
     fn binary_chain(&mut self, min_precedence: u8) -> ParseResult<Expr> {
@@ -115,7 +120,14 @@ impl Parser {
             if precedence < min_precedence {
                 break;
             }
-            self.deepen()?;
+            if let Infix::Binary(op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), _) = infix {
+                in_comparison_chain = false;
+                lhs = self.logic_chain(op, precedence, lhs)?;
+                continue;
+            }
+            if !(in_comparison_chain && matches!(infix, Infix::Comparison(_))) {
+                self.deepen()?;
+            }
             lhs = match infix {
                 Infix::Is => {
                     in_comparison_chain = false;
@@ -132,6 +144,22 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    fn logic_chain(&mut self, op: BinaryOp, precedence: u8, first: Expr) -> ParseResult<Expr> {
+        let mut operands = vec![(first, self.peak)];
+        while matches!(self.peek_infix(), Some(Infix::Binary(next, _)) if next == op) {
+            self.pos += 1;
+            let outer = std::mem::replace(&mut self.peak, self.depth);
+            let operand = self.binary(precedence + 1)?;
+            operands.push((operand, std::mem::replace(&mut self.peak, outer)));
+        }
+        let (chain, peak) = balanced(op, operands);
+        if peak > super::MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.peak = self.peak.max(peak);
+        Ok(chain)
     }
 
     fn is_suffix(&mut self, lhs: Expr) -> ParseResult<Expr> {
@@ -860,6 +888,25 @@ fn quantifier_named(name: &Name) -> Option<Quantifier> {
     } else {
         None
     }
+}
+
+fn balanced(op: BinaryOp, mut operands: Vec<(Expr, usize)>) -> (Expr, usize) {
+    if operands.len() == 1
+        && let Some(operand) = operands.pop()
+    {
+        return operand;
+    }
+    let right = operands.split_off(operands.len().div_ceil(2));
+    let (lhs, lhs_peak) = balanced(op, operands);
+    let (rhs, rhs_peak) = balanced(op, right);
+    (
+        Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        },
+        lhs_peak.max(rhs_peak) + 1,
+    )
 }
 
 #[cfg(test)]

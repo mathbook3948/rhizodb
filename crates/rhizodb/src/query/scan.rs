@@ -1374,7 +1374,7 @@ fn conjunction(mut conjuncts: Vec<Pred>) -> Option<Pred> {
     if conjuncts.len() <= 1 {
         return conjuncts.pop();
     }
-    let right = conjuncts.split_off(conjuncts.len() / 2);
+    let right = conjuncts.split_off(conjuncts.len().div_ceil(2));
     let left = conjunction(conjuncts)?;
     let right = conjunction(right)?;
     Some(Pred::Logic(BinaryOp::And, Box::new(left), Box::new(right)))

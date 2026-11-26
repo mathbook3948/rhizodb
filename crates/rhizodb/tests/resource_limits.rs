@@ -276,6 +276,33 @@ fn a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack() {
 }
 
 #[test]
+fn long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack() {
+    let test = "long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a: 7}), (:L {a: 20000})");
+    let ors: Vec<String> = (0..20_000).map(|value| format!("n.a = {value}")).collect();
+    let tests: Vec<String> = (0..20_000).map(|value| value.to_string()).collect();
+    let texts = [
+        format!("MATCH (n:L) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!("MATCH (n) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!(
+            "MATCH (n:L) RETURN sum(CASE n.a WHEN {} THEN 1 ELSE 0 END)",
+            tests.join(", ")
+        ),
+        format!("RETURN toInteger(true{})", " AND true".repeat(20_000)),
+        format!("RETURN toInteger(0 < 1{})", " <= 1".repeat(20_000)),
+    ];
+    on_small_stack(|| {
+        for text in &texts {
+            assert_eq!(single(&db, text), int(1), "{}", &text[..40]);
+        }
+    });
+}
+
+#[test]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {

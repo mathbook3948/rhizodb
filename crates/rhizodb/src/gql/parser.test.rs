@@ -587,6 +587,28 @@ fn nesting_within_the_limit_still_parses() {
 }
 
 #[test]
+fn long_flat_chains_of_logic_and_comparison_parse() {
+    for (first, operator) in [
+        ("true", " OR true"),
+        ("true", " AND true"),
+        ("true", " XOR true"),
+        ("1", " < 2"),
+        ("1", " = 1"),
+    ] {
+        let input = format!("RETURN {first}{}", operator.repeat(100_000));
+        assert!(parse(&input).is_ok(), "{operator}");
+    }
+    let nested = format!("RETURN {}true{}", "(true OR ".repeat(30), ")".repeat(30));
+    assert!(parse(&nested).is_ok());
+    let too_deep = format!(
+        "RETURN {}true{}",
+        "(true OR true OR true OR ".repeat(100),
+        ")".repeat(100)
+    );
+    assert_eq!(error(&too_deep).1, SyntaxErrorKind::NestingTooDeep);
+}
+
+#[test]
 fn nested_trim_calls_parse_in_time_linear_in_their_depth() {
     let depth = 50;
     let input = format!("RETURN {}'x'{}", "trim(".repeat(depth), ")".repeat(depth));
@@ -632,5 +654,18 @@ fn arbitrary_garbage_never_panics() {
         "é",
     ] {
         let _ = parse(source);
+    }
+}
+
+#[test]
+fn zz_probe_depth() {
+    for k in [5usize, 10, 15, 20, 25, 30, 40] {
+        let nested = format!("RETURN {}true{}", "(true OR ".repeat(k), ")".repeat(k));
+        let flat = format!("RETURN {}true{}", "(".repeat(k), ")".repeat(k));
+        println!(
+            "{k}: or={:?} paren={:?}",
+            parse(&nested).is_ok(),
+            parse(&flat).is_ok()
+        );
     }
 }
