@@ -45,6 +45,8 @@ use std::ops::Bound;
 
 const UNDERFULL: usize = BLOCK / 4;
 
+const CATALOG_ATTEMPTS_IN_HOLES: usize = 4;
+
 #[derive(Debug)]
 enum Child {
     Existing { low: Bytes, page: ChildRef },
@@ -207,6 +209,7 @@ pub(crate) struct Checkpointer<'a, B: BlockFile> {
     lsn: u64,
     generation: u64,
     entry_change: i64,
+    freed: u64,
 }
 
 impl<'a, B: BlockFile> Checkpointer<'a, B> {
@@ -222,7 +225,13 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             lsn,
             generation,
             entry_change: 0,
+            freed: 0,
         }
+    }
+
+    /// The blocks of pages and runs freed so far, the previous catalog aside.
+    pub(crate) fn freed(&self) -> u64 {
+        self.freed
     }
 
     fn source(&self) -> &dyn PageSource {
@@ -234,13 +243,18 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         pages: &Pages<B>,
         length: usize,
         lsn: u64,
+        role: Role,
     ) -> Result<Vec<RunRef>, EngineError> {
         let mut runs = split_runs(length)
             .into_iter()
             .rev()
             .map(|payload| {
                 let blocks = run_blocks(payload);
-                let at = extents.place(blocks, |id, slot| pages.place_extent(id, slot))?;
+                let opened = |id, slot| pages.place_extent(id, slot);
+                let at = match role {
+                    Role::Catalog => extents.place_in_open(blocks, opened)?,
+                    Role::Key | Role::Value => extents.place(blocks, opened)?,
+                };
                 Ok(RunRef { at, blocks, lsn })
             })
             .collect::<Result<Vec<_>, EngineError>>()?;
@@ -305,7 +319,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         owner: &[u8],
         bytes: &[u8],
     ) -> Result<BlobRef, EngineError> {
-        let runs = Self::plan_runs(&mut self.extents, self.pages, bytes.len(), self.lsn)?;
+        let runs = Self::plan_runs(&mut self.extents, self.pages, bytes.len(), self.lsn, role)?;
         self.write_runs(&runs, role, table, owner, bytes)
     }
 
@@ -313,6 +327,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         let mut run = blob.first;
         for _ in 0..(blob.length as usize / RUN_PAYLOAD_LIMIT + 1) {
             self.extents.free(run.at, run.blocks)?;
+            self.freed += u64::from(run.blocks);
             if blob.length as usize <= RUN_PAYLOAD_LIMIT {
                 return Ok(());
             }
@@ -393,6 +408,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         let load = |blob: &BlobRef| load_blob(self.source(), blob, Role::Key);
         let (content, owned) = node.content(&load, low)?;
         self.extents.free(page.at, 1)?;
+        self.freed += 1;
         for blob in owned {
             self.free_item(&blob, Role::Key)?;
         }
@@ -674,6 +690,7 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             }
             let child = node.child(0)?;
             self.extents.free(page.at, 1)?;
+            self.freed += 1;
             page = child;
             level -= 1;
         }
@@ -690,25 +707,34 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
         for run in previous {
             self.extents.free(run.at, run.blocks)?;
         }
+        self.extents.move_down();
         let dropped = self.extents.drop_empty();
         let mut length = Catalog {
             roots: roots.clone(),
             extents: self.extents.clone(),
+            live_counts: None,
         }
         .encode()?
         .len();
+        let mut attempts = 0;
         loop {
             let mut planned = self.extents.clone();
-            let runs = Self::plan_runs(&mut planned, self.pages, length, self.lsn)?;
+            if attempts >= CATALOG_ATTEMPTS_IN_HOLES {
+                planned.holes.clear();
+            }
+            attempts += 1;
+            let runs = Self::plan_runs(&mut planned, self.pages, length, self.lsn, Role::Catalog)?;
             let payload = Catalog {
                 roots: roots.clone(),
                 extents: planned.clone(),
+                live_counts: None,
             }
             .encode()?;
             if payload.len() == length {
                 self.extents = planned;
                 self.write_runs(&runs, Role::Catalog, TableId(0), &[], &payload)?;
                 self.extents.reusable.clear();
+                self.extents.holes.clear();
                 return Ok(Finished {
                     catalog: runs,
                     extents: self.extents,

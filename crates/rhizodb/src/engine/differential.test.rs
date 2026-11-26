@@ -71,6 +71,7 @@ fn compare(steps: &[Step]) -> Result<(), TestCaseError> {
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
         reclaim_slack: EngineOptions::default().reclaim_slack,
+        stage_floor: EngineOptions::default().stage_floor,
     };
     let mut reference = Some(RedbStorage::open(&path).unwrap());
     let mut engine = Some(Engine::open(Arc::new(fs.clone()), "graph.rhizo", options).unwrap());

@@ -36,6 +36,7 @@ fn sample() -> Header {
             salt: 0xDEAD_BEEF,
         },
         clean: true,
+        staged_lsn: 0,
     }
 }
 
@@ -57,6 +58,41 @@ fn a_header_round_trips_and_fills_one_block() {
         ..header
     };
     assert_eq!(Header::decode(&unclean.encode()).unwrap(), unclean);
+}
+
+#[test]
+fn a_staged_header_keeps_the_log_start_and_names_the_tree_lsn_past_it() {
+    let staged = Header {
+        clean: false,
+        staged_lsn: 1500,
+        catalog_lsn: 1500,
+        ..sample()
+    };
+    let decoded = Header::decode(&staged.encode()).unwrap();
+    assert_eq!(decoded, staged);
+    assert_eq!(decoded.checkpoint_lsn, 1000);
+    assert_eq!(decoded.tree_lsn(), 1500);
+    assert_eq!(sample().tree_lsn(), 1000);
+    for bad in [
+        Header {
+            clean: true,
+            ..staged
+        },
+        Header {
+            staged_lsn: 1000,
+            catalog_lsn: 900,
+            ..staged
+        },
+        Header {
+            catalog_lsn: 1501,
+            ..staged
+        },
+    ] {
+        assert!(
+            Header::decode(&bad.encode()).unwrap_err().is_corrupt(),
+            "{bad:?}"
+        );
+    }
 }
 
 #[test]
@@ -230,6 +266,11 @@ fn header_strategy() -> impl Strategy<Value = Header> {
                     wal: WalIdentity {
                         first_segment: wal[0],
                         salt: wal[1],
+                    },
+                    staged_lsn: if clean || lsn > u64::MAX - 1000 {
+                        0
+                    } else {
+                        lsn + 1 + hlc % 1000
                     },
                     clean,
                 };
