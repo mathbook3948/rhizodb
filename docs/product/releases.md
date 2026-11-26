@@ -24,6 +24,7 @@ The crate is developed and released from its own repository, and hosts depend on
 - The published crate carries both license texts.
 - The guide for hosts is the crate-level documentation, so docs.rs shows it and its examples run as doctests.
 - The README's example runs as a doctest, and every program in `crates/rhizodb/examples` runs in `mise run check`, so neither goes stale.
+- The crate keeps a byte-identical copy of the workspace README, not a symlink, since a checkout without symlinks would turn a symlink into a text file, and a check fails when the copy differs.
 - Every public item has documentation, which a lint enforces.
 
 ## Open
