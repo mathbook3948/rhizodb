@@ -49,6 +49,7 @@ unsafe impl GlobalAlloc for Peak {
 static ALLOCATOR: Peak = Peak;
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn detach_deleting_a_hub_named_by_every_matched_row_reads_its_adjacency_once() {
     let db = Database::in_memory().unwrap();
     let followers = 3000;

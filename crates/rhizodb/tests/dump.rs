@@ -536,6 +536,7 @@ impl io::Read for Interrupted<'_> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_write_from_another_thread_waits_for_the_whole_import() {
     let source = db();
     run(&source, "UNWIND range(1, 25000) AS i INSERT (:Item {i: i})");

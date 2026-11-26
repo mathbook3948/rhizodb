@@ -128,12 +128,14 @@ fn an_import_and_a_writer(check: Check) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 #[should_panic]
 fn checking_only_before_the_storage_lock_lets_a_write_in_between_batches() {
     shuttle::check_random(|| an_import_and_a_writer(Check::Before), schedules());
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn checking_again_after_the_storage_lock_keeps_other_writes_out_of_an_import() {
     shuttle::check_random(
         || an_import_and_a_writer(Check::BeforeAndAfter),
