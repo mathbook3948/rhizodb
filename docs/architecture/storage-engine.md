@@ -56,7 +56,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - `check` checks the file as its last checkpoint left it, and the commits after that checkpoint are checked as the log replays them.
 - Each block cache shard counts its hits and misses beside its lock, so counting adds no shared cache line to a read.
 - A vector index may read its vectors from the property column instead of keeping a copy.
-- The concurrency core of the engine is checked with loom.
 - Every engine checksum is a 64-bit xxh3 hash, from the MIT-licensed twox-hash crate.
 - The database file is made of 4096-byte blocks.
 - Blocks 0 and 1 of the database file are two header slots, written in turn, and the valid slot of the higher generation describes the database.
@@ -164,9 +163,9 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 
 ## Open
 
+- How the engine's reader registration, commit, freeze, checkpoint, and slot reuse are explored across thread interleavings, beyond the randomized tests that run them on real threads.
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
-- Whether a database file is locked against a second process.
 - How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
