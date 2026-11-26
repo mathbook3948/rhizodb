@@ -158,11 +158,7 @@ pub enum ErrorKind {
     ReservedProcedureName,
     /// The storage engine failed.
     Storage,
-    /// Stored data does not decode, breaks an invariant, or makes the storage engine fail. Once
-    /// the storage engine panics on a damaged file, every later operation on that [`Database`]
-    /// fails this way until the file is opened again.
-    ///
-    /// [`Database`]: crate::Database
+    /// Stored data does not decode, breaks an invariant, or makes the storage engine fail.
     CorruptData,
     /// The database was written in a format version this build cannot read.
     UnsupportedFormatVersion,
@@ -172,7 +168,8 @@ pub enum ErrorKind {
     /// its settings do not create one.
     DatabaseNotFound,
     /// The database file is already open, in this process or another, so it cannot be opened
-    /// again until that `Database` is dropped.
+    /// again until that `Database` is dropped. A file system that does not support file locks
+    /// gives no such check, and a second open of a file there succeeds.
     DatabaseAlreadyOpen,
     /// [`Database::backup_to`](crate::Database::backup_to) found a file or directory at the
     /// path, which a backup never replaces.

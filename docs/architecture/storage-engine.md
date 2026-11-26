@@ -162,7 +162,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
-- Whether a database file is locked against a second process.
 - How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
