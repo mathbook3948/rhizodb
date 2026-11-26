@@ -242,11 +242,11 @@ fn header_strategy() -> impl Strategy<Value = Header> {
     (
         any::<u128>(),
         any::<u64>(),
-        1u64..u64::MAX,
-        any::<u64>(),
+        1u64..COUNTER_LIMIT,
+        0..COUNTER_LIMIT,
         any::<u64>(),
         any::<bool>(),
-        any::<[u64; 2]>(),
+        (0..COUNTER_LIMIT, any::<u64>()),
         (2u64..1 << 40),
         proptest::array::uniform4((0u64..2, any::<u64>(), 0..=EXTENT_BLOCKS)),
     )
@@ -264,10 +264,10 @@ fn header_strategy() -> impl Strategy<Value = Header> {
                     next_extent: ExtentId(next),
                     open: [OpenExtent::default(); OPEN_EXTENTS],
                     wal: WalIdentity {
-                        first_segment: wal[0],
-                        salt: wal[1],
+                        first_segment: wal.0,
+                        salt: wal.1,
                     },
-                    staged_lsn: if clean || lsn > u64::MAX - 1000 {
+                    staged_lsn: if clean || lsn > COUNTER_LIMIT - 1000 {
                         0
                     } else {
                         lsn + 1 + hlc % 1000
@@ -306,4 +306,41 @@ proptest! {
         }
         let _ = Header::decode(&block);
     }
+}
+
+#[test]
+fn a_counter_in_the_upper_half_of_its_range_is_corrupt() {
+    let top = 1 << 63;
+    let bad = [
+        Header {
+            generation: top + 1,
+            ..sample()
+        },
+        Header {
+            checkpoint_lsn: u64::MAX,
+            catalog_lsn: 0,
+            ..sample()
+        },
+        Header {
+            wal: WalIdentity {
+                first_segment: u64::MAX,
+                salt: 1,
+            },
+            ..sample()
+        },
+        Header {
+            next_extent: ExtentId(top),
+            ..sample()
+        },
+    ];
+    for header in bad {
+        let error = Header::decode(&header.encode()).unwrap_err();
+        assert!(error.is_corrupt(), "{error}");
+    }
+    let highest = Header {
+        generation: top - 1,
+        checkpoint_lsn: top - 1,
+        ..sample()
+    };
+    assert_eq!(Header::decode(&highest.encode()).unwrap(), highest);
 }

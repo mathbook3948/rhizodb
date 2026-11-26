@@ -64,6 +64,13 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Appending keys in small commits split a full page in two at many checkpoints, so tables loaded in key order, such as new node IDs, kept about one half-full page per such checkpoint. Appends now leave full pages.
+- `Database::check` held the lock that checkpoints take for its whole walk of the file, so on a large database checkpoints and then commits stalled until it finished. It now reads the last checkpoint without that lock.
+- A damaged header whose generation, LSN, or log segment counter sat near the top of its range could panic in a debug build or wrap around in release. Such a header now fails as corrupt data.
+- An automatic compaction that ran while a read transaction was open could not reuse the space it emptied, so it grew the file instead of shrinking it and held off the next compaction. It now waits until the transactions that began before the checkpoint have ended.
+- A damaged database file whose catalog claimed a huge number of extent slots opened, then made its first checkpoint run out of memory. An open now ignores the free slots after the last extent in use, and fails as corrupt data when an extent starts past the end of the file.
+- A backup that failed, for example on a full disk, left the log segments of its staging copy in the target directory for good. They are now removed with the staging file.
+- A log segment that the engine failed to remove after a checkpoint, for example one another program held open on Windows or one already deleted, made every later commit fail until the database was reopened. The segment is now left for the next open to remove.
 - The doctests compile from the published package, whose README the crate now includes, so `cargo test` runs in an unpacked copy of the crate.
 - Opening a file whose storage-engine format is newer than this build fails with `ErrorKind::UnsupportedFormatVersion` instead of `ErrorKind::Storage`, so a host that rolls back a release can tell it from a disk fault.
 - A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
