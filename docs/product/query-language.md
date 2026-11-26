@@ -132,7 +132,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
 - Reading the labels of a node deleted earlier in the same query fails.
 - A `MERGE` property that evaluates to null is an error.
-- `range()` has a length cap, so one query cannot exhaust the host's memory.
+- A list a query builds has a length cap and a string a query builds a byte cap, so neither `range()` nor doubling a value with `+`, `||`, or `replace()` can make one value exhaust the host's memory.
+- A list or string past its cap fails with `ErrorKind::NumberOutOfRange` before it is allocated.
 - Floats convert to strings in the same form as the openCypher reference implementation.
 - Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
 - `length()` takes a path, and `size()` takes a list or a string.
@@ -215,3 +216,4 @@ GQL is the reference language, but the only public conformance suite is the open
 
 - Whether a variable, alias, or `YIELD` name that is a reserved word fails where it is bound, as in Cypher, rather than where the query reads it back.
 - What `TRUE`, `FALSE`, `NULL`, `DISTINCT`, and `NOT` mean when bound as a variable, since reading one back now gives the literal, the modifier, or the operator instead of the variable.
+- Whether a query gets a memory budget of its own, since values under the caps can still multiply through nested list comprehensions.

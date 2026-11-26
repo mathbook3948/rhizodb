@@ -506,6 +506,42 @@ fn range_refuses_to_build_a_list_past_its_limit_however_little_is_read() {
 }
 
 #[test]
+fn strings_and_lists_a_query_builds_stop_at_their_length_limits() {
+    let test = "strings_and_lists_a_query_builds_stop_at_their_length_limits";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    let wide = Parameters::new().with("text", "x".repeat(20_000));
+    for text in [
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s + s))",
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s || s))",
+        "RETURN size(reduce(s = 1, i IN range(1, 45) | s + toString(s)))",
+        "RETURN size(range(1, 10000000) + 0)",
+        "RETURN size(0 + range(1, 10000000))",
+        "RETURN size(range(1, 10000000) + [0])",
+        "RETURN size(range(1, 10000000) || [0])",
+        "RETURN size(replace($text, '', $text))",
+        "RETURN size(replace($text, 'x', $text))",
+    ] {
+        assert_eq!(
+            db.execute(text, &wide).unwrap_err().kind(),
+            ErrorKind::NumberOutOfRange,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        db.execute(
+            "RETURN size(replace($text, 'x', 'yy')), size(range(1, 9999999) + 0)",
+            &wide
+        )
+        .unwrap()
+        .rows(),
+        [vec![int(40_000), int(10_000_000)]]
+    );
+}
+
+#[test]
 fn skip_and_limit_at_the_integer_maximum_neither_overflow_nor_allocate() {
     let db = db();
     assert_eq!(

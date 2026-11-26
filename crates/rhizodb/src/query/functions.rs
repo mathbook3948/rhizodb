@@ -9,6 +9,7 @@ use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
 use super::compare::equals;
+use super::datum;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::arithmetic;
@@ -964,6 +965,17 @@ impl<T: ReadTransaction> Env<'_, T> {
                         }
                     };
                 };
+                if to.len() > from.len() {
+                    let matches = if from.is_empty() {
+                        text.chars().count().saturating_add(1)
+                    } else {
+                        text.matches(from.as_str()).count()
+                    };
+                    datum::check_string_bytes(
+                        text.len()
+                            .saturating_add(matches.saturating_mul(to.len() - from.len())),
+                    )?;
+                }
                 Ok(Datum::String(text.replace(from.as_str(), to)))
             }
             Function::Temporal(temporal) => {
