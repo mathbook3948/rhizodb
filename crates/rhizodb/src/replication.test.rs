@@ -381,6 +381,46 @@ mod crash {
         assert_eq!(error.kind(), ErrorKind::Fenced);
     }
 
+    fn while_checkpointing<T>(db: &Database, run: impl FnOnce() -> T) -> T {
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                db.graph.storage().while_checkpointing(|| {
+                    locked.send(()).unwrap();
+                    let _ = released.recv_timeout(std::time::Duration::from_secs(2));
+                });
+            });
+            is_locked.recv().unwrap();
+            let start = std::time::Instant::now();
+            let out = run();
+            let waited = start.elapsed();
+            let _ = release.send(());
+            assert!(
+                waited < std::time::Duration::from_secs(1),
+                "a replication call waited {waited:?} on a checkpoint"
+            );
+            out
+        })
+    }
+
+    #[test]
+    fn positions_changes_and_applies_never_wait_on_a_checkpoint() {
+        let writer = open_on(&SimFs::new(), false);
+        writer.promote(1, b"w").unwrap();
+        let replica = open_on(&SimFs::new(), true);
+        insert(&writer, 1);
+        sync(&writer, &replica).unwrap();
+        insert(&writer, 2);
+        let expected = writer.position();
+        let changes = while_checkpointing(&writer, || {
+            assert_eq!(writer.position(), expected);
+            writer.changes_since(&replica.position(), 1 << 20).unwrap()
+        });
+        let reached = while_checkpointing(&replica, || replica.apply(&changes).unwrap());
+        assert_eq!(reached, expected);
+    }
+
     #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);

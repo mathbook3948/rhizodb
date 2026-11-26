@@ -225,6 +225,12 @@ enum Task<F: FileSystem> {
     Remove(Detached<F>),
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Identity {
+    database_id: u128,
+    replication: Replication,
+}
+
 #[derive(Debug)]
 struct Shared<F: FileSystem> {
     options: EngineOptions,
@@ -237,6 +243,7 @@ struct Shared<F: FileSystem> {
     published: Mutex<Published>,
     writer: Mutex<Writer<F>>,
     durable: Mutex<Durable>,
+    identity: Mutex<Identity>,
     droppable: Mutex<Option<u64>>,
     running: Mutex<bool>,
     finished: Condvar,
@@ -750,6 +757,10 @@ fn make_recovery_durable<F: FileSystem + 'static>(
     shared
         .needed
         .store(header.wal.first_segment, Ordering::Relaxed);
+    *lock(&shared.identity) = Identity {
+        database_id: header.database_id,
+        replication: header.replication,
+    };
     durable.header = header;
     drop(durable);
     writer.last_hlc = hlc;
@@ -894,6 +905,10 @@ impl<F: FileSystem + 'static> Engine<F> {
                 chain,
             }),
             trees: Mutex::new(vec![Arc::downgrade(&tree)]),
+            identity: Mutex::new(Identity {
+                database_id: header.database_id,
+                replication: header.replication,
+            }),
             durable: Mutex::new(Durable {
                 header,
                 extents,
@@ -1237,6 +1252,13 @@ impl<F: FileSystem + 'static> Engine<F> {
             header,
             extents,
         })
+    }
+
+    #[cfg(test)]
+    /// Runs `run` while holding the lock a checkpoint holds across its merge and sync.
+    pub(crate) fn while_checkpointing<T>(&self, run: impl FnOnce() -> T) -> T {
+        let _durable = lock(&self.shared.durable);
+        run()
     }
 
     #[cfg(test)]

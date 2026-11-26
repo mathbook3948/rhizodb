@@ -254,7 +254,7 @@ impl<F: FileSystem + 'static> Engine<F> {
 
     /// The highest term this database has seen, in its history or from a peer.
     pub(crate) fn seen_term(&self) -> u64 {
-        let seen = lock(&self.shared.durable).header.replication.seen_term;
+        let seen = lock(&self.shared.identity).replication.seen_term;
         seen.max(top(&lock(&self.shared.epochs)).term)
     }
 
@@ -272,8 +272,8 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// zero while it holds nothing.
     pub(crate) fn lineage(&self) -> u128 {
         let (origin, own) = {
-            let header = lock(&self.shared.durable).header;
-            (header.replication.origin, header.database_id)
+            let identity = *lock(&self.shared.identity);
+            (identity.replication.origin, identity.database_id)
         };
         if lock(&self.shared.published).view.snapshot == 0 {
             0
@@ -305,6 +305,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             shared.poison_with(&error);
             return Err(error);
         }
+        lock(&shared.identity).replication = header.replication;
         durable.header = header;
         Ok(())
     }
@@ -362,7 +363,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         if after >= upto {
             return Ok(Vec::new());
         }
-        let database_id = lock(&shared.durable).header.database_id;
+        let database_id = lock(&shared.identity).database_id;
         let fs = &*shared.fs;
         let sequences = segment_files(fs, &shared.name)?;
         let mut start = None;
@@ -393,6 +394,10 @@ impl<F: FileSystem + 'static> Engine<F> {
                 None => match open_segment(fs, &shared.name, sequences[index], database_id) {
                     Ok(segment) => segment,
                     Err(_) if index + 1 == sequences.len() => break,
+                    Err(error) if is_gone(&error) && records.is_empty() => {
+                        return Err(too_far_behind(after, oldest));
+                    }
+                    Err(error) if is_gone(&error) => break,
                     Err(error) => return Err(error),
                 },
             };
@@ -461,7 +466,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 _ => {}
             }
         }
-        let seen = lock(&shared.durable).header.replication.seen_term;
+        let seen = lock(&shared.identity).replication.seen_term;
         let mut offered = changes.after.clone();
         let mut offered_chain = changes.after_chain;
         {
@@ -630,7 +635,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     ) -> Result<(), EngineError> {
         let shared = &*self.shared;
         self.drop_segments_aside(writer);
-        let incarnation = lock(&shared.durable).header.replication.incarnation;
+        let incarnation = lock(&shared.identity).replication.incarnation;
         let lsn = writer.last_lsn + 1;
         let hlc = hybrid_clock_after(writer.last_hlc);
         let bytes = config_record(lsn, term, hlc, writer.chain, (writer_id, incarnation, step))?;
@@ -665,7 +670,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             return Err(shared.refusal());
         }
         let epochs = self.epochs();
-        let replication = lock(&shared.durable).header.replication;
+        let replication = lock(&shared.identity).replication;
         let seen = replication.seen_term.max(top(&epochs).term);
         let offered = EpochId {
             term,
