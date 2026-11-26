@@ -13,6 +13,7 @@ use crate::temporal::build::Kind as TemporalKind;
 use super::builtin::Builtin;
 use super::datum::Datum;
 use super::functions::Function;
+use super::orient;
 use super::plan::Aggregate;
 use super::plan::AggregateFunction;
 use super::plan::CallClause;
@@ -1002,7 +1003,9 @@ impl Binder<'_> {
             .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
         for (part, first) in patterns.iter_mut().zip(firsts) {
-            part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
+            orient::orient(part, |part| {
+                seek::derive(part, filter.as_ref(), &introduced[first..])
+            });
         }
         let by_id = match patterns.as_slice() {
             [part] => {
@@ -1010,6 +1013,7 @@ impl Binder<'_> {
                     let mut bound = part.clone();
                     bound.start.bound = true;
                     bound.seeks = Vec::new();
+                    bound.others = Vec::new();
                     Box::new(IdStart {
                         value,
                         clause: MatchClause {
@@ -1084,7 +1088,9 @@ impl Binder<'_> {
             path,
             start,
             steps,
+            left: 0,
             seeks: Vec::new(),
+            others: Vec::new(),
         })
     }
 
@@ -2382,6 +2388,9 @@ impl Binder<'_> {
                 PatternUse::Predicate,
                 &mut introduced,
             )?);
+        }
+        for part in &mut bound {
+            orient::orient(part, |_| Vec::new());
         }
         let filter = match filter {
             Some(filter) => Some(self.filter(filter, &inner, mode)?),

@@ -249,7 +249,7 @@ fn is_point(test: &SeekTest) -> bool {
     matches!(test, SeekTest::Equal(_) | SeekTest::In(_))
 }
 
-fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
+pub(crate) fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
     let all = |items: &[Expr]| items.iter().all(|item| independent(item, bound_later));
     let maybe = |item: Option<&Expr>| item.is_none_or(|item| independent(item, bound_later));
     match expr {
@@ -321,7 +321,20 @@ fn deterministic(function: Function) -> bool {
     )
 }
 
-type Found = (Vec<u64>, Option<Token<PropertyKey>>);
+enum Lookup {
+    Unserved,
+    Over,
+    Found(Vec<u64>, Option<Token<PropertyKey>>),
+}
+
+enum Indexed {
+    /// No index serves it.
+    Unserved,
+    /// The label or relationship type it names does not exist, so it finds nothing.
+    Nothing,
+    /// This index, over this property.
+    Index(u32, Token<PropertyKey>),
+}
 
 /// The start nodes a seek found, ascending and each once.
 #[derive(Debug)]
@@ -345,18 +358,31 @@ impl<T: ReadTransaction> Env<'_, T> {
         part: &PatternPart,
         row: &Row,
     ) -> Result<Option<Sought>, Error> {
+        self.seek_within(part, row, usize::MAX)
+    }
+
+    /// [`Env::seek_start`], or `None` as soon as the seek that applies finds more than `limit`
+    /// start nodes.
+    pub(crate) fn seek_within(
+        &self,
+        part: &PatternPart,
+        row: &Row,
+        limit: usize,
+    ) -> Result<Option<Sought>, Error> {
         for seek in &part.seeks {
             let (elements, served) = match &seek.key {
-                SeekKey::Id => (self.id_seek(seek, row), None),
-                SeekKey::Property(key) => match self.property_seek(part, seek, key, row)? {
-                    Some((elements, served)) => (Some(elements), served),
-                    None => (None, None),
+                SeekKey::Id => match self.id_seek(seek, row) {
+                    Some(ids) if ids.len() > limit => return Ok(None),
+                    Some(ids) => (ids, None),
+                    None => continue,
+                },
+                SeekKey::Property(key) => match self.property_seek(part, seek, key, row, limit)? {
+                    Lookup::Unserved => continue,
+                    Lookup::Over => return Ok(None),
+                    Lookup::Found(elements, served) => (elements, served),
                 },
             };
-            let Some(elements) = elements else {
-                continue;
-            };
-            return Ok(Some(match seek.element {
+            let sought = match seek.element {
                 SeekElement::Start => Sought {
                     nodes: elements.into_iter().map(NodeId).collect(),
                     labelled: matches!(seek.key, SeekKey::Property(_)),
@@ -367,9 +393,60 @@ impl<T: ReadTransaction> Env<'_, T> {
                     labelled: false,
                     served: None,
                 },
-            }));
+            };
+            return Ok((sought.nodes.len() <= limit).then_some(sought));
         }
         Ok(None)
+    }
+
+    /// Whether a seek of `part` applies, which may still fail if its value fails to evaluate.
+    pub(crate) fn seek_served(&self, part: &PatternPart) -> Result<bool, Error> {
+        for seek in &part.seeks {
+            let served = match &seek.key {
+                SeekKey::Id => true,
+                SeekKey::Property(key) => {
+                    !matches!(self.seek_index(part, seek, key)?, Indexed::Unserved)
+                }
+            };
+            if served {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn seek_index(&self, part: &PatternPart, seek: &Seek, key: &str) -> Result<Indexed, Error> {
+        let target = match seek.element {
+            SeekElement::Start => {
+                let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
+                    return Ok(Indexed::Unserved);
+                };
+                match self.tx.lookup_token::<Label>(&label.0)? {
+                    Some(token) => Target::Label(token),
+                    None => return Ok(Indexed::Nothing),
+                }
+            }
+            SeekElement::FirstRelationship => {
+                let Some(LabelExpr::Name(rel_type)) = part
+                    .steps
+                    .first()
+                    .and_then(|step| step.relationship.labels.as_ref())
+                else {
+                    return Ok(Indexed::Unserved);
+                };
+                match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
+                    Some(token) => Target::RelationshipType(token),
+                    None => return Ok(Indexed::Nothing),
+                }
+            }
+        };
+        let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
+            return Ok(Indexed::Unserved);
+        };
+        Ok(match self.property_index(target, property)? {
+            Some(index) => Indexed::Index(index, property),
+            None => Indexed::Unserved,
+        })
     }
 
     fn id_seek(&self, seek: &Seek, row: &Row) -> Option<Vec<u64>> {
@@ -398,36 +475,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         seek: &Seek,
         key: &str,
         row: &Row,
-    ) -> Result<Option<Found>, Error> {
-        let target = match seek.element {
-            SeekElement::Start => {
-                let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
-                    return Ok(None);
-                };
-                match self.tx.lookup_token::<Label>(&label.0)? {
-                    Some(token) => Target::Label(token),
-                    None => return Ok(Some((Vec::new(), None))),
-                }
-            }
-            SeekElement::FirstRelationship => {
-                let Some(LabelExpr::Name(rel_type)) = part
-                    .steps
-                    .first()
-                    .and_then(|step| step.relationship.labels.as_ref())
-                else {
-                    return Ok(None);
-                };
-                match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
-                    Some(token) => Target::RelationshipType(token),
-                    None => return Ok(Some((Vec::new(), None))),
-                }
-            }
-        };
-        let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
-            return Ok(None);
-        };
-        let Some(index) = self.property_index(target, property)? else {
-            return Ok(None);
+        limit: usize,
+    ) -> Result<Lookup, Error> {
+        let (index, property) = match self.seek_index(part, seek, key)? {
+            Indexed::Unserved => return Ok(Lookup::Unserved),
+            Indexed::Nothing => return Ok(Lookup::Found(Vec::new(), None)),
+            Indexed::Index(index, property) => (index, property),
         };
         let mut points: Option<Vec<KeyRange>> = None;
         let mut range: Option<KeyRange> = None;
@@ -457,10 +510,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                         Compared::Range(found) => {
                             match range.map_or(Some(found.clone()), |held| held.intersect(&found)) {
                                 Some(narrowed) => range = Some(narrowed),
-                                None => return Ok(Some((Vec::new(), None))),
+                                None => return Ok(Lookup::Found(Vec::new(), None)),
                             }
                         }
-                        Compared::Never => return Ok(Some((Vec::new(), None))),
+                        Compared::Never => return Ok(Lookup::Found(Vec::new(), None)),
                         Compared::Unserved => {}
                     }
                 }
@@ -469,9 +522,18 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let served = served.filter(|_| points.is_some());
         let Some(ranges) = points.or_else(|| range.map(|range| vec![range])) else {
-            return Ok(None);
+            return Ok(Lookup::Unserved);
         };
-        Ok(Some((self.tx.property_seek(index, &ranges)?, served)))
+        if limit == usize::MAX {
+            return Ok(Lookup::Found(
+                self.tx.property_seek(index, &ranges)?,
+                served,
+            ));
+        }
+        Ok(match self.tx.property_seek_within(index, &ranges, limit)? {
+            Some(elements) => Lookup::Found(elements, served),
+            None => Lookup::Over,
+        })
     }
 
     fn endpoints(&self, part: &PatternPart, relationships: Vec<u64>) -> Result<Vec<NodeId>, Error> {

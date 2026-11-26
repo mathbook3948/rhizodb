@@ -168,13 +168,20 @@ pub(crate) struct MergeClause {
     pub(crate) on_match: Vec<SetAction>,
 }
 
+/// A pattern in the order a match walks it. `start` is the node the match begins at, and the
+/// first `left` steps walk from it toward the pattern's leftmost node, each with its direction
+/// flipped. The steps after them walk from `start` again toward the rightmost node.
 #[derive(Clone, Debug)]
 pub(crate) struct PatternPart {
     pub(crate) path: Option<Slot>,
     pub(crate) start: NodePattern,
     pub(crate) steps: Vec<Step>,
+    pub(crate) left: usize,
     /// Ways to find the start nodes without reading every node of the label, tried in order.
     pub(crate) seeks: Vec<Seek>,
+    /// The same pattern begun at each other node that an ID or index lookup may serve, which
+    /// the match picks from when it runs.
+    pub(crate) others: Vec<PatternPart>,
 }
 
 /// Conditions that every match puts on one value of the start node or of the first

@@ -94,7 +94,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - A time is keyed by its instant and then its offset, and a datetime by its instant, then its offset, then its zone.
 - A list is keyed by the keys of its items and an end marker.
 - Queries never name a property index, and a query uses one whenever its conditions allow.
-- A `MATCH` or `MERGE` pattern part uses a property index over the label of its start node or the type of its first relationship.
+- A `MATCH` or `MERGE` pattern part uses a property index over the label of its start node or the type of its first relationship, and a `MATCH` part may start at any of its nodes, as `docs/architecture/pattern-starts.md` decides.
 - A pattern part that uses an index over a relationship type starts at the ends of the relationships the index returns.
 - The conditions a property index serves are a property in the pattern's map and `=`, `IN`, `<`, `<=`, `>`, and `>=` on the property in the `WHERE` of the `MATCH`, alone or joined by `AND`.
 - A served condition compares the property with an expression that reads no variable the pattern part or a later one binds.

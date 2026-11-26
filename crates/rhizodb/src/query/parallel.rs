@@ -230,7 +230,9 @@ fn split<'q, 'w, T: ReadTransaction>(
         },
     };
     let threshold = parallelism.threshold.max(2);
-    if env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()? {
+    if env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()?
+        || !ptr::eq(env.oriented(part, row).ok()?.0, part)
+    {
         return None;
     }
     let helpers = workers.reserve(parallelism.threads - 1, parallelism.threads);

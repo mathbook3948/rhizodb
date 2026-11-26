@@ -965,6 +965,16 @@ impl<F: FileSystem + 'static> Engine<F> {
         view
     }
 
+    /// How many entries scans have copied out of the memtables the published view reads.
+    #[cfg(test)]
+    pub(crate) fn memtable_copied(&self) -> u64 {
+        let layers = Arc::clone(&lock(&self.shared.published).view.layers);
+        std::iter::once(&layers.active)
+            .chain(&layers.frozen)
+            .map(|memtable| memtable.copied.load(Ordering::Relaxed))
+            .sum()
+    }
+
     fn deregister(&self, snapshot: u64) {
         let mut published = lock(&self.shared.published);
         if let Some(count) = published.readers.get_mut(&snapshot) {

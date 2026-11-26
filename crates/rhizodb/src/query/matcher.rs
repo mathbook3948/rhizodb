@@ -28,6 +28,7 @@ use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
 use super::plan::Slot;
+use super::seek::Sought;
 
 /// Receives each complete match. Returning `false` stops the search.
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
@@ -62,7 +63,14 @@ struct Search<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     patterns: &'s [PatternPart],
     used: Vec<RelationshipId>,
-    trails: Vec<PathIds>,
+    trails: Vec<Trail<'s>>,
+}
+
+struct Trail<'s> {
+    part: &'s PatternPart,
+    nodes: Vec<NodeId>,
+    relationships: Vec<RelationshipId>,
+    split: usize,
 }
 
 #[derive(Debug)]
@@ -117,13 +125,15 @@ impl<T: ReadTransaction> Env<'_, T> {
             env: self,
             patterns,
             used: Vec::new(),
-            trails: vec![
-                PathIds {
+            trails: patterns
+                .iter()
+                .map(|part| Trail {
+                    part,
                     nodes: Vec::new(),
                     relationships: Vec::new(),
-                };
-                patterns.len()
-            ],
+                    split: 0,
+                })
+                .collect(),
         };
         let mut row = row.clone();
         search.run(&mut row, emit)?;
@@ -235,51 +245,112 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
-    fn start_candidates(
+    fn start_candidates<'p>(
         &self,
-        part: &PatternPart,
+        part: &'p PatternPart,
         row: &Row,
-    ) -> Result<(Vec<NodeId>, Known), Error> {
+    ) -> Result<(&'p PatternPart, Vec<NodeId>, Known), Error> {
+        if let Some(ids) = self.morsel_of(part) {
+            let known = Known {
+                labels: label_scan_decides(&part.start),
+                served: None,
+            };
+            return Ok((part, ids.to_vec(), known));
+        }
+        let (part, sought) = self.oriented(part, row)?;
         let pattern = &part.start;
         if pattern.bound {
-            return Ok((
-                match row.get(pattern.slot) {
-                    Some(Datum::Node(id)) => vec![*id],
-                    _ => Vec::new(),
-                },
-                Known::NOTHING,
-            ));
+            let nodes = match row.get(pattern.slot) {
+                Some(Datum::Node(id)) => vec![*id],
+                _ => Vec::new(),
+            };
+            return Ok((part, nodes, Known::NOTHING));
         }
         let labels_known = label_scan_decides(pattern);
-        if let Some(sought) = self.seek_start(part, row)? {
+        if let Some(sought) = sought {
             let known = Known {
                 labels: labels_known && sought.labelled,
                 served: sought.served,
             };
-            return Ok((sought.nodes, known));
+            return Ok((part, sought.nodes, known));
         }
-        let nodes = match self.morsel_of(part) {
-            Some(ids) => ids.to_vec(),
-            None => self.scanned_nodes(pattern)?,
-        };
         let known = Known {
             labels: labels_known,
             served: None,
         };
-        Ok((nodes, known))
+        Ok((part, self.scanned_nodes(pattern)?, known))
     }
 
-    /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts.
+    /// The order to walk `part` in from `row`, and the start nodes a lookup found for it. The
+    /// part begins at the leftmost of its starts that has the fewest start nodes: as many as
+    /// a lookup finds, or else as many as the start's label holds. A later start's lookup
+    /// stops reading index entries once it reaches the fewest found so far, and none is tried
+    /// once a start has at most one node.
+    pub(crate) fn oriented<'p>(
+        &self,
+        part: &'p PatternPart,
+        row: &Row,
+    ) -> Result<(&'p PatternPart, Option<Sought>), Error> {
+        let sought = self.seek_start(part, row)?;
+        if part.others.is_empty() {
+            return Ok((part, sought));
+        }
+        let mut fewest = match &sought {
+            Some(sought) => sought.nodes.len(),
+            None => usize::try_from(self.scanned_count(&part.start)?).unwrap_or(usize::MAX),
+        };
+        let mut chosen = (part, sought);
+        for other in &part.others {
+            if fewest <= 1 {
+                break;
+            }
+            if let Some(found) = self.seek_within(other, row, fewest - 1)? {
+                fewest = found.nodes.len();
+                chosen = (other, Some(found));
+            }
+        }
+        Ok(chosen)
+    }
+
+    /// Whether [`Env::oriented`] may begin `part`, whose leftmost start no lookup serves, at
+    /// another of its starts.
+    pub(crate) fn may_move(&self, part: &PatternPart) -> Result<bool, Error> {
+        Ok(self.others_served(part)? && self.scanned_count(&part.start)? > 1)
+    }
+
+    fn others_served(&self, part: &PatternPart) -> Result<bool, Error> {
+        for other in &part.others {
+            if self.seek_served(other)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts once per
+    /// statement.
     pub(crate) fn scanned_count(&self, pattern: &NodePattern) -> Result<u64, Error> {
-        Ok(
-            match pattern.labels.as_ref().and_then(LabelExpr::required) {
-                Some(label) => match self.label_token(&label.0)? {
-                    Some(token) => self.tx.count_nodes_with_label(token)?,
-                    None => 0,
-                },
-                None => self.tx.count_nodes()?,
+        let label = match pattern.labels.as_ref().and_then(LabelExpr::required) {
+            Some(label) => match self.label_token(&label.0)? {
+                Some(token) => Some(token),
+                None => return Ok(0),
             },
-        )
+            None => None,
+        };
+        if let Some((_, count)) = self
+            .node_counts
+            .borrow()
+            .iter()
+            .find(|(held, _)| *held == label)
+        {
+            return Ok(*count);
+        }
+        let count = match label {
+            Some(token) => self.tx.count_nodes_with_label(token)?,
+            None => self.tx.count_nodes()?,
+        };
+        self.node_counts.borrow_mut().push((label, count));
+        Ok(count)
     }
 
     /// The nodes a pattern starts from when no seek serves it: those of its required label, or
@@ -494,7 +565,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                                 frames.pop();
                             } else {
                                 let relationship =
-                                    &self.patterns[index].steps[step_index].relationship;
+                                    &self.trails[index].part.steps[step_index].relationship;
                                 *state = WalkState::Expanding {
                                     adjacents: self.env.expand(node, relationship)?.into_iter(),
                                     extended: false,
@@ -548,7 +619,8 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = self.patterns.get(index) else {
             return emit(row);
         };
-        let (candidates, known) = self.env.start_candidates(part, row)?;
+        let (walked, candidates, known) = self.env.start_candidates(part, row)?;
+        self.trails[index].part = walked;
         frames.push(Frame::Part {
             index,
             candidates: candidates.into_iter(),
@@ -566,7 +638,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let start = &self.patterns[index].start;
+        let start = &self.trails[index].part.start;
         if !self.env.node_matches(id, start, known, row)? {
             return Ok(true);
         }
@@ -587,10 +659,16 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let part = &self.patterns[index];
+        let part = self.trails[index].part;
+        let current = if step_index == part.left && step_index > 0 {
+            self.trails[index].split = self.trails[index].relationships.len();
+            self.trails[index].nodes[0]
+        } else {
+            current
+        };
         let Some(step) = part.steps.get(step_index) else {
             if let Some(path) = part.path {
-                set(row, path, Datum::Path(self.trails[index].clone()));
+                set(row, path, Datum::Path(self.path(index)));
             }
             return self.begin_part(index + 1, row, frames, emit);
         };
@@ -620,7 +698,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &mut Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let relationship = &self.trails[index].part.steps[step_index].relationship;
         for adjacent in adjacents {
             if self.used.contains(&adjacent.relationship) {
                 continue;
@@ -653,7 +731,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let relationship = &self.trails[index].part.steps[step_index].relationship;
         for adjacent in adjacents {
             if !self.used.contains(&adjacent.relationship)
                 && self
@@ -664,6 +742,34 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             }
         }
         Ok(None)
+    }
+
+    fn path(&self, index: usize) -> PathIds {
+        let trail = &self.trails[index];
+        if trail.part.left == 0 {
+            return PathIds {
+                nodes: trail.nodes.clone(),
+                relationships: trail.relationships.clone(),
+            };
+        }
+        let split = trail.split;
+        let (left, right) = trail.nodes.split_at(split + 1);
+        let (left_relationships, right_relationships) = trail.relationships.split_at(split);
+        PathIds {
+            nodes: left[1..]
+                .iter()
+                .rev()
+                .chain(&left[..1])
+                .chain(right)
+                .copied()
+                .collect(),
+            relationships: left_relationships
+                .iter()
+                .rev()
+                .chain(right_relationships)
+                .copied()
+                .collect(),
+        }
     }
 
     fn extend(&mut self, index: usize, adjacent: &Adjacent) {
@@ -694,10 +800,18 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let part = self.trails[index].part;
+        let relationship = &part.steps[step_index].relationship;
         if !relationship.anonymous {
-            let walked = &self.trails[index].relationships[base..];
-            let value = Datum::list(walked.iter().copied().map(Datum::Relationship).collect());
+            let walked = self.trails[index].relationships[base..]
+                .iter()
+                .copied()
+                .map(Datum::Relationship);
+            let value = Datum::list(if step_index < part.left {
+                walked.rev().collect()
+            } else {
+                walked.collect()
+            });
             if relationship.bound && row.get(relationship.slot) != Some(&value) {
                 return Ok(true);
             }
@@ -715,7 +829,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let pattern = &self.patterns[index].steps[step_index].node;
+        let pattern = &self.trails[index].part.steps[step_index].node;
         if pattern.bound {
             if row.get(pattern.slot) != Some(&Datum::Node(node)) {
                 return Ok(true);

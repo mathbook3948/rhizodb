@@ -150,15 +150,15 @@ impl Staged {
         end: Bound<&[u8]>,
         visit: Visit<'_, E>,
     ) -> Result<(), E> {
-        let upper: Vec<(Bytes, Slot)> = match self.overlay.get(&table) {
-            Some(keys) if bounds_are_ordered(start, end) => keys
-                .range::<[u8], _>((start, end))
-                .map(|(key, slot)| (Arc::clone(key), slot.clone()))
-                .collect(),
-            _ => Vec::new(),
-        };
+        let upper = self
+            .overlay
+            .get(&table)
+            .filter(|_| bounds_are_ordered(start, end))
+            .into_iter()
+            .flat_map(|keys| keys.range::<[u8], _>((start, end)))
+            .map(|(key, slot)| (Arc::clone(key), slot.clone()));
         merge_over(
-            &upper,
+            upper,
             |lower| self.view.scan(table, start, end, lower),
             visit,
         )
