@@ -224,6 +224,9 @@ pub enum ErrorKind {
     /// database already keeps the log for 32 peers. Forget a peer that is gone with
     /// [`Database::forget_peer`](crate::Database::forget_peer), or relay through a replica.
     TooManyPeers,
+    /// Changes were given to [`Database::apply`](crate::Database::apply) of a database that is
+    /// a writer, which takes no changes of another writer until it is demoted.
+    NotReplica,
 }
 
 impl ErrorKind {

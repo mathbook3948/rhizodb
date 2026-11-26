@@ -38,6 +38,7 @@ pub use procedure::Procedure;
 pub use procedure::ProcedureError;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
+pub use replication::Changes;
 pub use replication::Position;
 pub use result::Node;
 pub use result::Parameters;
@@ -78,4 +79,12 @@ pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
 #[doc(hidden)]
 pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::open_damaged_file(bytes)
+}
+
+/// Damages a batch of replication changes by `bytes`, reseals it, decodes it, applies it to a
+/// replica, and reads the replica, for the fuzzer. Fails when decoded changes keep other bytes.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn apply_changes_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    replication::apply_changes_for_fuzzing(bytes)
 }

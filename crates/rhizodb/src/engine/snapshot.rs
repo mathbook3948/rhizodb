@@ -6,6 +6,7 @@ use std::sync::PoisonError;
 
 use super::block_file::BlockFile;
 use super::block_file::FileSystem;
+use super::changes::EpochId;
 use super::codec::Reader;
 use super::codec::checksum;
 use super::codec::put_u16;
@@ -144,6 +145,11 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
     /// The LSN of the newest commit the checkpoint holds.
     pub(crate) fn position(&self) -> u64 {
         self.pinned.header.checkpoint_lsn
+    }
+
+    /// The term and writer of the newest commit the checkpoint holds.
+    pub(crate) fn epoch(&self) -> &EpochId {
+        &self.pinned.epoch
     }
 
     /// The bytes of the whole stream.

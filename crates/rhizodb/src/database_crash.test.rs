@@ -146,10 +146,10 @@ fn open(fs: &SimFs) -> Result<Database, Error> {
         options,
     )
     .map_err(crate::storage::StorageError::from)?;
-    Ok(Database {
-        graph: Graph::open(engine)?,
-        statements: Statements::default(),
-    })
+    Ok(Database::from_parts(
+        Graph::open(engine)?,
+        Statements::default(),
+    ))
 }
 
 fn consistent(db: &Database) -> Result<(), String> {

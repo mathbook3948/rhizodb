@@ -5,12 +5,16 @@ use proptest::prelude::*;
 use super::*;
 
 #[test]
-fn every_graph_table_has_its_own_id_in_the_graph_range() {
+fn every_table_has_its_own_id_in_its_range() {
     let ids: BTreeSet<TableId> = Table::ALL.into_iter().map(TableId::of).collect();
     assert_eq!(ids.len(), Table::ALL.len());
     for table in Table::ALL {
         let id = TableId::of(table);
-        assert!((0x100..0x200).contains(&id.0), "{table:?} has {id:?}");
+        let range = match table {
+            Table::ReplicationHistory => 0x01..0x100,
+            _ => 0x100..0x200,
+        };
+        assert!(range.contains(&id.0), "{table:?} has {id:?}");
         assert_eq!(id.table().unwrap(), table);
     }
 }
@@ -21,12 +25,14 @@ fn the_table_ids_never_change() {
         .into_iter()
         .map(|table| TableId::of(table).0)
         .collect();
-    assert_eq!(ids, (0x100..0x114).collect::<Vec<u16>>());
+    let mut expected: Vec<u16> = (0x100..0x114).collect();
+    expected.push(0x01);
+    assert_eq!(ids, expected);
 }
 
 #[test]
 fn an_unknown_table_id_is_unsupported() {
-    for raw in [0, 1, 2, 0xFF, 0x114, 0x1FF, 0xFFFF] {
+    for raw in [0, 2, 0xFF, 0x114, 0x1FF, 0xFFFF] {
         assert!(matches!(
             TableId(raw).table(),
             Err(EngineError::Unsupported(_))

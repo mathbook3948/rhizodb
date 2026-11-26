@@ -164,3 +164,90 @@ fn a_peer_id_holds_one_to_sixty_four_bytes() {
     assert!(db.forget_peer(&[5]).unwrap());
     db.acknowledge(b"one more", &Position::start()).unwrap();
 }
+
+fn follow(writer: &Database, replica: &Database) {
+    loop {
+        let changes = writer.changes_since(&replica.position(), 1 << 20).unwrap();
+        if changes.is_empty() {
+            return;
+        }
+        replica.apply(&changes).unwrap();
+    }
+}
+
+#[test]
+fn a_replica_seeded_by_a_snapshot_follows_its_writer_and_seeds_the_next_replica() {
+    let directory = tempfile::tempdir().unwrap();
+    let writer = Database::open(directory.path().join("writer.rhizodb")).unwrap();
+    writer.promote(1, b"node-a").unwrap();
+    load(&writer, 1, 500);
+    writer.compact().unwrap();
+    let snapshot = writer.snapshot().unwrap();
+    assert_eq!(
+        (snapshot.position().term(), snapshot.position().writer_id()),
+        (1, &b"node-a"[..])
+    );
+    let bytes = stream(&snapshot);
+    let position = snapshot.position();
+    writer.acknowledge(b"replica", &position).unwrap();
+    drop(snapshot);
+    let replica =
+        Database::install_snapshot(directory.path().join("replica.rhizodb"), bytes.as_slice())
+            .unwrap();
+    assert_eq!(replica.position(), position);
+    load(&writer, 501, 800);
+    follow(&writer, &replica);
+    assert_eq!(replica.position(), writer.position());
+    assert_eq!(
+        count(&replica, "MATCH (n:Item) RETURN count(n)"),
+        Value::Integer(800)
+    );
+    replica.compact().unwrap();
+    let relayed_bytes = stream(&replica.snapshot().unwrap());
+    let relayed = Database::install_snapshot(
+        directory.path().join("relayed.rhizodb"),
+        relayed_bytes.as_slice(),
+    )
+    .unwrap();
+    load(&writer, 801, 900);
+    follow(&writer, &replica);
+    follow(&replica, &relayed);
+    assert_eq!(relayed.position(), writer.position());
+    assert_eq!(
+        count(&relayed, "MATCH (n:Item) RETURN count(n)"),
+        Value::Integer(900)
+    );
+}
+
+#[test]
+fn a_restarted_writer_still_serves_a_peer_that_lags_behind() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("writer.rhizodb");
+    let writer = Database::open(&path).unwrap();
+    writer.promote(1, b"node-a").unwrap();
+    load(&writer, 1, 10);
+    let lagging = writer.position();
+    writer.acknowledge(b"replica", &lagging).unwrap();
+    for round in 0..40 {
+        load(&writer, 100 + round * 50, 149 + round * 50);
+        writer.compact().unwrap();
+    }
+    drop(writer);
+    let writer = Database::open(&path).unwrap();
+    writer.promote(1, b"node-a").unwrap();
+    let changes = writer.changes_since(&lagging, 1 << 30).unwrap();
+    assert_eq!(changes.after(), &lagging);
+    let unpinned = tempfile::tempdir().unwrap();
+    let other = Database::open(unpinned.path().join("other.rhizodb")).unwrap();
+    other.promote(1, b"node-a").unwrap();
+    load(&other, 1, 10);
+    let behind = other.position();
+    for round in 0..40 {
+        load(&other, 100 + round * 50, 149 + round * 50);
+        other.compact().unwrap();
+    }
+    drop(other);
+    let other = Database::open(unpinned.path().join("other.rhizodb")).unwrap();
+    let error = other.changes_since(&behind, 1 << 30).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TooFarBehind);
+}

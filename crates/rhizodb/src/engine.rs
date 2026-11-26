@@ -3,6 +3,7 @@ pub(crate) mod blob;
 pub(crate) mod block_file;
 pub(crate) mod cache;
 pub(crate) mod catalog;
+pub(crate) mod changes;
 pub(crate) mod check;
 pub(crate) mod checkpoint;
 pub(crate) mod codec;
@@ -40,3 +41,6 @@ mod differential_tests;
 #[cfg(test)]
 #[path = "engine/bench.test.rs"]
 mod bench_tests;
+
+pub(crate) use store::Epoch;
+pub(crate) use store::epoch_at;

@@ -33,7 +33,7 @@ impl<'db> Snapshot<'db> {
     /// The position of the newest change the snapshot holds. A database installed from it
     /// holds every change up to this one and follows its writer's changes from the next.
     pub fn position(&self) -> Position {
-        Position::at_lsn(self.export.position())
+        Position::of(self.export.epoch().clone(), self.export.position())
     }
 
     /// The bytes of the whole stream.

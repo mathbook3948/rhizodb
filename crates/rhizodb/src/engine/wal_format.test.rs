@@ -188,10 +188,11 @@ fn resealed(prefix: Vec<u8>) -> Vec<u8> {
 #[test]
 fn reserved_kinds_and_unknown_formats_are_refused_not_skipped() {
     for kind in Kind::ALL {
-        if matches!(kind, Kind::Batch | Kind::Checkpoint) {
-            continue;
-        }
-        let record = resealed(record_prefix(1, 0, 0, 1, kind, 1));
+        let format = match kind {
+            Kind::Batch | Kind::Checkpoint | Kind::Config => 2,
+            _ => 1,
+        };
+        let record = resealed(record_prefix(1, 0, 0, 1, kind, format));
         assert!(
             matches!(
                 decode_record(SEED, &record),
