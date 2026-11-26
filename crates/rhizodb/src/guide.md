@@ -118,6 +118,12 @@ Every failure is an [`Error`], and [`Error::kind`] gives its [`ErrorKind`]. Bran
 never on the message, which may change. `ErrorKind` is `#[non_exhaustive]`, so a match on it
 needs a catch-all arm.
 
+Every method that reads or writes the database can fail with [`ErrorKind::Storage`] or
+[`ErrorKind::CorruptData`], described below, and every call that creates data, such as a writing
+query, an index creation, or an import, can fail with [`ErrorKind::IdSpaceExhausted`]. A method's
+own docs leave these out and name only the kinds it adds, and a method whose docs name none fails
+only with these.
+
 Most kinds are decided by the query and the data, and running the same query on the same data
 fails the same way, so retrying does not help. These are the syntax and binding errors, type
 errors, value errors such as [`ErrorKind::IntegerOverflow`], and misuse such as
