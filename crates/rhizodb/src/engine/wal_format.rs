@@ -23,6 +23,8 @@ pub(crate) const RECORD_LIMIT: usize = 1 << 30;
 /// Format sector, so an append never rewrites one that holds a synced record or the header.
 pub(crate) const RECORD_UNIT: usize = 4096;
 
+const RECORD_UNIT_MINOR: u16 = 3;
+
 const SEGMENT_CHECKSUM_AT: usize = WAL_BLOCK - 8;
 
 const BATCH_FORMAT: u8 = 1;
@@ -85,7 +87,12 @@ impl SegmentHeader {
             )));
         }
         let record_unit = reader.u32()?;
-        if record_unit != 0 && record_unit as usize != RECORD_UNIT {
+        let expected_unit = if minor >= RECORD_UNIT_MINOR {
+            RECORD_UNIT as u32
+        } else {
+            0
+        };
+        if record_unit != expected_unit {
             return Err(reader.bad("record unit"));
         }
         let header = Self {

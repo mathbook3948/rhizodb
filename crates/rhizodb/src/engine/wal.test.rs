@@ -553,7 +553,7 @@ fn a_segment_longer_than_any_the_log_writes_is_corruption() {
 fn a_segment_of_an_earlier_build_replays_and_takes_appends_in_its_own_blocks() {
     let fs = SimFs::new();
     let header_block = SegmentHeader {
-        minor: FORMAT_MINOR,
+        minor: 2,
         sequence: 1,
         first_lsn: 1,
         database_id: identity().database_id,
