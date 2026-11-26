@@ -712,12 +712,14 @@ impl<F: FileSystem + 'static> Engine<F> {
                 *role = Role::Fenced;
             }
         }
-        let deadline = Instant::now() + wait;
+        let deadline = Instant::now().checked_add(wait);
         let mut writer = loop {
             match shared.writer.try_lock() {
                 Ok(writer) => break writer,
                 Err(TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                Err(TryLockError::WouldBlock)
+                    if deadline.is_none_or(|deadline| Instant::now() < deadline) =>
+                {
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(TryLockError::WouldBlock) => {

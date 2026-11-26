@@ -597,3 +597,11 @@ fn two_files_that_began_one_term_under_one_writer_id_are_told_apart_by_their_inc
         Lineage::Diverged { .. }
     ));
 }
+
+#[test]
+fn a_demotion_that_may_wait_longer_than_the_clock_reaches_finishes() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"w").unwrap();
+    writer.demote(std::time::Duration::MAX).unwrap();
+    assert_eq!(writer.role(), Role::Replica);
+}
