@@ -12,7 +12,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
 - Node meta carries checksums, so a damaged chunk or delta fails the read as corrupt data instead of answering wrongly.
 - Node properties kept in one column per property key and 4096 node IDs, typed when its values share a type, so a scan, filter, sort, or aggregate reads only the properties it uses, a commit that changes a few nodes writes a small checksummed delta per value, and a damaged column fails the read as corrupt data. Databases of earlier formats move their node records into columns on open.
-- Relationships kept in compressed sparse row segments per 64 node IDs, relationship type, and direction, with a small checksummed delta per node for small commits, so a loaded graph takes about half the disk space and a damaged segment fails the read as corrupt data. Databases of earlier formats move their adjacency into segments on open.
+- Relationships kept in compressed sparse row segments per 16 node IDs, relationship type, and direction, with a small checksummed delta per node for small commits, so a loaded graph takes about half the disk space and a damaged segment fails the read as corrupt data. Databases of earlier formats move their adjacency into segments on open.
 - GQL queries through `Database::execute`, with Cypher `CREATE` accepted as GQL `INSERT`.
 - Temporal values: dates, times, datetimes with zones, and durations.
 - Host-registered procedures callable with `CALL`, outside the `db` namespace that built-in procedures reserve, and full `EXISTS { ... }` subqueries.
@@ -65,6 +65,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 ### Fixed
 
 - Opening a file whose storage-engine format is newer than this build fails with `ErrorKind::UnsupportedFormatVersion` instead of `ErrorKind::Storage`, so a host that rolls back a release can tell it from a disk fault.
+- The doctests compile from the published package, whose README the crate now includes, so `cargo test` runs in an unpacked copy of the crate.
 - A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
 - A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.
 - `SET r = {...}` and `SET r += {...}` on a relationship rewrote its whole record once per property, so replacing the properties of a relationship with thousands of them took seconds. They now write the record once.
