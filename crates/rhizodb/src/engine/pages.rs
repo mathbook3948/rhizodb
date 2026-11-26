@@ -25,7 +25,14 @@ use super::page::PageHeader;
 
 /// Reads checked pages and runs of the database file.
 pub(crate) trait PageSource: Send + Sync + fmt::Debug {
-    fn page(&self, at: BlockRef) -> Result<CachedPage, EngineError>;
+    /// The page at `at`, which a scan reads right before the pages `ahead` names in order. When
+    /// the cache lacks it, one read takes it together with the pages of `ahead` that follow it
+    /// closely in its extent, and the cache keeps every one of them that checks.
+    fn page_ahead(
+        &self,
+        at: BlockRef,
+        ahead: &mut dyn Iterator<Item = BlockRef>,
+    ) -> Result<CachedPage, EngineError>;
 
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError>;
 
@@ -69,6 +76,8 @@ pub(crate) fn load_blob(
         blob.first.at
     )))
 }
+
+const READ_AHEAD_BLOCKS: u32 = 32;
 
 /// The database file's blocks, found through the extent slots, with a cache of checked pages.
 #[derive(Debug)]
@@ -172,19 +181,49 @@ impl<B: BlockFile> Pages<B> {
     }
 }
 
+impl<B: BlockFile> Pages<B> {
+    fn keep(&self, at: BlockRef, bytes: &[u8]) -> Result<CachedPage, EngineError> {
+        let header = PageHeader::open(self.seed, bytes, at)?;
+        let page = Arc::new(CheckedPage {
+            header,
+            bytes: bytes.into(),
+        });
+        self.cache.insert(at, Arc::clone(&page));
+        Ok(page)
+    }
+}
+
 impl<B: BlockFile> PageSource for Pages<B> {
-    fn page(&self, at: BlockRef) -> Result<CachedPage, EngineError> {
+    fn page_ahead(
+        &self,
+        at: BlockRef,
+        ahead: &mut dyn Iterator<Item = BlockRef>,
+    ) -> Result<CachedPage, EngineError> {
         if let Some(page) = self.cache.get(at) {
             return Ok(page);
         }
-        let mut bytes = vec![0; BLOCK];
-        self.file.read(self.physical(at, 1)?, &mut bytes)?;
-        let header = PageHeader::open(self.seed, &bytes, at)?;
-        let page = Arc::new(CheckedPage {
-            header,
-            bytes: bytes.into_boxed_slice(),
-        });
-        self.cache.insert(at, Arc::clone(&page));
+        let mut offsets = Vec::new();
+        for next in ahead {
+            let offset = next.block().wrapping_sub(at.block());
+            if next.extent() != at.extent()
+                || next.block() <= at.block()
+                || offset >= READ_AHEAD_BLOCKS
+                || offsets.last().is_some_and(|last| offset <= *last)
+            {
+                break;
+            }
+            offsets.push(offset);
+        }
+        let blocks = offsets.last().map_or(1, |last| last + 1);
+        let mut bytes = vec![0; blocks as usize * BLOCK];
+        self.file.read(self.physical(at, blocks)?, &mut bytes)?;
+        let page = self.keep(at, &bytes[..BLOCK])?;
+        for offset in offsets {
+            let start = offset as usize * BLOCK;
+            if let (Ok(next), Some(block)) = (at.offset(offset), bytes.get(start..start + BLOCK)) {
+                let _ = self.keep(next, block);
+            }
+        }
         Ok(page)
     }
 

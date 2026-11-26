@@ -10,6 +10,7 @@ use super::blob::Role;
 use super::cache::CachedPage;
 use super::catalog::Root;
 use super::error::EngineError;
+use super::layout::BlockRef;
 use super::layout::TableId;
 #[cfg(test)]
 use super::memtable::Bytes;
@@ -157,12 +158,22 @@ pub(crate) fn fetch(
     page: ChildRef,
     level: u8,
 ) -> Result<CachedPage, EngineError> {
+    fetch_ahead(source, table, page, level, &mut std::iter::empty())
+}
+
+fn fetch_ahead(
+    source: &dyn PageSource,
+    table: TableId,
+    page: ChildRef,
+    level: u8,
+    ahead: &mut dyn Iterator<Item = BlockRef>,
+) -> Result<CachedPage, EngineError> {
     if level > MAX_LEVEL {
         return Err(EngineError::corrupt(
             "a tree is deeper than any the engine writes",
         ));
     }
-    let cached = source.page(page.at)?;
+    let cached = source.page_ahead(page.at, ahead)?;
     let kind = if level == 0 {
         PageKind::Leaf
     } else {
@@ -176,6 +187,24 @@ pub(crate) fn fetch(
         )));
     }
     Ok(cached)
+}
+
+fn children_in_range<'n>(
+    node: &'n Node<'n>,
+    index: usize,
+    end: Bound<&'n [u8]>,
+    load: &'n dyn Fn(&BlobRef) -> Result<Vec<u8>, EngineError>,
+) -> impl Iterator<Item = BlockRef> + 'n {
+    let mut last = None;
+    let mut next = index;
+    std::iter::from_fn(move || {
+        let last = *last.get_or_insert_with(|| match end {
+            Bound::Unbounded => node.cells().saturating_sub(1),
+            Bound::Included(end) | Bound::Excluded(end) => node.search(end, load).unwrap_or(index),
+        });
+        next += 1;
+        (next <= last).then(|| node.child(next).ok().map(|child| child.at))?
+    })
 }
 
 impl Tree {
@@ -486,7 +515,9 @@ impl Tree {
                     self.scan_page(table, page, level - 1, None, from, visit, key, child_seek)?
                 }
                 None => {
-                    let page = fetch(&*self.source, table, child, level - 1).map_err(lift)?;
+                    let mut ahead = children_in_range(&node, index, end, &load);
+                    let page = fetch_ahead(&*self.source, table, child, level - 1, &mut ahead)
+                        .map_err(lift)?;
                     self.scan_page(table, &page, level - 1, None, from, visit, key, child_seek)?
                 }
             };

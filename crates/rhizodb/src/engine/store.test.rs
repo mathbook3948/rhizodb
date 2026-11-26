@@ -899,3 +899,38 @@ fn opens_racing_to_create_a_database_share_one_file_and_lose_no_commit() {
         assert_eq!(names_in(directory.path()), ["graph"]);
     }
 }
+
+#[test]
+fn a_scan_of_a_reopened_file_reads_each_run_of_leaves_in_one_read() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let keys = 20_000u32;
+    let mut write = engine.begin_write().unwrap();
+    for key in 0..keys {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &[key as u8; 100])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    engine.close().unwrap();
+    let reopened = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let read = reopened.begin_read().unwrap();
+    let leaves = keys as usize * 100 / BLOCK;
+
+    let before = fs.operations();
+    let entries = read.scan_prefix(Table::Nodes, &[]).unwrap();
+    let reads = fs.operations() - before;
+
+    assert_eq!(entries.len(), keys as usize);
+    assert!(
+        entries
+            .iter()
+            .enumerate()
+            .all(|(at, (key, value))| key[..] == (at as u32).to_be_bytes()
+                && value[..] == [at as u8; 100])
+    );
+    assert!(
+        reads * 16 < leaves as u64,
+        "{reads} reads for {leaves} leaves"
+    );
+}
