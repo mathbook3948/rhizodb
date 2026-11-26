@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
+use std::fmt::Write;
 
 use crate::graph::NodeId;
 use crate::graph::RelationshipId;
+use crate::query::float_text;
 use crate::temporal::Temporal;
 
 /// Named query parameters, referred to as `$name` in the query text.
@@ -93,6 +96,49 @@ impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Para
 /// An integer and a float are different values even when they are equal numbers. New variants
 /// may be added in any release, so a match needs a catch-all arm.
 ///
+/// # Display
+///
+/// A value displays as GQL text, so an output line reads like the query that could have produced
+/// it. For `Null`, `Boolean`, `Integer`, a finite `Float`, `String`, `Temporal`, and lists and
+/// maps of them, the text is an expression that evaluates back to an equal value, and that holds
+/// in every later release. A datetime in a named zone reads back through the zone rules of the
+/// build that reads it, so a changed rule can move it to another instant. `Bytes`, a non-finite
+/// `Float`, and anything holding a node, relationship, or path display for people to read, and
+/// their text may change.
+///
+/// | Value | Output |
+/// | --- | --- |
+/// | `Null`, `Boolean` | `null`, `true`, `false` |
+/// | `Integer` | `42`, `-7` |
+/// | `Float` | `1.5`, `1.0`, `NaN`, `Infinity`, `-Infinity`, `1.0E10`, as `toString` writes it |
+/// | `String` | `'text'`, with `\\`, `\'`, `\n`, `\r`, `\t`, `\b`, `\f` and `\u00XX` for other control characters escaped |
+/// | `Bytes` | `X'00ff'`, two lowercase hex digits per byte |
+/// | `List` | `[1, 'a']`, `[]` |
+/// | `Map` | `{k: 1, m: {}}` in key order, `{}`; a key that is not a plain name is in backticks |
+/// | `Node`, `Relationship`, `Path` | as documented on those types |
+/// | `Temporal` | a constructor call such as `date('2024-02-29')` or `duration('PT1H')` |
+///
+/// A float always has a fraction or an exponent, so it never reads as an integer, and a string is
+/// always quoted, so it never reads as a temporal.
+///
+/// ```
+/// use rhizodb::Database;
+/// use rhizodb::Parameters;
+/// use rhizodb::Value;
+///
+/// let db = Database::in_memory()?;
+/// let result = db.execute(
+///     "RETURN 1 AS i, 1.0 AS f, 'it\\'s' AS s, [null, true] AS l, {k: 'v'} AS m, date('2024-02-29') AS d",
+///     &Parameters::new(),
+/// )?;
+/// let shown: Vec<String> = result.rows()[0].iter().map(Value::to_string).collect();
+/// assert_eq!(shown, ["1", "1.0", r"'it\'s'", "[null, true]", "{k: 'v'}", "date('2024-02-29')"]);
+/// assert_eq!(Value::Bytes(vec![0, 255]).to_string(), "X'00ff'");
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
+///
+/// Values travel into a query as parameters and come back unchanged:
+///
 /// ```
 /// use rhizodb::Database;
 /// use rhizodb::Parameters;
@@ -177,6 +223,10 @@ impl From<&str> for Value {
 
 /// A node as it was when the query finished.
 ///
+/// A node displays as `(:Label1:Label2 {key: value})` in label and key order, without its ID, and
+/// leaves out the labels or the properties it does not have, down to `()`. Two nodes that differ
+/// only by ID display the same.
+///
 /// ```
 /// use rhizodb::Database;
 /// use rhizodb::Parameters;
@@ -192,6 +242,7 @@ impl From<&str> for Value {
 ///     &Parameters::from([("id".to_owned(), Value::Integer(node.id().as_u64() as i64))]),
 /// )?;
 /// assert_eq!(found.rows().len(), 1);
+/// assert_eq!(node.to_string(), "(:Admin:Person {name: 'Ada'})");
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -230,6 +281,9 @@ impl Node {
 
 /// A relationship as it was when the query finished.
 ///
+/// A relationship displays as `[:TYPE {key: value}]` in key order, without its ID or its end
+/// nodes, and leaves out the properties it does not have.
+///
 /// ```
 /// use rhizodb::Database;
 /// use rhizodb::Parameters;
@@ -244,6 +298,7 @@ impl Node {
 /// assert_eq!(r.relationship_type(), "KNOWS");
 /// assert_eq!(r.start(), a.id());
 /// assert_eq!(r.property("since").unwrap(), &Value::Integer(2020));
+/// assert_eq!(r.to_string(), "[:KNOWS {since: 2020}]");
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -292,6 +347,10 @@ impl Relationship {
 /// There is always one more node than relationships, and relationship `i` connects node `i` and
 /// node `i + 1` in either direction.
 ///
+/// A path displays as its nodes and relationships between angle brackets, such as
+/// `<(:A)-[:T]->(:B)<-[:T]-(:C)>`. A relationship that starts at the node before it points
+/// forward, as `-[:T]->`, and one that ends there points back, as `<-[:T]-`.
+///
 /// ```
 /// use rhizodb::Database;
 /// use rhizodb::Parameters;
@@ -307,6 +366,7 @@ impl Relationship {
 /// assert_eq!(path.nodes().len(), 3);
 /// assert_eq!(path.relationships().len(), 2);
 /// assert_eq!(path.relationships()[1].start(), path.nodes()[2].id());
+/// assert_eq!(path.to_string(), "<(:Stop {n: 1})-[:TO]->(:Stop {n: 2})<-[:TO]-(:Stop {n: 3})>");
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 #[derive(Clone, Debug, PartialEq)]
@@ -336,6 +396,140 @@ impl Path {
     pub fn relationships(&self) -> &[Relationship] {
         &self.relationships
     }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("null"),
+            Self::Boolean(value) => write!(formatter, "{value}"),
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::Float(value) => formatter.write_str(&float_text(*value)),
+            Self::String(text) => write_string(formatter, text),
+            Self::Bytes(bytes) => {
+                formatter.write_str("X'")?;
+                for byte in bytes {
+                    write!(formatter, "{byte:02x}")?;
+                }
+                formatter.write_char('\'')
+            }
+            Self::List(items) => {
+                formatter.write_char('[')?;
+                for (at, item) in items.iter().enumerate() {
+                    if at > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(formatter, "{item}")?;
+                }
+                formatter.write_char(']')
+            }
+            Self::Map(entries) => write_map(formatter, entries),
+            Self::Node(node) => node.fmt(formatter),
+            Self::Relationship(relationship) => relationship.fmt(formatter),
+            Self::Path(path) => path.fmt(formatter),
+            Self::Temporal(temporal) => {
+                write!(formatter, "{}('{temporal}')", temporal.constructor())
+            }
+        }
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_char('(')?;
+        for label in &self.labels {
+            formatter.write_char(':')?;
+            write_name(formatter, label)?;
+        }
+        if !self.properties.is_empty() {
+            if !self.labels.is_empty() {
+                formatter.write_char(' ')?;
+            }
+            write_map(formatter, &self.properties)?;
+        }
+        formatter.write_char(')')
+    }
+}
+
+impl fmt::Display for Relationship {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[:")?;
+        write_name(formatter, &self.relationship_type)?;
+        if !self.properties.is_empty() {
+            formatter.write_char(' ')?;
+            write_map(formatter, &self.properties)?;
+        }
+        formatter.write_char(']')
+    }
+}
+
+impl fmt::Display for Path {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_char('<')?;
+        if let Some((first, rest)) = self.nodes.split_first() {
+            write!(formatter, "{first}")?;
+            let mut previous = first.id;
+            for (relationship, node) in self.relationships.iter().zip(rest) {
+                if relationship.start == previous {
+                    write!(formatter, "-{relationship}->")?;
+                } else {
+                    write!(formatter, "<-{relationship}-")?;
+                }
+                write!(formatter, "{node}")?;
+                previous = node.id;
+            }
+        }
+        formatter.write_char('>')
+    }
+}
+
+fn write_map(formatter: &mut fmt::Formatter<'_>, entries: &BTreeMap<String, Value>) -> fmt::Result {
+    formatter.write_char('{')?;
+    for (at, (key, value)) in entries.iter().enumerate() {
+        if at > 0 {
+            formatter.write_str(", ")?;
+        }
+        write_name(formatter, key)?;
+        write!(formatter, ": {value}")?;
+    }
+    formatter.write_char('}')
+}
+
+fn write_string(formatter: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    formatter.write_char('\'')?;
+    for character in text.chars() {
+        match character {
+            '\\' => formatter.write_str("\\\\")?,
+            '\'' => formatter.write_str("\\'")?,
+            '\n' => formatter.write_str("\\n")?,
+            '\r' => formatter.write_str("\\r")?,
+            '\t' => formatter.write_str("\\t")?,
+            '\u{8}' => formatter.write_str("\\b")?,
+            '\u{c}' => formatter.write_str("\\f")?,
+            control if control.is_control() => write!(formatter, "\\u{:04x}", u32::from(control))?,
+            other => formatter.write_char(other)?,
+        }
+    }
+    formatter.write_char('\'')
+}
+
+fn write_name(formatter: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+    let mut characters = name.chars();
+    let plain = characters
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && characters.all(|character| character.is_alphanumeric() || character == '_');
+    if plain {
+        return formatter.write_str(name);
+    }
+    formatter.write_char('`')?;
+    for character in name.chars() {
+        if character == '`' {
+            formatter.write_char('`')?;
+        }
+        formatter.write_char(character)?;
+    }
+    formatter.write_char('`')
 }
 
 /// The table a query returns: column names and rows aligned with them.
