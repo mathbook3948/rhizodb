@@ -465,6 +465,76 @@ fn commits_leave_removing_the_log_a_checkpoint_freed_to_the_checkpoint_thread() 
     assert_eq!(everything(&reopened).unwrap(), committed);
 }
 
+#[derive(Clone, Debug)]
+struct StuckSegments {
+    fs: SimFs,
+    refusal: Arc<std::sync::Mutex<Option<io::ErrorKind>>>,
+}
+
+impl FileSystem for StuckSegments {
+    type File = <SimFs as FileSystem>::File;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.create(name, size)
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.open(name, size)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        match *self.refusal.lock().unwrap() {
+            Some(io::ErrorKind::NotFound) if name.contains("-wal-") => {
+                self.fs.remove(name)?;
+                self.fs.remove(name)
+            }
+            Some(kind) if name.contains("-wal-") => Err(io::Error::from(kind)),
+            _ => self.fs.remove(name),
+        }
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn a_log_segment_that_cannot_be_removed_refuses_no_commit_and_goes_at_the_next_open() {
+    for checkpoint in [CheckpointMode::Inline, CheckpointMode::Background] {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
+            let fs = StuckSegments {
+                fs: SimFs::new(),
+                refusal: Arc::new(std::sync::Mutex::new(Some(kind))),
+            };
+            let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(checkpoint)).unwrap();
+
+            fill(&engine, 60);
+            engine.shared.wait_for_checkpoint();
+            fill(&engine, 20);
+            engine.checkpoint().unwrap();
+            engine.compact().unwrap();
+            fill(&engine, 1);
+            let committed = everything(&engine).unwrap();
+            *fs.refusal.lock().unwrap() = None;
+            engine.close().unwrap();
+
+            let reopened = Engine::open(Arc::new(fs.fs.clone()), NAME, tiny(checkpoint)).unwrap();
+            assert_eq!(everything(&reopened).unwrap(), committed);
+            assert_eq!(segment_files(&fs.fs, NAME).unwrap().len(), 1);
+            reopened.close().unwrap();
+            assert_eq!(fs.fs.names().unwrap(), [NAME], "{checkpoint:?} {kind:?}");
+        }
+    }
+}
+
 #[test]
 fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
     let engine = Engine::open(

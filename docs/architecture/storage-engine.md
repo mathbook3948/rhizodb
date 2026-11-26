@@ -145,6 +145,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - With background checkpoints, the writer only drops those segments from the log's list and the checkpoint thread removes their files, so no commit waits for the removal.
+- A segment file that fails to be removed, or is already gone, poisons nothing, since no durable header needs it, and the next open removes it.
 - The background checkpoint thread keeps each memtable it wrote until no snapshot holds it and frees it then, so no commit or reader frees a frozen memtable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.

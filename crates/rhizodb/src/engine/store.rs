@@ -442,11 +442,7 @@ fn checkpoint_worker<F: FileSystem + 'static>(
                 retired.push(Arc::clone(&job.frozen));
                 shared.run_checkpoint(job, false);
             }
-            Task::Remove(detached) => {
-                if detached.remove().is_err() {
-                    shared.poison();
-                }
-            }
+            Task::Remove(detached) => detached.remove(),
         }
         retired.retain(|memtable| Arc::strong_count(memtable) > 1);
     }
@@ -695,10 +691,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             },
             None => Some(detached),
         };
-        if let Some(detached) = unsent
-            && detached.remove().is_err()
-        {
-            self.shared.poison();
+        if let Some(detached) = unsent {
+            detached.remove();
         }
     }
 
@@ -844,9 +838,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             return;
         };
         if let Some(wal) = writer.wal.as_mut() {
-            if wal.drop_before(sequence).is_err() {
-                self.poison();
-            }
+            wal.drop_before(sequence);
             self.wal_bytes.store(wal.size(), Ordering::Relaxed);
         }
     }
