@@ -3,6 +3,7 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,30 +16,53 @@ jobs:
   tag:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      name: ${{ steps.name.outputs.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
-      - name: Check that the tag is on main and matches the crate version
+      - name: Name the tag of the crate version
+        id: name
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
           crate="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rhizodb") | .version')"
-          if [ "$version" != "$crate" ]; then
-            echo "tag $GITHUB_REF_NAME does not match crate version $crate" >&2
-            exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "a release can be dispatched only from main" >&2
+              exit 1
+            fi
+            name="v$crate"
+            if git fetch --quiet origin "refs/tags/$name:refs/tags/$name" 2>/dev/null; then
+              if [ "$(git rev-parse "$name^{commit}")" != "$GITHUB_SHA" ]; then
+                echo "tag $name already names another commit" >&2
+                exit 1
+              fi
+            fi
+          else
+            name="$GITHUB_REF_NAME"
+            if [ "${name#v}" != "$crate" ]; then
+              echo "tag $name does not match crate version $crate" >&2
+              exit 1
+            fi
           fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Check that the commit is on main
+        shell: bash
+        run: |
           git fetch origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "tag $GITHUB_REF_NAME is not on main" >&2
+            echo "commit $GITHUB_SHA is not on main" >&2
             exit 1
           fi
       - name: Extract the release notes
         shell: bash
+        env:
+          TAG: ${{ steps.name.outputs.name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           awk -v heading="## $version" '
             $0 == heading { found = 1; next }
             found && /^## / { exit }
@@ -104,7 +128,7 @@ jobs:
         run: cargo package --package rhizodb --locked
 
   publish:
-    needs: [check, randomized, package]
+    needs: [tag, check, randomized, package]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -125,8 +149,10 @@ jobs:
       - name: Check whether this version is already on crates.io
         id: published
         shell: bash
+        env:
+          TAG: ${{ needs.tag.outputs.name }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --user-agent "rhizodb-release (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY})" \
             "https://crates.io/api/v1/crates/rhizodb/${version}")"
@@ -144,7 +170,7 @@ jobs:
         run: cargo publish --package rhizodb --locked --no-verify
 
   github-release:
-    needs: publish
+    needs: [tag, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -157,10 +183,11 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.tag.outputs.name }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "release $TAG already exists"
           else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file notes.md --target "$GITHUB_SHA"
           fi
