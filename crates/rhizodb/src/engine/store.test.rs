@@ -1065,3 +1065,23 @@ fn rewriting_a_third_of_the_keys_at_every_checkpoint_keeps_the_file_near_its_liv
         "the file reached {largest} bytes for {live} live bytes: {sizes:?}"
     );
 }
+
+#[test]
+fn a_copy_that_fails_on_a_full_device_leaves_no_log_segment() {
+    let source = Engine::open(Arc::new(SimFs::new()), NAME, tiny(CheckpointMode::Inline)).unwrap();
+    let mut write = source.begin_write().unwrap();
+    for key in 0..1000u32 {
+        write
+            .put(Table::NodeChunks, &key.to_be_bytes(), &[7; 1000])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let target = SimFs::new();
+    target.set_capacity(Some(256 << 10));
+    let snapshot = source.begin_read().unwrap();
+
+    let copied = crate::engine::any_fs::write_copy_on(&snapshot, Arc::new(target.clone()), NAME);
+
+    assert!(copied.is_err());
+    assert_eq!(target.names().unwrap(), [NAME]);
+}
