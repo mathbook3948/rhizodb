@@ -482,9 +482,13 @@ pub(crate) fn install<F: FileSystem + 'static>(
         },
         other => (other, None, 0),
     };
+    let local_logged = local.map_or(0, |header| {
+        replica::newest_logged_term(&*fs, name, header.database_id)
+    });
     let local_term = local
         .map_or(0, |header| header.replication.seen_term)
-        .max(local_history);
+        .max(local_history)
+        .max(local_logged);
     let local_lineage = local.as_ref().map_or(0, lineage);
     let staging = staging_name(name);
     let file = open_or_create_staging(&*fs, &staging)?.ok_or_else(|| {
