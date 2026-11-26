@@ -199,6 +199,21 @@ fn invisible_format_characters_inside_a_word_are_dropped() {
 }
 
 #[test]
+fn a_double_quote_inside_a_hebrew_word_splits_it_as_a_query_does() {
+    for text in ["צה\"ל", "ארה\"ב"] {
+        let stored = document(text);
+        let typed = clauses(text);
+        assert!(!typed.is_empty(), "{text:?}");
+        for clause in typed {
+            let Clause::Term(term) = clause else {
+                panic!("{text:?} gave {clause:?}");
+            };
+            assert!(stored.contains(&term), "{term:?} not in {stored:?}");
+        }
+    }
+}
+
+#[test]
 fn composed_and_decomposed_text_give_the_same_terms() {
     assert_eq!(document("cafe\u{301} Åsa"), document("café A\u{30a}sa"));
     assert_eq!(document("cafe\u{301}"), ["café"]);
@@ -370,6 +385,10 @@ const POOL: &[char] = &[
     '*',
     '-',
     '_',
+    '\u{5e6}',
+    '\u{5d4}',
+    '\u{5dc}',
+    '\u{5b4}',
     '\u{ad}',
     '\u{2060}',
     '\u{e0041}',
@@ -479,6 +498,26 @@ proptest! {
                         joined
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn typing_the_stored_text_as_a_query_looks_only_for_what_it_stored(text in mixed_text()) {
+        let stored: Vec<String> = terms(&text, Purpose::Document)
+            .into_iter()
+            .map(|term| term.text)
+            .collect();
+        for clause in clauses(&text) {
+            let looked_for = match &clause {
+                Clause::Term(term) | Clause::Prefix(term) => vec![term.clone()],
+                Clause::Phrase(terms) => terms.iter().map(|term| term.text.clone()).collect(),
+            };
+            for term in looked_for {
+                prop_assert!(
+                    stored.contains(&term),
+                    "{text:?} as a query gives {clause:?}, but stored {stored:?}"
+                );
             }
         }
     }

@@ -3,7 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::is_nfkc_quick;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -17,7 +17,7 @@ const PROBE: &str = concat!(
     "ก่อน ๒๕๖๗ a\u{e48} ພາສາລາວ ភាសាខ្មែរ မြန်မာဘာသာ \u{1a20}\u{1a60}\u{1a21} \u{aa80}\u{aab0} ",
     "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60} ",
     "a\u{e31} ก\u{e31}a\u{e31} \u{e31}ก ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0} ",
-    "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc Ver\u{ad}si\u{2060}cherung",
+    "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc Ver\u{ad}si\u{2060}cherung צה\"ל",
 );
 
 /// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
@@ -108,7 +108,8 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// character, so a run starts at a letter that is not a digit. A cluster that starts with
 /// whitespace, or with a character the Unicode grapheme rules join to the character before it
 /// (Grapheme_Cluster_Break Extend, SpacingMark, or ZWJ), has no base letter and separates words
-/// like a space; a mark with Grapheme_Cluster_Break Other, such as a few spacing marks of
+/// like a space, and so does a double quote, which a query reads as phrase syntax; a mark
+/// with Grapheme_Cluster_Break Other, such as a few spacing marks of
 /// Brahmic scripts, is still taken for a letter. A word starts and ends at a grapheme cluster whose
 /// first character is a letter or digit, so punctuation that a script change leaves at its edge,
 /// and a mark that follows punctuation, are not part of it. Control characters are dropped. Hangul units
@@ -166,7 +167,7 @@ fn scan_by(text: &str, purpose: Purpose, ascii: impl Fn(&str) -> bool) -> Scan {
         }
         let mut word = String::new();
         for cluster in segment.graphemes(true) {
-            if has_no_base(cluster) {
+            if has_no_base(cluster) || cluster.starts_with('"') {
                 scan.push_word(&mut word);
                 scan.flush_run();
                 continue;
