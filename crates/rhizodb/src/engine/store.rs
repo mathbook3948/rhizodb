@@ -1754,6 +1754,7 @@ mod replica;
 
 pub(crate) use replica::Epoch;
 pub(crate) use replica::Role;
+pub(crate) use replica::different;
 pub(crate) use replica::epoch_at;
 pub(crate) use replica::fork_lsn;
 

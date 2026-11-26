@@ -8,7 +8,7 @@ fn empty_changes_read_back() {
         term: 3,
         writer_id: b"w".to_vec(),
     };
-    let bytes = encode(&after, 9, 42, &[]).unwrap();
+    let bytes = encode(7, &after, 9, 42, &[]).unwrap();
     let decoded = decode(&bytes).unwrap();
     assert_eq!(
         (decoded.after, decoded.after_lsn, decoded.last_chain),

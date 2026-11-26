@@ -43,5 +43,6 @@ mod bench_tests;
 
 pub(crate) use store::Epoch;
 pub(crate) use store::Role;
+pub(crate) use store::different;
 pub(crate) use store::epoch_at;
 pub(crate) use store::fork_lsn;

@@ -43,6 +43,7 @@ pub(crate) enum Failure {
         seen_term: u64,
     },
     Diverged {
+        database: u128,
         local: (EpochId, u64, u64),
         remote: (EpochId, u64, u64),
         fork_lsn: u64,
@@ -52,6 +53,10 @@ pub(crate) enum Failure {
     },
     Gap {
         expected_lsn: u64,
+    },
+    DifferentDatabase {
+        local: u128,
+        remote: u128,
     },
 }
 

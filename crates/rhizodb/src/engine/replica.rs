@@ -191,6 +191,14 @@ fn refuse(kind: ErrorKind, message: String, failure: Option<Failure>) -> EngineE
     }))
 }
 
+pub(crate) fn different(local: u128, remote: u128) -> EngineError {
+    refuse(
+        ErrorKind::DifferentDatabase,
+        format!("database {local:#x} cannot follow the changes of database {remote:#x}"),
+        Some(Failure::DifferentDatabase { local, remote }),
+    )
+}
+
 pub(super) fn not_writer() -> EngineError {
     refuse(
         ErrorKind::NotWriter,
@@ -207,7 +215,12 @@ fn fenced(term: u64, seen_term: u64) -> EngineError {
     )
 }
 
-fn diverged(local: (EpochId, u64, u64), remote: (EpochId, u64, u64), fork_lsn: u64) -> EngineError {
+fn diverged(
+    database: u128,
+    local: (EpochId, u64, u64),
+    remote: (EpochId, u64, u64),
+    fork_lsn: u64,
+) -> EngineError {
     refuse(
         ErrorKind::Diverged,
         format!(
@@ -216,6 +229,7 @@ fn diverged(local: (EpochId, u64, u64), remote: (EpochId, u64, u64), fork_lsn: u
             remote.1, remote.0.term
         ),
         Some(Failure::Diverged {
+            database,
             local,
             remote,
             fork_lsn,
@@ -246,6 +260,23 @@ impl<F: FileSystem + 'static> Engine<F> {
             (published.view.snapshot, published.chain)
         };
         (epoch_at(&lock(&self.shared.epochs), lsn), lsn, chain)
+    }
+
+    /// The id of the database whose history this file holds: the one it took from its first
+    /// applied change or installed copy, its own while it is a writer that never took one, and
+    /// zero while it holds nothing.
+    pub(crate) fn lineage(&self) -> u128 {
+        let (origin, own) = {
+            let header = lock(&self.shared.durable).header;
+            (header.replication.origin, header.database_id)
+        };
+        if lock(&self.shared.published).view.snapshot == 0 {
+            0
+        } else if origin != 0 {
+            origin
+        } else {
+            own
+        }
     }
 
     fn set_role(&self, role: Role) {
@@ -365,6 +396,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                     let epochs = lock(&shared.epochs);
                     let held = epoch_at(&epochs, after);
                     return Err(diverged(
+                        self.lineage(),
                         (held.clone(), after, prev.unwrap_or_default()),
                         (held, after, after_chain),
                         after,
@@ -414,6 +446,15 @@ impl<F: FileSystem + 'static> Engine<F> {
                     expected_lsn: writer.last_lsn + 1,
                 }),
             ));
+        }
+        if !changes.records.is_empty() && changes.database != 0 {
+            match self.lineage() {
+                0 => self.write_replication(|replication| replication.origin = changes.database)?,
+                local if local != changes.database => {
+                    return Err(different(local, changes.database));
+                }
+                _ => {}
+            }
         }
         let seen = lock(&shared.durable).header.replication.seen_term;
         let mut offered = changes.after.clone();
@@ -509,6 +550,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
         let fork = fork_lsn(epochs, &offered.0, offered.1);
         diverged(
+            self.lineage(),
             (
                 epoch_at(epochs, writer.last_lsn),
                 writer.last_lsn,

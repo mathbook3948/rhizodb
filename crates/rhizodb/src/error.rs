@@ -218,6 +218,10 @@ pub enum ErrorKind {
     /// [`Database::demote`](crate::Database::demote) waited for an open write transaction longer
     /// than it was given. The database takes no write meanwhile, and a later demotion finishes.
     WriterBusy,
+    /// A position or changes belong to another database than this one follows, as when a
+    /// replica is pointed at the writer of an unrelated database. Unlike
+    /// [`ErrorKind::Diverged`], installing a snapshot of the other side is not the answer.
+    DifferentDatabase,
 }
 
 impl ErrorKind {

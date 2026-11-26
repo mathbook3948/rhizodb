@@ -17,15 +17,15 @@ use crate::error::ErrorKind;
 use crate::storage::StorageError;
 use crate::storage::Table;
 
-const POSITION_FORMAT: u8 = 2;
+const POSITION_FORMAT: u8 = 3;
 const HISTORY_FORMAT: u8 = 1;
 
 /// The longest writer id a promotion accepts.
 pub(crate) const WRITER_ID_LIMIT: usize = 64;
 
 /// A place in a database's history of changes: the log sequence number of the last change it
-/// holds, the term and writer id of the writer that made that change, and a chain hash over
-/// every change up to it.
+/// holds, the term and writer id of the writer that made that change, a chain hash over every
+/// change up to it, and the id of the database the history belongs to.
 ///
 /// A database that never held a change, or whose changes were all made before any promotion,
 /// is at term 0 with an empty writer id. Two databases at equal positions hold the same graph,
@@ -48,6 +48,7 @@ pub struct Position {
     writer_id: Vec<u8>,
     lsn: u64,
     chain: u64,
+    database_id: u128,
 }
 
 impl Position {
@@ -64,6 +65,7 @@ impl Position {
             writer_id: writer_id.to_vec(),
             lsn,
             chain: 0,
+            database_id: 0,
         })
     }
 
@@ -73,6 +75,14 @@ impl Position {
             writer_id: epoch.writer_id,
             lsn,
             chain,
+            database_id: 0,
+        }
+    }
+
+    pub(crate) fn in_database(self, database_id: u128) -> Self {
+        Self {
+            database_id,
+            ..self
         }
     }
 
@@ -103,11 +113,18 @@ impl Position {
         self.chain
     }
 
+    /// The id of the database whose history this is, the same on a writer and every database
+    /// that follows it, or 0 for a database that holds no change.
+    pub fn database_id(&self) -> u128 {
+        self.database_id
+    }
+
     /// The position as bytes that [`Position::from_bytes`] reads back, in a format that later
     /// releases keep reading.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(26 + self.writer_id.len());
+        let mut out = Vec::with_capacity(42 + self.writer_id.len());
         out.push(POSITION_FORMAT);
+        out.extend_from_slice(&self.database_id.to_le_bytes());
         out.extend_from_slice(&self.term.to_le_bytes());
         out.extend_from_slice(&self.lsn.to_le_bytes());
         out.extend_from_slice(&self.chain.to_le_bytes());
@@ -121,9 +138,12 @@ impl Position {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
         let malformed = || Error::new(ErrorKind::CorruptData, "the bytes are not a position");
         let (&format, rest) = bytes.split_first().ok_or_else(malformed)?;
-        if format != POSITION_FORMAT || rest.len() < 25 {
+        if format != POSITION_FORMAT || rest.len() < 41 {
             return Err(malformed());
         }
+        let (database_id, rest) = rest.split_at(16);
+        let mut database = [0; 16];
+        database.copy_from_slice(database_id);
         let (term, rest) = rest.split_at(8);
         let (lsn, rest) = rest.split_at(8);
         let (chain, rest) = rest.split_at(8);
@@ -137,6 +157,7 @@ impl Position {
             writer_id: writer_id.to_vec(),
             lsn: le_u64(lsn),
             chain: le_u64(chain),
+            database_id: u128::from_le_bytes(database),
         })
     }
 }
@@ -278,6 +299,9 @@ pub enum Lineage {
         /// The first LSN at which the histories can differ.
         fork_lsn: u64,
     },
+    /// The two databases follow the histories of different databases, so neither can catch up
+    /// from the other or install a snapshot of it in place of its own data.
+    DifferentDatabase,
 }
 
 /// The facts behind a replication error, from [`Error::replication_failure`].
@@ -315,11 +339,21 @@ pub enum ReplicationFailure {
         /// The LSN of the next change this database needs.
         expected_lsn: u64,
     },
+    /// This database follows the history of database `local`, and the other side belongs to
+    /// database `remote`.
+    #[non_exhaustive]
+    DifferentDatabase {
+        /// The database this one follows.
+        local: u128,
+        /// The database the other side belongs to.
+        remote: u128,
+    },
 }
 
 impl Error {
     /// The facts behind an error of kind [`ErrorKind::Fenced`], [`ErrorKind::Diverged`],
-    /// [`ErrorKind::TooFarBehind`], or [`ErrorKind::Gap`], and `None` for every other error.
+    /// [`ErrorKind::TooFarBehind`], [`ErrorKind::Gap`], or [`ErrorKind::DifferentDatabase`],
+    /// and `None` for every other error.
     pub fn replication_failure(&self) -> Option<ReplicationFailure> {
         let storage = std::error::Error::source(self)?.downcast_ref::<StorageError>()?;
         let engine = std::error::Error::source(storage)?.downcast_ref::<EngineError>()?;
@@ -329,16 +363,23 @@ impl Error {
         Some(match refusal.failure.clone()? {
             Failure::Fenced { seen_term } => ReplicationFailure::Fenced { seen_term },
             Failure::Diverged {
+                database,
                 local,
                 remote,
                 fork_lsn,
-            } => ReplicationFailure::Diverged {
-                local: Position::of(local.0, local.1, local.2),
-                remote: Position::of(remote.0, remote.1, remote.2),
-                fork_lsn,
-            },
+            } => {
+                let at = |lsn: u64| if lsn == 0 { 0 } else { database };
+                ReplicationFailure::Diverged {
+                    local: Position::of(local.0, local.1, local.2).in_database(at(local.1)),
+                    remote: Position::of(remote.0, remote.1, remote.2).in_database(at(remote.1)),
+                    fork_lsn,
+                }
+            }
             Failure::TooFarBehind { oldest_lsn } => ReplicationFailure::TooFarBehind { oldest_lsn },
             Failure::Gap { expected_lsn } => ReplicationFailure::Gap { expected_lsn },
+            Failure::DifferentDatabase { local, remote } => {
+                ReplicationFailure::DifferentDatabase { local, remote }
+            }
         })
     }
 }
@@ -376,12 +417,15 @@ pub struct Changes {
 impl Changes {
     fn decode(bytes: Vec<u8>) -> Result<Self, Error> {
         let decoded = changes::decode(&bytes).map_err(StorageError::from)?;
+        let database = |lsn: u64| if lsn == 0 { 0 } else { decoded.database };
         let after = Position::of(
             decoded.after.clone(),
             decoded.after_lsn,
             decoded.after_chain,
-        );
-        let last = Position::of(decoded.last.clone(), decoded.last_lsn(), decoded.last_chain);
+        )
+        .in_database(database(decoded.after_lsn));
+        let last = Position::of(decoded.last.clone(), decoded.last_lsn(), decoded.last_chain)
+            .in_database(database(decoded.last_lsn()));
         Ok(Self {
             bytes,
             decoded,
@@ -445,6 +489,7 @@ fn diverged(local: Position, remote: &Position, fork_lsn: u64) -> Error {
             remote.lsn, remote.term
         ),
         failure: Some(Failure::Diverged {
+            database: local.database_id.max(remote.database_id),
             local: (local.epoch(), local.lsn, local.chain),
             remote: (remote.epoch(), remote.lsn, remote.chain),
             fork_lsn,
@@ -468,8 +513,9 @@ impl Database {
     /// sees. A host that must not lose a commit waits until a replica reports a position at or
     /// past the writer's position right after that commit.
     pub fn position(&self) -> Position {
-        let (epoch, lsn, chain) = self.graph.storage().position();
-        Position::of(epoch, lsn, chain)
+        let engine = self.graph.storage();
+        let (epoch, lsn, chain) = engine.position();
+        Position::of(epoch, lsn, chain).in_database(engine.lineage())
     }
 
     /// What this database does with local writes.
@@ -504,6 +550,12 @@ impl Database {
     /// install a snapshot.
     pub fn compare_lineage(&self, remote_history: &History, remote: &Position) -> Lineage {
         let local = self.position();
+        if local.database_id != 0
+            && remote.database_id != 0
+            && local.database_id != remote.database_id
+        {
+            return Lineage::DifferentDatabase;
+        }
         let mine = self.history();
         let common = mine
             .entries
@@ -552,6 +604,16 @@ impl Database {
     /// [fenced](Role::Fenced), so a host passes only positions of authenticated peers.
     pub fn changes_since(&self, position: &Position, max_bytes: usize) -> Result<Changes, Error> {
         let engine = self.graph.storage();
+        let local = self.position();
+        if position.database_id != 0
+            && local.database_id != 0
+            && position.database_id != local.database_id
+        {
+            return Err(engine_error(crate::engine::different(
+                local.database_id,
+                position.database_id,
+            )));
+        }
         engine.observe_term(position.term).map_err(engine_error)?;
         let local = self.position();
         let epochs = engine.epochs();
@@ -574,8 +636,14 @@ impl Database {
             }
             Vec::new()
         };
-        let bytes = changes::encode(&asked, position.lsn, position.chain, &records)
-            .map_err(engine_error)?;
+        let bytes = changes::encode(
+            local.database_id,
+            &asked,
+            position.lsn,
+            position.chain,
+            &records,
+        )
+        .map_err(engine_error)?;
         Changes::decode(bytes)
     }
 
@@ -583,6 +651,9 @@ impl Database {
     /// reached. Each change is logged and made durable before readers see it, as a commit is.
     /// Changes this replica already holds in the same history are skipped, so applying the same
     /// changes twice is safe.
+    ///
+    /// A replica that holds no change takes the database id of the first changes it applies,
+    /// and changes of another database fail with [`ErrorKind::DifferentDatabase`].
     ///
     /// It fails with [`ErrorKind::NotReplica`] on a writer or a fenced writer, with
     /// [`ErrorKind::Gap`] when the changes start after the last change held, with

@@ -52,6 +52,9 @@ pub(crate) struct Replication {
     pub(crate) replica: bool,
     pub(crate) seen_term: u64,
     pub(crate) checkpoint_chain: u64,
+    /// The id of the database whose history this file follows, or zero when it has taken none
+    /// yet and its own database id stands for it.
+    pub(crate) origin: u128,
 }
 
 /// One header slot. The valid slot with the higher generation describes the database.
@@ -121,6 +124,7 @@ impl Header {
         put_u32(&mut out, if self.replication.replica { REPLICA } else { 0 });
         put_u64(&mut out, self.replication.seen_term);
         put_u64(&mut out, self.replication.checkpoint_chain);
+        put_u128(&mut out, self.replication.origin);
         out.resize(CHECKSUM_AT, 0);
         let sum = checksum(0, &[&out]);
         put_u64(&mut out, sum);
@@ -204,6 +208,7 @@ impl Header {
             replica: replication_flags & REPLICA != 0,
             seen_term: reader.u64()?,
             checkpoint_chain: reader.u64()?,
+            origin: reader.u128()?,
         };
         if reader.rest().iter().any(|byte| *byte != 0) {
             return Err(reader.bad("reserved area"));
