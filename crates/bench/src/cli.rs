@@ -14,6 +14,9 @@ use crate::engine::Engine;
 use crate::engine::EngineKind;
 use crate::falkor::FalkorEngine;
 use crate::ladybug::LadybugEngine;
+use crate::replication::replication_json;
+use crate::replication::replication_table;
+use crate::replication::run_replication;
 use crate::report::WorkloadReport;
 use crate::report::json;
 use crate::report::table;
@@ -57,6 +60,9 @@ pub struct Arguments {
     pub servers: Servers,
     /// The load scenarios to run in place of the workload suite, when any are named.
     pub load: Load,
+    /// Whether to measure snapshot export, install, and commits during an export in place of the
+    /// workload suite.
+    pub replication: bool,
 }
 
 /// A command line the binary cannot read.
@@ -67,7 +73,7 @@ impl fmt::Display for UsageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT] [--load readers,mixed,sustained|all] [--threads 1,2,4,8] [--seconds N]",
+            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT] [--load readers,mixed,sustained|all] [--threads 1,2,4,8] [--seconds N] [--replication]",
             self.0
         )
     }
@@ -87,6 +93,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
         engines: None,
         servers: Servers::default(),
         load: Load::default(),
+        replication: false,
     };
     let mut arguments = arguments.into_iter();
     while let Some(flag) = arguments.next() {
@@ -143,6 +150,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
                     .ok_or_else(|| UsageError(format!("`{text}` is not a positive count")))?;
                 parsed.load.duration = Duration::from_secs(seconds);
             }
+            "--replication" => parsed.replication = true,
             "--neo4j" => parsed.servers.neo4j = Some(value()?),
             "--memgraph" => parsed.servers.memgraph = Some(value()?),
             "--falkordb" => parsed.servers.falkordb = Some(value()?),
@@ -303,6 +311,9 @@ pub fn main() -> ExitCode {
     if !arguments.load.scenarios.is_empty() {
         return load_main(&arguments);
     }
+    if arguments.replication {
+        return replication_main(&arguments);
+    }
     let options = Options {
         scale: arguments.scale,
         reps: arguments.reps,
@@ -361,6 +372,50 @@ pub fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+fn replication_main(arguments: &Arguments) -> ExitCode {
+    let plan = arguments.scale.plan();
+    let data = Dataset::generate(SEED, plan);
+    let scratch = match tempfile_dir() {
+        Ok(scratch) => scratch,
+        Err(error) => {
+            eprintln!("cannot create the scratch directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let outcome = run_replication(&scratch, &data, arguments.reps);
+    let _ = fs::remove_dir_all(&scratch);
+    let report = match outcome {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("replication run failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    print!("{}", replication_table(&report));
+    if let Some(path) = &arguments.out {
+        let header = json!({
+            "scale": arguments.scale.name(),
+            "reps": arguments.reps,
+            "seed": SEED,
+            "persons": plan.persons,
+            "cores": std::thread::available_parallelism().map_or(0, |cores| cores.get()),
+        });
+        let text =
+            serde_json::to_string_pretty(&replication_json(&report, header)).unwrap_or_default();
+        if let Err(error) = fs::write(path, text) {
+            eprintln!("cannot write {}: {error}", path.display());
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn tempfile_dir() -> std::io::Result<PathBuf> {
+    let dir = env::temp_dir().join(format!("rhizodb-replication-{}", std::process::id()));
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 fn load_main(arguments: &Arguments) -> ExitCode {
