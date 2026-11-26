@@ -512,6 +512,8 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 collect_targets(self.eval(target, row)?, &mut nodes, &mut relationships)?;
             }
         }
+        nodes.sort_unstable();
+        nodes.dedup();
         if detach {
             for node in &nodes {
                 if self.tx.node_label_set(*node)?.is_some() {
@@ -521,6 +523,8 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 }
             }
         }
+        relationships.sort_unstable();
+        relationships.dedup();
         for relationship in relationships {
             if let Some(record) = self.tx.delete_relationship(relationship)?
                 && retain
