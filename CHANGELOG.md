@@ -65,6 +65,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- Reopening a database right after dropping it could fail with `ErrorKind::DatabaseAlreadyOpen` while another thread of the host spawned a process, since the child shares the file lock until it starts its program. An open that finds the lock held now tries again for half a second before it fails.
 - The doctests compile from the published package, whose README the crate now includes, so `cargo test` runs in an unpacked copy of the crate.
 - Opening a file whose storage-engine format is newer than this build fails with `ErrorKind::UnsupportedFormatVersion` instead of `ErrorKind::Storage`, so a host that rolls back a release can tell it from a disk fault.
 - A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.

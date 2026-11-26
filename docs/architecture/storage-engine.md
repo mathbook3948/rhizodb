@@ -13,6 +13,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The engine implements the storage trait, and the graph layer reaches it only through that trait.
 - A database at rest is one file.
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
+- An open that finds the lock held tries again for half a second before it fails, since a child process the host spawns shares the lock until it starts its program.
 - On a file system without locks the engine opens a database unlocked.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.

@@ -468,3 +468,24 @@ fn threads_racing_to_create_one_file_end_with_one_database_that_keeps_every_writ
         assert_eq!(single(&db, "MATCH (n:W) RETURN count(*)"), int(written));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn reopening_a_dropped_database_succeeds_while_another_thread_spawns_processes() {
+    let (_directory, path) = graph_file();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let failures = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::process::Command::new("true").status().unwrap();
+            }
+        });
+        let failures: Vec<ErrorKind> = (0..300)
+            .filter_map(|_| Database::open(&path).map(drop).err())
+            .map(|error| error.kind())
+            .collect();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        failures
+    });
+    assert_eq!(failures, Vec::new());
+}
