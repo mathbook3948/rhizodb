@@ -840,7 +840,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Relationship {
             id,
-            relationship_type: self.tx.token_name(record.rel_type)?,
+            relationship_type: self.token_name(record.rel_type)?.to_string(),
             start: record.source,
             end: record.target,
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,

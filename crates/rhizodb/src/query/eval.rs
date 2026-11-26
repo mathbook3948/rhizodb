@@ -28,6 +28,7 @@ use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Target;
 use crate::graph::Token;
+use crate::graph::TokenKind;
 use crate::storage::ReadTransaction;
 use crate::temporal::Clocks;
 
@@ -54,6 +55,7 @@ use super::plan::Slot;
 use super::plan::SubqueryKind;
 use super::prune;
 use super::regex::Patterns;
+use super::scan::ById;
 use super::taint;
 use super::taint::Taint;
 use super::temporals;
@@ -98,6 +100,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) relationships: RefCell<RelationshipReader>,
     /// The adjacency of the nodes expanded more than once.
     pub(crate) hops: RefCell<HopMemo>,
+    /// The names of the tokens read so far, by token kind and ID. A token never changes its name.
+    pub(crate) names: RefCell<ById<(u8, u32), Arc<str>>>,
     /// The relationship types looked up so far that have a token.
     pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
     /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
@@ -129,6 +133,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             adjacency: RefCell::default(),
             relationships: RefCell::default(),
             hops: RefCell::default(),
+            names: RefCell::default(),
             rel_type_tokens: RefCell::default(),
             morsel: None,
         }
@@ -148,7 +153,7 @@ pub(crate) fn type_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::TypeMismatch, message)
 }
 
-fn deleted() -> Error {
+pub(crate) fn deleted() -> Error {
     Error::new(
         ErrorKind::DeletedEntityAccess,
         "the element was deleted earlier in the query",
@@ -320,20 +325,35 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
+    /// The name of `token`, read from storage once per query.
+    pub(crate) fn token_name<K: TokenKind>(&self, token: Token<K>) -> Result<Arc<str>, Error> {
+        let key = (K::TAG, token.id());
+        if let Ok(names) = self.names.try_borrow()
+            && let Some(name) = names.get(&key)
+        {
+            return Ok(Arc::clone(name));
+        }
+        let name: Arc<str> = Arc::from(self.tx.token_name(token)?);
+        if let Ok(mut names) = self.names.try_borrow_mut() {
+            names.insert(key, Arc::clone(&name));
+        }
+        Ok(name)
+    }
+
     /// The type of a relationship, which stays readable after the query deleted it.
     pub(crate) fn relationship_type(&self, id: RelationshipId) -> Result<String, Error> {
         let rel_type = match self.graveyard.relationships.get(&id) {
             Some(record) => record.rel_type,
             None => self.relationship(id)?.rel_type,
         };
-        Ok(self.tx.token_name(rel_type)?)
+        Ok(self.token_name(rel_type)?.to_string())
     }
 
     pub(crate) fn label_names(&self, record: &NodeRecord) -> Result<Vec<String>, Error> {
         record
             .labels
             .iter()
-            .map(|label| Ok(self.tx.token_name(*label)?))
+            .map(|label| Ok(self.token_name(*label)?.to_string()))
             .collect()
     }
 
@@ -343,12 +363,7 @@ impl<T: ReadTransaction> Env<'_, T> {
     ) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         properties
             .iter()
-            .map(|(key, value)| {
-                Ok((
-                    Arc::from(self.tx.token_name(*key)?),
-                    Datum::from(value.clone()),
-                ))
-            })
+            .map(|(key, value)| Ok((self.token_name(*key)?, Datum::from(value.clone()))))
             .collect()
     }
 
