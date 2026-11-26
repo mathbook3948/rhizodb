@@ -64,6 +64,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A query that reads the properties of many relationships reads each stored chunk of 32 relationships from storage once rather than once per relationship, so counting the `KNOWS` relationships of the medium benchmark graph with a filter on a relationship property runs four times as fast.
 - A query that reaches a node again over the same kind of relationship, as one that closes a cycle does, reads that node's adjacency from storage at most twice, so counting every `KNOWS` triangle of the medium benchmark graph runs three times as fast.
 - A scan of one label computes operators, function calls, and indexing over the properties it reads, so a query that orders, groups, or filters by such a value, such as `ORDER BY p.age * 7 % 13 + p.id % 5 LIMIT 20` or `RETURN upper(substring(p.name, 0, 1)), count(*)`, no longer builds a row per node. Ordering twenty thousand persons by a computed score runs six times as fast.
+- `EXISTS { MATCH ... }` and `COUNT { MATCH ... }` over a single `MATCH` count the matches without building a row for each, and `EXISTS` stops at the first match when nothing it would test after that could fail. Filtering the persons of the medium benchmark graph by `COUNT { MATCH (p)<-[:KNOWS]-(:Person) } >= 20` runs twice as fast.
 
 ### Fixed
 

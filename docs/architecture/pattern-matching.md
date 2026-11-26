@@ -18,6 +18,8 @@ A pattern part was always matched from its first node and its `WHERE` tested onl
 - A query forgets the relationship chunks it holds when it stores a relationship, and when they pass a size set in code.
 - A query holds the relationships it read at a node, by direction and type, from the second time it expands that node the same way, so a traversal that reaches a node again reads its adjacency from storage at most twice.
 - A query forgets the adjacency it holds when it changes adjacency, and when it passes a size set in code.
+- `EXISTS` and `COUNT` over a single non-optional `MATCH` count its matches without building their rows.
+- `EXISTS` stops at its first match only when every property map entry of its pattern is a literal or a parameter and its filter takes only the conditions an early test takes, so stopping hides no error.
 
 ## Open
 

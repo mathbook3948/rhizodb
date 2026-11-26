@@ -137,3 +137,30 @@ fn a_query_reads_the_relationships_and_properties_it_wrote_itself() {
         (1..5).map(|w| vec![Value::Integer(w)]).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn exists_and_count_subqueries_answer_and_fail_as_their_rows_do() {
+    let db = graph();
+    for (fast, rows) in [
+        (
+            "MATCH (x) RETURN x.k, EXISTS { MATCH (x)-[r]->(y) WHERE y.k > 2 } ORDER BY x.k",
+            "MATCH (x) RETURN x.k, size(COLLECT { MATCH (x)-[r]->(y) WHERE y.k > 2 RETURN y }) > 0 ORDER BY x.k",
+        ),
+        (
+            "MATCH (x) RETURN x.k, COUNT { MATCH (x)-[:T]-(y:N {k: 2}) } ORDER BY x.k",
+            "MATCH (x) RETURN x.k, size(COLLECT { MATCH (x)-[:T]-(y:N {k: 2}) RETURN y }) ORDER BY x.k",
+        ),
+    ] {
+        assert_eq!(run(&db, fast), run(&db, rows), "{fast}");
+    }
+    for failing in [
+        "MATCH (x) WHERE EXISTS { MATCH (x)-->(y) WHERE y.k - 'a' = 1 } RETURN x",
+        "MATCH (x) WHERE EXISTS { MATCH (x)-->(y {k: x.k - 'a'}) } RETURN x",
+        "MATCH (x) RETURN COUNT { MATCH (x)-->(y) WHERE y.k / 0 = 1 }",
+    ] {
+        assert!(
+            db.execute(failing, &rhizodb::Parameters::new()).is_err(),
+            "{failing}"
+        );
+    }
+}

@@ -45,12 +45,14 @@ use super::plan::AggregateFunction;
 use super::plan::Case;
 use super::plan::Expr;
 use super::plan::ListComprehension;
+use super::plan::MatchClause;
 use super::plan::PatternQuery;
 use super::plan::Quantified;
 use super::plan::ReadClause;
 use super::plan::Reduce;
 use super::plan::Slot;
 use super::plan::SubqueryKind;
+use super::prune;
 use super::regex::Patterns;
 use super::taint;
 use super::taint::Taint;
@@ -919,6 +921,18 @@ impl<T: ReadTransaction> Env<'_, T> {
         clauses: &[ReadClause],
         row: &Row,
     ) -> Result<(Datum, Taint), Error> {
+        if let (SubqueryKind::Exists | SubqueryKind::Count, [ReadClause::Match(found)]) =
+            (kind, clauses)
+            && !found.optional
+            && found.by_id.is_none()
+        {
+            let count = self.count_matches_of(found, matches!(kind, SubqueryKind::Exists), row)?;
+            let value = match kind {
+                SubqueryKind::Exists => Datum::Boolean(count > 0),
+                _ => Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
+            };
+            return Ok((value, Taint::Clean));
+        }
         let mut rows = vec![row.clone()];
         for clause in clauses {
             rows = self.read_clause(clause, rows)?;
@@ -948,6 +962,21 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
         };
         Ok((value, Taint::Clean))
+    }
+
+    fn count_matches_of(&self, found: &MatchClause, any: bool, row: &Row) -> Result<usize, Error> {
+        let stop = any && prune::infallible(&found.patterns, found.filter.as_ref());
+        let mut count = 0;
+        self.match_patterns(&found.patterns, row, &mut |matched| {
+            if let Some(filter) = &found.filter
+                && !self.predicate(filter, matched)?
+            {
+                return Ok(true);
+            }
+            count += 1;
+            Ok(!stop)
+        })?;
+        Ok(count)
     }
 
     fn reduce(&self, reduce: &Reduce, row: &Row) -> Result<(Datum, Taint), Error> {

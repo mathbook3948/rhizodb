@@ -45,6 +45,41 @@ pub(crate) fn checks(part: &PatternPart, filter: Option<&Expr>) -> Vec<(usize, E
     found
 }
 
+/// Whether matching `patterns` and testing `filter` can give no error, so a search that stops at
+/// the first match hides none: every property map entry is a literal or a parameter, and every
+/// conjunct is a predicate that checks would take over the elements the patterns match.
+pub(crate) fn infallible(patterns: &[PatternPart], filter: Option<&Expr>) -> bool {
+    let mut elements = Vec::new();
+    let mut maps = Vec::new();
+    for part in patterns {
+        elements.push((part.start.slot, 0));
+        maps.push(part.start.properties.as_ref());
+        for step in &part.steps {
+            if step.relationship.length.is_none() {
+                elements.push((step.relationship.slot, 0));
+            }
+            elements.push((step.node.slot, 0));
+            maps.push(step.relationship.properties.as_ref());
+            maps.push(step.node.properties.as_ref());
+        }
+    }
+    let literal = |map: Option<&Expr>| match map {
+        None => true,
+        Some(Expr::Map(entries)) => entries
+            .iter()
+            .all(|(_, value)| matches!(value, Expr::Constant(_) | Expr::Parameter(_))),
+        Some(_) => false,
+    };
+    let mut conjuncts = Vec::new();
+    if let Some(filter) = filter {
+        collect(filter, &mut conjuncts);
+    }
+    maps.into_iter().all(literal)
+        && conjuncts
+            .into_iter()
+            .all(|conjunct| predicate(conjunct, &elements, &mut None))
+}
+
 fn collect<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
         Expr::Binary(BinaryOp::And, left, right) => {
