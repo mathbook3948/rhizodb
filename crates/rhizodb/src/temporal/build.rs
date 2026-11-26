@@ -95,6 +95,7 @@ fn out_of_range() -> TemporalError {
 pub(crate) enum Component {
     Integer(i64),
     Text(String),
+    Overflow,
 }
 
 /// The zone named by a `timezone` text: a UTC offset or an IANA zone name.
@@ -814,7 +815,7 @@ fn offset_text(offset: i32) -> String {
 pub(crate) fn component(value: &Temporal, name: &str) -> Option<Component> {
     let name = name.to_ascii_lowercase();
     if let Temporal::Duration(duration) = value {
-        return duration_component(duration, &name).map(Component::Integer);
+        return duration_component(duration, &name);
     }
     if let Some(date) = date_of(value) {
         let days = date.days;
@@ -866,11 +867,10 @@ pub(crate) fn component(value: &Temporal, name: &str) -> Option<Component> {
         _ => match value {
             Temporal::DateTime(datetime) => match name.as_str() {
                 "epochseconds" => Some(Component::Integer(datetime.epoch_second)),
-                "epochmillis" => Some(Component::Integer(
-                    datetime
-                        .epoch_second
-                        .saturating_mul(1000)
-                        .saturating_add(datetime.nanosecond / 1_000_000),
+                "epochmillis" => Some(scaled(
+                    datetime.epoch_second,
+                    1000,
+                    datetime.nanosecond / 1_000_000,
                 )),
                 _ => None,
             },
@@ -879,14 +879,21 @@ pub(crate) fn component(value: &Temporal, name: &str) -> Option<Component> {
     }
 }
 
-fn duration_component(duration: &Duration, name: &str) -> Option<i64> {
+fn scaled(whole: i64, per_whole: i64, part: i64) -> Component {
+    whole
+        .checked_mul(per_whole)
+        .and_then(|scaled| scaled.checked_add(part))
+        .map_or(Component::Overflow, Component::Integer)
+}
+
+fn duration_component(duration: &Duration, name: &str) -> Option<Component> {
     let Duration {
         months,
         days,
         seconds,
         nanoseconds,
     } = *duration;
-    Some(match name {
+    Some(Component::Integer(match name {
         "years" => months / 12,
         "quarters" => months / 3,
         "months" => months,
@@ -895,15 +902,9 @@ fn duration_component(duration: &Duration, name: &str) -> Option<i64> {
         "hours" => seconds / 3600,
         "minutes" => seconds / 60,
         "seconds" => seconds,
-        "milliseconds" => seconds
-            .saturating_mul(1000)
-            .saturating_add(nanoseconds / 1_000_000),
-        "microseconds" => seconds
-            .saturating_mul(1_000_000)
-            .saturating_add(nanoseconds / 1000),
-        "nanoseconds" => seconds
-            .saturating_mul(NANOS_PER_SECOND)
-            .saturating_add(nanoseconds),
+        "milliseconds" => return Some(scaled(seconds, 1000, nanoseconds / 1_000_000)),
+        "microseconds" => return Some(scaled(seconds, 1_000_000, nanoseconds / 1000)),
+        "nanoseconds" => return Some(scaled(seconds, NANOS_PER_SECOND, nanoseconds)),
         "quartersofyear" => months % 12 / 3,
         "monthsofquarter" => months % 3,
         "monthsofyear" => months % 12,
@@ -914,7 +915,7 @@ fn duration_component(duration: &Duration, name: &str) -> Option<i64> {
         "microsecondsofsecond" => nanoseconds / 1000,
         "nanosecondsofsecond" => nanoseconds,
         _ => return None,
-    })
+    }))
 }
 
 #[cfg(test)]

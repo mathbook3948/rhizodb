@@ -147,6 +147,31 @@ fn a_datetime_string_with_an_offset_and_a_zone_keeps_the_instant_its_offset_give
 }
 
 #[test]
+fn sub_second_components_that_do_not_fit_an_integer_overflow() {
+    let db = db();
+    for query in [
+        "RETURN duration.inSeconds(date('1700-01-01'), date('2024-01-01')).nanoseconds",
+        "RETURN duration({seconds: 9223372036854775807}).milliseconds",
+        "RETURN duration({seconds: -9223372036854775807}).microseconds",
+        "RETURN datetime({year: 300000000}).epochMillis",
+    ] {
+        assert_eq!(
+            error_kind(&db, query),
+            ErrorKind::IntegerOverflow,
+            "{query}"
+        );
+    }
+    assert_eq!(
+        run(
+            &db,
+            "RETURN duration({seconds: 9223372036, nanoseconds: 854775807}).nanoseconds, \
+             duration({seconds: 2}).milliseconds, datetime('1970-01-01T00:00:01.5Z').epochMillis"
+        ),
+        [vec![int(i64::MAX), int(2000), int(1500)]]
+    );
+}
+
+#[test]
 fn malformed_temporal_input_raises_its_own_error() {
     let db = db();
     for query in [
