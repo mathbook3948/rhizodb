@@ -343,6 +343,11 @@ impl<S: Storage> Graph<S> {
         Ok(work(&self.storage))
     }
 
+    /// Runs `work` on the storage, which must take no writer, from any thread.
+    pub(crate) fn inspect<R>(&self, work: impl FnOnce(&S) -> R) -> R {
+        work(&self.storage)
+    }
+
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
         let current = thread::current().id();
         if *lock(&self.writer) == Some(current) {

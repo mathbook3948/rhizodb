@@ -112,7 +112,8 @@ pub enum ValueType {
     Boolean,
     /// An integer.
     Integer,
-    /// A float. An integer argument is passed as the equal float.
+    /// A float. An integer argument is passed as the nearest float, as integer and float
+    /// arithmetic converts it.
     Float,
     /// An integer or a float, passed as it is.
     Number,

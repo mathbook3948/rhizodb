@@ -69,7 +69,7 @@ impl OpenOptions {
     }
 
     /// Whether [`OpenOptions::open`] creates the file when there is none, which it does unless
-    /// this is set to `false`. Without it, a path with no file fails with
+    /// this is set to `false`. Without it, a path with no file or an empty file fails with
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
     pub fn create(mut self, create: bool) -> Self {
         self.create = create;
@@ -123,11 +123,11 @@ impl OpenOptions {
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
     ///
     /// Fails with [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound) when
-    /// [`OpenOptions::create`] is `false` and there is no file at `path`, and with the kinds
-    /// [`Database::open`] lists.
+    /// [`OpenOptions::create`] is `false` and there is no file at `path` or the file there is
+    /// empty, and with the kinds [`Database::open`] lists.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
         let path = path.as_ref();
-        if !self.create && !exists(path)? {
+        if !self.create && !holds_bytes(path)? {
             return Err(Error::new(
                 ErrorKind::DatabaseNotFound,
                 format!("there is no database file at {}", path.display()),
@@ -140,14 +140,16 @@ impl OpenOptions {
     }
 }
 
-fn exists(path: &Path) -> Result<bool, Error> {
-    path.try_exists().map_err(|error| {
-        Error::caused_by(
+fn holds_bytes(path: &Path) -> Result<bool, Error> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len() > 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::caused_by(
             ErrorKind::Storage,
             format!("cannot read whether {} exists: {error}", path.display()),
             Box::new(error),
-        )
-    })
+        )),
+    }
 }
 
 /// The size of a database on disk and how well its cache serves reads, from
@@ -629,13 +631,10 @@ impl Database {
         Ok(self.graph.maintain(Maintenance::compact)??)
     }
 
-    /// The size of the database on disk and how well its cache serves reads.
-    ///
-    /// Fails with
-    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
-    /// when the calling thread holds a write transaction.
+    /// The size of the database on disk and how well its cache serves reads. It waits for no
+    /// transaction, so it also answers on a thread that holds a write transaction.
     pub fn stats(&self) -> Result<DatabaseStats, Error> {
-        let stats = self.graph.maintain(Maintenance::stats)??;
+        let stats = self.graph.inspect(Maintenance::stats)?;
         Ok(DatabaseStats {
             file_bytes: stats.file_bytes,
             live_bytes: stats.live_bytes,

@@ -81,3 +81,5 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `DETACH DELETE` of a node that many matched rows name read its relationships once per row, so deleting a hub through `MATCH (h:Hub)<-[:FOLLOWS]-(f) DETACH DELETE h` took time and memory quadratic in its degree, and 16,000 followers took seven seconds. Each node and relationship is now deleted once.
 - Dropping an index, and rebuilding a keyword index on open, copied every entry of the index into memory, vectors and postings included, and logged one delete per entry. They now delete the entries by range.
 - Vector scores of -0.0 sorted below equal scores of 0.0, so elements that both scored zero came out of a vector search out of ascending ID order, and the score read -0.0. Zero scores are now always 0.0.
+- `Database::stats` failed with `ErrorKind::WriteTransactionOnThisThread` on a thread that held a write transaction, although it waits for no transaction. It now answers there.
+- `OpenOptions::create(false)` wrote a new database into an existing empty file. Opening an empty file without `create` now fails with `ErrorKind::DatabaseNotFound` and leaves the file as it was.
