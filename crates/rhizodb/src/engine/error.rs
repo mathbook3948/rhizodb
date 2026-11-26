@@ -123,6 +123,8 @@ impl From<EngineError> for StorageError {
             StorageError::corrupt(error)
         } else if matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock) {
             StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
+        } else if matches!(&error, EngineError::Unsupported(_)) {
+            StorageError::of_kind(ErrorKind::UnsupportedFormatVersion, error)
         } else {
             StorageError::new(error)
         }

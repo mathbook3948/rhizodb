@@ -745,3 +745,7 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "database_backup.test.rs"]
 mod backup_tests;
+
+#[cfg(test)]
+#[path = "database_format.test.rs"]
+mod format_tests;

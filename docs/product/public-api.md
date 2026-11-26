@@ -19,7 +19,9 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - `NodeId` and `RelationshipId` convert to and from `u64`, so a host can store an ID and compare it later.
 - Functions that only the fuzz targets call exist only with the non-default `fuzzing` feature and are not part of the API.
 - A storage failure that a host handles differently from the rest, such as a file already open elsewhere or a backup target that exists, has an error kind of its own, and every other storage failure stays `ErrorKind::Storage`.
-- `Value`, `Node`, `Relationship`, and `Path` implement `Display` in the notation of GQL literals, without element IDs, so a host prints a result without writing a formatter and reads typed accessors when it needs data.
+- `Value`, `Node`, `Relationship`, and `Path` implement `Display` as GQL text without element IDs, so a host prints a result without writing a formatter and reads typed accessors when it needs data.
+- The `Display` text of null, booleans, integers, finite floats, strings, temporals, and lists and maps of them is a GQL expression that evaluates back to an equal value in every later release, while the text of bytes, non-finite floats, and elements is for reading only.
+- A datetime in a named zone reads back from its `Display` text through the zone rules of the reading build, so a changed rule can move it to another instant.
 - `Error` implements `std::error::Error` and is `Send`, `Sync`, and `'static`.
 - `Error::byte_offset` returns the position of a syntax error in the query text and is `Some` exactly when the kind is `ErrorKind::Syntax`.
 - Every public type is `Send` and `Sync`, except that `ReadTransaction` is only `Send` and `WriteTransaction` is neither, and a test asserts it.
