@@ -44,7 +44,7 @@ env = { RHIZODB_TEST_SCALE = "100" }
 run = [
   "cargo test --release --package rhizodb --test isolation --test kill_recovery --test model_ops --test corrupt_file --test concurrency --test resource_limits --test backup --test query_oracle --test memory_growth --test snapshot_stress",
   "cargo test --release --package interleavings",
-  "RHIZODB_TEST_PARALLEL=1 RHIZODB_TEST_SCALE=1 cargo test --release --package rhizodb --tests",
+  "RHIZODB_TEST_PARALLEL=1 RHIZODB_TEST_SCALE=1 cargo test --release --package rhizodb --test '*'",
 ]
 
 [tasks.soak]

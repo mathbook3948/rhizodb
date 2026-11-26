@@ -26,7 +26,7 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - Helper threads get a 2 MiB stack.
 - A worker that panics re-raises its panic on the calling thread.
 - A query that calls a host procedure, any updating query including an updating `CALL` or `NEXT` block, any query in a write transaction, and `MATCH (n) RETURN count(n)` answered from node counts stay on the calling thread.
-- `OpenOptions::threads` sets the threads per query, defaulting to the available parallelism, and one or zero keeps every query on the calling thread.
+- `OpenOptions::threads` is a budget for the whole database, not for one query: a split adds helpers only while the read threads running, callers and helpers alike, stay within it, and one or zero keeps every query on the calling thread.
 - `OpenOptions::parallel_threshold` sets the start nodes a match needs before it splits, defaulting to 8192, which is two row groups.
 - A threshold below two acts as two, since one start node cannot split.
 - Consecutive row groups join one morsel up to a quarter of a thread's share of the start nodes.
