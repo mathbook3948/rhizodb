@@ -37,7 +37,8 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
 - The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
 - The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
-- Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at each point, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
+- Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at points sampled from a seed that changes every run, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
+- Those workload tests try at most 16 reorders of unsynced writes at each point, since each reorder reopens and checks the database.
 - The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
 - A full disk is simulated by a backend that refuses to grow the file, and the database must fail writes as storage errors, keep reads, and open with every acknowledged step once space returns.
 - Node meta is checked against a model of node labels over random sequences of node and label edits, commits, rollbacks, reopens, and power losses.
