@@ -6,7 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
-- Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database instead of once per element, so returning many elements no longer reads storage once per label and property.
+- Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database (once per transaction inside a write transaction) instead of once per element, so returning many elements no longer reads storage once per label and property.
 - `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
 
 ## 0.1.0
