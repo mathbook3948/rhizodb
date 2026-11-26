@@ -6,12 +6,17 @@ use bench::report::Agreement;
 use bench::scale::Scale;
 
 /// What an engine has no form of, which the report shows as unsupported instead of a failure.
-const UNSUPPORTED: [(EngineKind, &str); 4] = [
+const UNSUPPORTED: [(EngineKind, &str); 5] = [
     (EngineKind::Sqlite, "index/vector-create"),
     (EngineKind::Sqlite, "index/vector-search"),
     (EngineKind::Duckdb, "index/keyword-create"),
+    (EngineKind::Duckdb, "index/keyword-then-expand"),
     (EngineKind::Duckdb, "index/vector-create"),
 ];
+
+/// The query shapes written only for the graph engines and SQL, which CozoDB reports as having
+/// no Datalog form.
+const WITHOUT_DATALOG: &str = "no Datalog form";
 
 fn embedded() -> Vec<EngineKind> {
     let mut engines = vec![
@@ -42,7 +47,12 @@ fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing
     let mut problems = Vec::new();
     for report in &reports {
         for series in &report.series {
-            let allowed = UNSUPPORTED.contains(&(series.engine, report.name));
+            let allowed = UNSUPPORTED.contains(&(series.engine, report.name))
+                || (series.engine == EngineKind::Cozodb
+                    && series
+                        .unsupported
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains(WITHOUT_DATALOG)));
             if let Some(reason) = &series.unavailable {
                 problems.push(format!(
                     "{} on {}: unavailable, {reason}",
@@ -94,5 +104,5 @@ fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing
     }
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
-    assert!(reports.len() >= 20, "{}", reports.len());
+    assert!(reports.len() >= 80, "{}", reports.len());
 }

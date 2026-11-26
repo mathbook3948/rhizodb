@@ -228,6 +228,7 @@ fn value(param: &Param) -> DataValue {
         Param::Int(value) => int(*value),
         Param::Text(value) => DataValue::from(value.as_str()),
         Param::Floats(values) => float_list(values),
+        Param::Ints(values) => DataValue::List(values.iter().map(|&value| int(value)).collect()),
         Param::NullInt => DataValue::Null,
         Param::Rows(rows) => DataValue::List(
             rows.iter()

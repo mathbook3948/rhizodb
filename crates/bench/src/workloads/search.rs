@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use crate::data::SEARCH_LIMIT;
 use crate::engine::Built;
 use crate::engine::EngineError;
+use crate::engine::EngineKind;
 use crate::engine::Query;
 use crate::engine::Session;
 use crate::engine::Texts;
@@ -18,6 +19,21 @@ const CONTAINS_TERM: Texts =
     Texts::graph("MATCH (p:Person) WHERE p.bio CONTAINS $term RETURN count(*)")
         .sql("SELECT count(*) FROM persons WHERE instr(bio, $term) > 0")
         .datalog("?[count(id)] := *persons{id, bio}, str_includes(bio, $term)");
+
+const KEYWORD_THEN_EXPAND: Texts = Texts {
+    gql: Some(
+        "CALL db.index.keyword.queryNodes('bio', $term, 10) YIELD node MATCH (node)-[:KNOWS]->(f:Person) RETURN node.id, count(f), max(f.age)",
+    ),
+    cypher: None,
+    sql: Some(
+        "SELECT p.id, count(*), max(f.age) FROM bio_fts JOIN persons p ON p.id = bio_fts.rowid JOIN knows k ON k.src = p.id JOIN persons f ON f.id = k.dst WHERE bio_fts MATCH $term GROUP BY p.id",
+    ),
+    datalog: None,
+    overrides: &[(
+        EngineKind::Ladybugdb,
+        "CALL QUERY_FTS_INDEX('Person', 'bio_index', $term, top := 10) WITH node MATCH (node)-[:KNOWS]->(f:Person) RETURN node.id, count(f), max(f.age)",
+    )],
+};
 
 const LOW_RECALL: f64 = 0.9;
 
@@ -53,6 +69,12 @@ pub fn workloads() -> Vec<Workload> {
             Needs::Indexed,
             Comparison::GroundTruth,
             vector_search,
+        ),
+        workload(
+            "index/keyword-then-expand",
+            Needs::Indexed,
+            Comparison::Exact,
+            keyword_then_expand,
         ),
         workload(
             "scan/bio-contains-term",
@@ -240,6 +262,28 @@ fn contains_term(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
         .terms
         .iter()
         .take(ctx.plan.traversals)
+        .map(|term| Query::new(text).text("term", term))
+        .collect();
+    run_queries(ctx, &queries)
+}
+
+fn keyword_then_expand(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
+    if let Some(indexes) = ctx.indexes {
+        indexes.keyword.clone()?;
+    }
+    let text = ctx.text(&KEYWORD_THEN_EXPAND)?;
+    let rare: Vec<&String> = ctx
+        .data
+        .terms
+        .iter()
+        .zip(&ctx.data.keyword_truth)
+        .filter(|(_, truth)| truth.len() < SEARCH_LIMIT)
+        .map(|(term, _)| term)
+        .collect();
+    let queries: Vec<Query<'static>> = rare
+        .iter()
+        .cycle()
+        .take(ctx.plan.searches)
         .map(|term| Query::new(text).text("term", term))
         .collect();
     run_queries(ctx, &queries)

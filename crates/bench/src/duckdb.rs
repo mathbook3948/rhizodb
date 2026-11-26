@@ -210,6 +210,14 @@ fn to_sql(param: &Param) -> Sql {
                 .collect::<Vec<_>>()
                 .join(",")
         )),
+        Param::Ints(values) => Sql::Text(format!(
+            "[{}]",
+            values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
         Param::NullInt => Sql::Null,
         Param::Rows(_) => Sql::Null,
     }

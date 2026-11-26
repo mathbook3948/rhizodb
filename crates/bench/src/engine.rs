@@ -194,6 +194,7 @@ pub enum Param {
     Int(i64),
     Text(String),
     Floats(Vec<f64>),
+    Ints(Vec<i64>),
     NullInt,
     Rows(Vec<Vec<(&'static str, Param)>>),
 }
@@ -229,6 +230,12 @@ impl<'a> Query<'a> {
     /// Adds a list of floats parameter.
     pub fn floats(mut self, name: &'static str, value: &[f64]) -> Self {
         self.params.push((name, Param::Floats(value.to_vec())));
+        self
+    }
+
+    /// Adds a list of integers parameter.
+    pub fn ints(mut self, name: &'static str, value: &[i64]) -> Self {
+        self.params.push((name, Param::Ints(value.to_vec())));
         self
     }
 

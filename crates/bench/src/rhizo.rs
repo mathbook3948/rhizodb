@@ -279,6 +279,7 @@ fn value(param: &Param) -> Value {
         Param::Int(value) => Value::Integer(*value),
         Param::Text(value) => Value::String(value.clone()),
         Param::Floats(values) => Value::List(values.iter().copied().map(Value::Float).collect()),
+        Param::Ints(values) => Value::List(values.iter().copied().map(Value::Integer).collect()),
         Param::NullInt => Value::Null,
         Param::Rows(rows) => Value::List(rows.iter().map(|row| row_value(row)).collect()),
     }

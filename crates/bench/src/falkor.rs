@@ -123,6 +123,14 @@ fn literal(param: &Param) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        Param::Ints(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         Param::NullInt => "null".to_owned(),
         Param::Rows(rows) => format!(
             "[{}]",

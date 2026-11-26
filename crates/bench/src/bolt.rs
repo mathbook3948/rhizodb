@@ -175,6 +175,12 @@ fn bolt_value(param: &Param) -> BoltType {
                 .map(|&value| BoltType::Float(BoltFloat::new(value)))
                 .collect::<Vec<_>>(),
         )),
+        Param::Ints(values) => BoltType::List(BoltList::from(
+            values
+                .iter()
+                .map(|&value| BoltType::Integer(BoltInteger::new(value)))
+                .collect::<Vec<_>>(),
+        )),
         Param::NullInt => BoltType::Null(BoltNull),
         Param::Rows(rows) => BoltType::List(BoltList::from(
             rows.iter()

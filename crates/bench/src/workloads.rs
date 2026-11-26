@@ -1,6 +1,7 @@
 pub(crate) mod load;
 mod read;
 mod search;
+mod shapes;
 mod write;
 
 use std::collections::BTreeSet;
@@ -107,6 +108,7 @@ pub fn all() -> Vec<Workload> {
     workloads.extend(load::workloads());
     workloads.extend(write::small_commits());
     workloads.extend(read::workloads());
+    workloads.extend(shapes::workloads());
     workloads.extend(write::bulk());
     workloads.extend(search::workloads());
     workloads

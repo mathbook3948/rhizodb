@@ -250,9 +250,21 @@ fn to_sql(param: &Param) -> Sql {
         Param::Int(value) => Sql::Integer(*value),
         Param::Text(value) => Sql::Text(value.clone()),
         Param::Floats(values) => Sql::Blob(blob(values)),
+        Param::Ints(values) => Sql::Text(json_list(values)),
         Param::NullInt => Sql::Null,
         Param::Rows(_) => Sql::Null,
     }
+}
+
+fn json_list(values: &[i64]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn bind(statement: &mut Statement<'_>, params: &[(&str, Param)]) -> Result<(), EngineError> {

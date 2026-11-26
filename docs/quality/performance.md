@@ -37,6 +37,8 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - Loading one row per commit is its own workload on every engine.
 - Every engine keeps its default commit durability.
 - The suite covers bulk load with on-disk size, reopen, many small commits, point lookups, scans, ordering, one to three hop traversals, variable-length paths, grouped aggregation, bulk update, detach delete, keyword and vector search with their index builds, and concurrent reads.
+- The suite also covers the query shapes of social, recommendation, and fraud applications: filters on every hop, `OPTIONAL MATCH` chains, many groups, ordering on computed values, deep pagination, top-k per group, collect and `UNWIND`, `EXISTS` and `COUNT` subqueries, string functions and regular expressions, range scans, `IN` lists, relationship property filters, undirected and two-way expansions, cycles, `DISTINCT` over paths, point queries with many parameters, property and relationship updates, `MERGE`, deletes, and keyword search followed by a traversal.
+- A shape that RhizoDB's language and LadybugDB's both express is written once, and a LadybugDB override changes only syntax, never the answer.
 - The suite includes a `RETURN 1` baseline that shows each engine's cost per query.
 - A workload that needs a feature one engine lacks reports that engine as unsupported instead of failing.
 - Reopening a database file is unsupported for a server.

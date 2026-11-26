@@ -273,6 +273,10 @@ fn value(param: &Param) -> Value {
                 .map(|&value| Value::Float(value as f32))
                 .collect(),
         ),
+        Param::Ints(values) => Value::List(
+            LogicalType::Int64,
+            values.iter().map(|&value| Value::Int64(value)).collect(),
+        ),
         Param::NullInt => Value::Null(LogicalType::Int64),
         Param::Rows(rows) => Value::List(
             LogicalType::Struct {
@@ -301,6 +305,9 @@ fn logical_type(param: &Param) -> LogicalType {
         Param::Text(_) => LogicalType::String,
         Param::Floats(_) => LogicalType::List {
             child_type: Box::new(LogicalType::Float),
+        },
+        Param::Ints(_) => LogicalType::List {
+            child_type: Box::new(LogicalType::Int64),
         },
         Param::Rows(_) => LogicalType::Any,
     }
