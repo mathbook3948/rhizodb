@@ -790,12 +790,12 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn map_value(
         &self,
-        entries: BTreeMap<String, Datum>,
+        entries: BTreeMap<Arc<str>, Datum>,
         graveyard: &Graveyard,
     ) -> Result<BTreeMap<String, Value>, Error> {
         let mut values = BTreeMap::new();
         for (key, value) in entries {
-            values.insert(key, self.value(value, graveyard)?);
+            values.insert(key.to_string(), self.value(value, graveyard)?);
         }
         Ok(values)
     }

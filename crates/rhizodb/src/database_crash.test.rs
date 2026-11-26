@@ -136,6 +136,7 @@ fn open(fs: &SimFs) -> Result<Database, Error> {
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     };
     let engine = Engine::open(
         Arc::new(AnyFs::Sim(fs.clone())),

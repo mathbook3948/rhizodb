@@ -457,7 +457,7 @@ fn a_catalog_longer_than_an_extent_reads_back_from_the_header_alone() {
             crate::engine::extent::ExtentEntry {
                 slot: 50_000_000 + index,
                 written: 1,
-                live: 1,
+                used: crate::engine::extent::Blocks::range(0, 1),
                 state: crate::engine::extent::ExtentState::Sealed,
                 purpose: crate::engine::extent::Purpose::Tree,
                 scheme: 0,

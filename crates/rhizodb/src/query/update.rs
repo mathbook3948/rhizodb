@@ -204,7 +204,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             Some(expr) => self
                 .map_operand(self.eval(expr, row)?)?
                 .into_iter()
-                .map(|(key, value)| (Cow::Owned(key), value))
+                .map(|(key, value)| (Cow::Owned(key.to_string()), value))
                 .collect(),
         };
         for (key, value) in entries {
@@ -243,7 +243,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
         Ok(values)
     }
 
-    fn map_operand(&self, value: Datum) -> Result<BTreeMap<String, Datum>, Error> {
+    fn map_operand(&self, value: Datum) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         let env = self.env();
         match value {
             Datum::Map(entries) => Ok(Arc::unwrap_or_clone(entries)),
@@ -375,12 +375,12 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 if *replace {
                     for key in self.map_operand(target.clone())?.into_keys() {
                         if !entries.contains_key(&key) {
-                            changes.push((key, None));
+                            changes.push((key.to_string(), None));
                         }
                     }
                 }
                 for (key, value) in entries {
-                    changes.push((key, to_property(&value)?));
+                    changes.push((key.to_string(), to_property(&value)?));
                 }
                 self.write_properties(&target, changes)
             }
