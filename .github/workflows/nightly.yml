@@ -28,7 +28,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: proptest-regressions-${{ matrix.os }}
-          path: crates/rhizodb/proptest-regressions
+          path: |
+            crates/rhizodb/proptest-regressions
+            crates/rhizodb/tests/*.proptest-regressions
 
   soak:
     runs-on: ubuntu-latest

@@ -110,15 +110,21 @@ fn probe_on(pristine: &[u8], inputs: impl IntoIterator<Item = (String, Vec<u8>)>
     outcomes
 }
 
-fn random_damages(count: usize) -> Vec<(String, Vec<u8>)> {
-    let seed = seed();
-    let mut rng = Rng::new(seed);
-    (0..cases(FAST_DAMAGES))
-        .map(|index| {
-            let bytes = (0..count * db_file::DAMAGE_BYTES)
-                .map(|_| rng.next_u64() as u8)
-                .collect();
-            (format!("seed {seed} damage {index}"), bytes)
+fn random_damages(test: &str, count: usize) -> Vec<(String, Vec<u8>)> {
+    let mut seeds = regression_seeds(test);
+    seeds.push(seed());
+    seeds
+        .into_iter()
+        .flat_map(|seed| {
+            let mut rng = Rng::new(seed);
+            (0..cases(FAST_DAMAGES))
+                .map(|index| {
+                    let bytes = (0..count * db_file::DAMAGE_BYTES)
+                        .map(|_| rng.next_u64() as u8)
+                        .collect();
+                    (format!("seed {seed} damage {index}"), bytes)
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -164,13 +170,19 @@ fn every_fuzzer_input_that_damaged_a_file_fails_as_corrupt_data_without_a_panic(
 
 #[test]
 fn random_single_damages_fail_without_a_panic() {
-    let outcomes = probe(random_damages(1));
+    let outcomes = probe(random_damages(
+        "random_single_damages_fail_without_a_panic",
+        1,
+    ));
     assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }
 
 #[test]
 fn random_multiple_damages_fail_without_a_panic() {
-    let outcomes = probe(random_damages(db_file::MAX_DAMAGES));
+    let outcomes = probe(random_damages(
+        "random_multiple_damages_fail_without_a_panic",
+        db_file::MAX_DAMAGES,
+    ));
     assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
 }
 
