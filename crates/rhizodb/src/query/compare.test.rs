@@ -20,15 +20,14 @@ fn scalar() -> impl Strategy<Value = Datum> {
 fn datum() -> impl Strategy<Value = Datum> {
     scalar().prop_recursive(3, 12, 3, |inner| {
         prop_oneof![
-            prop::collection::vec(inner.clone(), 0..3)
-                .prop_map(|items| Datum::List(Arc::new(items))),
+            prop::collection::vec(inner.clone(), 0..3).prop_map(Datum::list),
             prop::collection::btree_map("[ab]", inner, 0..2).prop_map(|entries| {
-                Datum::Map(Arc::new(
+                Datum::map(
                     entries
                         .into_iter()
                         .map(|(key, value)| (Arc::from(key), value))
                         .collect(),
-                ))
+                )
             }),
         ]
     })

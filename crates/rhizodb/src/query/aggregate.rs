@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -412,7 +411,7 @@ impl Accumulator {
                 };
                 Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
             }
-            AggregateFunction::Collect => Ok(Datum::List(Arc::new(values))),
+            AggregateFunction::Collect => Ok(Datum::list(values)),
             AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Sum => self.total.sum(),

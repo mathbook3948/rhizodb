@@ -24,6 +24,7 @@ use super::datum::Limits;
 use super::datum::PathIds;
 use super::datum::dismantle;
 use super::datum::from_parameter;
+use super::datum::owned;
 use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
@@ -409,7 +410,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     let items = match self.eval(expr, &row)? {
                         Datum::Null => Arc::default(),
                         Datum::List(items) => items,
-                        other => Arc::new(vec![other]),
+                        other => Arc::new(vec![other].into()),
                     };
                     for item in items.iter() {
                         let mut next = row.clone();
@@ -781,12 +782,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::String(value) => Value::String(value),
             Datum::Bytes(value) => Value::Bytes(value),
             Datum::Temporal(value) => Value::Temporal(value),
-            Datum::List(items) => {
-                Value::List(self.list_value(Arc::unwrap_or_clone(items), graveyard)?)
-            }
-            Datum::Map(entries) => {
-                Value::Map(self.map_value(Arc::unwrap_or_clone(entries), graveyard)?)
-            }
+            Datum::List(items) => Value::List(self.list_value(owned(items), graveyard)?),
+            Datum::Map(entries) => Value::Map(self.map_value(owned(entries), graveyard)?),
             Datum::Node(id) => Value::Node(self.node_value(id, graveyard)?),
             Datum::Relationship(id) => Value::Relationship(self.relationship_value(id, graveyard)?),
             Datum::Path(path) => Value::Path(self.path_value(path, graveyard)?),

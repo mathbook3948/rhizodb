@@ -27,6 +27,7 @@ use super::datum::Limits;
 use super::datum::PathIds;
 use super::datum::check_item;
 use super::datum::into_property;
+use super::datum::owned;
 use super::datum::to_property;
 use super::eval::Env;
 use super::eval::Row;
@@ -249,7 +250,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
     fn map_operand(&self, value: Datum) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         let env = self.env();
         match value {
-            Datum::Map(entries) => Ok(Arc::unwrap_or_clone(entries)),
+            Datum::Map(entries) => Ok(owned(entries)),
             Datum::Node(id) => env.property_map(&env.node(id)?.properties),
             Datum::Relationship(id) => env.property_map(&env.relationship(id)?.properties),
             Datum::Null => Ok(BTreeMap::new()),

@@ -37,7 +37,7 @@ use super::compare::equals;
 use super::datum::Datum;
 use super::datum::Limits;
 use super::datum::ListBuilder;
-use super::datum::Size;
+use super::datum::owned;
 use super::functions;
 use super::functions::Function;
 use super::parallel::Morsel;
@@ -978,7 +978,6 @@ impl<T: ReadTransaction> Env<'_, T> {
             _ => None,
         };
         let mut local = row.clone();
-        let mut size = None;
         for (item, taint) in items.into_iter().zip(source_taint.items()) {
             set(&mut local, reduce.accumulator, accumulator);
             set(&mut local, reduce.slot, item);
@@ -996,10 +995,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             let lhs = local
                 .get_mut(reduce.accumulator)
                 .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null));
-            let result = extended(self.limits, op, lhs, size.take(), rhs).map(|(value, grown)| {
-                size = grown;
-                value
-            });
+            let result = extended(self.limits, op, lhs, rhs);
             (accumulator, accumulator_taint) = self.tolerated(settle(
                 result,
                 accumulator_taint.is_whole() || rhs_taint.is_whole(),
@@ -1094,7 +1090,7 @@ pub(crate) fn set(row: &mut Row, slot: Slot, value: Datum) {
 fn list_operand(value: Datum) -> Result<Option<Vec<Datum>>, Error> {
     match value {
         Datum::Null => Ok(None),
-        Datum::List(items) => Ok(Some(Arc::unwrap_or_clone(items))),
+        Datum::List(items) => Ok(Some(owned(items))),
         other => Err(type_error(format!(
             "expected a list, got a {}",
             other.type_name()
@@ -1115,10 +1111,10 @@ pub(crate) fn list_position(length: usize, index: i64) -> Option<usize> {
 fn slice(base: Datum, from: Option<&Datum>, to: Option<&Datum>) -> Result<Datum, Error> {
     let items = match base {
         Datum::Null => return Ok(Datum::Null),
-        Datum::List(items) => Arc::unwrap_or_clone(items),
+        Datum::List(items) => owned(items),
         other => return Err(type_error(format!("cannot slice a {}", other.type_name()))),
     };
-    Ok(sliced(items, from, to)?.map_or(Datum::Null, |items| Datum::List(Arc::new(items))))
+    Ok(sliced(items, from, to)?.map_or(Datum::Null, Datum::list))
 }
 
 fn sliced<T>(
@@ -1237,9 +1233,7 @@ fn binary(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum,
         BinaryOp::Concat => match (lhs, rhs) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::String(a), Datum::String(b)) => joined(limits, a, &b),
-            (lhs @ Datum::List(_), rhs @ Datum::List(_)) => {
-                Ok(extended(limits, op, lhs, None, rhs)?.0)
-            }
+            (lhs @ Datum::List(_), rhs @ Datum::List(_)) => extended(limits, op, lhs, rhs),
             (lhs, rhs) => Err(type_error(format!(
                 "|| cannot join a {} and a {}",
                 lhs.type_name(),
@@ -1283,11 +1277,9 @@ fn membership(needle: &Datum, haystack: Datum) -> Result<Datum, Error> {
 fn add(limits: Limits, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match (lhs, rhs) {
         (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
-        (lhs @ Datum::List(_), rhs) => Ok(extended(limits, BinaryOp::Add, lhs, None, rhs)?.0),
+        (lhs @ Datum::List(_), rhs) => extended(limits, BinaryOp::Add, lhs, rhs),
         (a, Datum::List(mut b)) => {
-            let mut size = limits.list_size(&b)?;
-            limits.add_item(&mut size, &a)?;
-            Arc::make_mut(&mut b).insert(0, a);
+            limits.prepend(a, &mut b)?;
             Ok(Datum::List(b))
         }
         (Datum::String(a), Datum::String(b)) => joined(limits, a, &b),
@@ -1301,33 +1293,17 @@ fn add(limits: Limits, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     }
 }
 
-fn extended(
-    limits: Limits,
-    op: BinaryOp,
-    lhs: Datum,
-    lhs_size: Option<Size>,
-    rhs: Datum,
-) -> Result<(Datum, Option<Size>), Error> {
+fn extended(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     let mut a = match lhs {
         Datum::List(a) if !rhs.is_null() => a,
-        lhs => return Ok((binary(limits, op, lhs, rhs)?, None)),
-    };
-    let mut size = match lhs_size {
-        Some(size) => size,
-        None => limits.list_size(&a)?,
+        lhs => return binary(limits, op, lhs, rhs),
     };
     match rhs {
-        Datum::List(b) => {
-            size = limits.joined(size, limits.list_size(&b)?)?;
-            Arc::make_mut(&mut a).extend(Arc::unwrap_or_clone(b));
-        }
-        b if op == BinaryOp::Add => {
-            limits.add_item(&mut size, &b)?;
-            Arc::make_mut(&mut a).push(b);
-        }
-        b => return Ok((binary(limits, op, Datum::List(a), b)?, None)),
+        Datum::List(b) => limits.extend(&mut a, b)?,
+        b if op == BinaryOp::Add => limits.push(&mut a, b)?,
+        b => return binary(limits, op, Datum::List(a), b),
     }
-    Ok((Datum::List(a), Some(size)))
+    Ok(Datum::List(a))
 }
 
 fn joined(limits: Limits, a: String, b: &str) -> Result<Datum, Error> {

@@ -136,6 +136,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - `OpenOptions::max_value_items` and `OpenOptions::max_value_bytes` set those two limits, and `range()` gives at most `max_value_items` elements.
 - A value past a limit fails with `ErrorKind::NumberOutOfRange`, which `+`, `||`, `range()`, `replace()`, and `split()` raise before they allocate and the case and normalization functions raise right after.
 - Values that the host passes as parameters or reads from the graph count toward the limits only when a query builds a new value from them.
+- A list or map is measured against the limits once and keeps its measure until it changes, so `+` and `||` take time in the size of what they append, not in the size of the list they append to.
 - A `reduce` whose body appends to its accumulator, as in `acc + x` or `acc || x`, grows the accumulator in place, so it takes time linear in its length.
 - Floats convert to strings in the same form as the openCypher reference implementation.
 - Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
