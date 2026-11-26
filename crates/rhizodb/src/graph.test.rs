@@ -680,3 +680,217 @@ pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
         )
         .unwrap();
 }
+
+#[derive(Debug, Default)]
+struct Gate {
+    node_chunk_reads: std::sync::atomic::AtomicUsize,
+    armed: std::sync::atomic::AtomicBool,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    opened: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[derive(Debug)]
+struct GatedStorage {
+    inner: TestStorage,
+    gate: Arc<Gate>,
+}
+
+struct GatedWrite<'a> {
+    inner: <TestStorage as Storage>::Write<'a>,
+    gate: Arc<Gate>,
+}
+
+impl Storage for GatedStorage {
+    type Read<'a> = <TestStorage as Storage>::Read<'a>;
+    type Write<'a> = GatedWrite<'a>;
+
+    fn begin_read(&self) -> Result<Self::Read<'_>, StorageError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<GatedWrite<'_>, StorageError> {
+        Ok(GatedWrite {
+            inner: self.inner.begin_write()?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn write_copy(snapshot: &Self::Read<'_>, path: &std::path::Path) -> Result<(), StorageError> {
+        TestStorage::write_copy(snapshot, path)
+    }
+}
+
+impl GatedWrite<'_> {
+    fn count(&self, table: Table) {
+        if table == Table::NodeChunks {
+            self.gate
+                .node_chunk_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl ReadTransaction for GatedWrite<'_> {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.count(table);
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_prefix(table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.count(table);
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, visit)
+    }
+}
+
+impl WriteTransaction for GatedWrite<'_> {
+    fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(table, key, value)
+    }
+
+    fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(table, key)
+    }
+
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_range(table, start, end)
+    }
+
+    fn commit(self) -> Result<(), StorageError> {
+        if self
+            .gate
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Some(entered) = lock(&self.gate.entered).take() {
+                entered.send(()).unwrap();
+            }
+            if let Some(opened) = lock(&self.gate.opened).take() {
+                opened.recv().unwrap();
+            }
+        }
+        self.inner.commit()
+    }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback()
+    }
+}
+
+#[test]
+fn a_read_begins_while_a_commit_that_creates_an_index_is_writing() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: test_engine::in_memory(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let (enter, entered) = std::sync::mpsc::channel();
+    let (open, opened) = std::sync::mpsc::channel();
+    *lock(&gate.entered) = Some(enter);
+    *lock(&gate.opened) = Some(opened);
+    gate.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut write = graph.write().unwrap();
+            write
+                .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+                .unwrap();
+            write.commit().unwrap();
+        });
+        entered.recv().unwrap();
+        let (begun, began) = std::sync::mpsc::channel();
+        let shared = &graph;
+        let reader = scope.spawn(move || {
+            let read = shared.read().unwrap();
+            begun
+                .send((
+                    read.indexes().unwrap().len(),
+                    read.index_definitions().unwrap().len(),
+                ))
+                .unwrap();
+        });
+        let seen = began.recv_timeout(std::time::Duration::from_secs(5));
+        open.send(()).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(seen, Ok((0, 0)), "a read waited for the commit");
+    });
+    let read = graph.read().unwrap();
+    assert_eq!(read.indexes().unwrap().len(), 1);
+    assert_eq!(read.index_definitions().unwrap().len(), 1);
+}
+
+#[test]
+fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: test_engine::in_memory(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    let source = write.create_node(NodeRecord::default()).unwrap();
+    let target = write.create_node(NodeRecord::default()).unwrap();
+    let rel_type = write.intern_token("R").unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    gate.node_chunk_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..100 {
+        write
+            .create_relationship(&RelationshipRecord {
+                rel_type,
+                source,
+                target,
+                properties: Properties::new(),
+            })
+            .unwrap();
+    }
+    let reads = gate
+        .node_chunk_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads <= 4, "{reads} node meta reads");
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}

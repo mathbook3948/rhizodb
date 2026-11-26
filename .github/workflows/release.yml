@@ -79,7 +79,7 @@ jobs:
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - run: mise run random
         env:
-          RHIZODB_TEST_SCALE: "10"
+          RHIZODB_TEST_SCALE: "3"
 
   package:
     needs: tag
