@@ -468,7 +468,15 @@ pub(crate) fn install<F: FileSystem + 'static>(
         .as_ref()
         .and_then(|file| read_header(file).ok())
         .map(|(header, _)| header);
-    let local_term = local.map_or(0, |header| header.replication.seen_term);
+    let local_history = fs
+        .open(name, block_size()?)
+        .ok()
+        .and_then(|file| load(file, &options).ok())
+        .and_then(|loaded| loaded.newest_term().ok())
+        .unwrap_or(0);
+    let local_term = local
+        .map_or(0, |header| header.replication.seen_term)
+        .max(local_history);
     let local_lineage = local.as_ref().map_or(0, lineage);
     let staging = staging_name(name);
     let file = open_or_create_staging(&*fs, &staging)?.ok_or_else(|| {

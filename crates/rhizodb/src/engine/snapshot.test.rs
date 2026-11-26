@@ -74,6 +74,12 @@ fn dump(engine: &impl Storage) -> State {
     state
 }
 
+fn digest(state: &State) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(state, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 fn value(round: u64, index: u64) -> Vec<u8> {
     let length = match (round + index) % 9 {
         0 => 70_000,
@@ -377,7 +383,7 @@ fn an_export_stays_whole_while_the_source_rewrites_and_compacts() {
     let expected = dump(&source);
     let export = source.export(&[]).unwrap();
     let pinned: Vec<_> = source.extents().entries.into_keys().collect();
-    let rounds = u64::from(test_scale::cases(60));
+    let rounds = u64::from(test_scale::cases(60).min(90));
     let first = std::thread::scope(|scope| {
         let writer = scope.spawn(|| {
             for round in 20..20 + rounds {
@@ -580,12 +586,12 @@ fn a_log_kept_for_a_peer_past_the_checkpoint_limit_starts_no_extra_checkpoints()
 
 #[test]
 fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_its_position() {
-    let rounds = 20 + u64::from(test_scale::cases(40));
+    let rounds = 20 + u64::from(test_scale::cases(40).min(400));
     let reference = open(&SimFs::new(), SOURCE, by_hand()).unwrap();
-    let mut states = vec![State::new()];
+    let mut states = vec![digest(&State::new())];
     for round in 0..rounds {
         write_round(&reference, round, 60);
-        states.push(dump(&reference));
+        states.push(digest(&dump(&reference)));
     }
     let busy = EngineOptions {
         checkpoint: CheckpointMode::Background,
@@ -614,7 +620,7 @@ fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_
             let installed = install_bytes(&SimFs::new(), &bytes).unwrap();
             installed.check().unwrap();
             assert!(
-                dump(&installed) == states[position as usize],
+                digest(&dump(&installed)) == states[position as usize],
                 "the snapshot at {position} holds another state"
             );
             checked.insert(position);

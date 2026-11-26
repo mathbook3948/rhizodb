@@ -312,3 +312,20 @@ fn acknowledging_a_newer_term_fences_a_writer() {
     db.acknowledge(b"peer", &other.position()).unwrap();
     assert_eq!(db.role(), rhizodb::Role::Fenced);
 }
+
+#[test]
+fn an_install_refuses_a_snapshot_older_than_the_terms_the_replaced_database_began() {
+    let directory = tempfile::tempdir().unwrap();
+    let writer = Database::open(directory.path().join("writer.rhizodb")).unwrap();
+    writer.promote(1, b"node-a").unwrap();
+    load(&writer, 1, 10);
+    writer.compact().unwrap();
+    let old_bytes = stream(&writer.snapshot().unwrap());
+    let path = directory.path().join("replica.rhizodb");
+    let replica = Database::install_snapshot(&path, old_bytes.as_slice()).unwrap();
+    replica.promote(4, b"node-b").unwrap();
+    replica.compact().unwrap();
+    drop(replica);
+    let error = Database::install_snapshot(&path, old_bytes.as_slice()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+}
