@@ -347,6 +347,137 @@ fn a_commit_whose_log_sync_failed_and_reappeared_after_a_reopen_survives_a_power
 }
 
 #[test]
+fn every_failure_then_power_loss_while_reopening_after_a_failed_log_sync_keeps_the_database_whole()
+{
+    let options = EngineOptions {
+        segment_target: 1 << 20,
+        memtable_limit: 1 << 20,
+        wal_limit: 1 << 20,
+        ..options()
+    };
+    let put = |key: &[u8]| vec![Write::Put(Table::Metadata, key.to_vec(), b"v".to_vec())];
+    let base = SimFs::new();
+    let engine = open(&base, options).unwrap();
+    commit(&engine, &put(b"a")).unwrap();
+    let segment = crate::engine::wal::segment_name(
+        NAME,
+        *crate::engine::wal::segment_files(&base, NAME)
+            .unwrap()
+            .last()
+            .unwrap(),
+    );
+    base.fail_file_after(&segment, 1, Failure::Once).unwrap();
+    assert!(commit(&engine, &put(b"b")).is_err());
+    drop(engine);
+    let with_a = applied(&State::new(), &put(b"a"));
+    let with_b = applied(&with_a, &put(b"b"));
+    let total = {
+        let copy = base.fork();
+        let before = copy.operations();
+        drop(open(&copy, options).unwrap());
+        copy.operations() - before
+    };
+    for fail_at in 0..=total {
+        let copy = base.fork();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        let opened = open(&copy, options);
+        let images: Vec<(Crash, SimFs)> = crashes(4)
+            .into_iter()
+            .map(|crash| (crash, copy.crash(crash)))
+            .collect();
+        drop(opened);
+        for (crash, image) in images {
+            let engine = open(&image, options)
+                .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            let found = dump(&engine);
+            assert!(
+                found == with_a || found == with_b,
+                "fail at {fail_at}, {crash:?}: state differs"
+            );
+            commit(&engine, &put(b"c")).unwrap();
+            let expected = applied(&found, &put(b"c"));
+            let after = image.crash(Crash::DropUnsynced);
+            drop(engine);
+            assert_eq!(
+                dump(&open(&after, options).unwrap()),
+                expected,
+                "fail at {fail_at}, {crash:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_database_whole() {
+    let load: Vec<Write> = (0..60u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
+        .collect();
+    let rewrite: Vec<Write> = (0..60u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![!key; 1500]))
+        .collect();
+    let expected = states(&[load.clone(), rewrite.clone()])[2].clone();
+    let prepared = || {
+        let fs = SimFs::new();
+        let engine = open(&fs, by_hand()).unwrap();
+        commit(&engine, &load).unwrap();
+        engine.checkpoint().unwrap();
+        commit(&engine, &rewrite).unwrap();
+        (fs, engine)
+    };
+    let mut checked = 0;
+    let mut torn_last_durable_header = 0;
+    for fail_at in 0.. {
+        let (base, engine) = prepared();
+        base.fail_file_sync_after(NAME, fail_at, Failure::Once)
+            .unwrap();
+        let failed = engine.checkpoint().is_err();
+        drop(engine);
+        if !failed {
+            break;
+        }
+        let durable = durable_header(&base.crash(Crash::DropUnsynced)).generation;
+        for reopen_fail_at in 0.. {
+            let copy = base.fork();
+            copy.fail_sync_after(reopen_fail_at, Failure::FromThenOn);
+            let opened = open(&copy, by_hand());
+            let reopened = opened.is_ok();
+            let images: Vec<(Crash, SimFs)> = crashes(2)
+                .into_iter()
+                .map(|crash| (crash, copy.crash(crash)))
+                .collect();
+            drop(opened);
+            for (crash, image) in images {
+                if durable_header(&image).generation < durable {
+                    torn_last_durable_header += 1;
+                    continue;
+                }
+                let engine = open(&image, by_hand()).unwrap_or_else(|error| {
+                    panic!("fail at {fail_at} then {reopen_fail_at}, {crash:?}: {error}")
+                });
+                engine.check().unwrap_or_else(|error| {
+                    panic!(
+                        "check after fail at {fail_at} then {reopen_fail_at}, {crash:?}: {error}"
+                    )
+                });
+                assert!(
+                    dump(&engine) == expected,
+                    "fail at {fail_at} then {reopen_fail_at}, {crash:?}: state differs"
+                );
+                checked += 1;
+            }
+            if reopened {
+                break;
+            }
+        }
+    }
+    assert!(checked > 100, "only {checked} power losses were checked");
+    assert!(
+        torn_last_durable_header * 20 < checked,
+        "{torn_last_durable_header} power losses tore the last durable header"
+    );
+}
+
+#[test]
 fn every_failure_while_opening_leaves_the_database_whole() {
     let transactions = transactions(11, 12);
     let states = states(&transactions);

@@ -63,7 +63,7 @@ pub(crate) enum Failure {
     FromThenOn,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct State {
     inodes: Vec<Inode>,
     live_names: BTreeMap<String, usize>,
@@ -101,6 +101,7 @@ struct Fault {
     remaining: u64,
     failure: Failure,
     inode: Option<usize>,
+    syncs_only: bool,
     failing: bool,
 }
 
@@ -117,7 +118,7 @@ fn not_found(name: &str) -> io::Error {
 }
 
 impl State {
-    fn operate(&mut self, inode: Option<usize>) -> io::Result<()> {
+    fn operate(&mut self, inode: Option<usize>, sync: bool) -> io::Result<()> {
         self.operations += 1;
         let Some(fault) = &mut self.fault else {
             return Ok(());
@@ -127,6 +128,9 @@ impl State {
         }
         if fault.failing {
             return Err(injected());
+        }
+        if fault.syncs_only && !sync {
+            return Ok(());
         }
         if fault.remaining > 0 {
             fault.remaining -= 1;
@@ -196,6 +200,7 @@ impl SimFs {
             remaining: operations,
             failure,
             inode: None,
+            syncs_only: false,
             failing: false,
         });
     }
@@ -213,6 +218,38 @@ impl SimFs {
             remaining: operations,
             failure,
             inode: Some(inode),
+            syncs_only: false,
+            failing: false,
+        });
+        Ok(())
+    }
+
+    /// Like [`SimFs::fail_after`], counting only syncs of files and of the names, though a
+    /// failure from then on fails every later operation.
+    pub(crate) fn fail_sync_after(&self, syncs: u64, failure: Failure) {
+        lock(&self.state).fault = Some(Fault {
+            remaining: syncs,
+            failure,
+            inode: None,
+            syncs_only: true,
+            failing: false,
+        });
+    }
+
+    /// Like [`SimFs::fail_file_after`], counting only syncs of the file named `name`.
+    pub(crate) fn fail_file_sync_after(
+        &self,
+        name: &str,
+        syncs: u64,
+        failure: Failure,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
+        state.fault = Some(Fault {
+            remaining: syncs,
+            failure,
+            inode: Some(inode),
+            syncs_only: true,
             failing: false,
         });
         Ok(())
@@ -241,6 +278,14 @@ impl SimFs {
     /// The number of operations called so far, failed ones included.
     pub(crate) fn operations(&self) -> u64 {
         lock(&self.state).operations
+    }
+
+    /// A separate file system in the state of this one, its unsynced writes and armed
+    /// failure included.
+    pub(crate) fn fork(&self) -> SimFs {
+        SimFs {
+            state: Arc::new(Mutex::new(lock(&self.state).clone())),
+        }
     }
 
     /// The file system a power loss now could leave, with every write in it synced and no
@@ -414,7 +459,7 @@ impl FileSystem for SimFs {
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if state.live_names.contains_key(name) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -432,14 +477,14 @@ impl FileSystem for SimFs {
 
     fn open(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
         Ok(self.file(inode, size))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if !state.live_names.contains_key(from) {
             return Err(not_found(from));
         }
@@ -452,7 +497,7 @@ impl FileSystem for SimFs {
 
     fn remove(&self, name: &str) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if !state.live_names.contains_key(name) {
             return Err(not_found(name));
         }
@@ -464,7 +509,7 @@ impl FileSystem for SimFs {
 
     fn names(&self) -> io::Result<Vec<String>> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         Ok(state.live_names.keys().cloned().collect())
     }
 
@@ -473,7 +518,7 @@ impl FileSystem for SimFs {
         if state.names_sync_failed {
             return Err(injected());
         }
-        if let Err(error) = state.operate(None) {
+        if let Err(error) = state.operate(None, true) {
             state.names_sync_failed = true;
             return Err(error);
         }
@@ -490,13 +535,13 @@ impl BlockFile for SimFile {
 
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
     }
 
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         let start = byte_index(self.size.offset(first)?)?;
         state.fits(self.inode, start + buffer.len())?;
         let inode = state.inode(self.inode);
@@ -513,13 +558,13 @@ impl BlockFile for SimFile {
 
     fn block_count(&self) -> io::Result<u64> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         Ok((state.inode(self.inode).live.len() / self.size.bytes()) as u64)
     }
 
     fn is_empty(&self) -> io::Result<bool> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         Ok(state.inode(self.inode).live.is_empty())
     }
 
@@ -529,7 +574,7 @@ impl BlockFile for SimFile {
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         let length = byte_index(self.size.offset(count)?)?;
         state.fits(self.inode, length)?;
         let inode = state.inode(self.inode);
@@ -541,7 +586,7 @@ impl BlockFile for SimFile {
 
     fn sync(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
-        let failed = state.operate(Some(self.inode));
+        let failed = state.operate(Some(self.inode), true);
         let inode = state.inode(self.inode);
         let pending = mem::take(&mut inode.pending);
         if let Err(error) = failed {

@@ -351,8 +351,7 @@ impl<F: FileSystem> Wal<F> {
             .ok_or_else(|| EngineError::corrupt("the log has no segment"))
     }
 
-    /// Starts a new segment, durable with its name, that the next record goes to.
-    pub(crate) fn roll_over(&mut self, hlc: u64) -> Result<(), EngineError> {
+    fn roll_over(&mut self, hlc: u64) -> Result<(), EngineError> {
         let sequence = self.active_segment()?.sequence + 1;
         let (file, header) = new_segment(
             &*self.fs,

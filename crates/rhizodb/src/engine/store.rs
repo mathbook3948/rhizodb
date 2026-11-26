@@ -217,6 +217,7 @@ struct Shared<F: FileSystem> {
     quarantine: Mutex<BTreeMap<u64, u64>>,
     freed: Mutex<BTreeMap<u64, Vec<(ExtentId, Blocks)>>>,
     poisoned: AtomicBool,
+    keeping_free_space: AtomicBool,
     wal_bytes: AtomicU64,
     compacted_bytes: AtomicU64,
     compaction_due: AtomicBool,
@@ -431,28 +432,90 @@ fn remove_segments_before<F: FileSystem>(
     Ok(())
 }
 
+fn start_log<F: FileSystem>(
+    fs: &Arc<F>,
+    name: &str,
+    pages: &Pages<F::File>,
+    header: &Header,
+    last_lsn: u64,
+    hlc: u64,
+    segment_target: u64,
+) -> Result<(Wal<F>, Header), EngineError> {
+    let sequence = header.wal.first_segment + 1;
+    for later in segment_files(&**fs, name)?
+        .into_iter()
+        .filter(|later| *later >= sequence)
+    {
+        fs.remove(&segment_name(name, later))?;
+    }
+    let identity = LogIdentity {
+        database_id: header.database_id,
+        shard_id: header.shard_id,
+        salt: random_u64(),
+    };
+    let wal = Wal::create(
+        Arc::clone(fs),
+        name,
+        identity,
+        sequence,
+        last_lsn + 1,
+        hlc,
+        segment_target,
+    )?;
+    let header = Header {
+        generation: header.generation + 1,
+        wal: WalIdentity {
+            first_segment: sequence,
+            salt: identity.salt,
+        },
+        clean: false,
+        ..*header
+    };
+    pages.write_header(&header)?;
+    remove_segments_before(&**fs, name, sequence)?;
+    Ok((wal, header))
+}
+
 fn make_recovery_durable<F: FileSystem + 'static>(
     shared: &Shared<F>,
-    fs: &F,
+    fs: &Arc<F>,
     name: &str,
 ) -> Result<(), EngineError> {
     let mut writer = lock(&shared.writer);
+    shared.keeping_free_space.store(true, Ordering::Release);
+    for _ in 0..2 {
+        if lock(&shared.durable).header.clean {
+            break;
+        }
+        if let Some(job) = shared.freeze(&mut writer) {
+            shared.run_checkpoint(job, true);
+        }
+        if shared.is_poisoned() {
+            return Err(shared.refusal());
+        }
+    }
+    shared.keeping_free_space.store(false, Ordering::Release);
+    let mut durable = lock(&shared.durable);
+    if !durable.header.clean {
+        return Err(EngineError::Poisoned);
+    }
+    lock(&shared.droppable).take();
+    drop(writer.wal.take());
     let hlc = hybrid_clock_after(writer.last_hlc);
-    writer
-        .wal
-        .as_mut()
-        .ok_or(EngineError::WalMissing)?
-        .roll_over(hlc)?;
+    let (wal, header) = start_log(
+        fs,
+        name,
+        &shared.pages,
+        &durable.header,
+        writer.last_lsn,
+        hlc,
+        shared.options.segment_target,
+    )?;
+    durable.header = header;
     writer.last_hlc = hlc;
-    if let Some(job) = shared.freeze(&mut writer) {
-        shared.run_checkpoint(job, false);
-    }
-    shared.drop_segments(&mut writer);
-    if shared.is_poisoned() {
-        return Err(shared.refusal());
-    }
-    let first = lock(&shared.durable).header.wal.first_segment;
-    remove_segments_before(fs, name, first)
+    shared.wal_bytes.store(wal.size(), Ordering::Relaxed);
+    writer.wal = Some(wal);
+    Ok(())
 }
 
 fn checkpoint_worker<F: FileSystem + 'static>(
@@ -556,40 +619,16 @@ impl<F: FileSystem + 'static> Engine<F> {
         let mut last_hlc = header.checkpoint_hlc;
         let recovered = !header.clean;
         let (wal, header) = if header.clean {
-            let sequence = header.wal.first_segment + 1;
-            for later in segment_files(&*fs, name)?
-                .into_iter()
-                .filter(|later| *later >= sequence)
-            {
-                fs.remove(&segment_name(name, later))?;
-            }
-            let identity = LogIdentity {
-                database_id: header.database_id,
-                shard_id: header.shard_id,
-                salt: random_u64(),
-            };
             last_hlc = hybrid_clock_after(last_hlc);
-            let wal = Wal::create(
-                Arc::clone(&fs),
+            start_log(
+                &fs,
                 name,
-                identity,
-                sequence,
-                last_lsn + 1,
+                &pages,
+                &header,
+                last_lsn,
                 last_hlc,
                 options.segment_target,
-            )?;
-            let header = Header {
-                generation: header.generation + 1,
-                wal: WalIdentity {
-                    first_segment: sequence,
-                    salt: identity.salt,
-                },
-                clean: false,
-                ..header
-            };
-            pages.write_header(&header)?;
-            remove_segments_before(&*fs, name, sequence)?;
-            (wal, header)
+            )?
         } else {
             let wal = Wal::recover(
                 Arc::clone(&fs),
@@ -627,11 +666,12 @@ impl<F: FileSystem + 'static> Engine<F> {
             quarantine: Mutex::new(BTreeMap::new()),
             freed: Mutex::new(BTreeMap::new()),
             poisoned: AtomicBool::new(false),
+            keeping_free_space: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
             compaction_due: AtomicBool::new(false),
         });
         if recovered {
-            make_recovery_durable(&shared, &*fs, name)?;
+            make_recovery_durable(&shared, &fs, name)?;
         }
         let (jobs, worker) = match options.checkpoint {
             #[cfg(any(test, feature = "fuzzing"))]
@@ -1214,12 +1254,20 @@ impl<F: FileSystem + 'static> Shared<F> {
     fn extents_to_place(&self, extents: &ExtentTable) -> ExtentTable {
         let oldest = self.oldest_tree();
         let mut extents = extents.clone();
+        if self.keeping_free_space.load(Ordering::Acquire) {
+            extents.reusable = BTreeSet::new();
+            extents.holes = Vec::new();
+            return extents;
+        }
         extents.reusable = self.reusable_slots(&extents, oldest);
         extents.holes = self.reusable_holes(&extents, oldest);
         extents
     }
 
     fn trim(&self, durable: &mut Durable) -> Result<(), EngineError> {
+        if self.keeping_free_space.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let removable = self.reusable_slots(&durable.extents, self.oldest_tree());
         if let Some((slot, written)) = durable.extents.trim(&removable) {
             self.pages.truncate_after(slot, written)?;
