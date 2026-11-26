@@ -500,3 +500,35 @@ fn reads_run_while_a_replica_applies_index_creations_and_drops() {
     assert!(reads > 0);
     assert_eq!(dump(&replica), dump(&writer));
 }
+
+#[test]
+fn a_replica_refuses_the_changes_of_an_unrelated_database() {
+    let x = Database::in_memory().unwrap();
+    x.promote(1, b"x").unwrap();
+    x.execute("INSERT (:X)", &Parameters::new()).unwrap();
+    let y = Database::in_memory().unwrap();
+    y.promote(1, b"y").unwrap();
+    y.execute("INSERT (:Y)", &Parameters::new()).unwrap();
+    let replica = in_memory_replica();
+    assert_eq!(replica.position().database_id(), 0);
+    sync(&x, &replica);
+    assert_eq!(replica.position().database_id(), x.position().database_id());
+    assert_ne!(x.position().database_id(), y.position().database_id());
+    let error = y.changes_since(&replica.position(), 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DifferentDatabase);
+    assert!(matches!(
+        error.replication_failure(),
+        Some(ReplicationFailure::DifferentDatabase { local, remote, .. })
+            if local == y.position().database_id() && remote == x.position().database_id()
+    ));
+    let foreign = y.changes_since(&Position::start(), 1 << 20).unwrap();
+    assert_eq!(
+        replica.apply(&foreign).unwrap_err().kind(),
+        ErrorKind::DifferentDatabase
+    );
+    assert_eq!(
+        replica.compare_lineage(&y.history(), &y.position()),
+        Lineage::DifferentDatabase
+    );
+    assert_eq!(dump(&replica), dump(&x));
+}

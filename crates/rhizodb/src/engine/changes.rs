@@ -2,6 +2,7 @@ use super::codec::Reader;
 use super::codec::checksum;
 use super::codec::put_u32;
 use super::codec::put_u64;
+use super::codec::put_u128;
 use super::error::EngineError;
 use super::layout::TableId;
 use super::wal_format::Body;
@@ -40,6 +41,7 @@ pub(crate) struct ChangeRecord {
 /// `after_chain`, and end in epoch `last` with chain hash `last_chain`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Decoded {
+    pub(crate) database: u128,
     pub(crate) after: EpochId,
     pub(crate) after_lsn: u64,
     pub(crate) after_chain: u64,
@@ -77,6 +79,7 @@ pub(crate) fn reseal(mut bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
 /// The bytes of the changes `records`, each sealed with [`CHANGES_SEED`], that follow
 /// `after_lsn` in epoch `after`.
 pub(crate) fn encode(
+    database: u128,
     after: &EpochId,
     after_lsn: u64,
     after_chain: u64,
@@ -86,6 +89,7 @@ pub(crate) fn encode(
     let mut out = Vec::with_capacity(48 + after.writer_id.len() + length);
     out.extend_from_slice(&MAGIC);
     out.push(FORMAT);
+    put_u128(&mut out, database);
     put_u64(&mut out, after.term);
     put_u64(&mut out, after_lsn);
     put_u64(&mut out, after_chain);
@@ -131,6 +135,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
     if reader.u8()? != FORMAT {
         return Err(bad("an unknown format"));
     }
+    let database = reader.u128()?;
     let term = reader.u64()?;
     let after_lsn = reader.u64()?;
     let after_chain = reader.u64()?;
@@ -217,6 +222,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
         return Err(bad("bytes after the last record"));
     }
     Ok(Decoded {
+        database,
         after,
         after_lsn,
         after_chain,
@@ -235,10 +241,10 @@ mod tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn reseal_for_fuzzing(mut bytes: Vec<u8>) -> Vec<u8> {
     use super::wal_format::RECORD_LIMIT;
-    let Some(&length) = bytes.get(MAGIC.len() + 25) else {
+    let Some(&length) = bytes.get(MAGIC.len() + 41) else {
         return bytes;
     };
-    let mut at = MAGIC.len() + 26 + usize::from(length) + 4;
+    let mut at = MAGIC.len() + 42 + usize::from(length) + 4;
     while let Some(head) = bytes.get(at..at + 4) {
         let mut array = [0; 4];
         array.copy_from_slice(head);

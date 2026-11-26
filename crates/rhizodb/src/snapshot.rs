@@ -38,6 +38,7 @@ impl<'db> Snapshot<'db> {
             self.export.position(),
             self.export.chain(),
         )
+        .in_database(self.export.database())
     }
 
     /// The bytes of the whole stream.

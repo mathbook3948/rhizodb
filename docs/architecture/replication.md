@@ -13,18 +13,22 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - The host owns leases, transport, routing of writes to the writer, and who wins a split.
 - Replication is asynchronous, and a host builds semi-synchronous commits from positions and acknowledgements.
 - A host waits for a replica to reach the writer's position read right after a commit, instead of a position returned by the commit.
-- A position is the LSN of the last change a database holds, the term and writer id of the writer that made it, and a chain hash over every change up to it.
+- A position is the LSN of the last change a database holds, the term and writer id of the writer that made it, a chain hash over every change up to it, and the id of the database the history belongs to.
 - Term 0 has no writer id, and every later term has a writer id of 1 to 64 bytes.
 - A position converts to versioned bytes, so a host can send it between nodes and store it.
 - Every log record carries the term of the writer that made it and the chain hash of the record before it.
 - The chain hash of a record is an xxh3 hash, seeded with the chain hash before it, over every byte of the record after its length and checksum, so it is the same in every log that holds the record.
-- The chain hash tells apart two histories that reused a term, a writer id, and an LSN, so positions carry no database id, since two unrelated logs differ at their first record.
+- The chain hash tells apart two histories that reused a term, a writer id, and an LSN.
+- The database id tells a wiring mistake from a divergence, since the answer to `Diverged` is to install the lease holder's snapshot, which would replace an unrelated database's data.
+- A writer's history belongs to its own file's database id, and a file that holds no change takes the database id of the first changes it applies or the snapshot it installs, kept in the header.
+- A position at LSN 0 has database id 0, so it follows any database.
+- `changes_since` and `apply` fail with `DifferentDatabase` when the two sides belong to different databases, and `compare_lineage` reports it.
 - A configuration record begins each term in the log and names its writer and the incarnation of the file that began it.
 - A configuration record also marks where a writer stepped down, so a demotion and the end of a term are one durable record.
 - The history of terms, each with its writer id, incarnation, first LSN, and the LSN it ended at, lives in a table of the engine's own, so checkpoints, copies, and snapshots carry it.
 - The history is never trimmed.
 - Batches of changes write only graph tables, and only configuration records write the history table.
-- The header keeps the file's incarnation, whether a file with no history is a replica, the highest term the file has heard of, and the chain hash at the checkpoint's LSN.
+- The header keeps the file's incarnation, whether a file with no history is a replica, the highest term the file has heard of, the chain hash at the checkpoint's LSN, and the database id the file follows.
 - A new file and an installed copy get a new random incarnation, so a copy of a file never passes as the file that began a term.
 - A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer, and every other file is a replica.
 - A writer opens fenced after every restart and takes writes again only once the host promotes it with its own newest term and writer id.
@@ -61,9 +65,8 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - After an `apply` that touches index definitions, the graph reloads them before any reader begins, so no reader sees data and definitions of different commits.
 - `apply` and `promote` drop the cached counts of column deltas, which only writers keep.
 - Committed tokens, label sets, the next IDs, and query plans need no refresh after `apply`, since tokens and label sets never change and the rest are read per transaction or bound without data.
-- Replication reports its own error kinds: `Fenced`, `Diverged`, `TooFarBehind`, `Gap`, `NotReplica`, `NotWriter`, and `WriterBusy`.
+- Replication reports its own error kinds: `Fenced`, `Diverged`, `DifferentDatabase`, `TooFarBehind`, `Gap`, `NotReplica`, `NotWriter`, and `WriterBusy`.
 
 ## Open
-
 
 - How a replica of a newer build follows a writer that has not upgraded the graph's format yet, since a replica cannot write the upgrade.

@@ -151,14 +151,19 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
         self.pinned.header.checkpoint_lsn
     }
 
-    /// The chain hash of the log after the newest commit the checkpoint holds.
+    /// The term and writer of the newest commit the checkpoint holds.
+    pub(crate) fn epoch(&self) -> &EpochId {
+        &self.pinned.epoch
+    }
+
+    /// The chain hash of the newest commit the checkpoint holds.
     pub(crate) fn chain(&self) -> u64 {
         self.pinned.header.replication.checkpoint_chain
     }
 
-    /// The term and writer of the newest commit the checkpoint holds.
-    pub(crate) fn epoch(&self) -> &EpochId {
-        &self.pinned.epoch
+    /// The database whose history the checkpoint holds, or zero when it holds no change.
+    pub(crate) fn database(&self) -> u128 {
+        lineage(&self.pinned.header)
     }
 
     /// The bytes of the whole stream.
@@ -226,6 +231,14 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Pins the last durable checkpoint and writes it out as a snapshot that carries `history`.
     pub(crate) fn export(&self, history: &[u8]) -> Result<Export<'_, F>, EngineError> {
         Export::new(self.pin()?, random_u64(), history)
+    }
+}
+
+fn lineage(header: &Header) -> u128 {
+    match (header.checkpoint_lsn, header.replication.origin) {
+        (0, _) => 0,
+        (_, 0) => header.database_id,
+        (_, origin) => origin,
     }
 }
 
@@ -451,10 +464,12 @@ pub(crate) fn install<F: FileSystem + 'static>(
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let local_term = existing
+    let local = existing
         .as_ref()
         .and_then(|file| read_header(file).ok())
-        .map_or(0, |(header, _)| header.replication.seen_term);
+        .map(|(header, _)| header);
+    let local_term = local.map_or(0, |header| header.replication.seen_term);
+    let local_lineage = local.as_ref().map_or(0, lineage);
     let staging = staging_name(name);
     let file = open_or_create_staging(&*fs, &staging)?.ok_or_else(|| {
         io::Error::new(
@@ -473,6 +488,10 @@ pub(crate) fn install<F: FileSystem + 'static>(
             .max(loaded.newest_term()?);
         if local_term > snapshot_term && !force {
             return Err(replica::fenced(snapshot_term, local_term));
+        }
+        let snapshot_lineage = lineage(loaded.header());
+        if local_lineage != 0 && local_lineage != snapshot_lineage && !force {
+            return Err(replica::different(local_lineage, snapshot_lineage));
         }
         let header = *loaded.header();
         loaded.rewrite_header(Header {

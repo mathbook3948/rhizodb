@@ -131,7 +131,7 @@ fn loaded_source(rounds: u64, rows: u64) -> (SimFs, Engine<SimFs>, State) {
 }
 
 fn install_bytes(fs: &SimFs, bytes: &[u8]) -> Result<Engine<SimFs>, EngineError> {
-    install(Arc::new(fs.clone()), TARGET, bytes, options(), false)
+    install(Arc::new(fs.clone()), TARGET, bytes, options(), true)
 }
 
 fn old_target() -> (SimFs, State) {
@@ -298,7 +298,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts: vec![export.len() / 2],
         resume: false,
     };
-    let error = install(Arc::new(target.clone()), TARGET, cut, options(), false).unwrap_err();
+    let error = install(Arc::new(target.clone()), TARGET, cut, options(), true).unwrap_err();
     assert_eq!(StorageError::from(error).kind(), ErrorKind::Io);
     assert_eq!(dump(&open(&target, TARGET, options()).unwrap()), old);
     let cuts = (1..6).map(|part| export.len() * part / 6 + part).collect();
@@ -308,7 +308,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts,
         resume: true,
     };
-    let installed = install(Arc::new(target.clone()), TARGET, resumed, options(), false).unwrap();
+    let installed = install(Arc::new(target.clone()), TARGET, resumed, options(), true).unwrap();
     assert_eq!(dump(&installed), expected);
 }
 
@@ -802,5 +802,47 @@ fn installing_over_a_database_open_on_the_simulated_file_system_fails_and_keeps_
     assert_eq!(
         dump(&install_bytes(&target, &bytes).unwrap()).len(),
         dump(&source).len()
+    );
+}
+
+#[test]
+fn installing_over_another_database_fails_unless_forced_and_keeps_it() {
+    let (_fs, source, expected) = loaded_source(3, 10);
+    let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let (target, old) = old_target();
+    let error = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(
+        StorageError::from(error).kind(),
+        ErrorKind::DifferentDatabase
+    );
+    assert_eq!(dump(&open(&target, TARGET, options()).unwrap()), old);
+    let installed = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        true,
+    )
+    .unwrap();
+    assert_eq!(dump(&installed), expected);
+    drop(installed);
+    let again = install(
+        Arc::new(target.clone()),
+        TARGET,
+        bytes.as_slice(),
+        options(),
+        false,
+    );
+    assert_eq!(
+        dump(&again.unwrap()),
+        expected,
+        "a snapshot of the same database was refused"
     );
 }

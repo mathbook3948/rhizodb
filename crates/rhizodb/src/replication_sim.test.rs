@@ -259,7 +259,12 @@ impl Sim {
         self.steps.push(format!("pull {from} -> {to}"));
         let changes = match self.nodes[from].db.changes_since(&asked, size) {
             Ok(changes) => changes,
-            Err(error) if error.kind() == ErrorKind::Diverged => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::Diverged | ErrorKind::DifferentDatabase
+                ) =>
+            {
                 self.count("diverged pull");
                 self.resolve(to, from);
                 return;
@@ -316,11 +321,13 @@ impl Sim {
                 ErrorKind::Gap => self.count("gap"),
                 ErrorKind::Fenced => self.count("fenced"),
                 ErrorKind::NotReplica => self.count("not replica"),
-                ErrorKind::Diverged if from != usize::MAX => {
+                ErrorKind::Diverged | ErrorKind::DifferentDatabase if from != usize::MAX => {
                     self.count("diverged apply");
                     self.resolve(to, from);
                 }
-                ErrorKind::Diverged => self.count("diverged late apply"),
+                ErrorKind::Diverged | ErrorKind::DifferentDatabase => {
+                    self.count("diverged late apply")
+                }
                 _ => panic!("{}: apply failed with {error}", self.context()),
             },
         }

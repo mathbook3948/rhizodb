@@ -467,6 +467,13 @@ fn find_live_blocks(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Replayed {
+    lsn: u64,
+    hlc: u64,
+    chain: u64,
+}
+
 /// A database file read up to its tree: the header, the catalog, and the extent table.
 #[derive(Debug)]
 pub(crate) struct Loaded<B: BlockFile> {
@@ -574,13 +581,6 @@ pub(crate) fn load<B: BlockFile + 'static>(
         extents,
         catalog,
     })
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Replayed {
-    lsn: u64,
-    hlc: u64,
-    chain: u64,
 }
 
 fn replay_into(
@@ -2122,6 +2122,7 @@ pub(crate) mod replica;
 
 pub(crate) use replica::Epoch;
 pub(crate) use replica::Role;
+pub(crate) use replica::different;
 pub(crate) use replica::epoch_at;
 pub(crate) use replica::fork_lsn;
 

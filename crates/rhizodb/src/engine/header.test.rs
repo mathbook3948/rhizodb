@@ -42,6 +42,7 @@ fn sample() -> Header {
             replica: true,
             seen_term: 4,
             checkpoint_chain: 0xC4A1,
+            origin: 0xD00D,
         },
     }
 }
@@ -284,6 +285,7 @@ fn header_strategy() -> impl Strategy<Value = Header> {
                         replica: clean,
                         seen_term: lsn / 3,
                         checkpoint_chain: hlc ^ lsn,
+                        origin: u128::from(lsn) << 64,
                     },
                 };
                 for (entry, (present, slot, written)) in header.open.iter_mut().zip(open) {
