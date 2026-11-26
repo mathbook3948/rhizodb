@@ -790,7 +790,6 @@ fn compacting_shrinks_the_file_to_its_live_data_and_keeps_every_entry() {
 }
 
 #[test]
-#[ignore = "left out of mise run check, run by mise run random"]
 fn a_reader_holding_an_old_snapshot_through_a_compaction_reads_it_whole() {
     let fs = SimFs::new();
     let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(CheckpointMode::Inline)).unwrap();
