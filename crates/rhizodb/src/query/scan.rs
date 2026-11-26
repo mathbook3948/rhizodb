@@ -1010,6 +1010,9 @@ impl<T: ReadTransaction> Env<'_, T> {
                     return Ok(None);
                 };
                 if entries[at + 1..].iter().any(|(other, _)| other == key) {
+                    if computed(&value) {
+                        return Ok(None);
+                    }
                     continue;
                 }
                 let column = Value::Column(compiler.column(key)?);
