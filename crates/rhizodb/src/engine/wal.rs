@@ -9,6 +9,7 @@ use super::header::FORMAT_MINOR;
 use super::header::Header;
 use super::layout::WAL_BLOCK;
 use super::wal_format::NotRecord;
+use super::wal_format::RECORD_LIMIT;
 use super::wal_format::Record;
 use super::wal_format::SegmentHeader;
 use super::wal_format::decode_record;
@@ -166,6 +167,12 @@ impl<F: FileSystem> Wal<F> {
             let name = segment_name(base, sequence);
             let file = fs.open(&name, wal_block()?)?;
             let blocks = file.block_count()?;
+            let longest = segment_target.max((WAL_BLOCK + padded(RECORD_LIMIT)) as u64);
+            if blocks.saturating_mul(WAL_BLOCK as u64) > longest {
+                return Err(EngineError::corrupt(format!(
+                    "log segment {sequence} is longer than any segment the log writes"
+                )));
+            }
             let mut bytes =
                 vec![0; usize::try_from(blocks).map_err(|_| EngineError::TooLarge)? * WAL_BLOCK];
             file.read(0, &mut bytes)?;

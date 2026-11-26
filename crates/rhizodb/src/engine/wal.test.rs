@@ -521,3 +521,21 @@ fn a_torn_tail_of_random_bytes_that_read_as_record_lengths_is_cut_off_quickly() 
         started.elapsed()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_segment_longer_than_any_the_log_writes_is_corruption() {
+    let directory = tempfile::tempdir().unwrap();
+    let fs = Arc::new(crate::engine::os_fs::OsFs::new(directory.path()));
+    let mut wal = Wal::create(Arc::clone(&fs), BASE, identity(), 1, 1, 0, TARGET).unwrap();
+    wal.append(record(1), 1).unwrap();
+    drop(wal);
+    let file = fs
+        .open(&segment_name(BASE, 1), wal_block().unwrap())
+        .unwrap();
+    file.set_block_count((1 << 40) / WAL_BLOCK as u64).unwrap();
+    drop(file);
+    let error = Wal::recover(fs, BASE, &header(0, 1), TARGET, |_| Ok(()))
+        .expect_err("an oversized segment was read");
+    assert!(error.is_corrupt(), "{error}");
+}

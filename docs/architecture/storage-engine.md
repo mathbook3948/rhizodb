@@ -77,6 +77,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts, and so is a damaged header of a last segment that holds such a record.
 - Recovery looks for such a record only where the LSN field holds an LSN a record there could carry, and hashes nothing else, so a torn tail of random bytes is scanned in linear time.
 - A log that ends before the checkpoint's LSN is corruption.
+- A segment longer than the segment target and longer than a header and the longest record is corruption, refused before recovery reads it.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
