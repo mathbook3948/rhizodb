@@ -24,6 +24,7 @@ fn options() -> EngineOptions {
         cache_pages: 64,
         reclaim_slack: EngineOptions::default().reclaim_slack,
         stage_floor: EngineOptions::default().stage_floor,
+        ingest_limit: u64::MAX,
     }
 }
 

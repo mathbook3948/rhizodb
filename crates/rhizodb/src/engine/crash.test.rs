@@ -138,6 +138,7 @@ fn options() -> EngineOptions {
         cache_pages: 64,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        ingest_limit: u64::MAX,
     }
 }
 
@@ -186,6 +187,15 @@ fn every_failure_then_power_loss_keeps_each_commit_checkpointed_at_once() {
         ..options()
     };
     fail_each_operation_then_lose_power(every_commit, 20);
+}
+
+#[test]
+fn every_failure_then_power_loss_keeps_each_commit_that_went_straight_into_the_file() {
+    let ingesting = EngineOptions {
+        ingest_limit: 2_500,
+        ..options()
+    };
+    fail_each_operation_then_lose_power(ingesting, 8);
 }
 
 fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generation: u64) {
@@ -373,11 +383,25 @@ fn state_after(count: u64) -> State {
 
 #[test]
 fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_commit() {
-    let background = EngineOptions {
+    lose_power_at_any_moment_of_background_checkpoints(EngineOptions {
         checkpoint: CheckpointMode::Background,
         memtable_limit: 4_000,
         ..options()
-    };
+    });
+}
+
+#[test]
+fn a_power_loss_at_any_moment_of_commits_that_go_straight_into_the_file_keeps_each_acknowledged_commit()
+ {
+    lose_power_at_any_moment_of_background_checkpoints(EngineOptions {
+        checkpoint: CheckpointMode::Background,
+        memtable_limit: 4_000,
+        ingest_limit: 2_000,
+        ..options()
+    });
+}
+
+fn lose_power_at_any_moment_of_background_checkpoints(background: EngineOptions) {
     let commits = u64::from(test_scale::cases(400)).min(4000);
     let fs = SimFs::new();
     let engine = open(&fs, background).unwrap();
@@ -622,6 +646,7 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
     let base = SimFs::new();
     let unstaged = EngineOptions {
         stage_floor: u64::MAX,
+        ingest_limit: u64::MAX,
         ..by_hand()
     };
     let engine = open(&base, unstaged).unwrap();
@@ -697,6 +722,7 @@ fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole
     let compacting = EngineOptions {
         reclaim_slack: 0,
         stage_floor: u64::MAX,
+        ingest_limit: u64::MAX,
         ..by_hand()
     };
     let base = SimFs::new();

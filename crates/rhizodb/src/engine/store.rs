@@ -63,6 +63,7 @@ use super::wal::segment_files;
 use super::wal::segment_name;
 use super::wal_format::Body;
 use super::wal_format::batch_record;
+use super::wal_format::ingest_record;
 use crate::storage::Entry;
 use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
@@ -125,6 +126,8 @@ pub(crate) struct EngineOptions {
     pub(crate) reclaim_slack: u64,
     /// The fewest blocks a stage of a checkpoint frees before its header is written.
     pub(crate) stage_floor: u64,
+    /// The bytes of writes above which a commit goes straight into the database file.
+    pub(crate) ingest_limit: u64,
 }
 
 impl Default for EngineOptions {
@@ -137,6 +140,7 @@ impl Default for EngineOptions {
             cache_pages: (1 << 30) / BLOCK,
             reclaim_slack: 0,
             stage_floor: 256,
+            ingest_limit: 64 << 20,
         }
     }
 }
@@ -194,6 +198,7 @@ struct Job {
     lsn: u64,
     hlc: u64,
     first_segment: u64,
+    ingest: Option<BTreeMap<TableId, BTreeMap<Bytes, Slot>>>,
 }
 
 #[derive(Debug)]
@@ -414,6 +419,27 @@ fn replay_into(
     Ok(())
 }
 
+fn with_ingest(
+    mut changes: BTreeMap<TableId, Vec<(Bytes, Slot)>>,
+    staged: &BTreeMap<TableId, BTreeMap<Bytes, Slot>>,
+) -> BTreeMap<TableId, Vec<(Bytes, Slot)>> {
+    for (table, keys) in staged {
+        let earlier = changes.remove(table).unwrap_or_default();
+        let mut merged = Vec::with_capacity(earlier.len() + keys.len());
+        let mut earlier = earlier.into_iter().peekable();
+        for (key, slot) in keys {
+            while let Some(before) = earlier.next_if(|(before, _)| before < key) {
+                merged.push(before);
+            }
+            earlier.next_if(|(before, _)| before == key);
+            merged.push((Arc::clone(key), slot.clone()));
+        }
+        merged.extend(earlier);
+        changes.insert(*table, merged);
+    }
+    changes
+}
+
 const RETIRED_POLL: Duration = Duration::from_millis(50);
 
 fn checkpoint_worker<F: FileSystem + 'static>(
@@ -632,6 +658,9 @@ impl<F: FileSystem + 'static> Engine<F> {
             return Ok(());
         }
         self.drop_segments_aside(writer);
+        if staged.bytes() > shared.options.ingest_limit {
+            return self.ingest(writer, staged);
+        }
         let lsn = writer.last_lsn + 1;
         let hlc = hybrid_clock_after(writer.last_hlc);
         let record = batch_record(
@@ -672,6 +701,39 @@ impl<F: FileSystem + 'static> Engine<F> {
                 shared.wait_for_checkpoint();
             }
         }
+        Ok(())
+    }
+
+    fn ingest(&self, writer: &mut Writer<F>, staged: Staged) -> Result<(), EngineError> {
+        let shared = &*self.shared;
+        shared.wait_for_checkpoint();
+        if shared.is_poisoned() {
+            return Err(shared.refusal());
+        }
+        let lsn = writer.last_lsn + 1;
+        let hlc = hybrid_clock_after(writer.last_hlc);
+        let wal = writer.wal.as_mut().ok_or(EngineError::Poisoned)?;
+        if let Err(error) = wal.append(ingest_record(lsn, hlc, u128::from(lsn)), hlc) {
+            shared.poison_with(&error);
+            return Err(error);
+        }
+        writer.last_lsn = lsn;
+        writer.last_hlc = hlc;
+        let Some(mut job) = shared.freeze(writer) else {
+            shared.poison();
+            return Err(shared.refusal());
+        };
+        job.ingest = Some(staged.into_tables());
+        shared.run_checkpoint(job, false);
+        if self.jobs.is_none() {
+            shared.drop_segments(writer);
+        }
+        if shared.is_poisoned() {
+            return Err(shared.refusal());
+        }
+        shared
+            .wal_bytes
+            .store(writer.wal.as_ref().map_or(0, Wal::size), Ordering::Relaxed);
         Ok(())
     }
 
@@ -872,6 +934,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             lsn: writer.last_lsn,
             hlc: writer.last_hlc,
             first_segment: wal.first_needed(writer.last_lsn),
+            ingest: None,
         })
     }
 
@@ -890,6 +953,9 @@ impl<F: FileSystem + 'static> Shared<F> {
                     frozen: None,
                     tree,
                 });
+                if job.ingest.is_some() {
+                    published.view.snapshot = job.lsn;
+                }
                 drop(published);
                 *lock(&self.droppable) = Some(job.first_segment);
                 let trimmed = self.trim(&mut lock(&self.durable));
@@ -930,8 +996,14 @@ impl<F: FileSystem + 'static> Shared<F> {
     fn write_checkpoint(&self, job: &Job, clean: bool) -> Result<Arc<Tree>, EngineError> {
         let mut durable = lock(&self.durable);
         self.trim(&mut durable)?;
-        let changes = job.frozen.newest();
-        if changes.is_empty() && !durable.header.catalog.is_null() && !self.can_move_down(&durable)
+        let changes = match &job.ingest {
+            Some(staged) => with_ingest(job.frozen.newest(), staged),
+            None => job.frozen.newest(),
+        };
+        if changes.is_empty()
+            && job.ingest.is_none()
+            && !durable.header.catalog.is_null()
+            && !self.can_move_down(&durable)
         {
             let header = Header {
                 generation: durable.header.generation + 1,
@@ -949,7 +1021,10 @@ impl<F: FileSystem + 'static> Shared<F> {
             durable.header = header;
             return Ok(Arc::clone(&durable.tree));
         }
-        let stage = self.stage_blocks(&durable.extents);
+        let stage = match job.ingest {
+            Some(_) => u64::MAX,
+            None => self.stage_blocks(&durable.extents),
+        };
         let mut checkpointer = Checkpointer::new(
             &self.pages,
             self.extents_to_place(&durable.extents),
@@ -1173,6 +1248,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                 lsn,
                 hlc: durable.header.checkpoint_hlc,
                 first_segment: durable.header.wal.first_segment,
+                ingest: None,
             };
             let tree = self.install(
                 &mut durable,

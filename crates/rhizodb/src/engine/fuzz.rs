@@ -20,6 +20,7 @@ use super::wal_format::SegmentHeader;
 use super::wal_format::batch_record;
 use super::wal_format::checkpoint_record;
 use super::wal_format::decode_record;
+use super::wal_format::ingest_record;
 use super::wal_format::seal_record;
 use crate::storage::Entry;
 use crate::storage::ReadTransaction;
@@ -90,6 +91,7 @@ pub(crate) fn decode_formats(bytes: &[u8]) -> Result<(), String> {
                         ops.iter().map(Op::borrowed),
                     )
                     .map_err(|error| error.to_string())?,
+                    Body::Ingest => ingest_record(decoded.lsn, decoded.hlc, decoded.txn),
                     Body::Checkpoint { lsn, generation } => {
                         checkpoint_record(decoded.lsn, decoded.hlc, *lsn, *generation)
                     }
@@ -121,6 +123,7 @@ fn fuzz_options() -> EngineOptions {
         cache_pages: 64,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        ingest_limit: u64::MAX,
     }
 }
 

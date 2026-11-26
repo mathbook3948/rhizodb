@@ -129,6 +129,32 @@ fn a_checkpoint_record_round_trips() {
 }
 
 #[test]
+fn an_ingest_record_round_trips_and_refuses_a_body() {
+    let record = sealed(ingest_record(7, 8, 7));
+    let (decoded, length) = decode_record(SEED, &record).unwrap();
+    assert_eq!(length, record.len());
+    assert_eq!(
+        decoded,
+        Record {
+            lsn: 7,
+            term: 0,
+            hlc: 8,
+            txn: 7,
+            body: Body::Ingest,
+        }
+    );
+    let mut longer = ingest_record(7, 8, 7);
+    longer.push(0);
+    assert!(decode_record(SEED, &sealed(longer)).is_err());
+    let mut newer = record_prefix(7, 0, 8, 7, Kind::Ingest, 2);
+    newer.truncate(RECORD_HEADER);
+    assert!(matches!(
+        decode_record(SEED, &resealed(newer)),
+        Err(NotRecord::Refused(EngineError::Unsupported(_)))
+    ));
+}
+
+#[test]
 fn every_flipped_bit_of_a_record_makes_it_invalid() {
     let record = batch(3, &ops());
     for byte in 0..record.len() {
@@ -188,7 +214,7 @@ fn resealed(prefix: Vec<u8>) -> Vec<u8> {
 #[test]
 fn reserved_kinds_and_unknown_formats_are_refused_not_skipped() {
     for kind in Kind::ALL {
-        if matches!(kind, Kind::Batch | Kind::Checkpoint) {
+        if matches!(kind, Kind::Batch | Kind::Ingest | Kind::Checkpoint) {
             continue;
         }
         let record = resealed(record_prefix(1, 0, 0, 1, kind, 1));

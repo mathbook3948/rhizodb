@@ -23,6 +23,7 @@ const SEGMENT_CHECKSUM_AT: usize = WAL_BLOCK - 8;
 
 const BATCH_FORMAT: u8 = 1;
 const CHECKPOINT_FORMAT: u8 = 1;
+const INGEST_FORMAT: u8 = 1;
 
 /// The first block of every segment, which names the database and log it belongs to, so a segment
 /// can be shipped to another node and replayed there on its own.
@@ -137,6 +138,9 @@ const PATCH: u8 = 4;
 pub(crate) enum Body {
     /// The writes of one committed transaction.
     Batch(Vec<Op>),
+    /// A transaction whose writes go straight into the database file. It holds no writes, and
+    /// a header whose checkpoint reaches its LSN holds them.
+    Ingest,
     /// A checkpoint at `lsn` reached the database file in header generation `generation`.
     Checkpoint { lsn: u64, generation: u64 },
 }
@@ -317,6 +321,11 @@ pub(crate) fn batch_record<'a>(
     Ok(record)
 }
 
+/// An ingest record, to be sealed by the segment it lands in.
+pub(crate) fn ingest_record(lsn: u64, hlc: u64, txn: u128) -> Vec<u8> {
+    record_prefix(lsn, 0, hlc, txn, Kind::Ingest, INGEST_FORMAT)
+}
+
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn checkpoint_record(
     lsn: u64,
@@ -397,6 +406,7 @@ fn decode_checked(mut reader: Reader<'_>) -> Result<Record, EngineError> {
         .ok_or_else(|| EngineError::Unsupported(format!("log record kind {code}")))?;
     let body = match (kind, format) {
         (Kind::Batch, BATCH_FORMAT) => Body::Batch(decode_batch(&mut reader)?),
+        (Kind::Ingest, INGEST_FORMAT) => Body::Ingest,
         (Kind::Checkpoint, CHECKPOINT_FORMAT) => Body::Checkpoint {
             lsn: reader.u64()?,
             generation: reader.u64()?,

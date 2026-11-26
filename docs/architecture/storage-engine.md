@@ -90,6 +90,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A write transaction keeps its operations in order, for the log, and each written key's value now, for its own reads and for the memtable.
 - A range delete puts a tombstone in the memtable for each key it removes, and replaying its log operation finds the same keys.
 - A commit's record is synced to the log before its versions join the memtable and the commit becomes visible.
+- A commit whose writes pass 64 MiB goes straight into the database file instead of the log and the memtable, so a bulk load writes its data once and no log record limits its size.
+- Such a commit syncs an ingest record that holds no writes to the log, then checkpoints every earlier commit with its writes and makes them durable with one header, so a crash leaves the file before the commit or after it.
+- A checkpoint that carries an ingested commit writes no stage header, since a stage would make part of the commit durable.
+- Replaying a log skips an ingest record that the header's checkpoint does not reach, since its commit was never acknowledged.
+- An ingested commit waits for a running checkpoint first, and becomes visible when its tree is published.
 - A commit's timestamp is the wall clock in microseconds, or one past the previous commit's when the clock has not moved past it.
 - A replayed operation on a table id this build does not know refuses the log.
 - The database file is copy-on-write: a checkpoint writes each changed page and run to a block that neither a durable header nor an open snapshot reaches, never in place.
@@ -160,7 +165,6 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 ## Open
 
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
-- How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - Whether a database file is locked against a second process.
 - How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.

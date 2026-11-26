@@ -55,6 +55,7 @@ pub(crate) struct Staged {
     pub(crate) view: View,
     overlay: BTreeMap<TableId, BTreeMap<Bytes, Slot>>,
     pub(crate) ops: Vec<StagedOp>,
+    bytes: u64,
 }
 
 impl Staged {
@@ -63,10 +64,12 @@ impl Staged {
             view,
             overlay: BTreeMap::new(),
             ops: Vec::new(),
+            bytes: 0,
         }
     }
 
     pub(crate) fn put(&mut self, table: TableId, key: &[u8], value: &[u8]) {
+        self.bytes += (key.len() + value.len()) as u64;
         let key: Bytes = Arc::from(key);
         let value: Bytes = Arc::from(value);
         self.overlay
@@ -77,6 +80,7 @@ impl Staged {
     }
 
     pub(crate) fn delete(&mut self, table: TableId, key: &[u8]) {
+        self.bytes += key.len() as u64;
         let key: Bytes = Arc::from(key);
         self.overlay
             .entry(table)
@@ -162,6 +166,16 @@ impl Staged {
             |lower| self.view.scan(table, start, end, lower),
             visit,
         )
+    }
+
+    /// The bytes of the keys and values this transaction wrote, each write counted again.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Each table's keys as the transaction leaves them, ascending.
+    pub(crate) fn into_tables(self) -> BTreeMap<TableId, BTreeMap<Bytes, Slot>> {
+        self.overlay
     }
 
     pub(crate) fn into_changes(self) -> impl Iterator<Item = (TableId, Bytes, Slot)> {

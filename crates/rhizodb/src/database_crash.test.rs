@@ -125,6 +125,10 @@ fn dump(db: &Database) -> Vec<String> {
 }
 
 fn open(fs: &SimFs) -> Result<Database, Error> {
+    open_with(fs, u64::MAX)
+}
+
+fn open_with(fs: &SimFs, ingest_limit: u64) -> Result<Database, Error> {
     use crate::engine::any_fs::AnyFs;
     use crate::engine::store::CheckpointMode;
     use crate::engine::store::Engine;
@@ -137,6 +141,7 @@ fn open(fs: &SimFs) -> Result<Database, Error> {
         cache_pages: 64,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        ingest_limit,
     };
     let engine = Engine::open(
         Arc::new(AnyFs::Sim(fs.clone())),
@@ -225,12 +230,14 @@ fn candidates(run: &Run) -> Vec<Vec<usize>> {
 }
 
 fn check_recovered(
+    ingest_limit: u64,
     recovered: &SimFs,
     run: &Run,
     expected: &mut Expected,
     case: &str,
 ) -> Result<(), String> {
-    let db = open(recovered).map_err(|error| format!("{case}: reopening failed: {error}"))?;
+    let db = open_with(recovered, ingest_limit)
+        .map_err(|error| format!("{case}: reopening failed: {error}"))?;
     consistent(&db).map_err(|problem| format!("{case}: {problem}"))?;
     let found = dump(&db);
     let matched = candidates(run)
@@ -249,7 +256,8 @@ fn check_recovered(
     .map_err(|error| format!("{case}: the recovered database refused a write: {error}"))?;
     consistent(&db).map_err(|problem| format!("{case}: after a write, {problem}"))?;
     drop(db);
-    let reopened = open(recovered).map_err(|error| format!("{case}: second reopen: {error}"))?;
+    let reopened = open_with(recovered, ingest_limit)
+        .map_err(|error| format!("{case}: second reopen: {error}"))?;
     let mut probes = expected.after(&matched).to_vec();
     let after = dump(&reopened);
     probes[0] = after[0].clone();
@@ -276,9 +284,9 @@ fn modes(seeds: u64, salt: u64) -> Vec<Crash> {
     modes
 }
 
-fn operations() -> (u64, u64) {
+fn operations(ingest_limit: u64) -> (u64, u64) {
     let fs = SimFs::new();
-    let db = open(&fs).unwrap();
+    let db = open_with(&fs, ingest_limit).unwrap();
     let opened = fs.operations();
     let run = run_workload(&db, true);
     assert_eq!(run.acknowledged.len(), WORKLOAD.len());
@@ -301,15 +309,15 @@ fn points(from: u64, total: u64, budget: u64) -> Vec<u64> {
     points
 }
 
-fn crash_during_workload(failure: Failure) {
-    let (opened, total) = operations();
+fn crash_during_workload(failure: Failure, ingest_limit: u64) {
+    let (opened, total) = operations(ingest_limit);
     let budget = u64::from(test_scale::cases(40));
     let seeds = u64::from(test_scale::cases(1)).min(16);
     let mut expected = Expected::default();
     let mut problems = Vec::new();
     for at in points(opened, total, budget) {
         let fs = SimFs::new();
-        let run = match open(&fs) {
+        let run = match open_with(&fs, ingest_limit) {
             Ok(db) => {
                 fs.fail_after(at - opened, failure);
                 let run = run_workload(&db, failure == Failure::FromThenOn);
@@ -324,7 +332,9 @@ fn crash_during_workload(failure: Failure) {
         };
         for mode in modes(seeds, at) {
             let case = format!("{failure:?} at operation {at} of {total}, {mode:?}");
-            if let Err(problem) = check_recovered(&fs.crash(mode), &run, &mut expected, &case) {
+            if let Err(problem) =
+                check_recovered(ingest_limit, &fs.crash(mode), &run, &mut expected, &case)
+            {
                 problems.push(problem);
             }
         }
@@ -334,12 +344,24 @@ fn crash_during_workload(failure: Failure) {
 
 #[test]
 fn a_power_loss_at_any_point_of_a_workload_recovers_the_acknowledged_steps() {
-    crash_during_workload(Failure::FromThenOn);
+    crash_during_workload(Failure::FromThenOn, u64::MAX);
+}
+
+#[test]
+fn a_power_loss_at_any_point_of_a_workload_of_commits_straight_into_the_file_recovers_the_acknowledged_steps()
+ {
+    crash_during_workload(Failure::FromThenOn, 2_000);
 }
 
 #[test]
 fn one_failed_write_or_sync_in_a_workload_loses_only_its_own_step() {
-    crash_during_workload(Failure::Once);
+    crash_during_workload(Failure::Once, u64::MAX);
+}
+
+#[test]
+fn one_failed_write_or_sync_in_a_workload_of_commits_straight_into_the_file_loses_only_its_own_step()
+ {
+    crash_during_workload(Failure::Once, 2_000);
 }
 
 fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
@@ -365,7 +387,7 @@ fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
 
 #[test]
 fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole_empty_one() {
-    let (opened, _) = operations();
+    let (opened, _) = operations(u64::MAX);
     let seeds = u64::from(test_scale::cases(2)).min(16);
     let mut problems = Vec::new();
     for failure in [Failure::FromThenOn, Failure::Once] {

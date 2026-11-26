@@ -21,6 +21,14 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         cache_pages: 32,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        ingest_limit: u64::MAX,
+    }
+}
+
+fn ingesting(checkpoint: CheckpointMode) -> EngineOptions {
+    EngineOptions {
+        ingest_limit: 512,
+        ..tiny(checkpoint)
     }
 }
 
@@ -74,6 +82,12 @@ fn the_engine_passes_the_conformance_suite_checkpointing_in_the_background_all_t
 }
 
 #[test]
+fn the_engine_passes_the_conformance_suite_writing_large_commits_straight_into_the_file() {
+    conformance::run(on_sim_fs(ingesting(CheckpointMode::Inline)));
+    conformance::run(on_sim_fs(ingesting(CheckpointMode::Background)));
+}
+
+#[test]
 fn the_engine_in_memory_passes_the_storage_conformance_suite() {
     conformance::run(|| InMemory {
         fs: Arc::new(MemFs::default()),
@@ -96,6 +110,85 @@ proptest! {
     #[test]
     fn the_engine_checkpointing_in_the_background_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(tiny(CheckpointMode::Background))(), &ops)?;
+    }
+
+    #[test]
+    fn the_engine_writing_large_commits_straight_into_the_file_matches_the_versioned_model(
+        ops in model::ops(),
+        background in any::<bool>(),
+    ) {
+        let checkpoint = if background { CheckpointMode::Background } else { CheckpointMode::Inline };
+        model::check(&mut on_sim_fs(ingesting(checkpoint))(), &ops)?;
+    }
+}
+
+#[test]
+fn a_commit_larger_than_the_ingest_limit_goes_into_the_file_and_leaves_its_writes_out_of_the_log() {
+    for checkpoint in [CheckpointMode::Inline, CheckpointMode::Background] {
+        let fs = SimFs::new();
+        let options = EngineOptions {
+            ingest_limit: 64 << 10,
+            ..EngineOptions::default()
+        };
+        let engine = Engine::open(
+            Arc::new(fs.clone()),
+            NAME,
+            EngineOptions {
+                checkpoint,
+                ..options
+            },
+        )
+        .unwrap();
+        let mut small = engine.begin_write().unwrap();
+        small.put(Table::Nodes, b"small", b"first").unwrap();
+        small.commit().unwrap();
+        let before = engine.begin_read().unwrap();
+        let log_before = engine.stats().unwrap().wal_bytes;
+        let mut large = engine.begin_write().unwrap();
+        for item in 0..400u32 {
+            large
+                .put(Table::Nodes, &item.to_be_bytes(), &vec![item as u8; 1000])
+                .unwrap();
+        }
+        large.delete(Table::Nodes, b"small").unwrap();
+        large.commit().unwrap();
+        let log_after = engine.stats().unwrap().wal_bytes;
+        assert!(
+            log_after < log_before + 4096,
+            "{checkpoint:?}: the log grew from {log_before} to {log_after} bytes"
+        );
+        assert_eq!(engine.header().checkpoint_lsn, 2, "{checkpoint:?}");
+        assert_eq!(
+            before.get(Table::Nodes, b"small").unwrap().as_deref(),
+            Some(&b"first"[..])
+        );
+        assert_eq!(before.get(Table::Nodes, &7u32.to_be_bytes()).unwrap(), None);
+        drop(before);
+        let mut after = engine.begin_write().unwrap();
+        assert_eq!(after.get(Table::Nodes, b"small").unwrap(), None);
+        after.put(Table::Nodes, b"later", b"x").unwrap();
+        after.commit().unwrap();
+        drop(engine);
+        let reopened = Engine::open(
+            Arc::new(fs.crash(Crash::DropUnsynced)),
+            NAME,
+            EngineOptions {
+                checkpoint,
+                ..options
+            },
+        )
+        .unwrap();
+        reopened.check().unwrap();
+        let read = reopened.begin_read().unwrap();
+        assert_eq!(
+            read.scan_prefix(Table::Nodes, &[]).unwrap().len(),
+            401,
+            "{checkpoint:?}"
+        );
+        assert_eq!(
+            read.get(Table::Nodes, &399u32.to_be_bytes()).unwrap(),
+            Some(vec![399u32 as u8; 1000])
+        );
     }
 }
 
@@ -221,6 +314,7 @@ fn a_block_the_durable_header_reaches_never_changes_and_freed_blocks_take_later_
     let fs = SimFs::new();
     let unstaged = EngineOptions {
         stage_floor: u64::MAX,
+        ingest_limit: u64::MAX,
         ..manual(CheckpointMode::Inline)
     };
     let engine = Engine::open(Arc::new(fs.clone()), NAME, unstaged).unwrap();
