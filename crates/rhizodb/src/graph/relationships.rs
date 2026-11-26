@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
+
 use crate::value::DecodeError;
 use crate::value::Reader;
 use crate::value::put_varint;
@@ -100,6 +105,100 @@ impl<'a> ChunkRef<'a> {
             failed = record.is_err();
             Some(record)
         })
+    }
+}
+
+const READER_BYTES: usize = 64 << 20;
+
+/// The stored relationship chunks one query read more than once, so it reads such a chunk from
+/// storage once however many of its relationships it reads. The first read of a chunk reads it
+/// in place, so a traversal that reads one relationship of each chunk copies nothing. It forgets
+/// them all once it holds more than `READER_BYTES`, and whenever the transaction stored a
+/// relationship since it read them.
+#[derive(Debug, Default)]
+pub(crate) struct RelationshipReader {
+    chunks: HashMap<u64, Held, BuildHasherDefault<ChunkHasher>>,
+    bytes: usize,
+    writes: u64,
+}
+
+#[derive(Debug)]
+enum Held {
+    Probed,
+    Loaded(Option<Box<[u8]>>),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ChunkHasher(u64);
+
+impl Hasher for ChunkHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// What a [`RelationshipReader`] holds of one chunk.
+#[derive(Debug)]
+pub(crate) enum Holding<'a> {
+    /// Not read before, which the reader now notes.
+    Nothing,
+    /// Read once before, so it is worth loading.
+    Probed,
+    /// Loaded, or known to be absent.
+    Loaded(Option<&'a [u8]>),
+}
+
+impl RelationshipReader {
+    pub(crate) fn follow(&mut self, writes: u64) {
+        if self.writes != writes {
+            self.forget();
+            self.writes = writes;
+        }
+    }
+
+    fn forget(&mut self) {
+        self.chunks.clear();
+        self.bytes = 0;
+    }
+
+    pub(crate) fn holding(&mut self, chunk: u64) -> Holding<'_> {
+        match self.chunks.entry(chunk) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(Held::Probed);
+                Holding::Nothing
+            }
+            Entry::Occupied(held) => match held.into_mut() {
+                Held::Probed => Holding::Probed,
+                Held::Loaded(bytes) => Holding::Loaded(bytes.as_deref()),
+            },
+        }
+    }
+
+    pub(crate) fn insert(&mut self, chunk: u64, bytes: Option<Box<[u8]>>) -> Option<&[u8]> {
+        let size = bytes.as_ref().map_or(0, |bytes| bytes.len());
+        if self.bytes + size > READER_BYTES {
+            self.forget();
+        }
+        self.bytes += size;
+        match self
+            .chunks
+            .entry(chunk)
+            .insert_entry(Held::Loaded(bytes))
+            .into_mut()
+        {
+            Held::Loaded(bytes) => bytes.as_deref(),
+            Held::Probed => None,
+        }
     }
 }
 

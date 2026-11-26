@@ -23,6 +23,7 @@ use crate::graph::NodeId;
 use crate::graph::NodeRecord;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
+use crate::graph::RelationshipReader;
 use crate::graph::RelationshipRecord;
 use crate::graph::RelationshipType;
 use crate::graph::Target;
@@ -90,6 +91,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
     /// The adjacency segments read last.
     pub(crate) adjacency: RefCell<AdjacencyReader>,
+    /// The relationship chunks read so far.
+    pub(crate) relationships: RefCell<RelationshipReader>,
     /// The relationship types looked up so far that have a token.
     pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
     /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
@@ -119,6 +122,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             label_tokens: RefCell::default(),
             property_indexes: RefCell::default(),
             adjacency: RefCell::default(),
+            relationships: RefCell::default(),
             rel_type_tokens: RefCell::default(),
             morsel: None,
         }
@@ -285,7 +289,29 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn relationship(&self, id: RelationshipId) -> Result<RelationshipRecord, Error> {
-        self.tx.relationship(id)?.ok_or_else(deleted)
+        self.relationship_record(id)?.ok_or_else(deleted)
+    }
+
+    /// The record of relationship `id`, or `None` when there is no such relationship.
+    pub(crate) fn relationship_record(
+        &self,
+        id: RelationshipId,
+    ) -> Result<Option<RelationshipRecord>, Error> {
+        match self.relationships.try_borrow_mut() {
+            Ok(mut reader) => Ok(self.tx.relationship_in(&mut reader, id)?),
+            Err(_) => Ok(self.tx.relationship(id)?),
+        }
+    }
+
+    fn stored_relationship_property(
+        &self,
+        id: RelationshipId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<crate::value::PropertyValue>>, Error> {
+        match self.relationships.try_borrow_mut() {
+            Ok(mut reader) => Ok(self.tx.relationship_property_in(&mut reader, id, key)?),
+            Err(_) => Ok(self.tx.relationship_property(id, key)?),
+        }
     }
 
     /// The type of a relationship, which stays readable after the query deleted it.
@@ -336,8 +362,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         let token = self.property_key(key)?;
         let stored = match (value, token) {
             (Datum::Node(id), token) => self.node_property(*id, token)?,
-            (Datum::Relationship(id), Some(token)) => self.tx.relationship_property(*id, token)?,
-            (Datum::Relationship(id), None) => self.tx.relationship(*id)?.map(|_| None),
+            (Datum::Relationship(id), Some(token)) => {
+                self.stored_relationship_property(*id, token)?
+            }
+            (Datum::Relationship(id), None) => self.relationship_record(*id)?.map(|_| None),
             _ => return Ok(None),
         };
         Ok(Some(

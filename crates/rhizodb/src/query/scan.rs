@@ -18,6 +18,7 @@ use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::Quick;
+use crate::graph::RelationshipType;
 use crate::graph::ScanGroup;
 use crate::graph::Target;
 use crate::graph::Text;
@@ -792,26 +793,58 @@ impl<'d> Chosen<'d> {
 
 impl<T: ReadTransaction> Env<'_, T> {
     pub(crate) fn seek_possible(&self, part: &PatternPart) -> Result<bool, Error> {
+        Ok(self.indexed_start(part)? || self.reversal(part)?.is_some())
+    }
+
+    /// The form of `part` written from its end that a match takes instead of `part`: one whose
+    /// start node is bound or has an ID lookup or an index, when `part` has neither.
+    pub(crate) fn reversal<'p>(
+        &self,
+        part: &'p PatternPart,
+    ) -> Result<Option<&'p PatternPart>, Error> {
+        let Some(reversed) = part.reversed.as_deref() else {
+            return Ok(None);
+        };
+        if self.indexed_start(part)? {
+            return Ok(None);
+        }
+        Ok((reversed.start.bound || self.indexed_start(reversed)?).then_some(reversed))
+    }
+
+    fn indexed_start(&self, part: &PatternPart) -> Result<bool, Error> {
         for seek in &part.seeks {
             let SeekKey::Property(key) = &seek.key else {
                 return Ok(true);
             };
-            if seek.element != SeekElement::Start {
-                return Ok(true);
-            }
-            let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required) else {
-                continue;
-            };
-            let Some(label) = self.tx.lookup_token::<Label>(&label.0)? else {
-                continue;
+            let target = match seek.element {
+                SeekElement::Start => {
+                    let Some(label) = part.start.labels.as_ref().and_then(LabelExpr::required)
+                    else {
+                        continue;
+                    };
+                    match self.tx.lookup_token::<Label>(&label.0)? {
+                        Some(token) => Target::Label(token),
+                        None => continue,
+                    }
+                }
+                SeekElement::FirstRelationship => {
+                    let Some(LabelExpr::Name(rel_type)) = part
+                        .steps
+                        .first()
+                        .and_then(|step| step.relationship.labels.as_ref())
+                    else {
+                        continue;
+                    };
+                    match self.tx.lookup_token::<RelationshipType>(&rel_type.0)? {
+                        Some(token) => Target::RelationshipType(token),
+                        None => continue,
+                    }
+                }
             };
             let Some(property) = self.tx.lookup_token::<PropertyKey>(key)? else {
                 continue;
             };
-            if self
-                .property_index(Target::Label(label), property)?
-                .is_some()
-            {
+            if self.property_index(target, property)?.is_some() {
                 return Ok(true);
             }
         }

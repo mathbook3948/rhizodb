@@ -175,6 +175,12 @@ pub(crate) struct PatternPart {
     pub(crate) steps: Vec<Step>,
     /// Ways to find the start nodes without reading every node of the label, tried in order.
     pub(crate) seeks: Vec<Seek>,
+    /// The same pattern written from its end node, which the match takes instead when none of
+    /// `seeks` can serve and the end node is bound or one of its own seeks can.
+    pub(crate) reversed: Option<Box<PatternPart>>,
+    /// Conjuncts of the clause's filter, each tested as soon as the element at its position is
+    /// bound, so a partial match that fails one goes no further.
+    pub(crate) checks: Vec<(usize, Expr)>,
 }
 
 /// Conditions that every match puts on one value of the start node or of the first

@@ -61,6 +61,7 @@ pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
+pub(crate) use relationships::RelationshipReader;
 pub(crate) use value_key::Bound;
 pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
@@ -87,6 +88,7 @@ use meta::Part;
 use meta::Slot;
 use relationships::ChunkEdit;
 use relationships::ChunkRef;
+use relationships::Holding;
 
 const FORMAT_VERSION: u32 = 14;
 const OLDEST_FORMAT_VERSION: u32 = 1;
@@ -326,6 +328,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            relationship_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -377,6 +380,7 @@ impl<S: Storage> Graph<S> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            relationship_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -406,6 +410,7 @@ pub(crate) struct GraphTx<T> {
     adjacency: BTreeMap<SegmentId, SegmentEdit>,
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
+    relationship_writes: u64,
     record_buffer: Vec<u8>,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
@@ -433,6 +438,7 @@ impl<T> GraphTx<T> {
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
+            relationship_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -528,6 +534,66 @@ impl<T: ReadTransaction> GraphTx<T> {
                 |bytes| ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
             )?
             .flatten())
+    }
+
+    /// The value of property `key` of relationship `id`, as
+    /// [`relationship_property`](Self::relationship_property) gives it, read through `reader`.
+    pub(crate) fn relationship_property_in(
+        &self,
+        reader: &mut RelationshipReader,
+        id: RelationshipId,
+        key: Token<PropertyKey>,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        self.with_relationship_in(reader, id, |bytes| {
+            Ok(RelationshipRecord::property(bytes, key)?)
+        })
+    }
+
+    /// The record of relationship `id`, as [`relationship`](Self::relationship) gives it, read
+    /// through `reader`.
+    pub(crate) fn relationship_in(
+        &self,
+        reader: &mut RelationshipReader,
+        id: RelationshipId,
+    ) -> Result<Option<RelationshipRecord>, GraphError> {
+        self.with_relationship_in(reader, id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
+    }
+
+    fn with_relationship_in<R>(
+        &self,
+        reader: &mut RelationshipReader,
+        id: RelationshipId,
+        read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        if let Some(edit) = self.relationship_chunks.get(&chunk) {
+            return edit.get(slot).map(read).transpose();
+        }
+        reader.follow(self.relationship_writes);
+        let key = relationships::chunk_key(chunk);
+        let bytes = match reader.holding(chunk) {
+            Holding::Loaded(bytes) => bytes,
+            Holding::Nothing => {
+                return Ok(self
+                    .transaction
+                    .get_with(Table::RelationshipChunks, &key, |bytes| {
+                        ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose()
+                    })?
+                    .flatten());
+            }
+            Holding::Probed => {
+                let stored =
+                    self.transaction
+                        .get_with(Table::RelationshipChunks, &key, |bytes| {
+                            Ok::<_, GraphError>(Box::<[u8]>::from(bytes))
+                        })?;
+                reader.insert(chunk, stored)
+            }
+        };
+        match bytes {
+            Some(bytes) => ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
+            None => Ok(None),
+        }
     }
 
     /// Calls `visit` with every relationship's ID and stored record, in ascending ID order, as
@@ -1249,6 +1315,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         id: RelationshipId,
         record: Option<&RelationshipRecord>,
     ) -> Result<(), GraphError> {
+        self.relationship_writes += 1;
         let (chunk, slot) = relationships::locate(id);
         let edit = match self.relationship_chunks.entry(chunk) {
             btree_map::Entry::Occupied(held) => held.into_mut(),

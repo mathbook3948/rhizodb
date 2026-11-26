@@ -22,6 +22,7 @@ use super::eval::Env;
 use super::eval::Row;
 use super::functions::Function;
 use super::plan::Expr;
+use super::plan::NodePattern;
 use super::plan::PatternPart;
 use super::plan::RelationshipPattern;
 use super::plan::Seek;
@@ -29,6 +30,8 @@ use super::plan::SeekElement;
 use super::plan::SeekKey;
 use super::plan::SeekTest;
 use super::plan::Slot;
+use super::plan::Step;
+use super::prune;
 use super::temporals::Moment;
 use super::temporals::TemporalFunction;
 
@@ -141,6 +144,104 @@ pub(crate) fn derive(part: &PatternPart, filter: Option<&Expr>, bound_later: &[S
     seeks.retain(|seek| seek.key != SeekKey::Id || seek.tests.iter().any(is_point));
     seeks.sort_by_key(|seek| (seek.key != SeekKey::Id, !seek.tests.iter().any(is_point)));
     seeks
+}
+
+/// `part` with its seeks. When its start node is not bound, the form written from its end node
+/// is kept beside it if that end node is bound or has a seek, and it replaces `part` when `part`
+/// has no seek and its end node is bound.
+pub(crate) fn orient(
+    part: &PatternPart,
+    filter: Option<&Expr>,
+    bound_later: &[Slot],
+) -> PatternPart {
+    let mut forward = PatternPart {
+        seeks: derive(part, filter, bound_later),
+        reversed: None,
+        checks: prune::checks(part, filter),
+        ..part.clone()
+    };
+    if part.start.bound || !reversible(part) {
+        return forward;
+    }
+    let mut reversed = reverse(part);
+    reversed.checks = prune::checks(&reversed, filter);
+    if reversed.start.bound && forward.seeks.is_empty() {
+        return reversed;
+    }
+    reversed.seeks = derive(&reversed, filter, bound_later);
+    if reversed.start.bound || !reversed.seeks.is_empty() {
+        forward.reversed = Some(Box::new(reversed));
+    }
+    forward
+}
+
+fn reversible(part: &PatternPart) -> bool {
+    let nodes = || std::iter::once(&part.start).chain(part.steps.iter().map(|step| &step.node));
+    let relationships = || part.steps.iter().map(|step| &step.relationship);
+    let own: Vec<Slot> = nodes()
+        .filter(|node| !node.bound)
+        .map(|node| node.slot)
+        .chain(
+            relationships()
+                .filter(|relationship| !relationship.bound)
+                .map(|relationship| relationship.slot),
+        )
+        .collect();
+    let mut slots: Vec<Slot> = nodes()
+        .map(|node| node.slot)
+        .chain(relationships().map(|relationship| relationship.slot))
+        .collect();
+    let count = slots.len();
+    slots.sort_unstable();
+    slots.dedup();
+    let reads_own =
+        |properties: Option<&Expr>| properties.is_some_and(|expr| !independent(expr, &own));
+    part.path.is_none()
+        && !part.steps.is_empty()
+        && slots.len() == count
+        && relationships().all(|relationship| relationship.length.is_none())
+        && !nodes().any(|node| reads_own(node.properties.as_ref()))
+        && !relationships().any(|relationship| reads_own(relationship.properties.as_ref()))
+}
+
+fn reverse(part: &PatternPart) -> PatternPart {
+    let mut nodes: Vec<NodePattern> = std::iter::once(part.start.clone())
+        .chain(part.steps.iter().map(|step| step.node.clone()))
+        .collect();
+    nodes.reverse();
+    let mut nodes = nodes.into_iter();
+    let start = nodes.next().unwrap_or_else(|| part.start.clone());
+    let steps = part
+        .steps
+        .iter()
+        .rev()
+        .zip(nodes)
+        .map(|(step, node)| Step {
+            relationship: RelationshipPattern {
+                direction: opposite(step.relationship.direction),
+                ..step.relationship.clone()
+            },
+            node,
+        })
+        .collect();
+    PatternPart {
+        path: None,
+        start,
+        steps,
+        seeks: Vec::new(),
+        reversed: None,
+        checks: Vec::new(),
+    }
+}
+
+fn opposite(direction: Direction) -> Direction {
+    match direction {
+        Direction::Outgoing => Direction::Incoming,
+        Direction::Incoming => Direction::Outgoing,
+        Direction::UndirectedOrOutgoing => Direction::IncomingOrUndirected,
+        Direction::IncomingOrUndirected => Direction::UndirectedOrOutgoing,
+        other => other,
+    }
 }
 
 /// The value of the one `id()` equality of `filter` that names the start node of `part`, when
@@ -486,7 +587,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let mut nodes = Vec::new();
         for relationship in relationships {
-            if let Some(record) = self.tx.relationship(RelationshipId(relationship))? {
+            if let Some(record) = self.relationship_record(RelationshipId(relationship))? {
                 if sources {
                     nodes.push(record.source);
                 }

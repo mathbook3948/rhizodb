@@ -11,6 +11,7 @@ mod keys;
 mod matcher;
 mod parallel;
 mod plan;
+mod prune;
 mod regex;
 mod scalars;
 mod scan;

@@ -1002,7 +1002,7 @@ impl Binder<'_> {
             .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
         for (part, first) in patterns.iter_mut().zip(firsts) {
-            part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
+            *part = seek::orient(part, filter.as_ref(), &introduced[first..]);
         }
         let by_id = match patterns.as_slice() {
             [part] => {
@@ -1085,6 +1085,8 @@ impl Binder<'_> {
             start,
             steps,
             seeks: Vec::new(),
+            reversed: None,
+            checks: Vec::new(),
         })
     }
 

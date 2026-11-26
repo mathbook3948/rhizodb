@@ -28,6 +28,7 @@ use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
 use super::plan::Slot;
+use super::seek::Sought;
 
 /// Receives each complete match. Returning `false` stops the search.
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
@@ -61,6 +62,7 @@ impl Known {
 struct Search<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     patterns: &'s [PatternPart],
+    oriented: Vec<&'s PatternPart>,
     used: Vec<RelationshipId>,
     trails: Vec<PathIds>,
 }
@@ -116,6 +118,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let mut search = Search {
             env: self,
             patterns,
+            oriented: patterns.iter().collect(),
             used: Vec::new(),
             trails: vec![
                 PathIds {
@@ -225,7 +228,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         if pattern.properties.is_none() {
             return Ok(true);
         }
-        let Some(record) = self.tx.relationship(id)? else {
+        let Some(record) = self.relationship_record(id)? else {
             return Ok(false);
         };
         self.properties_match(
@@ -235,29 +238,29 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
-    fn start_candidates(
+    fn start_candidates<'p>(
         &self,
-        part: &PatternPart,
+        part: &'p PatternPart,
         row: &Row,
-    ) -> Result<(Vec<NodeId>, Known), Error> {
+    ) -> Result<(Vec<NodeId>, Known, &'p PatternPart), Error> {
         let pattern = &part.start;
         if pattern.bound {
-            return Ok((
-                match row.get(pattern.slot) {
-                    Some(Datum::Node(id)) => vec![*id],
-                    _ => Vec::new(),
-                },
-                Known::NOTHING,
-            ));
+            return Ok((bound_start(pattern, row), Known::NOTHING, part));
+        }
+        if let Some(sought) = self.seek_start(part, row)? {
+            let known = sought_known(pattern, &sought);
+            return Ok((sought.nodes, known, part));
+        }
+        if let Some(reversed) = self.reversal(part)? {
+            if reversed.start.bound {
+                return Ok((bound_start(&reversed.start, row), Known::NOTHING, reversed));
+            }
+            if let Some(sought) = self.seek_start(reversed, row)? {
+                let known = sought_known(&reversed.start, &sought);
+                return Ok((sought.nodes, known, reversed));
+            }
         }
         let labels_known = label_scan_decides(pattern);
-        if let Some(sought) = self.seek_start(part, row)? {
-            let known = Known {
-                labels: labels_known && sought.labelled,
-                served: sought.served,
-            };
-            return Ok((sought.nodes, known));
-        }
         let nodes = match self.morsel_of(part) {
             Some(ids) => ids.to_vec(),
             None => self.scanned_nodes(pattern)?,
@@ -266,7 +269,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             labels: labels_known,
             served: None,
         };
-        Ok((nodes, known))
+        Ok((nodes, known, part))
     }
 
     /// How many nodes [`Env::scanned_nodes`] gives, read from the node counts.
@@ -413,6 +416,20 @@ pub(crate) fn counted_nodes(found: &MatchClause) -> Option<(Slot, Option<&str>)>
     }
 }
 
+fn bound_start(pattern: &NodePattern, row: &Row) -> Vec<NodeId> {
+    match row.get(pattern.slot) {
+        Some(Datum::Node(id)) => vec![*id],
+        _ => Vec::new(),
+    }
+}
+
+fn sought_known(pattern: &NodePattern, sought: &Sought) -> Known {
+    Known {
+        labels: label_scan_decides(pattern) && sought.labelled,
+        served: sought.served,
+    }
+}
+
 fn label_scan_decides(pattern: &NodePattern) -> bool {
     !pattern.bound && matches!(pattern.labels, Some(LabelExpr::Name(_)))
 }
@@ -494,7 +511,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                                 frames.pop();
                             } else {
                                 let relationship =
-                                    &self.patterns[index].steps[step_index].relationship;
+                                    &self.oriented[index].steps[step_index].relationship;
                                 *state = WalkState::Expanding {
                                     adjacents: self.env.expand(node, relationship)?.into_iter(),
                                     extended: false,
@@ -548,7 +565,10 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = self.patterns.get(index) else {
             return emit(row);
         };
-        let (candidates, known) = self.env.start_candidates(part, row)?;
+        let (candidates, known, oriented) = self.env.start_candidates(part, row)?;
+        if let Some(slot) = self.oriented.get_mut(index) {
+            *slot = oriented;
+        }
         frames.push(Frame::Part {
             index,
             candidates: candidates.into_iter(),
@@ -566,11 +586,14 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let start = &self.patterns[index].start;
+        let start = &self.oriented[index].start;
         if !self.env.node_matches(id, start, known, row)? {
             return Ok(true);
         }
         set(row, start.slot, Datum::Node(id));
+        if !self.passes(index, 0, row)? {
+            return Ok(true);
+        }
         let trail = &mut self.trails[index];
         trail.nodes.clear();
         trail.nodes.push(id);
@@ -587,7 +610,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let part = &self.patterns[index];
+        let part = &self.oriented[index];
         let Some(step) = part.steps.get(step_index) else {
             if let Some(path) = part.path {
                 set(row, path, Datum::Path(self.trails[index].clone()));
@@ -620,7 +643,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &mut Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let relationship = &self.oriented[index].steps[step_index].relationship;
         for adjacent in adjacents {
             if self.used.contains(&adjacent.relationship) {
                 continue;
@@ -641,6 +664,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                 relationship.slot,
                 Datum::Relationship(adjacent.relationship),
             );
+            if !self.passes(index, 2 * step_index + 1, row)? {
+                continue;
+            }
             return Ok(Some(adjacent));
         }
         Ok(None)
@@ -653,7 +679,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let relationship = &self.oriented[index].steps[step_index].relationship;
         for adjacent in adjacents {
             if !self.used.contains(&adjacent.relationship)
                 && self
@@ -664,6 +690,15 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             }
         }
         Ok(None)
+    }
+
+    fn passes(&self, index: usize, position: usize, row: &Row) -> Result<bool, Error> {
+        for (at, check) in &self.oriented[index].checks {
+            if *at == position && !self.env.predicate(check, row)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn extend(&mut self, index: usize, adjacent: &Adjacent) {
@@ -694,7 +729,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let relationship = &self.patterns[index].steps[step_index].relationship;
+        let relationship = &self.oriented[index].steps[step_index].relationship;
         if !relationship.anonymous {
             let walked = &self.trails[index].relationships[base..];
             let value = Datum::List(Arc::new(
@@ -717,7 +752,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let pattern = &self.patterns[index].steps[step_index].node;
+        let pattern = &self.oriented[index].steps[step_index].node;
         if pattern.bound {
             if row.get(pattern.slot) != Some(&Datum::Node(node)) {
                 return Ok(true);
@@ -725,7 +760,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         } else {
             set(row, pattern.slot, Datum::Node(node));
         }
-        if !self.env.node_matches(node, pattern, Known::NOTHING, row)? {
+        if !self.env.node_matches(node, pattern, Known::NOTHING, row)?
+            || !self.passes(index, 2 * step_index + 2, row)?
+        {
             return Ok(true);
         }
         self.begin_step(index, step_index + 1, node, row, frames, emit)
