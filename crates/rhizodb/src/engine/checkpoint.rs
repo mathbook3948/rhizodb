@@ -22,6 +22,7 @@ use super::memtable::Bytes;
 use super::memtable::Slot;
 use super::node::BranchEntry;
 use super::node::CHILD_BYTES;
+use super::node::CellValue;
 use super::node::ChildRef;
 use super::node::Content;
 use super::node::INLINE_VALUE;
@@ -770,7 +771,11 @@ impl<'a, B: BlockFile> Checkpointer<'a, B> {
             Bound::Unbounded,
             &mut |key, value| {
                 let key = Bytes::from(key);
-                let value = self.stored(table, &key, &Bytes::from(value))?;
+                let value = match value {
+                    CellValue::Inline(value) => Bytes::from(value),
+                    CellValue::External(blob) => Bytes::from(tree.load_value(&blob)?),
+                };
+                let value = self.stored(table, &key, &value)?;
                 builder.push_leaf(self, table, LeafEntry { key, value })?;
                 Ok(())
             },
