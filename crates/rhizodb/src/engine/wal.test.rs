@@ -581,3 +581,52 @@ fn a_segment_of_an_earlier_build_replays_and_takes_appends_in_its_own_blocks() {
     let (_, again) = lsns(&fs.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
     assert_eq!(again, [1, 2, 3, 4]);
 }
+
+#[test]
+fn a_power_loss_at_any_sync_around_a_preallocation_keeps_each_acknowledged_record() {
+    let target = 4 << 20;
+    let records = (PREALLOCATED / FIRST) + 8;
+    let mut extended = false;
+    for fail_at in records - 12..records {
+        let fs = SimFs::new();
+        let mut wal = Wal::create(Arc::new(fs.clone()), BASE, identity(), 1, 1, 0, target).unwrap();
+        fs.fail_sync_after(fail_at, Failure::FromThenOn);
+        let mut acked = 0;
+        for lsn in 1..=records {
+            if wal.append(record(lsn), lsn).is_err() {
+                break;
+            }
+            acked = lsn;
+        }
+        extended |= acked > PREALLOCATED / FIRST;
+        for crash in crashes(4) {
+            let crashed = fs.crash(crash);
+            let mut seen = Vec::new();
+            let mut recovered = Wal::recover(
+                Arc::new(crashed.clone()),
+                BASE,
+                &header(0, 1),
+                target,
+                |record| {
+                    seen.push(record.lsn);
+                    Ok(())
+                },
+            )
+            .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            let last = seen.len() as u64;
+            assert_eq!(
+                seen,
+                (1..=last).collect::<Vec<_>>(),
+                "fail at {fail_at}, {crash:?}"
+            );
+            assert!(
+                last == acked || last == acked + 1,
+                "fail at {fail_at}, {crash:?}: acknowledged {acked}, recovered {last}"
+            );
+            recovered.append(record(last + 1), 0).unwrap();
+            let (_, again) = lsns(&crashed.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
+            assert_eq!(again, (1..=last + 1).collect::<Vec<_>>());
+        }
+    }
+    assert!(extended, "no append reached past the first preallocation");
+}
