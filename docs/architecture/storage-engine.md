@@ -75,6 +75,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
 - Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts, and so is a damaged header of a last segment that holds such a record.
+- Recovery looks for such a record only where the LSN field holds an LSN a record there could carry, and hashes nothing else, so a torn tail of random bytes is scanned in linear time.
 - A log that ends before the checkpoint's LSN is corruption.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a staging name and renamed into place once its header is synced.

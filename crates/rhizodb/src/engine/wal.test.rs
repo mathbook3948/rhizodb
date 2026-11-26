@@ -490,3 +490,34 @@ fn a_damaged_header_of_a_last_segment_that_holds_records_is_corruption() {
         );
     }
 }
+
+#[test]
+fn a_torn_tail_of_random_bytes_that_read_as_record_lengths_is_cut_off_quickly() {
+    let fs = filled(2);
+    let file = fs
+        .open(&segment_name(BASE, 1), wal_block().unwrap())
+        .unwrap();
+    let at = file.block_count().unwrap();
+    let mut torn = vec![0u8; 16 << 20];
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for byte in torn.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    let length = torn.len();
+    for start in (0..length).step_by(WAL_BLOCK) {
+        let claimed = u32::try_from(length - start).unwrap();
+        torn[start..start + 4].copy_from_slice(&claimed.to_le_bytes());
+    }
+    file.write(at, &torn).unwrap();
+    let started = std::time::Instant::now();
+    let (_, seen) = lsns(&fs, &header(0, 1)).unwrap();
+    assert_eq!(seen, [1, 2]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "recovery took {:?}",
+        started.elapsed()
+    );
+}

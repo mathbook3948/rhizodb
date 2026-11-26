@@ -179,7 +179,8 @@ impl<F: FileSystem> Wal<F> {
                         ..SegmentHeader::default()
                     }
                     .record_seed();
-                    if sealed_record_after(seed, &bytes, 0).is_some() {
+                    let next = expected_lsn.unwrap_or(after);
+                    if sealed_record_after(seed, &bytes, WAL_BLOCK, next).is_some() {
                         return Err(EngineError::corrupt(format!(
                             "the header of log segment {sequence} is damaged, but synced records follow it"
                         )));
@@ -233,7 +234,9 @@ impl<F: FileSystem> Wal<F> {
                     }
                     Err(NotRecord::Refused(error)) => return Err(error),
                     Err(NotRecord::End | NotRecord::Invalid(_)) if last => {
-                        if let Some(later) = sealed_record_after(seed, &bytes, at) {
+                        if let Some(later) =
+                            sealed_record_after(seed, &bytes, at + WAL_BLOCK, lsn + 1)
+                        {
                             return Err(EngineError::corrupt(format!(
                                 "log segment {sequence} is damaged at LSN {lsn}, before a synced \
                                  record at byte {later}"
@@ -412,15 +415,20 @@ impl<F: FileSystem> Wal<F> {
     }
 }
 
-fn sealed_record_after(seed: u64, bytes: &[u8], at: usize) -> Option<usize> {
-    (at + WAL_BLOCK..bytes.len())
-        .step_by(WAL_BLOCK)
-        .find(|start| {
-            !matches!(
-                decode_record(seed, &bytes[*start..]),
+fn sealed_record_after(seed: u64, bytes: &[u8], from: usize, first_lsn: u64) -> Option<usize> {
+    (from..bytes.len()).step_by(WAL_BLOCK).find(|start| {
+        let rest = &bytes[*start..];
+        let highest = first_lsn + ((start - from) / WAL_BLOCK) as u64;
+        let lsn = rest
+            .get(12..20)
+            .and_then(|field| <[u8; 8]>::try_from(field).ok())
+            .map(u64::from_le_bytes);
+        lsn.is_some_and(|lsn| (first_lsn..=highest).contains(&lsn))
+            && !matches!(
+                decode_record(seed, rest),
                 Err(NotRecord::End | NotRecord::Invalid(_))
             )
-        })
+    })
 }
 
 fn check_segment(
