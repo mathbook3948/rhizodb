@@ -17,7 +17,7 @@ The crate is developed and released from its own repository, and hosts depend on
 - A release that stopped partway finishes when its workflow is run again, skipping the steps that already happened.
 - The crates.io token is a secret of the `release` environment, which needs a reviewer's approval, and only the step that uploads sets it.
 - A job without the token packages the crate and builds it from its packaged files, and the publish job installs only the pinned Rust toolchain and uploads the package unbuilt, so no dependency's build script runs on the runner that holds the token.
-- Every workflow pins each action to a full commit SHA with a comment naming its release, which a guard rule checks.
+- Every workflow pins each action to a full commit SHA, which a guard rule checks.
 - `CHANGELOG.md` keeps an `Unreleased` section, and each user-visible change adds a line to it in the same pull request.
 - A `feat` or breaking commit adds that line in the same commit, unless it changes only the unpublished crates, the fuzz targets, the docs, the CI workflows, or `mise.toml`.
 - Cutting a release renames `Unreleased` to the new version, and that section becomes the GitHub release notes.

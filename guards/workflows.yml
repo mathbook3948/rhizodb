@@ -23,7 +23,7 @@ rule:
 id: action-pinned-by-sha
 language: yaml
 severity: error
-message: An action is pinned to a full commit SHA, followed by a `# vX.Y.Z` comment naming its release.
+message: An action is pinned to a full commit SHA, never to a tag or branch that can move.
 files:
   - .github/workflows/*.yml
 rule:

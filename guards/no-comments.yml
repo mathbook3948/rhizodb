@@ -73,6 +73,4 @@ ignores:
 rule:
   kind: comment
   not:
-    any:
-      - regex: ast-grep-ignore
-      - regex: ^# v[0-9]+\.[0-9]+\.[0-9]+$
+    regex: ast-grep-ignore
