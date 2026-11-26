@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -8,8 +9,9 @@ use crate::graph::RelationshipId;
 use crate::storage::ReadTransaction;
 
 use super::compare::order;
-use super::datum;
 use super::datum::Datum;
+use super::datum::Limits;
+use super::datum::Size;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
@@ -58,6 +60,7 @@ pub(crate) struct Groups<'p> {
     index: KeyIndex,
     groups: Vec<(Vec<Datum>, Vec<Accumulator>)>,
     partial: bool,
+    limits: Limits,
 }
 
 #[derive(Default)]
@@ -65,6 +68,7 @@ struct Accumulator {
     rows: usize,
     counted: usize,
     values: Vec<Datum>,
+    collected: Size,
     total: Total,
     seen: Seen,
     percentile: Option<Datum>,
@@ -129,13 +133,14 @@ impl Total {
 }
 
 impl<'p> Groups<'p> {
-    pub(crate) fn new(keys: &'p [(Expr, Slot)], aggregates: &'p [(Aggregate, Slot)]) -> Self {
+    fn new(keys: &'p [(Expr, Slot)], aggregates: &'p [(Aggregate, Slot)], limits: Limits) -> Self {
         Self {
             keys,
             aggregates,
             index: KeyIndex::default(),
             groups: Vec::new(),
             partial: false,
+            limits,
         }
     }
 
@@ -148,7 +153,7 @@ impl<'p> Groups<'p> {
                 for ((aggregate, _), (mine, theirs)) in
                     self.aggregates.iter().zip(mine.iter_mut().zip(theirs))
                 {
-                    mine.merge(aggregate, theirs)?;
+                    mine.merge(aggregate, theirs, self.limits)?;
                 }
             }
         }
@@ -212,7 +217,7 @@ impl<'p> Groups<'p> {
             for (index, ((aggregate, _), accumulator)) in
                 self.aggregates.iter().zip(accumulators).enumerate()
             {
-                accumulator.add(aggregate, index, self.partial, &mut eval)?;
+                accumulator.add(aggregate, index, self.partial, self.limits, &mut eval)?;
             }
         }
         Ok(())
@@ -282,7 +287,7 @@ impl<T: ReadTransaction> Env<'_, T> {
     ) -> Groups<'p> {
         Groups {
             partial: self.morsel.is_some(),
-            ..Groups::new(keys, aggregates)
+            ..Groups::new(keys, aggregates, self.limits)
         }
     }
 
@@ -295,7 +300,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         aggregates: &[(Aggregate, Slot)],
         finals: &[(Expr, Slot)],
     ) -> Result<Vec<Row>, Error> {
-        let mut groups = Groups::new(keys, aggregates);
+        let mut groups = Groups::new(keys, aggregates, self.limits);
         for row in &rows {
             groups.add(self, row)?;
         }
@@ -309,6 +314,7 @@ impl Accumulator {
         aggregate: &Aggregate,
         index: usize,
         partial: bool,
+        limits: Limits,
         eval: &mut impl FnMut(Part, &Expr) -> Result<Datum, Error>,
     ) -> Result<(), Error> {
         self.rows += 1;
@@ -329,7 +335,7 @@ impl Accumulator {
                         self.values.push(value);
                     }
                     AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
-                    _ => self.values.push(value),
+                    _ => self.keep(function, value, limits)?,
                 }
             }
         }
@@ -360,7 +366,25 @@ impl Accumulator {
         }
     }
 
-    fn merge(&mut self, aggregate: &Aggregate, other: Accumulator) -> Result<(), Error> {
+    fn keep(
+        &mut self,
+        function: AggregateFunction,
+        value: Datum,
+        limits: Limits,
+    ) -> Result<(), Error> {
+        if function == AggregateFunction::Collect {
+            limits.add_item(&mut self.collected, &value)?;
+        }
+        self.values.push(value);
+        Ok(())
+    }
+
+    fn merge(
+        &mut self,
+        aggregate: &Aggregate,
+        other: Accumulator,
+        limits: Limits,
+    ) -> Result<(), Error> {
         self.rows += other.rows;
         self.counted += other.counted;
         if let Some(percentile) = other.percentile {
@@ -371,7 +395,7 @@ impl Accumulator {
                 match aggregate.function {
                     AggregateFunction::Count => self.counted += 1,
                     AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
-                    _ => self.values.push(value),
+                    _ => self.keep(aggregate.function, value, limits)?,
                 }
             }
         }
@@ -388,7 +412,7 @@ impl Accumulator {
                 };
                 Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
             }
-            AggregateFunction::Collect => datum::list(values),
+            AggregateFunction::Collect => Ok(Datum::List(Arc::new(values))),
             AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
             AggregateFunction::Sum => self.total.sum(),

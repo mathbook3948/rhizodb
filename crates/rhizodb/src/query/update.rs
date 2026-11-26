@@ -23,6 +23,7 @@ use crate::storage::WriteTransaction;
 use crate::temporal::Clocks;
 
 use super::datum::Datum;
+use super::datum::Limits;
 use super::datum::PathIds;
 use super::datum::check_item;
 use super::datum::into_property;
@@ -61,6 +62,7 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) now: &'a Clocks,
     pub(crate) patterns: &'a Patterns,
     pub(crate) graveyard: &'a mut Graveyard,
+    pub(crate) limits: Limits,
     pub(crate) tokens: Vec<(u8, String, u32)>,
 }
 
@@ -171,6 +173,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             self.now,
             &*self.graveyard,
             self.patterns,
+            self.limits,
         )
     }
 

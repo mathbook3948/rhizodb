@@ -9,8 +9,8 @@ use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
 use super::compare::equals;
-use super::datum;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::eval::Env;
 use super::eval::arithmetic;
 use super::eval::float_text;
@@ -114,8 +114,6 @@ pub(crate) enum Function {
     EuclideanSimilarity,
     Temporal(TemporalFunction),
 }
-
-const MAX_RANGE_LENGTH: i128 = 10_000_000;
 
 type Accepted = &'static [Shape];
 
@@ -713,7 +711,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     })?,
                     Some(other) => return Err(invalid(&other)),
                 };
-                Ok(Datum::String(normalized(&text, form)))
+                self.limits.text(normalized(&text, form))
             }
             Function::Pi => Ok(Datum::Float(std::f64::consts::PI)),
             Function::E => Ok(Datum::Float(std::f64::consts::E)),
@@ -781,7 +779,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Datum::String(text) => Ok(Datum::String(text.chars().rev().collect())),
                 other => Err(invalid(&other)),
             },
-            Function::Range => range(first, second, third),
+            Function::Range => range(first, second, third, self.limits),
             Function::ToInteger => to_integer(first),
             Function::ToFloat => to_float(first),
             Function::ToString => to_string(first),
@@ -884,11 +882,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::ToUpper | Function::ToLower => match first {
-                Datum::String(text) => Ok(Datum::String(if function == Function::ToUpper {
+                Datum::String(text) => self.limits.text(if function == Function::ToUpper {
                     text.to_uppercase()
                 } else {
                     text.to_lowercase()
-                })),
+                }),
                 other => Err(invalid(&other)),
             },
             Function::Trim | Function::BTrim | Function::LTrim | Function::RTrim => {
@@ -971,7 +969,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     } else {
                         text.matches(from.as_str()).count()
                     };
-                    datum::check_string_bytes(
+                    self.limits.check_bytes(
                         text.len()
                             .saturating_add(matches.saturating_mul(to.len() - from.len())),
                     )?;
@@ -984,6 +982,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             Function::Split => {
                 let text = string_argument(function, first)?;
+                self.limits.check_bytes(text.len())?;
+                if text.len() >= self.limits.items {
+                    self.limits.check_items(match &second {
+                        Some(Datum::String(delimiter)) if delimiter.is_empty() => {
+                            text.chars().count()
+                        }
+                        Some(Datum::String(delimiter)) => {
+                            text.matches(delimiter.as_str()).count() + 1
+                        }
+                        _ => 0,
+                    })?;
+                }
                 match second {
                     Some(Datum::String(delimiter)) if delimiter.is_empty() => {
                         Ok(Datum::List(Arc::new(
@@ -1056,7 +1066,12 @@ fn round_half_up(value: f64) -> f64 {
     }
 }
 
-fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum, Error> {
+fn range(
+    start: Datum,
+    end: Option<Datum>,
+    step: Option<Datum>,
+    limits: Limits,
+) -> Result<Datum, Error> {
     let integer = |value: Option<Datum>| match value {
         Some(Datum::Integer(value)) => Ok(Some(value)),
         Some(Datum::Null) => Ok(None),
@@ -1086,10 +1101,10 @@ fn range(start: Datum, end: Option<Datum>, step: Option<Datum>) -> Result<Datum,
     } else {
         distance / i128::from(step).abs() + 1
     };
-    if length > MAX_RANGE_LENGTH {
+    if length > i128::try_from(limits.items).unwrap_or(i128::MAX) {
         return Err(Error::new(
             ErrorKind::NumberOutOfRange,
-            format!("range() would build more than {MAX_RANGE_LENGTH} elements"),
+            format!("range() would build more than {} elements", limits.items),
         ));
     }
     let items = (0..length)

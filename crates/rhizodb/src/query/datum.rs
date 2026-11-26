@@ -81,28 +81,166 @@ pub(crate) const MAX_NESTING: usize = 128;
 
 const SHARED_KEYS: usize = 16;
 
-pub(crate) const MAX_STRING_BYTES: usize = 1 << 28;
-
-pub(crate) const MAX_LIST_ITEMS: usize = 10_000_000;
-
-pub(crate) fn check_string_bytes(bytes: usize) -> Result<(), Error> {
-    if bytes > MAX_STRING_BYTES {
-        return Err(Error::new(
-            ErrorKind::NumberOutOfRange,
-            format!("a query cannot build a string of more than {MAX_STRING_BYTES} bytes"),
-        ));
-    }
-    Ok(())
+/// How large one value that a query builds may grow: list items and map entries, and bytes of
+/// strings and byte strings, each counted through every nested list and map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) items: usize,
+    pub(crate) bytes: usize,
 }
 
-pub(crate) fn check_list_items(items: usize) -> Result<(), Error> {
-    if items > MAX_LIST_ITEMS {
-        return Err(Error::new(
-            ErrorKind::NumberOutOfRange,
-            format!("a query cannot build a list of more than {MAX_LIST_ITEMS} items"),
-        ));
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            items: 10_000_000,
+            bytes: 1 << 28,
+        }
     }
-    Ok(())
+}
+
+/// How much of [`Limits`] a value takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Size {
+    pub(crate) items: usize,
+    pub(crate) bytes: usize,
+}
+
+impl Limits {
+    /// Fails unless a value can hold `items` list items and map entries.
+    pub(crate) fn check_items(self, items: usize) -> Result<(), Error> {
+        if items > self.items {
+            return Err(Error::new(
+                ErrorKind::NumberOutOfRange,
+                format!(
+                    "a query cannot build a value of more than {} list items and map entries",
+                    self.items
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fails unless a value can hold `bytes` bytes of strings and byte strings.
+    pub(crate) fn check_bytes(self, bytes: usize) -> Result<(), Error> {
+        if bytes > self.bytes {
+            return Err(Error::new(
+                ErrorKind::NumberOutOfRange,
+                format!(
+                    "a query cannot build a value of more than {} bytes of strings",
+                    self.bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `text` as a string, or an error when it is longer than these limits allow.
+    pub(crate) fn text(self, text: String) -> Result<Datum, Error> {
+        self.check_bytes(text.len())?;
+        Ok(Datum::String(text))
+    }
+
+    /// Fails unless `a` and `b` together fit in one value.
+    pub(crate) fn joined(self, a: Size, b: Size) -> Result<Size, Error> {
+        let size = Size {
+            items: a.items.saturating_add(b.items),
+            bytes: a.bytes.saturating_add(b.bytes),
+        };
+        self.check_items(size.items)?;
+        self.check_bytes(size.bytes)?;
+        Ok(size)
+    }
+
+    /// The size of the list of `items`, or an error once it passes these limits.
+    pub(crate) fn list_size(self, items: &[Datum]) -> Result<Size, Error> {
+        let mut size = Size::default();
+        for item in items {
+            self.add_item(&mut size, item)?;
+        }
+        Ok(size)
+    }
+
+    /// Adds `item` as one more item to `size`, failing when the sum passes these limits or
+    /// `item` would nest too deeply as an item of a list or a map.
+    pub(crate) fn add_item(self, size: &mut Size, item: &Datum) -> Result<(), Error> {
+        size.items = size.items.saturating_add(1);
+        self.check_items(size.items)?;
+        self.add(size, item, MAX_NESTING - 1)
+    }
+
+    fn add(self, size: &mut Size, value: &Datum, levels: usize) -> Result<(), Error> {
+        let (items, bytes) = match value {
+            Datum::String(text) => (0, text.len()),
+            Datum::Bytes(bytes) => (0, bytes.len()),
+            Datum::List(items) => (items.len(), 0),
+            Datum::Map(entries) => (entries.len(), 0),
+            _ => return Ok(()),
+        };
+        size.items = size.items.saturating_add(items);
+        size.bytes = size.bytes.saturating_add(bytes);
+        self.check_items(size.items)?;
+        self.check_bytes(size.bytes)?;
+        match value {
+            Datum::List(items) => {
+                let levels = levels.checked_sub(1).ok_or_else(nesting_too_deep)?;
+                items
+                    .iter()
+                    .try_for_each(|item| self.add(size, item, levels))
+            }
+            Datum::Map(entries) => {
+                let levels = levels.checked_sub(1).ok_or_else(nesting_too_deep)?;
+                entries.iter().try_for_each(|(key, item)| {
+                    size.bytes = size.bytes.saturating_add(key.len());
+                    self.check_bytes(size.bytes)?;
+                    self.add(size, item, levels)
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The list of `items`, or an error when it would pass these limits or nest too deeply.
+    pub(crate) fn list(self, items: Vec<Datum>) -> Result<Datum, Error> {
+        self.list_size(&items)?;
+        Ok(Datum::List(Arc::new(items)))
+    }
+
+    /// The map of `entries`, or an error when it would pass these limits or nest too deeply.
+    pub(crate) fn map(self, entries: BTreeMap<Arc<str>, Datum>) -> Result<Datum, Error> {
+        let mut size = Size::default();
+        for (key, item) in &entries {
+            size.bytes = size.bytes.saturating_add(key.len());
+            self.add_item(&mut size, item)?;
+        }
+        Ok(Datum::Map(Arc::new(entries)))
+    }
+}
+
+/// A list that grows one item at a time and fails as soon as it passes its [`Limits`].
+pub(crate) struct ListBuilder {
+    limits: Limits,
+    size: Size,
+    items: Vec<Datum>,
+}
+
+impl ListBuilder {
+    pub(crate) fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            size: Size::default(),
+            items: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, item: Datum) -> Result<(), Error> {
+        self.limits.add_item(&mut self.size, &item)?;
+        self.items.push(item);
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Datum {
+        Datum::List(Arc::new(self.items))
+    }
 }
 
 fn nesting_too_deep() -> Error {
@@ -127,18 +265,6 @@ pub(crate) fn check_item(item: &Datum) -> Result<(), Error> {
     } else {
         Err(nesting_too_deep())
     }
-}
-
-/// The list of `items`, or an error when it would nest too deeply.
-pub(crate) fn list(items: Vec<Datum>) -> Result<Datum, Error> {
-    items.iter().try_for_each(check_item)?;
-    Ok(Datum::List(Arc::new(items)))
-}
-
-/// The map of `entries`, or an error when it would nest too deeply.
-pub(crate) fn map(entries: BTreeMap<Arc<str>, Datum>) -> Result<Datum, Error> {
-    entries.values().try_for_each(check_item)?;
-    Ok(Datum::Map(Arc::new(entries)))
 }
 
 /// What writing `value` as a property does: `None` removes the property.

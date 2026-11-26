@@ -43,6 +43,7 @@ use crate::temporal::DateTime;
 pub(crate) use self::builtin::is_reserved;
 use self::cache::PlanCache;
 use self::datum::Datum;
+pub(crate) use self::datum::Limits;
 use self::datum::from_parameter;
 pub(crate) use self::eval::float_text;
 pub(crate) use self::parallel::Parallelism;
@@ -58,13 +59,15 @@ pub(crate) struct Statements {
     procedures: RwLock<Procedures>,
     plans: PlanCache,
     parallelism: Parallelism,
+    limits: Limits,
     workers: Workers,
 }
 
 impl Statements {
-    pub(crate) fn new(parallelism: Parallelism) -> Self {
+    pub(crate) fn new(parallelism: Parallelism, limits: Limits) -> Self {
         Self {
             parallelism,
+            limits,
             ..Self::default()
         }
     }
@@ -130,13 +133,19 @@ where
             program,
             &values,
             &Clocks::for_own_transaction(),
+            statements.limits,
             statements.parallelism,
             &statements.workers,
         ),
         Plan::Updating(program) => {
             let mut tx = graph.write()?;
-            let result =
-                exec::run_write(&mut tx, program, &values, &Clocks::for_own_transaction())?;
+            let result = exec::run_write(
+                &mut tx,
+                program,
+                &values,
+                &Clocks::for_own_transaction(),
+                statements.limits,
+            )?;
             tx.commit()?;
             Ok(result)
         }
@@ -161,6 +170,7 @@ where
             program,
             &values,
             &Clocks::within(began),
+            statements.limits,
             statements.parallelism,
             &statements.workers,
         ),
@@ -182,7 +192,19 @@ pub(crate) fn execute_write<W: WriteTransaction>(
 ) -> Result<QueryResult, Error> {
     let (plan, values) = statements.prepare(query, parameters)?;
     match &*plan {
-        Plan::ReadOnly(program) => exec::run_read(tx, program, &values, &Clocks::within(began)),
-        Plan::Updating(program) => exec::run_write(tx, program, &values, &Clocks::within(began)),
+        Plan::ReadOnly(program) => exec::run_read(
+            tx,
+            program,
+            &values,
+            &Clocks::within(began),
+            statements.limits,
+        ),
+        Plan::Updating(program) => exec::run_write(
+            tx,
+            program,
+            &values,
+            &Clocks::within(began),
+            statements.limits,
+        ),
     }
 }

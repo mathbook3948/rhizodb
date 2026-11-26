@@ -20,6 +20,7 @@ use crate::temporal::Clocks;
 use super::aggregate::Groups;
 use super::compare::sort_order;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::datum::PathIds;
 use super::datum::dismantle;
 use super::datum::from_parameter;
@@ -57,10 +58,16 @@ pub(crate) fn run_read<T: ReadTransaction>(
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
 ) -> Result<QueryResult, Error> {
-    read_program(tx, program, parameters, now, |env, clause, next, rows| {
-        env.read_clauses(clause, next, rows)
-    })
+    read_program(
+        tx,
+        program,
+        parameters,
+        now,
+        limits,
+        |env, clause, next, rows| env.read_clauses(clause, next, rows),
+    )
 }
 
 /// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does.
@@ -69,6 +76,7 @@ pub(crate) fn read_program<T: ReadTransaction>(
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
     read: impl Fn(
         &Env<'_, T>,
         &ReadClause,
@@ -85,6 +93,7 @@ pub(crate) fn read_program<T: ReadTransaction>(
         now,
         &graveyard,
         &patterns,
+        limits,
     );
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| match clauses {
@@ -100,11 +109,13 @@ pub(crate) fn run_write<W: WriteTransaction>(
     program: &Program<Clause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    Env::new(&*tx, slots, parameters, now, &graveyard, &patterns).check_closed(&program.closed)?;
+    Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits)
+        .check_closed(&program.closed)?;
     let mut writer = Writer {
         tx,
         slots,
@@ -112,13 +123,14 @@ pub(crate) fn run_write<W: WriteTransaction>(
         now,
         patterns: &patterns,
         graveyard: &mut graveyard,
+        limits,
         tokens: Vec::new(),
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
         tx.ensure_detached(*node)?;
     }
-    let env = Env::new(&*tx, slots, parameters, now, &graveyard, &patterns);
+    let env = Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits);
     materialize(&env, &graveyard, &program.columns, rows)
 }
 
@@ -690,6 +702,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 self.now,
                 self.graveyard,
                 self.patterns,
+                self.limits,
             )
         };
         let row = vec![Datum::Null; self.slots];

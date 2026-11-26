@@ -9,7 +9,6 @@ use crate::storage::ReadTransaction;
 use crate::temporal::Temporal;
 use crate::temporal::build::Kind;
 
-use super::datum;
 use super::datum::Datum;
 use super::eval::Env;
 use super::functions::Function;
@@ -188,7 +187,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 for item in items.iter() {
                     cast.push(self.cast(item.clone(), inner)?);
                 }
-                return datum::list(cast);
+                return self.limits.list(cast);
             }
             (
                 ValueType::String,

@@ -302,5 +302,7 @@ fails with [`ErrorKind::CorruptData`] on the first that does not hold.
 
 A query runs within 1 MiB of thread stack, whatever its input, so a host thread with a small
 stack still runs any query. A list or map value nests at most 128 levels inside a query and 64
-levels in a stored property, `range()` has a length cap, and a regular expression has a size
-cap, each failing with an error kind of its own instead of exhausting the host.
+levels in a stored property, a value a query builds holds at most the list items and bytes of
+strings that [`OpenOptions::max_value_items`] and [`OpenOptions::max_value_bytes`] set, and a
+regular expression has a size cap, each failing with an error kind of its own instead of
+exhausting the host.
