@@ -152,15 +152,30 @@ pub(crate) fn parsed(kind: Kind, text: &str) -> Result<Temporal, TemporalError> 
             .map(|stamp| Temporal::LocalDateTime(stamp.local)),
         Kind::DateTime => match parse::stamp(text) {
             Some(stamp) => {
-                let zone = match (&stamp.zone, stamp.offset) {
-                    (Some(name), _) => zone_named(name)?,
-                    (None, Some(offset)) => Zone::Offset(offset),
-                    (None, None) => Zone::UTC,
+                let datetime = match (&stamp.zone, stamp.offset) {
+                    (Some(name), Some(offset)) => {
+                        let zone = zone_named(name)?;
+                        stamp
+                            .local
+                            .second()
+                            .checked_sub(i64::from(offset))
+                            .and_then(|instant| {
+                                DateTime::from_instant(
+                                    instant,
+                                    stamp.local.time.nanos % NANOS_PER_SECOND,
+                                    &zone,
+                                )
+                            })
+                    }
+                    (Some(name), None) => {
+                        DateTime::from_local(stamp.local, &zone_named(name)?, None)
+                    }
+                    (None, Some(offset)) => {
+                        DateTime::from_local(stamp.local, &Zone::Offset(offset), Some(offset))
+                    }
+                    (None, None) => DateTime::from_local(stamp.local, &Zone::UTC, None),
                 };
-                Some(Temporal::DateTime(
-                    DateTime::from_local(stamp.local, &zone, stamp.offset)
-                        .ok_or_else(out_of_range)?,
-                ))
+                Some(Temporal::DateTime(datetime.ok_or_else(out_of_range)?))
             }
             None => None,
         },

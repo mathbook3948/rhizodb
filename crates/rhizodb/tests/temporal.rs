@@ -113,6 +113,40 @@ fn values_of_different_temporal_types_do_not_compare() {
 }
 
 #[test]
+fn a_datetime_string_with_an_offset_and_a_zone_keeps_the_instant_its_offset_gives() {
+    let db = db();
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-07-01T12:00+05:00[Europe/Paris]')"
+        ),
+        "2024-07-01T09:00+02:00[Europe/Paris]"
+    );
+    assert_eq!(
+        single(
+            &db,
+            "RETURN datetime('2024-07-01T12:00+05:00[Europe/Paris]').epochSeconds = \
+             datetime('2024-07-01T07:00Z').epochSeconds"
+        ),
+        boolean(true)
+    );
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-10-27T02:30+01:00[Europe/Paris]')"
+        ),
+        "2024-10-27T02:30+01:00[Europe/Paris]"
+    );
+    assert_eq!(
+        text(
+            &db,
+            "RETURN datetime('2024-10-27T02:30+02:00[Europe/Paris]')"
+        ),
+        "2024-10-27T02:30+02:00[Europe/Paris]"
+    );
+}
+
+#[test]
 fn malformed_temporal_input_raises_its_own_error() {
     let db = db();
     for query in [
