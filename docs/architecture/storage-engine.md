@@ -160,8 +160,8 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
 - A new block cache entry takes the first place the hand freed for it, behind the hand, so it waits a whole turn of the hand for its first use, and a new working set takes the place of one no longer read.
 - The block cache also holds each long value a read loaded from its runs, whole and checked, under its first run's block, and serves it only to a cell whose pointer matches the one it was loaded for, so reading the value again reads no file and checks no checksum.
-- Pages and values share one budget of the block cache in bytes, a page counting its block, a value its length, and each entry also its map slot, clock place, and reference counts, and a value longer than a quarter of a shard's budget is not kept, so one large value never empties a shard.
-- A scan reads its first MiB of pages, and apart from them its first MiB of long values, as lookups do, and keeps what it reads after that only in free room of the block cache, so a scan longer than the cache pushes out none of what lookups use, and a scan whose data fits the free room is served from the cache the next time.
+- Pages and values share one budget of the block cache in bytes, a page counting its block and its checked header, a value its length, and each entry also its map slot, clock place, and reference counts, and a value longer than a quarter of a shard's budget is not kept, so one large value never empties a shard.
+- A scan reads its first MiB of pages, and apart from them its first MiB of long values, as lookups do, and keeps what it reads after that only in free room of the block cache, so a scan longer than the cache pushes out at most those first MiB of entries the hand finds unused, and a scan whose data fits the free room is served from the cache the next time.
 - `check` and the copies of `compact` read values from the file without the cache, so a check reads what the file holds and a compaction does not push hot pages out.
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
@@ -175,6 +175,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - How the engine's reader registration, commit, freeze, checkpoint, and slot reuse are explored across thread interleavings, beyond the randomized tests that run them on real threads.
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How a write set larger than the memtable is ingested.
+- How a scan warms a block cache full of entries nobody reads any more, since a scan read past its first MiB evicts nothing, not even an entry whose used flag is clear.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
 - How a point read that overlaps a background checkpoint keeps its speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
