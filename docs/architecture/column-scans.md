@@ -9,14 +9,15 @@ Node properties are stored as typed columns per row group, but the executor eval
 ## Decisions
 
 - A `MATCH` of one node pattern, with at most a label and a property map, reads the nodes of the label or every node in ID order and tests them on their stored values in place.
-- Such a scan takes only conditions that cannot fail: comparisons, null tests, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, and `IN` over a fixed list, each over the node, its properties, literals, parameters, and earlier variables, joined by `NOT`, `AND`, `OR`, and `XOR`.
+- Such a scan takes comparisons, null tests, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, and `IN` over a fixed list, each over the node, its properties, literals, parameters, earlier variables, and operators, function calls, and indexing applied to those, joined by `NOT`, `AND`, `OR`, and `XOR`.
 - A condition outside that set, an optional match, or a pattern a property index or an ID lookup serves leaves the clause to the row-at-a-time path.
-- Because every condition it takes cannot fail, a scan answers and fails exactly as testing each row in turn does, whichever columns it reads first.
+- A scan answers and fails exactly as testing each row in turn does: it tests the filter only on nodes whose property map holds, and a property map value that reads the node leaves the clause to the row path.
+- A computed value can fail, so a scan that computes one in its filter, items, sort keys, or distinct columns computes it for every node the row path would, without the shortcuts below that skip a node's values.
 - A scan reads each row group's columns for the properties it tests whole, once, and builds a row only for a node that passes.
 - A value read by a scan is the value the transaction sees, its own uncommitted changes and the stored deltas included.
 - An aggregating projection right after a scan reads its keys and arguments from the scan when each is the node, one of its properties, or a value fixed for the input row.
 - A `MATCH` of one hop of fixed length from such a node pattern, with no property map on the relationship or the far node, that feeds an aggregating projection reads its start node as a scan and follows the hop from each node the scan keeps.
-- Such a hop takes its filter only when the filter reads neither the relationship nor the far node, and evaluates whatever the scan cannot read on the matched row.
+- Such a hop takes its filter only when the filter reads neither the relationship nor the far node and computes nothing, since it tests the start node before it knows a match exists, and evaluates whatever the scan cannot read on the matched row.
 - Expanding consecutive nodes reads their adjacency segments from storage in one pass per window of segments, which starts at one segment and doubles up to 16 while the reads stay consecutive, so a traversal that only now and then reads the next segment reads no more than before.
 - The far node of such a hop is tested against its pattern once, and when every group key reads only the far node or values fixed for the input row, each far node finds its group once.
 - A plain projection right after a scan whose items, sort keys, and distinct columns are of that kind is computed on the scan.

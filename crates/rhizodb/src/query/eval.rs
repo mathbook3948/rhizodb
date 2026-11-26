@@ -1019,7 +1019,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error> {
+    pub(crate) fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error> {
         match (base, index) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
             (Datum::List(items), Datum::Integer(index)) => Ok(list_position(items.len(), index)
@@ -1177,7 +1177,7 @@ pub(crate) fn comparison(op: ComparisonOp, left: &Datum, right: &Datum) -> Optio
     }
 }
 
-fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+pub(crate) fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match op {
         BinaryOp::And => Ok(from_truth(and(truth(&lhs)?, truth(&rhs)?))),
         BinaryOp::Or => Ok(from_truth(or(truth(&lhs)?, truth(&rhs)?))),

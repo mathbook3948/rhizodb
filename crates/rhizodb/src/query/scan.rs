@@ -33,9 +33,11 @@ use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::and;
+use super::eval::binary;
 use super::eval::comparison;
 use super::eval::or;
 use super::eval::set;
+use super::functions::Function;
 use super::keys::KeySet;
 use super::keys::Probe;
 use super::matcher::HopRead;
@@ -164,6 +166,29 @@ enum Value {
     Node,
     Fixed(Datum),
     Row(Slot),
+    Apply(Box<Apply>),
+}
+
+#[derive(Clone, Debug)]
+enum Apply {
+    Binary(BinaryOp, Value, Value),
+    Call(Function, Vec<Value>),
+    Index(Value, Value),
+}
+
+trait Calls {
+    fn call(&self, function: Function, args: Vec<Datum>) -> Result<Datum, Error>;
+    fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error>;
+}
+
+impl<T: ReadTransaction> Calls for Env<'_, T> {
+    fn call(&self, function: Function, args: Vec<Datum>) -> Result<Datum, Error> {
+        Env::call(self, function, args)
+    }
+
+    fn index(&self, base: &Datum, index: Datum) -> Result<Datum, Error> {
+        Env::index(self, base, index)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +208,7 @@ enum Pred {
     In(Value, Option<Vec<Datum>>),
     Not(Box<Pred>),
     Logic(BinaryOp, Box<Pred>, Box<Pred>),
+    Gated(Box<Pred>, Box<Pred>),
 }
 
 struct Compiler<'e, 'a, T: ReadTransaction> {
@@ -192,6 +218,7 @@ struct Compiler<'e, 'a, T: ReadTransaction> {
     names: Vec<String>,
     aliases: Vec<(Slot, Value)>,
     forbidden: Vec<Slot>,
+    computed: bool,
 }
 
 impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
@@ -203,6 +230,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
             names: Vec::new(),
             aliases: Vec::new(),
             forbidden: Vec::new(),
+            computed: true,
         }
     }
 
@@ -242,6 +270,25 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                 }
                 _ => return Ok(None),
             },
+            Expr::Binary(..) | Expr::Call(..) | Expr::Index(..) if !self.computed => {
+                return Ok(None);
+            }
+            Expr::Binary(op, lhs, rhs) if *op != BinaryOp::RegexMatch => {
+                let (Some(lhs), Some(rhs)) = (self.value(lhs)?, self.value(rhs)?) else {
+                    return Ok(None);
+                };
+                Value::Apply(Box::new(Apply::Binary(*op, lhs, rhs)))
+            }
+            Expr::Call(function, args) => match self.values(args)? {
+                Some(args) => Value::Apply(Box::new(Apply::Call(*function, args))),
+                None => return Ok(None),
+            },
+            Expr::Index(base, index) => {
+                let (Some(base), Some(index)) = (self.value(base)?, self.value(index)?) else {
+                    return Ok(None);
+                };
+                Value::Apply(Box::new(Apply::Index(base, index)))
+            }
             _ => return Ok(None),
         }))
     }
@@ -517,6 +564,7 @@ struct At<'g, 'r> {
     group: &'g ScanGroup<'g>,
     node: NodeId,
     row: &'r Row,
+    calls: &'g dyn Calls,
 }
 
 impl At<'_, '_> {
@@ -532,6 +580,7 @@ impl At<'_, '_> {
                 Some(value) => Arg::Datum(Cow::Borrowed(value)),
                 None => Arg::Datum(Cow::Owned(Datum::Null)),
             },
+            Value::Apply(_) => Arg::Datum(Cow::Owned(self.datum(value)?)),
         })
     }
 
@@ -541,6 +590,7 @@ impl At<'_, '_> {
             Value::Node => return Ok(Datum::Node(self.node)),
             Value::Fixed(value) => return Ok(value.clone()),
             Value::Row(slot) => return Ok(self.row.get(*slot).cloned().unwrap_or(Datum::Null)),
+            Value::Apply(apply) => return self.applied(apply),
         };
         match self.group.quick(self.node, column) {
             Quick::Absent => Ok(Datum::Null),
@@ -549,6 +599,20 @@ impl At<'_, '_> {
                 Some(cell) => cell_datum(cell),
                 None => Ok(Datum::Null),
             },
+        }
+    }
+
+    fn applied(&self, apply: &Apply) -> Result<Datum, Error> {
+        match apply {
+            Apply::Binary(op, lhs, rhs) => binary(*op, self.datum(lhs)?, self.datum(rhs)?),
+            Apply::Call(function, args) => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.datum(arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.calls.call(*function, args)
+            }
+            Apply::Index(base, index) => self.calls.index(&self.datum(base)?, self.datum(index)?),
         }
     }
 
@@ -628,6 +692,10 @@ impl At<'_, '_> {
                 .map(|text| finder.find(text).is_some()),
             Pred::In(needle, items) => member(&self.arg(needle)?, items.as_deref())?,
             Pred::Not(operand) => self.holds(operand)?.map(|value| !value),
+            Pred::Gated(gate, pred) => match self.holds(gate)? {
+                Some(true) => self.holds(pred)?,
+                _ => Some(false),
+            },
             Pred::Logic(op, lhs, rhs) => {
                 let (lhs, rhs) = (self.holds(lhs)?, self.holds(rhs)?);
                 match op {
@@ -916,6 +984,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                         group,
                         node: *node,
                         row,
+                        calls: self,
                     };
                     if at.keeps(filter)? && !visit(&at, input)? {
                         return Ok(());
@@ -934,28 +1003,33 @@ impl<T: ReadTransaction> Env<'_, T> {
         scan: &NodeScan<'_>,
         found: &MatchClause,
     ) -> Result<Option<Option<Pred>>, Error> {
-        let mut conjuncts = Vec::new();
+        let mut entries_held = Vec::new();
         if let Some(Expr::Map(entries)) = &scan.part.start.properties {
             for (at, (key, value)) in entries.iter().enumerate() {
                 if entries[at + 1..].iter().any(|(other, _)| other == key) {
                     continue;
                 }
-                let Some(value) = compiler.value(value)? else {
+                let Some(value) = compiler.value(value)?.filter(|value| !scanned(value)) else {
                     return Ok(None);
                 };
                 let column = Value::Column(compiler.column(key)?);
-                conjuncts.push(Pred::Compare(column, vec![(ComparisonOp::Equal, value)]));
+                entries_held.push(Pred::Compare(column, vec![(ComparisonOp::Equal, value)]));
             }
         }
-        if let Some(filter) = &found.filter {
-            let Some(filter) = compiler.pred(filter)? else {
-                return Ok(None);
-            };
-            conjuncts.push(filter);
-        }
-        Ok(Some(conjuncts.into_iter().reduce(|all, next| {
-            Pred::Logic(BinaryOp::And, Box::new(all), Box::new(next))
-        })))
+        let map = entries_held
+            .into_iter()
+            .reduce(|all, next| Pred::Logic(BinaryOp::And, Box::new(all), Box::new(next)));
+        let filter = match &found.filter {
+            Some(filter) => match compiler.pred(filter)? {
+                Some(filter) => Some(filter),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        Ok(Some(match (map, filter) {
+            (Some(map), Some(filter)) => Some(Pred::Gated(Box::new(map), Box::new(filter))),
+            (map, filter) => map.or(filter),
+        }))
     }
 
     /// `MATCH` over `scan`, reading only the columns its filter tests. `None` when the filter has
@@ -1099,10 +1173,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         let far = hop.step.node.slot;
         let mut compiler = Compiler::new(self, start);
         compiler.forbidden = vec![relationship.slot, far];
+        compiler.computed = false;
         let Some(filter) = self.scan_filter(&mut compiler, &hop.scan, found)? else {
             return Ok(None);
         };
         compiler.forbidden.clear();
+        compiler.computed = true;
         let mut key_values = Vec::with_capacity(keys.len());
         for (expr, _) in keys {
             key_values.push(compiler.hop_value(expr)?);
@@ -1128,7 +1204,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let by_far = key_values.iter().all(|value| match value {
             HopValue::Scanned(Value::Fixed(_)) => true,
             HopValue::Scanned(Value::Row(slot)) => *slot != relationship.slot,
-            HopValue::Scanned(Value::Column(_) | Value::Node) => false,
+            HopValue::Scanned(Value::Column(_) | Value::Node | Value::Apply(_)) => false,
             HopValue::Row(Expr::Property(base, _)) => {
                 matches!(base.as_ref(), Expr::Slot(slot) if *slot == far)
             }
@@ -1184,6 +1260,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                         group: at.group,
                         node: at.node,
                         row: &row,
+                        calls: at.calls,
                     };
                     let value = |value: &HopValue<'_>| match value {
                         HopValue::Scanned(value) => here.datum(value),
@@ -1274,7 +1351,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let kept = limit.map(|limit| skip.saturating_add(limit));
         let ordered = !directions.is_empty();
-        let early = kept.is_some();
+        let fallible = item_values
+            .iter()
+            .chain(&sort_values)
+            .chain(outputs.iter().flatten())
+            .any(computed)
+            || filter.as_ref().is_some_and(pred_computed);
+        let early = kept.is_some() && !fallible;
         let tokens: Vec<Option<Token<PropertyKey>>> = compiler
             .tokens
             .iter()
@@ -1328,7 +1411,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                         .collect::<Result<Vec<_>, _>>()?,
                 );
             }
-            if let Some(worst) = chosen.worst() {
+            if !fallible && let Some(worst) = chosen.worst() {
                 let mut ahead = false;
                 for ((value, held), direction) in
                     sort_values.iter().zip(&worst.keys).zip(&directions)
@@ -1352,7 +1435,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             chosen.offer(&mut keys, (position, at.node, input), values, &directions);
             position += 1;
-            Ok(ordered || kept.is_none_or(|kept| chosen.len() < kept))
+            Ok(ordered || fallible || kept.is_none_or(|kept| chosen.len() < kept))
         })?;
         let mut out = Vec::new();
         for ranked in chosen
@@ -1405,8 +1488,32 @@ fn is_read(
         || outputs.is_some_and(|outputs| outputs.iter().any(|value| reads(value, column)))
 }
 
+fn computed(value: &Value) -> bool {
+    matches!(value, Value::Apply(_))
+}
+
+fn scanned(value: &Value) -> bool {
+    match value {
+        Value::Column(_) | Value::Node => true,
+        Value::Fixed(_) | Value::Row(_) => false,
+        Value::Apply(apply) => match apply.as_ref() {
+            Apply::Binary(_, lhs, rhs) | Apply::Index(lhs, rhs) => scanned(lhs) || scanned(rhs),
+            Apply::Call(_, args) => args.iter().any(scanned),
+        },
+    }
+}
+
 fn reads(value: &Value, column: usize) -> bool {
-    matches!(value, Value::Column(held) if *held == column)
+    match value {
+        Value::Column(held) => *held == column,
+        Value::Apply(apply) => match apply.as_ref() {
+            Apply::Binary(_, lhs, rhs) | Apply::Index(lhs, rhs) => {
+                reads(lhs, column) || reads(rhs, column)
+            }
+            Apply::Call(_, args) => args.iter().any(|arg| reads(arg, column)),
+        },
+        Value::Node | Value::Fixed(_) | Value::Row(_) => false,
+    }
 }
 
 fn pred_reads(pred: &Pred, column: usize) -> bool {
@@ -1418,7 +1525,22 @@ fn pred_reads(pred: &Pred, column: usize) -> bool {
         Pred::IsNull(value, _) | Pred::In(value, _) | Pred::Contains(value, _) => reads(value),
         Pred::Text(_, lhs, rhs) => reads(lhs) || reads(rhs),
         Pred::Not(operand) => pred_reads(operand, column),
+        Pred::Gated(gate, pred) => pred_reads(gate, column) || pred_reads(pred, column),
         Pred::Logic(_, lhs, rhs) => pred_reads(lhs, column) || pred_reads(rhs, column),
+    }
+}
+
+fn pred_computed(pred: &Pred) -> bool {
+    match pred {
+        Pred::Fixed(_) | Pred::Against { .. } => false,
+        Pred::Compare(first, rest) => {
+            computed(first) || rest.iter().any(|(_, value)| computed(value))
+        }
+        Pred::IsNull(value, _) | Pred::In(value, _) | Pred::Contains(value, _) => computed(value),
+        Pred::Text(_, lhs, rhs) => computed(lhs) || computed(rhs),
+        Pred::Not(operand) => pred_computed(operand),
+        Pred::Gated(gate, pred) => pred_computed(gate) || pred_computed(pred),
+        Pred::Logic(_, lhs, rhs) => pred_computed(lhs) || pred_computed(rhs),
     }
 }
 

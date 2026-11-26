@@ -605,6 +605,9 @@ fn each_benchmark_shape_takes_the_scan() {
         "MATCH (p:Person) WHERE p.age < 3 RETURN p ORDER BY p.id LIMIT 3",
         "MATCH (p) WHERE p.id >= 9990 UNWIND [1] AS x RETURN p.id",
         "MATCH (p:Person) RETURN toUpper(p.name) ORDER BY p.id LIMIT 2",
+        "MATCH (p:Person) WHERE p.age + 1 > 30 RETURN count(*)",
+        "MATCH (p:Person) WHERE p.age IS NOT NULL RETURN p.id, p.age * 7 % 13 AS score ORDER BY score DESC, p.id LIMIT 5",
+        "MATCH (p:Person) RETURN upper(substring(p.name, 0, 1)) AS initial, count(*)",
         "MATCH (p:Person {id: 3}) RETURN p.name",
         "MATCH (p:Person {id: 3, name: 'n3', id: 4}) RETURN p.name",
     ] {
@@ -616,7 +619,6 @@ fn each_benchmark_shape_takes_the_scan() {
 fn shapes_the_scan_cannot_answer_take_the_row_path() {
     let db = db_with(PEOPLE);
     for query in [
-        "MATCH (p:Person) WHERE p.age + 1 > 30 RETURN count(*)",
         "OPTIONAL MATCH (p:Person) WHERE p.age > 80 RETURN count(p)",
         "MATCH (p:Person {id: 3 + p.id}) RETURN p.name",
         "MATCH (p:Person|Other) WHERE p.age > 80 RETURN count(*)",
