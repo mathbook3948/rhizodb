@@ -1141,3 +1141,86 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
     let violations = graph.read().unwrap().check_integrity().unwrap();
     assert_eq!(violations, vec![]);
 }
+
+#[test]
+fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let entry_writes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: RedbStorage::open(directory.path().join("drop.redb")).unwrap(),
+        entry_writes: Rc::clone(&entry_writes),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for i in 0..200 {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String(format!("word{i} graph"))),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Float(1.0),
+                            PropertyValue::Float(f64::from(i)),
+                        ]),
+                    ),
+                ]),
+            })
+            .unwrap();
+    }
+    write.commit().unwrap();
+    entry_writes.set(0);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    assert!(write.drop_index("points").unwrap());
+    write.commit().unwrap();
+    assert!(
+        entry_writes.get() <= 2 * ENTRY_TABLES.len(),
+        "{} entry writes",
+        entry_writes.get()
+    );
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    for table in ENTRY_TABLES {
+        assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
+    }
+}
+
+#[test]
+fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .transaction
+        .put(
+            Table::Metadata,
+            keys::NEXT_INDEX_ID_KEY,
+            &u64::from(u32::MAX).to_be_bytes(),
+        )
+        .unwrap();
+    write
+        .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    write
+        .create_node(NodeRecord {
+            labels: [label].into(),
+            properties: Properties::from([(text, PropertyValue::String("graph".to_owned()))]),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    for table in ENTRY_TABLES {
+        assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
+    }
+}
