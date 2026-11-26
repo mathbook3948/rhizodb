@@ -20,6 +20,7 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         checkpoint,
         cache_pages: 32,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     }
 }
 
@@ -119,14 +120,15 @@ fn everything(engine: &impl Storage) -> Result<Vec<Entry>, StorageError> {
     let read = engine.begin_read()?;
     let mut all = Vec::new();
     for table in Table::ALL {
-        all.extend(read.scan_prefix(table, &[])?);
-    }
-    for (key, value) in all.clone() {
-        if read.get(Table::Nodes, &key)?.as_ref() != Some(&value) {
-            return Err(StorageError::new(EngineError::corrupt(
-                "a get differs from the scan",
-            )));
+        let entries = read.scan_prefix(table, &[])?;
+        for (key, value) in &entries {
+            if read.get(table, key)?.as_ref() != Some(value) {
+                return Err(StorageError::new(EngineError::corrupt(
+                    "a get differs from the scan",
+                )));
+            }
         }
+        all.extend(entries);
     }
     Ok(all)
 }
@@ -188,17 +190,19 @@ fn an_explicit_checkpoint_drops_the_log_and_keeps_every_commit() {
     engine.check().unwrap();
 }
 
-type Blocks = std::collections::BTreeMap<(ExtentId, u32), Vec<u8>>;
+type LiveBlocks = std::collections::BTreeMap<(ExtentId, u32), Vec<u8>>;
 
-fn written_blocks(fs: &SimFs, extents: &ExtentTable) -> Blocks {
+fn live_blocks(fs: &SimFs, extents: &ExtentTable) -> LiveBlocks {
     let file = fs.open(NAME, block_size().unwrap()).unwrap();
-    let mut blocks = Blocks::new();
+    let mut blocks = LiveBlocks::new();
     for (id, entry) in &extents.entries {
-        for block in 0..entry.written {
-            let at = physical_block(entry.slot, block).unwrap();
-            let mut bytes = vec![0; BLOCK];
-            file.read(at, &mut bytes).unwrap();
-            blocks.insert((*id, block), bytes);
+        for (start, length) in entry.used.ranges() {
+            for block in start..start + length {
+                let at = physical_block(entry.slot, block).unwrap();
+                let mut bytes = vec![0; BLOCK];
+                file.read(at, &mut bytes).unwrap();
+                blocks.insert((*id, block), bytes);
+            }
         }
     }
     blocks
@@ -213,12 +217,17 @@ fn manual(checkpoint: CheckpointMode) -> EngineOptions {
 }
 
 #[test]
-fn written_blocks_never_change_while_their_extent_is_listed_and_freed_slots_are_reused() {
+fn a_block_the_durable_header_reaches_never_changes_and_freed_blocks_take_later_pages() {
     let fs = SimFs::new();
-    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
-    let mut previous: Option<Blocks> = None;
-    let mut extents_seen = std::collections::BTreeSet::new();
+    let unstaged = EngineOptions {
+        stage_floor: u64::MAX,
+        ..manual(CheckpointMode::Inline)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, unstaged).unwrap();
+    let mut previous: Option<LiveBlocks> = None;
+    let mut freed = std::collections::BTreeSet::new();
     let mut checked = 0;
+    let mut reused = 0;
     for round in 0..40u32 {
         let mut write = engine.begin_write().unwrap();
         for item in 0..200u32 {
@@ -232,27 +241,28 @@ fn written_blocks_never_change_while_their_extent_is_listed_and_freed_slots_are_
         engine.checkpoint().unwrap();
         engine.check().unwrap();
         let extents = engine.extents();
-        let now = written_blocks(&fs, &extents);
+        let now = live_blocks(&fs, &extents);
         if let Some(before) = previous.take() {
             for (place, bytes) in &before {
-                if extents.entries.contains_key(&place.0) {
-                    assert!(
-                        now.get(place) == Some(bytes),
-                        "block {place:?} of a listed extent changed"
-                    );
-                    checked += 1;
+                match now.get(place) {
+                    Some(after) if after == bytes => checked += 1,
+                    Some(_) => panic!("block {place:?} changed while a durable header reached it"),
+                    None => {
+                        freed.insert(*place);
+                    }
                 }
             }
+            reused += now
+                .keys()
+                .filter(|place| !before.contains_key(place) && freed.contains(place))
+                .count();
         }
-        extents_seen.extend(extents.entries.keys().copied());
         previous = Some(now);
     }
     assert!(checked > 1000);
-    let slots = engine.extents().next_slot;
     assert!(
-        (slots as usize) < extents_seen.len(),
-        "{} extents were opened in {slots} slots, so no slot was reused",
-        extents_seen.len()
+        reused > 1000,
+        "only {reused} freed blocks took a later page"
     );
 }
 
@@ -735,7 +745,7 @@ fn overwriting_the_same_keys_keeps_the_file_bounded() {
     engine.check().unwrap();
 }
 
-fn log_with_survivors(engine: &impl Storage, rounds: u32) {
+fn load_then_keep_survivors(engine: &Engine<SimFs>, rounds: u32) {
     let key = |round: u32, item: u32| (round * 200 + item).to_be_bytes();
     for round in 0..rounds {
         let mut write = engine.begin_write().unwrap();
@@ -744,28 +754,33 @@ fn log_with_survivors(engine: &impl Storage, rounds: u32) {
                 .put(Table::Nodes, &key(round, item), &[round as u8; 300])
                 .unwrap();
         }
-        if round > 0 {
-            for item in (0..200).filter(|item| item % 50 != 0) {
-                write.delete(Table::Nodes, &key(round - 1, item)).unwrap();
-            }
-        }
         write.commit().unwrap();
     }
+    let mut write = engine.begin_write().unwrap();
+    for round in 0..rounds {
+        for item in (0..200).filter(|item| item % 50 != 0) {
+            write.delete(Table::Nodes, &key(round, item)).unwrap();
+        }
+    }
+    write.commit().unwrap();
+    engine.checkpoint().unwrap();
 }
 
-fn file_and_live_bytes_after_a_long_log(reclaim_slack: u64) -> (u64, u64) {
+fn file_and_live_bytes_after_most_is_deleted(reclaim_slack: u64) -> (u64, u64) {
     let fs = SimFs::new();
     let options = EngineOptions {
         reclaim_slack,
+        memtable_limit: 256 << 10,
+        wal_limit: 1 << 20,
         ..tiny(CheckpointMode::Inline)
     };
     let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
-    log_with_survivors(&engine, 400);
+    load_then_keep_survivors(&engine, 400);
     let live = engine.check().unwrap().live_blocks * BLOCK as u64;
     assert_eq!(
         everything(&engine).unwrap().len(),
-        399 * 4 + 200,
-        "every survivor and the last round"
+        400 * 4,
+        "every survivor"
     );
     (file_bytes(&fs), live)
 }
@@ -775,12 +790,12 @@ fn checkpoints_compact_a_file_whose_free_space_outgrows_its_live_data() {
     let slack = tiny(CheckpointMode::Inline).reclaim_slack;
     let extent = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
     let bound = |live: u64| 2 * live + slack + 4 * extent;
-    let (kept, kept_live) = file_and_live_bytes_after_a_long_log(u64::MAX);
+    let (kept, kept_live) = file_and_live_bytes_after_most_is_deleted(u64::MAX);
     assert!(
         kept > bound(kept_live),
-        "without reclaiming, the log leaves {kept} bytes for {kept_live} live"
+        "without reclaiming, the deletes leave {kept} bytes for {kept_live} live"
     );
-    let (reclaimed, live) = file_and_live_bytes_after_a_long_log(slack);
+    let (reclaimed, live) = file_and_live_bytes_after_most_is_deleted(slack);
     assert!(
         reclaimed <= bound(live),
         "the file holds {reclaimed} bytes for {live} live bytes"
@@ -898,4 +913,85 @@ fn opens_racing_to_create_a_database_share_one_file_and_lose_no_commit() {
         drop(engine);
         assert_eq!(names_in(directory.path()), ["graph"]);
     }
+}
+
+fn load_items(engine: &Engine<SimFs>, round: u32) {
+    for batch in 0..12u32 {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..250u32 {
+            let key = batch * 250 + item;
+            let length = [40, 400, 1500][(key % 3) as usize];
+            write
+                .put(Table::Nodes, &key.to_be_bytes(), &vec![round as u8; length])
+                .unwrap();
+        }
+        write.commit().unwrap();
+        engine.checkpoint().unwrap();
+    }
+}
+
+fn delete_items(engine: &Engine<SimFs>) {
+    let mut write = engine.begin_write().unwrap();
+    write.delete_range(Table::Nodes, &[], &[0xFF; 5]).unwrap();
+    write.commit().unwrap();
+    engine.checkpoint().unwrap();
+}
+
+fn without_compaction() -> EngineOptions {
+    EngineOptions {
+        reclaim_slack: u64::MAX,
+        ..manual(CheckpointMode::Inline)
+    }
+}
+
+#[test]
+fn loading_deleting_and_loading_again_keeps_the_file_near_one_load() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, without_compaction()).unwrap();
+    let mut write = engine.begin_write().unwrap();
+    write.put(Table::Metadata, b"version", b"1").unwrap();
+    write.commit().unwrap();
+    load_items(&engine, 0);
+    let one_load = file_bytes(&fs);
+    let mut largest = 0;
+    for round in 1..8 {
+        delete_items(&engine);
+        engine.check().unwrap();
+        load_items(&engine, round);
+        engine.check().unwrap();
+        largest = largest.max(file_bytes(&fs));
+    }
+    let extent = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
+    assert!(
+        largest <= one_load + extent,
+        "one load takes {one_load} bytes, but loading again grew the file to {largest}"
+    );
+    assert_eq!(everything(&engine).unwrap().len(), 3001);
+}
+
+#[test]
+fn rewriting_a_third_of_the_keys_at_every_checkpoint_keeps_the_file_near_its_live_data() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, without_compaction()).unwrap();
+    load_items(&engine, 0);
+    let mut sizes = Vec::new();
+    for round in 1..40u32 {
+        let mut write = engine.begin_write().unwrap();
+        for key in (0..3000u32).filter(|key| key % 3 == round % 3) {
+            let length = [40, 400, 1500][((key + round) % 3) as usize];
+            write
+                .put(Table::Nodes, &key.to_be_bytes(), &vec![round as u8; length])
+                .unwrap();
+        }
+        write.commit().unwrap();
+        engine.checkpoint().unwrap();
+        sizes.push(file_bytes(&fs));
+    }
+    let live = engine.check().unwrap().live_blocks * BLOCK as u64;
+    let extent = u64::from(crate::engine::layout::EXTENT_BLOCKS) * BLOCK as u64;
+    let largest = sizes.iter().max().copied().unwrap_or(0);
+    assert!(
+        largest <= 2 * live + extent,
+        "the file reached {largest} bytes for {live} live bytes: {sizes:?}"
+    );
 }

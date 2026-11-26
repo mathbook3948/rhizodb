@@ -120,6 +120,7 @@ fn fuzz_options() -> EngineOptions {
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     }
 }
 
