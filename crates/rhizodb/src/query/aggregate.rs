@@ -132,7 +132,11 @@ impl Total {
 }
 
 impl<'p> Groups<'p> {
-    fn new(keys: &'p [(Expr, Slot)], aggregates: &'p [(Aggregate, Slot)], limits: Limits) -> Self {
+    pub(crate) fn new(
+        keys: &'p [(Expr, Slot)],
+        aggregates: &'p [(Aggregate, Slot)],
+        limits: Limits,
+    ) -> Self {
         Self {
             keys,
             aggregates,

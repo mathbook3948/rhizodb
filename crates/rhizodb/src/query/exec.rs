@@ -31,6 +31,7 @@ use super::eval::Row;
 use super::eval::set;
 use super::keys::KeyIndex;
 use super::keys::KeySet;
+use super::matcher::Emit;
 use super::matcher::counted_nodes;
 use super::plan::Aggregate;
 use super::plan::CallClause;
@@ -50,6 +51,9 @@ use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
+use super::stream::elements;
+use super::stream::read_elements;
+use super::stream::update_elements;
 use super::update::Graveyard;
 use super::update::Writer;
 
@@ -67,39 +71,42 @@ pub(crate) fn run_read<T: ReadTransaction>(
         parameters,
         now,
         limits,
-        |env, clause, next, rows| env.read_clauses(clause, next, rows),
+        |env, clauses, rows| {
+            env.read_run(clauses, rows, |clauses, streamed, rows| {
+                env.read_clauses_at(clauses, streamed, rows)
+            })
+        },
     )
 }
 
-/// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does.
+/// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does, given
+/// the clauses left in the pipeline.
 pub(crate) fn read_program<T: ReadTransaction>(
     tx: &GraphTx<T>,
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
     limits: Limits,
-    read: impl Fn(
-        &Env<'_, T>,
-        &ReadClause,
-        Option<&ReadClause>,
-        Vec<Row>,
-    ) -> Result<(Vec<Row>, usize), Error>,
+    read: impl Fn(&Env<'_, T>, &[&ReadClause], Vec<Row>) -> Result<(Vec<Row>, usize), Error>,
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    let env = Env::new(
-        tx,
-        program.slot_count,
-        parameters,
-        now,
-        &graveyard,
-        &patterns,
-        limits,
-    );
+    let elements = elements(program, read_elements);
+    let env = Env {
+        elements: &elements,
+        ..Env::new(
+            tx,
+            program.slot_count,
+            parameters,
+            now,
+            &graveyard,
+            &patterns,
+            limits,
+        )
+    };
     env.check_closed(&program.closed)?;
-    let rows = run(program, |clauses, rows| match clauses {
-        [first, rest @ ..] => read(&env, first, rest.first(), rows),
-        [] => Ok((rows, 0)),
+    let rows = run(program, |clauses, rows| {
+        read(&env, &clauses.iter().collect::<Vec<_>>(), rows)
     })?;
     materialize(&env, &graveyard, &program.columns, rows)
 }
@@ -113,6 +120,10 @@ pub(crate) fn run_write<W: WriteTransaction>(
     limits: Limits,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
+    let elements = elements(program, |clause, out| match clause {
+        Clause::Read(clause) => read_elements(clause, out),
+        Clause::Update(clause) => update_elements(clause, out),
+    });
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
     Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits)
@@ -126,6 +137,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         graveyard: &mut graveyard,
         limits,
         tokens: Vec::new(),
+        elements: &elements,
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
@@ -316,15 +328,64 @@ fn materialize<T: ReadTransaction>(
 }
 
 impl<T: ReadTransaction> Env<'_, T> {
-    /// Applies `clause`, and `next` with it when a match feeds an aggregating projection, which
-    /// then aggregates each match without collecting the matched rows. Says how many clauses it
-    /// applied.
+    /// Applies the first of `clauses`, the rest of the pipeline, and the clauses after it that
+    /// it feeds without collecting rows between them: a projection that a match feeds, which
+    /// aggregates each match or reads it from a scan, or the run that [`Env::streamed`] takes
+    /// when it holds more than this clause, which gains nothing from passing on rows it already
+    /// holds one at a time. Says how many clauses it applied.
     pub(crate) fn read_clauses(
         &self,
-        clause: &ReadClause,
-        next: Option<&ReadClause>,
+        clauses: &[&ReadClause],
         rows: Vec<Row>,
     ) -> Result<(Vec<Row>, usize), Error> {
+        self.read_clauses_at(clauses, self.streamed(clauses), rows)
+    }
+
+    /// Applies `clauses`, the rest of a pipeline, up to the first table-wise `CALL` or through
+    /// the run that [`Env::streamed`] takes, with `step` applying the clauses from each point on
+    /// as [`Env::read_clauses_at`] does, given what [`Env::streamed`] gives there. It reads ahead
+    /// once for the whole run, so a pipeline of many clauses takes time linear in its length.
+    /// Says how many clauses it applied.
+    pub(crate) fn read_run(
+        &self,
+        clauses: &[&ReadClause],
+        mut rows: Vec<Row>,
+        mut step: impl FnMut(
+            &[&ReadClause],
+            Option<usize>,
+            Vec<Row>,
+        ) -> Result<(Vec<Row>, usize), Error>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        let streamed = self.streamed(clauses);
+        let end = streamed.unwrap_or_else(|| {
+            clauses
+                .iter()
+                .position(|clause| matches!(clause, ReadClause::CallSubquery(call) if call.table))
+                .unwrap_or(clauses.len())
+        });
+        if end == 0 {
+            return step(clauses, None, rows);
+        }
+        let mut at = 0;
+        while at < end {
+            let (next, applied) = step(&clauses[at..], streamed.map(|count| count - at), rows)?;
+            rows = next;
+            at += applied.max(1);
+        }
+        Ok((rows, at))
+    }
+
+    /// [`Env::read_clauses`], given what [`Env::streamed`] gives for `clauses`.
+    pub(crate) fn read_clauses_at(
+        &self,
+        clauses: &[&ReadClause],
+        streamed: Option<usize>,
+        rows: Vec<Row>,
+    ) -> Result<(Vec<Row>, usize), Error> {
+        let Some(&clause) = clauses.first() else {
+            return Ok((rows, 0));
+        };
+        let next = clauses.get(1).copied();
         if let (ReadClause::Match(found), Some(ReadClause::Project(projection))) = (clause, next)
             && !found.optional
             && let Items::Aggregate {
@@ -345,9 +406,14 @@ impl<T: ReadTransaction> Env<'_, T> {
             {
                 return Ok((rows, 2));
             }
-            if let Some(rows) = self.scan_match(scan, found, &rows)? {
+            if streamed.is_none()
+                && let Some(rows) = self.scan_match(scan, found, &rows)?
+            {
                 return Ok((rows, 1));
             }
+        }
+        if let Some(count) = streamed.filter(|count| *count > 1) {
+            return Ok((self.stream_clauses(&clauses[..count], rows)?, count));
         }
         Ok((self.read_clause(clause, rows)?, 1))
     }
@@ -463,81 +529,104 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let mut out = Vec::new();
         for row in rows {
-            let mut parts = Vec::new();
-            for branch in &call.branches {
-                let mut inner = vec![row.clone()];
-                for clause in &branch.clauses {
-                    inner = self.read_clause(clause, inner)?;
-                }
-                parts.push(branch_rows(branch, inner));
-            }
-            extend_row(call, row, parts, &mut out);
+            self.subquery_row(call, row, &mut out)?;
         }
         Ok(out)
     }
 
+    /// Adds to `out` the rows a `CALL` subquery that is not a table call gives for `row`.
+    pub(crate) fn subquery_row(
+        &self,
+        call: &CallSubquery<ReadClause>,
+        row: Row,
+        out: &mut Vec<Row>,
+    ) -> Result<(), Error> {
+        let mut parts = Vec::new();
+        for branch in &call.branches {
+            let mut inner = vec![row.clone()];
+            for clause in &branch.clauses {
+                inner = self.read_clause(clause, inner)?;
+            }
+            parts.push(branch_rows(branch, inner));
+        }
+        extend_row(call, row, parts, out);
+        Ok(())
+    }
+
     fn call_procedure(&self, call: &CallClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
-        let signature = call.callee.signature();
         let mut out = Vec::new();
         for row in rows {
-            let mut args = Vec::new();
-            for (arg, (parameter, accepts)) in call.args.iter().zip(&signature.parameters) {
-                let value = match self.eval(arg, &row)? {
-                    Datum::Integer(value) if *accepts == ValueType::Float => {
-                        Datum::Float(value as f64)
-                    }
-                    value => value,
-                };
-                if let Some(shape) = Shape::of(&value)
-                    && !admits(procedure_parameter(*accepts), shape)
-                {
-                    return Err(Error::rejecting_type(
-                        ErrorKind::InvalidArgumentValue,
-                        format!(
-                            "parameter `{parameter}` of `{}` cannot take a {}",
-                            signature.name,
-                            value.type_name()
-                        ),
-                    ));
-                }
-                args.push(value);
-            }
-            let results = match &call.callee {
-                Callee::Host(procedure) => self.call_host(procedure, args)?,
-                Callee::Builtin(builtin) => builtin.call(self.tx, &args)?,
-            };
-            if signature.outputs.is_empty() {
-                out.push(row);
-                continue;
-            }
-            for result in results {
-                if result.len() != signature.outputs.len() {
-                    return Err(Error::new(
-                        ErrorKind::ProcedureFailed,
-                        format!(
-                            "procedure `{}` returned a row of {} values for {} outputs",
-                            signature.name,
-                            result.len(),
-                            signature.outputs.len()
-                        ),
-                    ));
-                }
-                let mut next = row.clone();
-                for (index, slot) in &call.yields {
-                    if let Some(value) = result.get(*index) {
-                        set(&mut next, *slot, value.clone());
-                    }
-                }
-                let keep = match &call.filter {
-                    Some(filter) => self.predicate(filter, &next)?,
-                    None => true,
-                };
-                if keep {
-                    out.push(next);
-                }
-            }
+            self.call_row(call, row, &mut |next| {
+                out.push(next);
+                Ok(true)
+            })?;
         }
         Ok(out)
+    }
+
+    /// Calls `emit` with each row a procedure call gives for `row`, until it returns false, and
+    /// says whether it did not.
+    pub(crate) fn call_row(
+        &self,
+        call: &CallClause,
+        row: Row,
+        emit: &mut dyn FnMut(Row) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
+        let signature = call.callee.signature();
+        let mut args = Vec::new();
+        for (arg, (parameter, accepts)) in call.args.iter().zip(&signature.parameters) {
+            let value = match self.eval(arg, &row)? {
+                Datum::Integer(value) if *accepts == ValueType::Float => Datum::Float(value as f64),
+                value => value,
+            };
+            if let Some(shape) = Shape::of(&value)
+                && !admits(procedure_parameter(*accepts), shape)
+            {
+                return Err(Error::rejecting_type(
+                    ErrorKind::InvalidArgumentValue,
+                    format!(
+                        "parameter `{parameter}` of `{}` cannot take a {}",
+                        signature.name,
+                        value.type_name()
+                    ),
+                ));
+            }
+            args.push(value);
+        }
+        let results = match &call.callee {
+            Callee::Host(procedure) => self.call_host(procedure, args)?,
+            Callee::Builtin(builtin) => builtin.call(self.tx, &args)?,
+        };
+        if signature.outputs.is_empty() {
+            return emit(row);
+        }
+        for result in results {
+            if result.len() != signature.outputs.len() {
+                return Err(Error::new(
+                    ErrorKind::ProcedureFailed,
+                    format!(
+                        "procedure `{}` returned a row of {} values for {} outputs",
+                        signature.name,
+                        result.len(),
+                        signature.outputs.len()
+                    ),
+                ));
+            }
+            let mut next = row.clone();
+            for (index, slot) in &call.yields {
+                if let Some(value) = result.get(*index) {
+                    set(&mut next, *slot, value.clone());
+                }
+            }
+            let keep = match &call.filter {
+                Some(filter) => self.predicate(filter, &next)?,
+                None => true,
+            };
+            if keep && !emit(next)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn call_host(&self, procedure: &Procedure, args: Vec<Datum>) -> Result<Vec<Vec<Datum>>, Error> {
@@ -566,61 +655,84 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn match_clause(&self, found: &MatchClause, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
         let mut out = Vec::new();
-        for mut row in rows {
-            let before = out.len();
-            let sought = found.by_id.as_deref().and_then(|by_id| {
-                let value = self.eval(&by_id.value, &row).ok()?;
-                Some((by_id, value))
-            });
-            match sought {
-                Some((by_id, value)) => {
-                    if let (Some(id), [part]) = (seek::id(&value), by_id.clause.patterns.as_slice())
-                    {
-                        let id = NodeId(id);
-                        set(&mut row, part.start.slot, Datum::Node(id));
-                        if part.steps.is_empty()
-                            && part.path.is_none()
-                            && part.start.labels.is_none()
-                            && part.start.properties.is_none()
-                        {
-                            let kept = self.with_labels(id, |_| ())?.is_some()
-                                && match &by_id.clause.filter {
-                                    Some(filter) => self.predicate(filter, &row)?,
-                                    None => true,
-                                };
-                            if kept {
-                                out.push(row);
-                                continue;
-                            }
-                        } else {
-                            self.match_into(&by_id.clause, &row, &mut out)?;
-                        }
-                    }
-                }
-                None => self.match_into(found, &row, &mut out)?,
-            }
-            if found.optional && out.len() == before {
-                let mut padded = row;
-                for slot in &found.introduced {
-                    set(&mut padded, *slot, Datum::Null);
-                }
-                out.push(padded);
-            }
+        for row in rows {
+            self.match_row(found, row, &mut |matched| {
+                out.push(matched.clone());
+                Ok(true)
+            })?;
         }
         Ok(out)
     }
 
-    fn match_into(&self, found: &MatchClause, row: &Row, out: &mut Vec<Row>) -> Result<(), Error> {
+    /// Calls `emit` with each row that `found` gives for `row`, until it returns false, and
+    /// says whether it did not.
+    pub(crate) fn match_row(
+        &self,
+        found: &MatchClause,
+        mut row: Row,
+        emit: &mut Emit<'_>,
+    ) -> Result<bool, Error> {
+        let mut emitted = false;
+        let mut counted = |matched: &Row| {
+            emitted = true;
+            emit(matched)
+        };
+        let sought = found.by_id.as_deref().and_then(|by_id| {
+            let value = self.eval(&by_id.value, &row).ok()?;
+            Some((by_id, value))
+        });
+        let more = match sought {
+            Some((by_id, value)) => match (seek::id(&value), by_id.clause.patterns.as_slice()) {
+                (Some(id), [part]) => {
+                    let id = NodeId(id);
+                    set(&mut row, part.start.slot, Datum::Node(id));
+                    if part.steps.is_empty()
+                        && part.path.is_none()
+                        && part.start.labels.is_none()
+                        && part.start.properties.is_none()
+                    {
+                        let kept = self.with_labels(id, |_| ())?.is_some()
+                            && match &by_id.clause.filter {
+                                Some(filter) => self.predicate(filter, &row)?,
+                                None => true,
+                            };
+                        if kept {
+                            return counted(&row);
+                        }
+                        true
+                    } else {
+                        self.match_filtered(&by_id.clause, &row, &mut counted)?
+                    }
+                }
+                _ => true,
+            },
+            None => self.match_filtered(found, &row, &mut counted)?,
+        };
+        if found.optional && !emitted {
+            for slot in &found.introduced {
+                set(&mut row, *slot, Datum::Null);
+            }
+            return emit(&row);
+        }
+        Ok(more)
+    }
+
+    fn match_filtered(
+        &self,
+        found: &MatchClause,
+        row: &Row,
+        emit: &mut Emit<'_>,
+    ) -> Result<bool, Error> {
+        let mut more = true;
         self.match_patterns(&found.patterns, row, &mut |matched| {
             let keep = match &found.filter {
                 Some(filter) => self.predicate(filter, matched)?,
                 None => true,
             };
-            if keep {
-                out.push(matched.clone());
-            }
-            Ok(true)
-        })
+            more = !keep || emit(matched)?;
+            Ok(more)
+        })?;
+        Ok(more)
     }
 
     fn project(&self, projection: &Projection, rows: Vec<Row>) -> Result<Vec<Row>, Error> {
@@ -708,7 +820,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let row = vec![Datum::Null; self.slots];
         for expr in closed {
-            if let Err(error) = checker.eval(expr, &row) {
+            if let Err(error) = checker.discarded(expr, &row) {
                 return Err(match error.kind() {
                     ErrorKind::TypeMismatch => error.with_kind(ErrorKind::InvalidArgumentType),
                     _ => error,

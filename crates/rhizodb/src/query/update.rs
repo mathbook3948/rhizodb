@@ -41,8 +41,10 @@ use super::plan::Expr;
 use super::plan::MergeClause;
 use super::plan::NodePattern;
 use super::plan::PatternPart;
+use super::plan::ReadClause;
 use super::plan::RemoveAction;
 use super::plan::SetAction;
+use super::plan::Slot;
 use super::plan::UpdateClause;
 use super::regex::Patterns;
 
@@ -65,6 +67,8 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) graveyard: &'a mut Graveyard,
     pub(crate) limits: Limits,
     pub(crate) tokens: Vec<(u8, String, u32)>,
+    /// The slots that only ever hold a graph element or null, in ascending order.
+    pub(crate) elements: &'a [Slot],
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -144,12 +148,18 @@ impl<W: WriteTransaction> Writer<'_, W> {
         rows: Vec<Row>,
     ) -> Result<(Vec<Row>, usize), Error> {
         match clauses {
-            [Clause::Read(clause), rest @ ..] => {
-                let next = match rest.first() {
-                    Some(Clause::Read(next)) => Some(next),
-                    _ => None,
-                };
-                self.env().read_clauses(clause, next, rows)
+            [Clause::Read(_), ..] => {
+                let reads: Vec<&ReadClause> = clauses
+                    .iter()
+                    .map_while(|clause| match clause {
+                        Clause::Read(clause) => Some(clause),
+                        Clause::Update(_) => None,
+                    })
+                    .collect();
+                let env = self.env();
+                env.read_run(&reads, rows, |clauses, streamed, rows| {
+                    env.read_clauses_at(clauses, streamed, rows)
+                })
             }
             [Clause::Update(clause), ..] => Ok((self.apply(clause, rows)?, 1)),
             [] => Ok((rows, 0)),
@@ -176,6 +186,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             self.patterns,
             self.limits,
         )
+        .with_elements(self.elements)
     }
 
     fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
