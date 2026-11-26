@@ -190,7 +190,8 @@ impl Database {
     /// `Database`, in this process or another, holds the file on a file system with file locks,
     /// and with
     /// [`ErrorKind::UnsupportedFormatVersion`](crate::ErrorKind::UnsupportedFormatVersion) when
-    /// the file records a format version newer than this build reads. A damaged file fails with
+    /// the file records a format version newer than this build reads, or older than the oldest
+    /// it upgrades. A damaged file fails with
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
     /// reads the damage, since every page carries a checksum.
     ///

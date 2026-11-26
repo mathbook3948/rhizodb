@@ -17,7 +17,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - Opening an existing file that the engine cannot read never rewrites it, since it may be a damaged database.
 - Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
 - Opening a database written in a newer format version fails.
-- Opening a database written in a format version older than the first one RhizoDB's own engine wrote fails the same way, since only redb ever stored those versions.
+- Opening a database written in a format version older than the first one RhizoDB's own engine wrote fails the same way.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.
 - Opening a database written in an older format version does not rebuild its keyword indexes for the upgrade alone.
 - Opening a database written before posting blocks moves each posting into its block in the same write transaction, without tokenizing again.

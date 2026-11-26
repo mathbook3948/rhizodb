@@ -148,7 +148,8 @@ The kinds a host may retry are these.
 
 [`ErrorKind::CorruptData`] means a page of the file fails its checksum or breaks an invariant
 the file records. Restore from a backup when opening the file again does not clear it.
-[`ErrorKind::UnsupportedFormatVersion`] means a newer build wrote the file.
+[`ErrorKind::UnsupportedFormatVersion`] means a newer build wrote the file, or a pre-release
+build wrote it in a format older than any this build upgrades.
 
 # Indexes
 
@@ -266,7 +267,8 @@ version only adds, such as a value tag, so an older dump keeps its meaning.
 
 The file records a format version. Opening a file written by an older version of RhizoDB
 upgrades it in place, in one write transaction before anything else reads it, and opening one
-written by a newer version fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file
+written by a newer version, or by a pre-release build in a format older than any this build
+upgrades, fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file
 cannot be opened by the older build again, so take a backup before upgrading the crate. Below
 1.0, a release that changes the API or the format raises the minor version, and the changelog
 lists the change.
