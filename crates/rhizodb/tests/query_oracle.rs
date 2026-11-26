@@ -19,6 +19,7 @@ use support::cases;
 use support::db;
 use support::options;
 use support::parallel_options;
+use support::regression_seeds;
 use support::seed;
 
 const FAST_GRAPHS: u64 = 24;
@@ -974,8 +975,8 @@ fn gap(db: &Database, rng: &mut Rng) -> Result<(), String> {
     Ok(())
 }
 
-fn fail(seed: u64, log: &str, reason: &str) -> ! {
-    panic!("seed {seed} (replay with RHIZODB_TEST_SEED={seed}): {reason}\nstatements:\n{log}")
+fn fail(seed: u64, replay: u64, log: &str, reason: &str) -> ! {
+    panic!("seed {seed} (replay with RHIZODB_TEST_SEED={replay}): {reason}\nstatements:\n{log}")
 }
 
 fn session(db: Database, rng: &mut Rng) -> Result<Session, String> {
@@ -988,18 +989,19 @@ fn session(db: Database, rng: &mut Rng) -> Result<Session, String> {
     })
 }
 
-fn in_memory_sessions(salt: u64, open: impl Fn() -> Database) {
+fn in_memory_sessions(test: &str, salt: u64, open: impl Fn() -> Database) {
     let base = seed();
-    for offset in 0..cases(FAST_GRAPHS) {
-        let seed = base.wrapping_add(offset).wrapping_add(salt);
+    let fresh = (0..cases(FAST_GRAPHS)).map(|offset| base.wrapping_add(offset));
+    for replay in regression_seeds(test).into_iter().chain(fresh) {
+        let seed = replay.wrapping_add(salt);
         let mut rng = Rng::new(seed);
         let mut session = match session(open(), &mut rng) {
             Ok(session) => session,
-            Err(reason) => fail(seed, "", &reason),
+            Err(reason) => fail(seed, replay, "", &reason),
         };
         for _ in 0..ROUNDS_PER_GRAPH {
             if let Err(reason) = session.round(&mut rng) {
-                fail(seed, &session.log, &reason);
+                fail(seed, replay, &session.log, &reason);
             }
         }
     }
@@ -1007,25 +1009,31 @@ fn in_memory_sessions(salt: u64, open: impl Fn() -> Database) {
 
 #[test]
 fn random_queries_in_memory_match_the_reference() {
-    in_memory_sessions(0, db);
+    in_memory_sessions("random_queries_in_memory_match_the_reference", 0, db);
 }
 
 #[test]
 fn random_queries_split_across_threads_match_the_reference() {
-    in_memory_sessions(2 << 40, || parallel_options().in_memory().unwrap());
+    in_memory_sessions(
+        "random_queries_split_across_threads_match_the_reference",
+        2 << 40,
+        || parallel_options().in_memory().unwrap(),
+    );
 }
 
 #[test]
 fn random_queries_on_a_reopened_file_match_the_reference() {
     let base = seed();
     let directory = tempfile::tempdir().unwrap();
-    for offset in 0..cases(FAST_GRAPHS / 4) {
-        let seed = base.wrapping_add(offset).wrapping_add(1 << 40);
+    let fresh = (0..cases(FAST_GRAPHS / 4)).map(|offset| base.wrapping_add(offset));
+    let replays = regression_seeds("random_queries_on_a_reopened_file_match_the_reference");
+    for (run, replay) in replays.into_iter().chain(fresh).enumerate() {
+        let seed = replay.wrapping_add(1 << 40);
         let mut rng = Rng::new(seed);
-        let path = directory.path().join(format!("oracle-{offset}.rhizodb"));
+        let path = directory.path().join(format!("oracle-{run}.rhizodb"));
         let mut session = match session(options().open(&path).unwrap(), &mut rng) {
             Ok(session) => session,
-            Err(reason) => fail(seed, "", &reason),
+            Err(reason) => fail(seed, replay, "", &reason),
         };
         for _ in 0..ROUNDS_PER_GRAPH {
             if rng.chance(1, 3) {
@@ -1034,7 +1042,7 @@ fn random_queries_on_a_reopened_file_match_the_reference() {
                 session.db = options().open(&path).unwrap();
             }
             if let Err(reason) = session.round(&mut rng) {
-                fail(seed, &session.log, &reason);
+                fail(seed, replay, &session.log, &reason);
             }
         }
     }

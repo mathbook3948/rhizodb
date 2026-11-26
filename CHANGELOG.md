@@ -12,7 +12,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
 - Node meta carries checksums, so a damaged chunk or delta fails the read as corrupt data instead of answering wrongly.
 - Node properties kept in one column per property key and 4096 node IDs, typed when its values share a type, so a scan, filter, sort, or aggregate reads only the properties it uses, a commit that changes a few nodes writes a small checksummed delta per value, and a damaged column fails the read as corrupt data. Databases of earlier formats move their node records into columns on open.
-- Relationships kept in compressed sparse row segments per 64 node IDs, relationship type, and direction, with a small checksummed delta per node for small commits, so a loaded graph takes about half the disk space and a damaged segment fails the read as corrupt data. Databases of earlier formats move their adjacency into segments on open.
+- Relationships kept in compressed sparse row segments per 16 node IDs, relationship type, and direction, with a small checksummed delta per node for small commits, so a loaded graph takes about half the disk space and a damaged segment fails the read as corrupt data. Databases of earlier formats move their adjacency into segments on open.
 - GQL queries through `Database::execute`, with Cypher `CREATE` accepted as GQL `INSERT`.
 - Temporal values: dates, times, datetimes with zones, and durations.
 - Host-registered procedures callable with `CALL`, outside the `db` namespace that built-in procedures reserve, and full `EXISTS { ... }` subqueries.
@@ -41,7 +41,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
 - `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
 - Automatic space reclaim: after a checkpoint, a clean close's included, a file that holds more than twice its live data plus 4 MiB, and has grown by its live data since the last compaction, is compacted, so a long-running host's file does not grow without bound and a database that lost most of its data gives the space back by the time it closes.
-- `Display` for `Value`, `Node`, `Relationship`, and `Path`, in the notation of GQL literals such as `{k: [1, 'a']}`, `(:Person {name: 'Ada'})`, and `<(:A)-[:T]->(:B)>`, so a host can print query results without writing a formatter.
+- `Display` for `Value`, `Node`, `Relationship`, and `Path` as GQL text such as `{k: [1, 'a']}`, `date('2024-02-29')`, `(:Person {name: 'Ada'})`, and `<(:A)-[:T]->(:B)>`, so a host can print query results without writing a formatter; the text of null, booleans, integers, finite floats, strings, temporals, and lists and maps of them reads back as an equal value.
 
 ### Changed
 
@@ -68,6 +68,8 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- The doctests compile from the published package, whose README the crate now includes, so `cargo test` runs in an unpacked copy of the crate.
+- Opening a file whose storage-engine format is newer than this build fails with `ErrorKind::UnsupportedFormatVersion` instead of `ErrorKind::Storage`, so a host that rolls back a release can tell it from a disk fault.
 - A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
 - A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.
 - `SET r = {...}` and `SET r += {...}` on a relationship rewrote its whole record once per property, so replacing the properties of a relationship with thousands of them took seconds. They now write the record once.

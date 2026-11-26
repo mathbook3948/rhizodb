@@ -85,8 +85,18 @@ const ENGINE_LOG_AND_MEMTABLE: isize = 320 << 20;
 #[test]
 fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     let steps = cases(300);
-    let slack = (256 << 10) + ENGINE_LOG_AND_MEMTABLE;
+    let quiet = 256 << 10;
+    let committing = quiet + ENGINE_LOG_AND_MEMTABLE;
     let mut reports = Vec::new();
+
+    let mut leak = Vec::new();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        levels_off("a deliberate leak", steps, quiet, |_| {
+            leak.push(vec![0u8; 4096])
+        });
+    }));
+    drop(leak);
+    assert!(caught.is_err(), "a leak of 4 KiB per step passes");
 
     let db = support::db();
     db.execute(
@@ -94,14 +104,14 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
         &none(),
     )
     .unwrap();
-    reports.push(levels_off("new query texts", steps, slack, |i| {
+    reports.push(levels_off("new query texts", steps, quiet, |i| {
         db.execute(
             &format!("MATCH (n:P) WHERE n.k = {} RETURN n.name, {i} AS i", i % 50),
             &none(),
         )
         .unwrap();
     }));
-    reports.push(levels_off("failing queries", steps, slack, |i| {
+    reports.push(levels_off("failing queries", steps, quiet, |i| {
         let _ = db.execute(&format!("MATCH (n:P) RETURN n.k / {}", i % 2), &none());
         let _ = db.execute(&format!("MATCH (n:P RETURN {i}"), &none());
         let _ = db.execute("MATCH (n:P) RETURN toInteger(n.name) + 'x'", &none());
@@ -109,7 +119,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     reports.push(levels_off(
         "rolled back and dropped writes",
         steps,
-        slack,
+        quiet,
         |i| {
             let mut tx = db.begin_write().unwrap();
             tx.execute(
@@ -128,7 +138,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     reports.push(levels_off(
         "a write that a failed query rolled back",
         steps,
-        slack,
+        quiet,
         |_| {
             let mut tx = db.begin_write().unwrap();
             tx.execute("UNWIND range(1, 100) AS i INSERT (:Q {k: i})", &none())
@@ -140,7 +150,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     reports.push(levels_off(
         "read transactions across commits",
         steps,
-        slack,
+        committing,
         |i| {
             let read = db.begin_read().unwrap();
             db.execute(
@@ -152,23 +162,28 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
                 .unwrap();
         },
     ));
-    reports.push(levels_off("overwriting one property", steps, slack, |i| {
-        db.execute(
-            "MATCH (n:P) WHERE n.k <= 10 SET n.v = $v, n.w = $w",
-            &Parameters::from([
-                ("v".to_owned(), Value::Integer(i as i64)),
-                (
-                    "w".to_owned(),
-                    Value::String("x".repeat((i % 7) as usize * 100)),
-                ),
-            ]),
-        )
-        .unwrap();
-    }));
+    reports.push(levels_off(
+        "overwriting one property",
+        steps,
+        committing,
+        |i| {
+            db.execute(
+                "MATCH (n:P) WHERE n.k <= 10 SET n.v = $v, n.w = $w",
+                &Parameters::from([
+                    ("v".to_owned(), Value::Integer(i as i64)),
+                    (
+                        "w".to_owned(),
+                        Value::String("x".repeat((i % 7) as usize * 100)),
+                    ),
+                ]),
+            )
+            .unwrap();
+        },
+    ));
     reports.push(levels_off(
         "inserting and deleting the same amount",
         steps,
-        slack,
+        committing,
         |_| {
             db.execute(
                 "UNWIND range(1, 20) AS i INSERT (:T {k: i})-[:E {w: i}]->(:T)",
@@ -178,7 +193,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
             db.execute("MATCH (n:T) DETACH DELETE n", &none()).unwrap();
         },
     ));
-    reports.push(levels_off("names that do not exist", steps, slack, |i| {
+    reports.push(levels_off("names that do not exist", steps, quiet, |i| {
         db.execute(
             &format!("MATCH (n:Missing{i})-[:NoType{i}]->(m) RETURN n.nokey{i}"),
             &none(),
@@ -188,7 +203,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     reports.push(levels_off(
         "creating and dropping indexes",
         steps / 3,
-        slack,
+        committing,
         |i| {
             let name = format!("index{}", i % 3);
             db.create_property_index(&name, IndexTarget::Label("P"), "k")
@@ -207,7 +222,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     reports.push(levels_off(
         "threads that each run a query",
         steps / 3,
-        slack,
+        quiet,
         |_| {
             std::thread::scope(|scope| {
                 scope.spawn(|| db.execute("MATCH (n:P) RETURN count(*)", &none()).unwrap());
@@ -222,7 +237,7 @@ fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
         .unwrap()
         .execute("UNWIND range(1, 500) AS i INSERT (:P {k: i})", &none())
         .unwrap();
-    reports.push(levels_off("reopening a file", steps / 3, slack, |i| {
+    reports.push(levels_off("reopening a file", steps / 3, committing, |i| {
         let db = Database::open(&path).unwrap();
         db.execute(
             "MATCH (n:P) WHERE n.k = $k SET n.v = $k",

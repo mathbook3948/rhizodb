@@ -209,7 +209,8 @@ impl Database {
     ///
     /// Fails with
     /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen) when another
-    /// `Database`, in this process or another, holds the file, and with
+    /// `Database`, in this process or another, holds the file on a file system with file locks,
+    /// and with
     /// [`ErrorKind::UnsupportedFormatVersion`](crate::ErrorKind::UnsupportedFormatVersion) when
     /// the file records a format version newer than this build reads. A damaged file fails with
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
@@ -713,3 +714,7 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "database_backup.test.rs"]
 mod backup_tests;
+
+#[cfg(test)]
+#[path = "database_format.test.rs"]
+mod format_tests;

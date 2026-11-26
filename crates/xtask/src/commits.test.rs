@@ -113,9 +113,24 @@ fn lets_other_types_leave_the_changelog_alone() {
 }
 
 #[test]
-fn skips_merges_fixups_and_squashes() {
+fn the_commit_message_hook_skips_merges_fixups_and_squashes() {
     for subject in ["Merge branch 'main'", "fixup! feat: a", "squash! feat: a"] {
-        assert!(commit_problems(subject, &[]).is_empty(), "{subject}");
+        assert!(message_problems(subject, &[]).is_empty(), "{subject}");
+    }
+}
+
+#[test]
+fn a_pushed_commit_is_checked_whatever_its_subject_starts_with() {
+    for subject in [
+        "Merge in new traversal API",
+        "fixup! feat: a",
+        "squash! feat: a",
+    ] {
+        assert_eq!(
+            commit_problems(subject, &["crates/rhizodb/src/lib.rs"]).len(),
+            1,
+            "{subject}"
+        );
     }
 }
 

@@ -172,7 +172,7 @@ fn what_displays_as_a_literal_reads_back_as_the_same_value() {
 }
 
 #[test]
-fn temporal_values_display_unquoted() {
+fn temporal_values_display_as_constructor_calls() {
     assert_eq!(
         shown_row(
             &db(),
@@ -182,17 +182,33 @@ fn temporal_values_display_unquoted() {
              duration({seconds: 0}), [date('2024-02-29')]"
         ),
         [
-            "2024-02-29",
-            "10:15:30",
-            "10:15+02:00",
-            "2024-02-29T10:15",
-            "2024-02-29T10:15Z",
-            "2024-02-29T10:15+01:00[Europe/Paris]",
-            "P1DT2H",
-            "PT0S",
-            "[2024-02-29]"
+            "date('2024-02-29')",
+            "localtime('10:15:30')",
+            "time('10:15+02:00')",
+            "localdatetime('2024-02-29T10:15')",
+            "datetime('2024-02-29T10:15Z')",
+            "datetime('2024-02-29T10:15+01:00[Europe/Paris]')",
+            "duration('P1DT2H')",
+            "duration('PT0S')",
+            "[date('2024-02-29')]"
         ]
     );
+}
+
+#[test]
+fn every_temporal_reads_back_as_the_same_value() {
+    let db = db();
+    let query = "RETURN [date('-0044-03-15'), date('+12345-01-01'), localtime('23:59:59.999999999'), \
+                 time('00:00:00.5-08:00'), localdatetime('2024-02-29T10:15:30.000000001'), \
+                 datetime('2024-02-29T10:15:30.25Z'), \
+                 datetime('2024-10-27T02:30:00+01:00[Europe/Paris]'), \
+                 datetime('2024-02-29T10:15:00-03:30'), duration('P1Y2M3DT4H5M6.7S'), \
+                 duration('P3W'), duration({days: -2, hours: 5}), duration({seconds: -1, nanoseconds: 5})]";
+    let value = single(&db, query);
+    let shown = value.to_string();
+    assert_eq!(single(&db, &format!("RETURN {shown}")), value, "{shown}");
+    let nested = Value::Map(BTreeMap::from([("t".to_owned(), value)]));
+    assert_eq!(single(&db, &format!("RETURN {nested}")), nested);
 }
 
 #[test]
