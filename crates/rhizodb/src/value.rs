@@ -26,6 +26,7 @@ const TAG_ZONED_DATETIME: u8 = 11;
 const TAG_DURATION: u8 = 12;
 const TAG_SINGLE_FLOATS: u8 = 13;
 const TAG_VARINT_INTEGER: u8 = 14;
+const TAG_BRAIN_FLOATS: u8 = 15;
 
 /// A stored property value. Null is never stored: setting a property to null removes it.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +81,20 @@ fn single_floats(items: &[PropertyValue]) -> Option<impl Iterator<Item = f32>> {
         .then(|| items.iter().filter_map(single))
 }
 
+fn brain_floats(items: &[PropertyValue]) -> Option<impl Iterator<Item = u16>> {
+    let brain = |item: &PropertyValue| match item {
+        PropertyValue::Float(value) => {
+            let narrow = *value as f32;
+            let bits = narrow.to_bits();
+            (f64::from(narrow).to_bits() == value.to_bits() && bits & 0xffff == 0)
+                .then_some((bits >> 16) as u16)
+        }
+        _ => None,
+    };
+    (!items.is_empty() && items.iter().all(|item| brain(item).is_some()))
+        .then(|| items.iter().filter_map(brain))
+}
+
 impl PropertyValue {
     #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
@@ -112,15 +127,22 @@ impl PropertyValue {
                 put_varint(out, value.len());
                 out.extend_from_slice(value);
             }
-            Self::List(items) => match single_floats(items) {
-                Some(floats) => {
+            Self::List(items) => match (brain_floats(items), single_floats(items)) {
+                (Some(floats), _) => {
+                    out.push(TAG_BRAIN_FLOATS);
+                    put_varint(out, items.len());
+                    for float in floats {
+                        out.extend_from_slice(&float.to_be_bytes());
+                    }
+                }
+                (None, Some(floats)) => {
                     out.push(TAG_SINGLE_FLOATS);
                     put_varint(out, items.len());
                     for float in floats {
                         out.extend_from_slice(&float.to_bits().to_be_bytes());
                     }
                 }
-                None => {
+                (None, None) => {
                     out.push(TAG_LIST);
                     put_varint(out, items.len());
                     for item in items {
@@ -376,6 +398,25 @@ impl<'a> Reader<'a> {
                         .collect(),
                 ))
             }
+            TAG_BRAIN_FLOATS => {
+                if depth >= MAX_DEPTH {
+                    return Err(DecodeError::NestingTooDeep);
+                }
+                let count = self.varint()?;
+                let bytes = self.take(count.checked_mul(2).ok_or(DecodeError::LengthOverflow)?)?;
+                Ok(PropertyValue::List(
+                    bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|chunk| {
+                            PropertyValue::Float(f64::from(f32::from_bits(
+                                u32::from(u16::from_be_bytes(*chunk)) << 16,
+                            )))
+                        })
+                        .collect(),
+                ))
+            }
             tag @ TAG_DATE..=TAG_DURATION => self.temporal(tag).map(PropertyValue::Temporal),
             tag => Err(DecodeError::UnknownTag(tag)),
         }
@@ -431,6 +472,14 @@ impl<'a> Reader<'a> {
                     }
                     self.varint()?
                         .checked_mul(4)
+                        .ok_or(DecodeError::LengthOverflow)?
+                }
+                TAG_BRAIN_FLOATS => {
+                    if depth >= MAX_DEPTH {
+                        return Err(DecodeError::NestingTooDeep);
+                    }
+                    self.varint()?
+                        .checked_mul(2)
                         .ok_or(DecodeError::LengthOverflow)?
                 }
                 tag => return Err(DecodeError::UnknownTag(tag)),

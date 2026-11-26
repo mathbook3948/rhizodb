@@ -60,6 +60,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A commit that deletes a key no checkpoint has written drops its tombstone once every open snapshot sees the delete, so reads beside a steady writer no longer slow down with every commit until the next checkpoint. Beside one writer, a mix of lookups, scans, and traversals reads twice as fast as before at the medium benchmark scale.
 - Writing a batch of rows takes fewer allocations: the maps of a parameter share their keys, an index into a list parameter reads the item in place, and a relationship's record is encoded once into a buffer the transaction keeps, so a bulk load of a medium graph runs about a fifth fewer instructions.
 - A write transaction keeps the changes of each adjacency segment in one fixed slot per node instead of ordered maps, so a bulk load of a large graph creates its relationships about a sixth faster.
+- A list whose floats all fit bfloat16 bit for bit, as embeddings a model wrote in bfloat16 do, is stored in two bytes a float instead of four, so the large benchmark graph, whose embeddings are such lists, takes a sixth less file. Format 15; opening an older database only records the new version, and an older build refuses a format 15 database.
 
 ### Fixed
 

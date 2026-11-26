@@ -201,11 +201,62 @@ fn a_list_of_single_precision_floats_takes_four_bytes_a_float() {
     let floats = |values: &[f64]| {
         PropertyValue::List(values.iter().copied().map(PropertyValue::Float).collect())
     };
-    let embedding: Vec<f64> = (0..64).map(|i| f64::from(i - 32) / 64.0).collect();
+    let embedding: Vec<f64> = (0..64)
+        .map(|i| f64::from(i - 32) / 1000.0)
+        .map(|value| f64::from(value as f32))
+        .collect();
     assert_eq!(floats(&embedding).encode().len(), 2 + 64 * 4);
     let mut mixed = embedding.clone();
     mixed.push(0.1);
     assert_eq!(floats(&mixed).encode().len(), 2 + 65 * 9);
+}
+
+#[test]
+fn a_list_of_floats_that_bfloat16_holds_takes_two_bytes_a_float() {
+    let floats = |values: &[f64]| {
+        PropertyValue::List(values.iter().copied().map(PropertyValue::Float).collect())
+    };
+    let embedding: Vec<f64> = (0..64).map(|i| f64::from(i - 32) / 64.0).collect();
+    let encoded = floats(&embedding).encode();
+    assert_eq!(encoded.len(), 2 + 64 * 2);
+    assert_eq!(PropertyValue::decode(&encoded), Ok(floats(&embedding)));
+    let mut wider = embedding.clone();
+    wider.push(f64::from(1.0f32 + f32::EPSILON));
+    assert_eq!(floats(&wider).encode().len(), 2 + 65 * 4);
+}
+
+#[test]
+fn a_list_of_single_precision_floats_stored_before_bfloat16_lists_still_reads() {
+    let mut bytes = vec![13, 2];
+    bytes.extend_from_slice(&0.5f32.to_bits().to_be_bytes());
+    bytes.extend_from_slice(&(-2.0f32).to_bits().to_be_bytes());
+    assert_eq!(
+        PropertyValue::decode(&bytes),
+        Ok(PropertyValue::List(vec![
+            PropertyValue::Float(0.5),
+            PropertyValue::Float(-2.0)
+        ]))
+    );
+}
+
+proptest! {
+    #[test]
+    fn a_list_of_bfloat16_floats_round_trips_bit_exactly(
+        bits in prop::collection::vec(any::<u16>(), 0..80),
+    ) {
+        let value = PropertyValue::List(
+            bits.iter()
+                .map(|bits| PropertyValue::Float(f64::from(f32::from_bits(u32::from(*bits) << 16))))
+                .collect(),
+        );
+        let encoded = value.encode();
+        let decoded = PropertyValue::decode(&encoded).unwrap();
+        prop_assert!(same_bits(&value, &decoded));
+        prop_assert!(bits.is_empty() || encoded.len() == 2 + 2 * bits.len());
+        let mut skipped = Reader::new(&encoded);
+        skipped.skip_value().unwrap();
+        prop_assert_eq!(skipped.remaining(), 0);
+    }
 }
 
 #[test]

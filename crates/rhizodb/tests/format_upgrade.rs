@@ -787,3 +787,63 @@ fn a_database_of_format_thirteen_keeps_its_keyword_indexes_exact_through_writes_
         int(0)
     );
 }
+
+const FORMAT_FOURTEEN: &str = "tests/fixtures/format-14.db";
+
+#[test]
+fn a_database_of_format_fourteen_answers_after_the_upgrade_as_it_did_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_FOURTEEN, directory.path());
+    let answers = answers_in("format-14.answers");
+    assert_eq!(answers.len(), 6);
+    for _ in 0..2 {
+        let db = Database::open(&path).unwrap();
+        db.check().unwrap();
+        for (query, expected) in &answers {
+            assert_eq!(format!("{:?}", run(&db, query)), *expected, "{query}");
+        }
+    }
+}
+
+#[test]
+fn a_database_of_format_fourteen_reads_its_lists_of_floats_beside_ones_written_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_FOURTEEN, directory.path());
+    let answers = answers_in("format-14.answers");
+    {
+        let db = Database::open(&path).unwrap();
+        run(
+            &db,
+            "MATCH (v:Vec) WHERE v.i % 50 = 7 CREATE (:Copy {i: v.i, brain: v.brain, single: v.single, double: v.double})",
+        );
+        run(
+            &db,
+            "MATCH (v:Vec) WHERE v.i % 13 = 1 SET v.extra = [0.5, -1.5, 3.0]",
+        );
+    }
+    let db = Database::open(&path).unwrap();
+    db.check().unwrap();
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(&db, query)), *expected, "{query}");
+    }
+    let originals = run(
+        &db,
+        "MATCH (v:Vec) WHERE v.i % 50 = 7 RETURN v.i, v.brain, v.single, v.double ORDER BY v.i",
+    );
+    let copies = run(
+        &db,
+        "MATCH (v:Copy) RETURN v.i, v.brain, v.single, v.double ORDER BY v.i",
+    );
+    assert_eq!(copies, originals);
+    assert_eq!(
+        run(
+            &db,
+            "MATCH (v:Vec) WHERE v.extra IS NOT NULL RETURN DISTINCT v.extra"
+        ),
+        vec![vec![Value::List(vec![
+            Value::Float(0.5),
+            Value::Float(-1.5),
+            Value::Float(3.0)
+        ])]]
+    );
+}
