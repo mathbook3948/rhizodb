@@ -30,6 +30,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Column names are not compared.
 - A null property of a LadybugDB node or relationship counts as absent.
 - A checked-in list names every query on which the engines do not agree, and a run fails when an outcome differs from it.
+- Each listed query that RhizoDB answers with rows also records a digest of those rows, taken under the same order and list rules as the comparison, so a run fails when RhizoDB's answer changes.
 - Each listed difference in returned rows carries the reason the engines differ.
 - A query that only one engine accepts is listed with the error it raised.
 - Consistency after a forced shutdown is tested.
