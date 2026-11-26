@@ -412,6 +412,7 @@ fn crashes(seeds: u64) -> Vec<Crash> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
     let total = {
         let fs = SimFs::new();
@@ -500,6 +501,7 @@ fn a_damaged_header_of_a_last_segment_that_holds_records_is_corruption() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_torn_tail_of_random_bytes_that_read_as_record_lengths_is_cut_off_quickly() {
     let fs = filled(2);
     let last = *segment_files(&fs, BASE).unwrap().last().unwrap();

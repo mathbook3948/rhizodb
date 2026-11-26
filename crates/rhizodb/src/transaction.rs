@@ -15,7 +15,7 @@ use crate::temporal::DateTime;
 
 /// A snapshot of the graph that several queries read, begun with
 /// [`Database::begin_read`](crate::Database::begin_read). Commits made after it began stay out of
-/// its view. Dropping it ends it.
+/// its view. Dropping it ends it. Threads can share it and run queries on it at once.
 ///
 /// ```
 /// use rhizodb::Database;
@@ -89,6 +89,13 @@ impl<'db> ReadTransaction<'db> {
 /// fn send<T: Send>(_: T) {}
 /// let db = rhizodb::Database::in_memory()?;
 /// send(db.begin_write()?);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
+///
+/// ```compile_fail
+/// fn share<T: Sync>(_: &T) {}
+/// let db = rhizodb::Database::in_memory()?;
+/// share(&db.begin_write()?);
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
 pub struct WriteTransaction<'db> {

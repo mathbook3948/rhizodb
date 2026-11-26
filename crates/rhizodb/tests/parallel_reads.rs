@@ -151,6 +151,7 @@ fn compare(serial: &Database, parallel: &Database, rng: &mut Rng, seed: u64) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_reads_give_the_same_answer_on_one_thread_and_on_four() {
     let base = seed();
     let fresh = (0..cases(FAST_GRAPHS)).map(|offset| base.wrapping_add(offset));
@@ -168,6 +169,7 @@ fn random_reads_give_the_same_answer_on_one_thread_and_on_four() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn reads_over_several_row_groups_give_the_same_answer_on_one_thread_and_on_four() {
     let seed = seed();
     let mut rng = Rng::new(seed);

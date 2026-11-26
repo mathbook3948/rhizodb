@@ -189,6 +189,7 @@ fn ordered_bounds_match_what_a_btree_map_accepts() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn every_snapshot_at_or_after_the_horizon_reads_its_own_state(
         commits in vec(vec((0u8..6, proptest::option::of(any::<u8>())), 1..5), 1..30),
         horizon_lag in 0u64..10,
@@ -242,6 +243,7 @@ fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn memtable_keys_rank_as_their_bytes_do(left in key_strategy(), right in key_strategy()) {
         let (left_key, right_key) = (Key::new(bytes(&left)), Key::new(bytes(&right)));
         prop_assert_eq!(left_key.cmp(&right_key), left.cmp(&right));
@@ -250,6 +252,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_range_holds_the_keys_between_its_bounds(
         keys in proptest::collection::btree_set(key_strategy(), 0..40),
         start in key_strategy(),

@@ -41,6 +41,7 @@ fn delta() -> impl Strategy<Value = Delta> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_chunk_reads_back_each_slot_and_label_count_it_was_encoded_with(
         live in prop_oneof![live_slots(0..1), live_slots(1..3), live_slots(0..400)],
         label in (0u32..13).prop_map(Token::new),
@@ -67,6 +68,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_cut_or_padded_chunk_is_rejected(
         live in live_slots(0..400),
         cut in 1usize..64,
@@ -83,6 +85,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_chunk_with_any_byte_changed_is_rejected_and_its_head_check_covers_its_head(
         live in prop_oneof![live_slots(0..1), live_slots(1..3), live_slots(0..400)],
         at in any::<prop::sample::Index>(),
@@ -100,6 +103,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_chunk_is_rejected_under_the_key_of_another_group(
         live in live_slots(0..400),
         other in any::<u64>(),
@@ -111,6 +115,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_delta_reads_back_and_rejects_any_changed_byte_or_another_key(
         delta in delta(),
         at in 0..DELTA,
@@ -131,6 +136,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_group_stored_as_a_chunk_and_deltas_reads_back_as_edited_and_keeps_few_deltas(
         initial in live_slots(0..4),
         transactions in prop::collection::vec(

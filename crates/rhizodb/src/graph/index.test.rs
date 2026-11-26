@@ -297,6 +297,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn indexes_match_the_data_after_any_committed_or_rolled_back_writes(
         steps in prop::collection::vec((op(), any::<bool>()), 0..60),
         indexed_after in 0usize..10,
@@ -886,6 +887,57 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
 }
 
 #[test]
+fn opening_a_database_recorded_under_older_unicode_tables_records_the_current_tokenizer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unicode.redb");
+    let mut older = tokenize::unicode_versions();
+    older[0].0 -= 1;
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("current terms".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write
+            .transaction
+            .put(
+                Table::Metadata,
+                keys::TOKENIZER_KEY,
+                &tokenize::fingerprint_of(&older),
+            )
+            .unwrap();
+        write.commit().unwrap();
+        assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction
+            .get(Table::Metadata, keys::TOKENIZER_KEY)
+            .unwrap(),
+        Some(tokenize::fingerprint())
+    );
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "current", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn opening_records_the_current_tokenizer() {
     let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
     let stored = graph
@@ -1140,4 +1192,163 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
     write.commit().unwrap();
     let violations = graph.read().unwrap().check_integrity().unwrap();
     assert_eq!(violations, vec![]);
+}
+
+#[test]
+fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let entry_writes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: RedbStorage::open(directory.path().join("drop.redb")).unwrap(),
+        entry_writes: Rc::clone(&entry_writes),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for i in 0..200 {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String(format!("word{i} graph"))),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Float(1.0),
+                            PropertyValue::Float(f64::from(i)),
+                        ]),
+                    ),
+                ]),
+            })
+            .unwrap();
+    }
+    write
+        .create_keyword_index("more words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    write.commit().unwrap();
+    entry_writes.set(0);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("points").unwrap());
+    write.commit().unwrap();
+    assert!(
+        entry_writes.get() <= ENTRY_TABLES.len(),
+        "{} entry writes",
+        entry_writes.get()
+    );
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction.scan_prefix(Table::Vectors, &[]).unwrap(),
+        vec![]
+    );
+    for neighbour in ["words", "more words"] {
+        assert_eq!(
+            read.keyword_search(neighbour, ElementKind::Node, "graph", 1000)
+                .unwrap()
+                .len(),
+            200,
+            "{neighbour}"
+        );
+    }
+    drop(read);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    assert!(write.drop_index("more words").unwrap());
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    for table in ENTRY_TABLES {
+        assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
+    }
+}
+
+#[test]
+fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .transaction
+        .put(
+            Table::Metadata,
+            keys::NEXT_INDEX_ID_KEY,
+            &u64::from(u32::MAX - 1).to_be_bytes(),
+        )
+        .unwrap();
+    for name in ["below", "words"] {
+        write
+            .create_keyword_index(name, IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+    }
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    write
+        .create_node(NodeRecord {
+            labels: [label].into(),
+            properties: Properties::from([(text, PropertyValue::String("graph".to_owned()))]),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("below", ElementKind::Node, "graph", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    for table in ENTRY_TABLES {
+        for (key, _) in read.transaction.scan_prefix(table, &[]).unwrap() {
+            assert!(
+                key.starts_with(&keys::index_prefix(u32::MAX - 1)),
+                "{table:?} keeps {key:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_vector_scores_of_either_sign_tie_in_ascending_id_order() {
+    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .create_vector_index(
+            "dots",
+            IndexTarget::Label("Doc"),
+            "at",
+            2,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for vector in [[-1.0, -2.0], [1.0, 2.0]] {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    at,
+                    PropertyValue::List(vector.map(PropertyValue::Float).to_vec()),
+                )]),
+            })
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let found = graph
+        .read()
+        .unwrap()
+        .vector_search("dots", ElementKind::Node, &[0.0, 0.0], 10)
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|(id, score)| (*id, score.to_bits()))
+            .collect::<Vec<_>>(),
+        vec![(0, 0.0f64.to_bits()), (1, 0.0f64.to_bits())]
+    );
 }

@@ -126,6 +126,7 @@ fn the_seed_folds_both_halves_of_the_database_id() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_page_opens_or_fails_without_panicking(
         bytes in proptest::collection::vec(any::<u8>(), BLOCK),
         reseal in any::<bool>(),

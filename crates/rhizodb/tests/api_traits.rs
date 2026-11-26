@@ -34,8 +34,6 @@ use rhizodb::VectorMetric;
 
 fn shared<T: Send + Sync + Debug>() {}
 
-fn moved<T: Send + Debug>() {}
-
 fn error<T: StdError + Send + Sync + 'static>() {}
 
 #[test]
@@ -65,7 +63,7 @@ fn values_and_handles_move_and_share_across_threads() {
     shared::<VectorMetric>();
     shared::<ErrorKind>();
     shared::<SyntaxErrorKind>();
-    moved::<ReadTransaction<'static>>();
+    shared::<ReadTransaction<'static>>();
 }
 
 #[test]

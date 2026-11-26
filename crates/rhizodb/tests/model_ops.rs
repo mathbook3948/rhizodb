@@ -30,6 +30,7 @@ fn fail(seed: u64, run: &Run, reason: &str) -> ! {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_transactions_in_memory_match_the_model() {
     let base = seed();
     let fresh = (0..cases(FAST_RUNS)).map(|offset| base.wrapping_add(offset));
@@ -48,6 +49,7 @@ fn random_transactions_in_memory_match_the_model() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_transactions_on_a_file_match_the_model_across_reopens() {
     let base = seed();
     let directory = tempfile::tempdir().unwrap();

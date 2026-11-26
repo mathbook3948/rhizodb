@@ -3087,7 +3087,34 @@ fn contains_aggregate(expr: &ast::Expr) -> bool {
 
 fn calls_rand(expr: &ast::Expr) -> bool {
     matches!(expr, ast::Expr::Function(call) if Function::lookup(&qualified_name(call)) == Some(Function::Rand))
-        || children(expr).into_iter().any(calls_rand)
+        || children(expr)
+            .into_iter()
+            .chain(bodies(expr))
+            .any(calls_rand)
+}
+
+fn bodies(expr: &ast::Expr) -> Vec<&ast::Expr> {
+    match expr {
+        ast::Expr::ListComprehension(comprehension) => comprehension
+            .filter
+            .as_deref()
+            .into_iter()
+            .chain(comprehension.projection.as_deref())
+            .collect(),
+        ast::Expr::ListPredicate(predicate) => vec![&predicate.predicate],
+        ast::Expr::Reduce(reduce) => vec![&reduce.body],
+        ast::Expr::PatternComprehension(comprehension) => comprehension
+            .filter
+            .as_deref()
+            .into_iter()
+            .chain(std::iter::once(comprehension.projection.as_ref()))
+            .collect(),
+        ast::Expr::Exists(subquery) | ast::Expr::Count(subquery) => match subquery.as_ref() {
+            ast::Subquery::Pattern { filter, .. } => filter.iter().collect(),
+            ast::Subquery::Query(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
 }
 
 fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {

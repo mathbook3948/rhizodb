@@ -36,6 +36,7 @@ fn leap_years_follow_the_gregorian_rule() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn day_numbers_round_trip(days in MIN_DAYS..=MAX_DAYS) {
         let (year, month, day) = civil_from_days(days);
         prop_assert!((1..=12).contains(&month));

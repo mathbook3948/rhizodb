@@ -83,6 +83,7 @@ fn levels_off(name: &str, steps: u64, slack: isize, mut step: impl FnMut(u64)) -
 const ENGINE_LOG_AND_MEMTABLE: isize = 320 << 20;
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn the_heap_levels_off_over_long_loops_that_keep_no_new_data() {
     let steps = cases(300);
     let quiet = 256 << 10;

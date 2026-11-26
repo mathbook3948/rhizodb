@@ -5,10 +5,13 @@ use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -192,8 +195,8 @@ pub(crate) struct Adjacent {
 #[derive(Debug)]
 pub(crate) struct Graph<S> {
     storage: S,
-    writer: Arc<Mutex<Option<ThreadId>>>,
-    committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    writers: Arc<Writers>,
+    committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
     committed_column_deltas: Arc<ColumnDeltas>,
@@ -284,8 +287,12 @@ impl<S: Storage> Graph<S> {
         let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
         Ok(Self {
             storage,
-            writer: Arc::default(),
-            committed_index_definitions: Arc::new(Mutex::new(definitions)),
+            writers: Arc::default(),
+            committed_index_definitions: Arc::new(CommittedCatalog {
+                definitions: Mutex::new(definitions),
+                changes: AtomicU64::new(0),
+                publishing: Mutex::new(()),
+            }),
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
             committed_column_deltas: Arc::default(),
@@ -304,12 +311,20 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
-        let catalog = lock(&self.committed_index_definitions);
+        let committed = &self.committed_index_definitions;
+        let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
+        let definitions = Arc::clone(&lock(&committed.definitions));
+        let index_definitions =
+            if before.is_multiple_of(2) && committed.changes.load(Ordering::SeqCst) == before {
+                OnceLock::from(definitions)
+            } else {
+                OnceLock::new()
+            };
         Ok(GraphTx {
             transaction,
             _writer: None,
-            index_definitions: OnceLock::from(Arc::clone(&catalog)),
+            index_definitions,
             catalog: None,
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: true,
@@ -332,32 +347,75 @@ impl<S: Storage> Graph<S> {
         })
     }
 
-    /// Opens the one write transaction, waiting for another thread's to end. Fails instead of
-    /// waiting forever when the calling thread already holds it.
     /// Runs `work` on the storage, which may take the storage's writer itself, and fails when
     /// this thread holds the write transaction that work would wait for.
     pub(crate) fn maintain<R>(&self, work: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
-        if *lock(&self.writer) == Some(thread::current().id()) {
+        if lock(&self.writers.slot).writer == Some(thread::current().id()) {
             return Err(GraphError::WriterOnThisThread);
         }
         Ok(work(&self.storage))
     }
 
-    pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+    /// Runs `work` on the storage, which must take no writer, from any thread.
+    pub(crate) fn inspect<R>(&self, work: impl FnOnce(&S) -> R) -> R {
+        work(&self.storage)
+    }
+
+    /// Keeps write transactions of other threads from beginning until the claim is dropped,
+    /// waiting for another thread's claim to end. The calling thread goes on beginning write
+    /// transactions one after another. Fails when the calling thread holds a write transaction.
+    pub(crate) fn exclusive_writes(&self) -> Result<ExclusiveWrites, GraphError> {
         let current = thread::current().id();
-        if *lock(&self.writer) == Some(current) {
+        let mut slot = lock(&self.writers.slot);
+        if slot.writer == Some(current) {
             return Err(GraphError::WriterOnThisThread);
         }
-        let transaction = self.storage.begin_write()?;
-        *lock(&self.writer) = Some(current);
-        let definitions = Arc::clone(&lock(&self.committed_index_definitions));
+        while slot.exclusive.is_some() {
+            slot = wait(&self.writers.released, slot);
+        }
+        slot.exclusive = Some(current);
+        Ok(ExclusiveWrites {
+            writers: Arc::clone(&self.writers),
+        })
+    }
+
+    /// Opens the one write transaction, waiting for another thread's to end and for another
+    /// thread's exclusive writes. Fails instead of waiting forever when the calling thread
+    /// already holds it.
+    pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+        let current = thread::current().id();
+        let transaction = loop {
+            {
+                let mut slot = lock(&self.writers.slot);
+                if slot.writer == Some(current) {
+                    return Err(GraphError::WriterOnThisThread);
+                }
+                while slot.excludes(current) {
+                    slot = wait(&self.writers.released, slot);
+                }
+            }
+            let transaction = self.storage.begin_write()?;
+            let mut slot = lock(&self.writers.slot);
+            if !slot.excludes(current) {
+                slot.writer = Some(current);
+                break transaction;
+            }
+            drop(slot);
+            transaction.rollback()?;
+        };
+        let committed = &self.committed_index_definitions;
+        let index_definitions = if committed.changes.load(Ordering::SeqCst).is_multiple_of(2) {
+            OnceLock::from(Arc::clone(&lock(&committed.definitions)))
+        } else {
+            OnceLock::new()
+        };
         Ok(GraphTx {
             transaction,
             _writer: Some(WriterClaim {
-                slot: Arc::clone(&self.writer),
+                writers: Arc::clone(&self.writers),
                 owner: current,
             }),
-            index_definitions: OnceLock::from(definitions),
+            index_definitions,
             catalog: Some(Catalog {
                 shared: Arc::clone(&self.committed_index_definitions),
                 changed: false,
@@ -442,23 +500,70 @@ impl<T> GraphTx<T> {
 
 #[derive(Debug)]
 struct Catalog {
-    shared: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    shared: Arc<CommittedCatalog>,
     changed: bool,
 }
 
 #[derive(Debug)]
+struct CommittedCatalog {
+    definitions: Mutex<Arc<[Vec<u8>]>>,
+    changes: AtomicU64,
+    publishing: Mutex<()>,
+}
+
+#[derive(Debug, Default)]
+struct Writers {
+    slot: Mutex<WriterSlot>,
+    released: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct WriterSlot {
+    writer: Option<ThreadId>,
+    exclusive: Option<ThreadId>,
+}
+
+impl WriterSlot {
+    fn excludes(&self, thread: ThreadId) -> bool {
+        self.exclusive.is_some_and(|owner| owner != thread)
+    }
+}
+
+#[derive(Debug)]
 struct WriterClaim {
-    slot: Arc<Mutex<Option<ThreadId>>>,
+    writers: Arc<Writers>,
     owner: ThreadId,
 }
 
 impl Drop for WriterClaim {
     fn drop(&mut self) {
-        let mut slot = lock(&self.slot);
-        if *slot == Some(self.owner) {
-            *slot = None;
+        let mut slot = lock(&self.writers.slot);
+        if slot.writer == Some(self.owner) {
+            slot.writer = None;
         }
     }
+}
+
+/// Write transactions of other threads wait while it lives.
+#[derive(Debug)]
+pub(crate) struct ExclusiveWrites {
+    writers: Arc<Writers>,
+}
+
+impl Drop for ExclusiveWrites {
+    fn drop(&mut self) {
+        lock(&self.writers.slot).exclusive = None;
+        self.writers.released.notify_all();
+    }
+}
+
+fn wait<'a, V>(
+    condition: &Condvar,
+    guard: std::sync::MutexGuard<'a, V>,
+) -> std::sync::MutexGuard<'a, V> {
+    condition
+        .wait(guard)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
@@ -1149,9 +1254,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             }) => Some((shared, self.index_definitions()?)),
             _ => None,
         };
-        let mut current = definitions
-            .as_ref()
-            .map(|(shared, definitions)| (lock(shared), definitions));
+        let publishing = definitions.as_ref().map(|(shared, _)| {
+            let publishing = lock(&shared.publishing);
+            shared.changes.fetch_add(1, Ordering::SeqCst);
+            publishing
+        });
         let mut counts = self.column_deltas.as_ref().map(|shared| lock(shared));
         let committed = self.transaction.commit();
         if let Some(counts) = &mut counts {
@@ -1161,11 +1268,14 @@ impl<T: WriteTransaction> GraphTx<T> {
                 counts.clear();
             }
         }
-        committed?;
-        if let Some((current, definitions)) = &mut current {
-            **current = Arc::clone(definitions);
+        if let Some((shared, definitions)) = definitions {
+            if committed.is_ok() {
+                *lock(&shared.definitions) = definitions;
+            }
+            shared.changes.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(())
+        drop(publishing);
+        Ok(committed?)
     }
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {
@@ -1755,10 +1865,11 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(Some(record))
     }
 
-    fn require_node(&self, id: NodeId) -> Result<(), GraphError> {
-        self.node_label_set(id)?
-            .map(|_| ())
-            .ok_or(GraphError::NodeNotFound(id))
+    fn require_node(&mut self, id: NodeId) -> Result<(), GraphError> {
+        let mut reader = std::mem::take(&mut self.labels);
+        let found = self.with_labels(&mut reader, id, |_| ());
+        self.labels = reader;
+        found?.ok_or(GraphError::NodeNotFound(id))
     }
 
     fn partial_record(
