@@ -17,6 +17,7 @@ fn agrees(read: Option<PropertyValue>, stored: Option<&PropertyValue>) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn one_relationship_property_reads_what_the_whole_record_holds(
         properties in properties(),
         key in (0u32..9).prop_map(Token::new),
@@ -56,6 +57,7 @@ fn same_record(read: &RelationshipRecord, record: &RelationshipRecord) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_relationship_record_decodes_what_it_encodes(record in relationship()) {
         let read = RelationshipRecord::decode(&record.encode()).unwrap();
         prop_assert!(same_record(&read, &record));

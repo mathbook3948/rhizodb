@@ -170,21 +170,25 @@ fn crash_at_every_operation(small: u64, work: Work) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_one_node_commit_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(0, one_node);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_one_node_commit_after_small_commits_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(40, one_node);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_many_nodes_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, many_nodes);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_empties_a_group_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, empty_a_group);
 }
@@ -196,6 +200,7 @@ fn fold_deltas(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: 
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_folds_deltas_into_their_chunk_leaves_the_graph_before_or_after_it()
 {
     crash_at_every_operation(40, fold_deltas);

@@ -1026,7 +1026,7 @@ fn brute_force(
                 }
                 _ => dot(query, vector),
             };
-            (position, score)
+            (position, score + 0.0)
         })
         .collect();
     scored.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
@@ -1049,6 +1049,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn vector_search_returns_exactly_the_brute_force_top_k(
         vectors in prop::collection::vec(prop::collection::vec(-4i8..=4, 3), 0..24),
         query in prop::collection::vec(-4i8..=4, 3),
@@ -1072,6 +1073,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn vector_search_scores_match_the_brute_force_bit_for_bit(
         (vectors, query) in (1usize..=8).prop_flat_map(|dimension| (
             prop::collection::vec(prop::collection::vec(-6i8..=6, dimension), 0..40),
@@ -1100,6 +1102,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_phrase_finds_exactly_the_nodes_with_a_string_that_holds_its_words_in_a_row(
         documents in prop::collection::vec(
             prop::collection::vec(prop::collection::vec(0usize..3, 0..6), 0..4),
@@ -1137,6 +1140,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_prefix_finds_exactly_the_nodes_with_a_word_that_starts_with_it(
         documents in prop::collection::vec(prop::collection::vec(0usize..4, 0..5), 0..12),
         prefix in prop::sample::select(vec!["r", "re", "rea", "read", "reader", "b", "x"]),

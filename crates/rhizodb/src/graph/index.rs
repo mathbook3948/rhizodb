@@ -198,7 +198,7 @@ impl Batch {
                 VectorMetric::Euclidean => 0.0 - sums[lane].sqrt(),
                 VectorMetric::DotProduct => sums[lane],
             };
-            scored.push((self.ids[lane], score));
+            scored.push((self.ids[lane], score + 0.0));
         }
         self.len = 0;
     }
@@ -1246,11 +1246,21 @@ impl<T: WriteTransaction> GraphTx<T> {
         let prefix = keys::index_prefix(index.id);
         self.postings.forget(&prefix);
         for table in ENTRY_TABLES {
-            for (key, _) in self
-                .transaction
-                .scan_prefix(table, &keys::index_prefix(index.id))?
-            {
-                self.transaction.delete(table, &key)?;
+            match index.id.checked_add(1) {
+                Some(next) => {
+                    self.transaction
+                        .delete_range(table, &prefix, &keys::index_prefix(next))?;
+                }
+                None => {
+                    let mut doomed = Vec::new();
+                    self.transaction.visit_prefix(table, &prefix, |key, _| {
+                        doomed.push(key.to_vec());
+                        Ok::<(), GraphError>(())
+                    })?;
+                    for key in doomed {
+                        self.transaction.delete(table, &key)?;
+                    }
+                }
             }
         }
         Ok(())

@@ -192,31 +192,37 @@ fn crash_at_every_operation(small: u64, work: Work) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_one_value_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(0, one_value);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_one_node_after_small_commits_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(40, one_node);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_many_values_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, many_values);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_deletes_many_nodes_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, delete_many);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_empties_a_column_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, empty_a_column);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_folds_deltas_into_segments_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(40, fold_deltas);
 }

@@ -21,7 +21,8 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Creating an index that exists with the same definition changes nothing.
 - Creating an index under a name that another definition holds fails with its own error kind.
 - Dropping an index removes its definition and every entry in one transaction.
-- The database keeps the committed index definitions in memory, and a commit that changes them replaces that copy before any later transaction begins.
+- The database keeps the committed index definitions in memory, and a commit that changes them replaces that copy once its storage commit returns.
+- A commit that changes the index definitions holds no lock that reads wait for, and a transaction that begins while it runs reads the definitions from its own snapshot.
 - Dropping an index that does not exist succeeds and reports that nothing was dropped.
 - Each index has an internal ID that keys its entries, so a dropped index's name can be reused at once.
 - Queries search an index over a label with the built-in procedures `db.index.keyword.queryNodes(index, query, limit)` and `db.index.vector.queryNodes(index, vector, limit)`.
@@ -34,11 +35,13 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Equal scores come in ascending element ID order.
 - A keyword index covers one or more properties, and an element's document is the terms of all of them together.
 - A keyword index reads strings and lists of strings, and ignores values of other types.
+- Invisible format characters, the default ignorable code points other than the zero-width joiner, the zero-width non-joiner, and the Hangul fillers, are removed from text before anything else.
 - Text is put in Unicode normalization form NFKC before it is split.
 - Text splits into words at Unicode word boundaries.
 - Words are lowercased.
 - A word starts and ends at a grapheme cluster whose first character is a letter or digit, so punctuation that a script change leaves at its edge, and a mark after punctuation, are not part of it.
 - A grapheme cluster that starts with whitespace, or with a character that Unicode grapheme rules join to the character before it, separates words.
+- A `"` inside a word of stored text, as in a Hebrew acronym, separates words, since a keyword query reads it as the edge of a phrase.
 - A run of Hangul, Han, Hiragana, Katakana, or a script that Unicode line breaking leaves to a dictionary, such as Thai, Lao, Khmer, or Myanmar, is indexed as its overlapping pairs of units and its single units.
 - A unit of such a run is a grapheme cluster, except in Hangul.
 - Such a run starts at a grapheme cluster whose first character is a letter.
@@ -64,7 +67,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Each posting keeps the positions of its term in the element.
 - Each indexed element keeps the terms it was indexed under.
 - Removing an element from a keyword index deletes the terms it kept, without tokenizing again.
-- The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms and their positions for a fixed probe text that exercises the Unicode tables it depends on.
+- The database records which tokenizer built its keyword indexes, as the tokenizer's version, the Unicode version of each table it reads, and its terms and their positions for a fixed probe text that exercises those tables.
 - Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction.
 - That rebuild records the current tokenizer.
 - Changing what the tokenizer produces on purpose raises its version.

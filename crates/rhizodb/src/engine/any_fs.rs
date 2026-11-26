@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -17,6 +16,9 @@ use super::os_fs::OsFile;
 use super::os_fs::OsFs;
 use super::store::Engine;
 use super::store::EngineOptions;
+use super::store::staging_name;
+use super::wal::segment_files;
+use super::wal::segment_name;
 
 /// The file system a database lives on: a directory of the operating system's, or memory.
 #[derive(Debug)]
@@ -194,25 +196,45 @@ pub(crate) fn in_memory(options: EngineOptions) -> Result<Engine<AnyFs>, EngineE
 /// checkpoints its whole log into the file and removes the log's segments. Fails when a segment
 /// is left, since the file alone would then miss commits.
 pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result<(), StorageError> {
-    let copy = open_path(path, EngineOptions::default()).map_err(StorageError::from)?;
-    copy_tables(snapshot, &copy)?;
-    drop(copy);
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .map(|name| format!("{name}-wal-"))
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            StorageError::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the backup path {} names no file in UTF-8", path.display()),
+            ))
+        })?;
     let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => Path::new(".").to_path_buf(),
     };
-    for entry in fs::read_dir(directory).map_err(StorageError::new)? {
-        let entry = entry.map_err(StorageError::new)?;
-        if entry.file_name().to_string_lossy().starts_with(&name) {
-            return Err(StorageError::new(io::Error::other(
-                "closing the copy left a log segment beside it",
-            )));
-        }
+    write_copy_on(snapshot, Arc::new(AnyFs::Os(OsFs::new(directory))), name)
+}
+
+/// [`write_copy`] into the database file `name` on `fs`, removing the copy's log segments and
+/// staging file when it fails.
+pub(crate) fn write_copy_on<F: FileSystem + 'static>(
+    snapshot: &impl ReadTransaction,
+    fs: Arc<F>,
+    name: &str,
+) -> Result<(), StorageError> {
+    let copied = Engine::open(Arc::clone(&fs), name, EngineOptions::default())
+        .map_err(StorageError::from)
+        .and_then(|copy| {
+            copy_tables(snapshot, &copy)?;
+            copy.close().map_err(StorageError::from)
+        });
+    let left = segment_files(&*fs, name).map_err(StorageError::new)?;
+    if copied.is_ok() && left.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    for sequence in left {
+        let _ = fs.remove(&segment_name(name, sequence));
+    }
+    let _ = fs.remove(&staging_name(name));
+    copied?;
+    Err(StorageError::new(io::Error::other(
+        "closing the copy left a log segment beside it",
+    )))
 }

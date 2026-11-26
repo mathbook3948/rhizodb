@@ -193,49 +193,58 @@ fn crash_at_every_operation(small: u64, work: Work) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_one_relationship_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(0, one_relationship);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_one_relationship_after_small_commits_leaves_the_graph_before_or_after_it()
  {
     crash_at_every_operation(30, one_relationship);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_one_delete_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, one_delete);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_self_loops_and_parallel_relationships_leaves_the_graph_before_or_after_it()
  {
     crash_at_every_operation(10, self_loops_and_parallels);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_of_many_relationships_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, many_relationships);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_detaches_and_deletes_many_nodes_leaves_the_graph_before_or_after_it()
  {
     crash_at_every_operation(10, detach_many);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_folds_deltas_into_parts_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(30, fold_deltas);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_grows_a_hub_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, grow_the_hub);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_inside_a_commit_that_empties_a_segment_leaves_the_graph_before_or_after_it() {
     crash_at_every_operation(10, empty_a_segment);
 }

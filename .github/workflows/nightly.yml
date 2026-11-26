@@ -22,8 +22,16 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-      - run: mise run storage-deep
-      - run: mise run random-deep
+      - shell: bash
+        run: mise run storage-deep 2>&1 | tee storage-deep.log
+      - shell: bash
+        run: mise run random-deep 2>&1 | tee random-deep.log
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log-storage-${{ matrix.os }}
+          path: "*-deep.log"
+          if-no-files-found: ignore
       - if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -41,9 +49,16 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-      - run: mise run soak
+      - shell: bash
+        run: mise run soak 2>&1 | tee soak.log
         env:
           RHIZODB_SOAK_SECS: "1200"
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log-soak
+          path: soak.log
+          if-no-files-found: ignore
 
   advisories:
     runs-on: ubuntu-latest
@@ -53,7 +68,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
-      - run: cargo deny check advisories
+      - shell: bash
+        run: cargo deny check advisories 2>&1 | tee advisories.log
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log-advisories
+          path: advisories.log
+          if-no-files-found: ignore
 
   fuzz:
     runs-on: ubuntu-latest
@@ -63,9 +85,24 @@ jobs:
         with:
           persist-credentials: false
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
-      - run: sh fuzz/run.sh 600
+      - shell: bash
+        run: sh fuzz/run.sh 600 2>&1 | tee fuzz.log
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log-fuzz
+          path: fuzz.log
+          if-no-files-found: ignore
       - if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
+
+  report:
+    needs: [storage, soak, advisories, fuzz]
+    if: failure() && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/report.yml

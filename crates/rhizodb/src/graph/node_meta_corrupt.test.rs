@@ -211,6 +211,7 @@ fn the_healthy_graph_keeps_chunks_and_deltas_in_both_groups() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_changed_byte_in_any_node_meta_entry_fails_reads_that_need_it_and_never_misanswers() {
     let (graph, model) = healthy();
     let entries = node_meta(&graph.read().unwrap());

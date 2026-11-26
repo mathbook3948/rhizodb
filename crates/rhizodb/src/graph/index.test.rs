@@ -1,4 +1,6 @@
 use proptest::prelude::*;
+use std::cell::Cell;
+use std::rc::Rc;
 
 use super::*;
 use crate::graph::Direction;
@@ -7,7 +9,9 @@ use crate::graph::NodeId;
 use crate::graph::RelationshipId;
 use crate::graph::records::Properties;
 use crate::storage::Storage;
+use crate::storage::StorageError;
 use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 
 const TEXTS: [&str; 6] = [
     "graph store",
@@ -290,6 +294,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn indexes_match_the_data_after_any_committed_or_rolled_back_writes(
         steps in prop::collection::vec((op(), any::<bool>()), 0..60),
         indexed_after in 0usize..10,
@@ -519,6 +524,57 @@ fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
             .property_index(target, text)
             .unwrap()
             .is_some()
+    );
+}
+
+#[test]
+fn opening_a_database_recorded_under_older_unicode_tables_records_the_current_tokenizer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unicode.rhizodb");
+    let mut older = tokenize::unicode_versions();
+    older[0].0 -= 1;
+    {
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("current terms".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write
+            .transaction
+            .put(
+                Table::Metadata,
+                keys::TOKENIZER_KEY,
+                &tokenize::fingerprint_of(&older),
+            )
+            .unwrap();
+        write.commit().unwrap();
+        assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
+    }
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction
+            .get(Table::Metadata, keys::TOKENIZER_KEY)
+            .unwrap(),
+        Some(tokenize::fingerprint())
+    );
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "current", 10)
+            .unwrap()
+            .len(),
+        1
     );
 }
 
@@ -777,4 +833,278 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
     write.commit().unwrap();
     let violations = graph.read().unwrap().check_integrity().unwrap();
     assert_eq!(violations, vec![]);
+}
+
+#[derive(Debug)]
+struct CountingStorage {
+    inner: TestStorage,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+struct CountingWrite<'a> {
+    inner: <TestStorage as Storage>::Write<'a>,
+    entry_writes: Rc<Cell<usize>>,
+}
+
+impl CountingWrite<'_> {
+    fn count(&self, table: Table) {
+        if ENTRY_TABLES.contains(&table) && table != Table::KeywordPostings {
+            self.entry_writes.set(self.entry_writes.get() + 1);
+        }
+    }
+}
+
+impl Storage for CountingStorage {
+    type Read<'a> = <TestStorage as Storage>::Read<'a>;
+    type Write<'a> = CountingWrite<'a>;
+
+    fn begin_read(&self) -> Result<Self::Read<'_>, StorageError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<CountingWrite<'_>, StorageError> {
+        Ok(CountingWrite {
+            inner: self.inner.begin_write()?,
+            entry_writes: Rc::clone(&self.entry_writes),
+        })
+    }
+
+    fn write_copy(snapshot: &Self::Read<'_>, path: &std::path::Path) -> Result<(), StorageError> {
+        TestStorage::write_copy(snapshot, path)
+    }
+}
+
+impl ReadTransaction for CountingWrite<'_> {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_prefix(table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, visit)
+    }
+}
+
+impl WriteTransaction for CountingWrite<'_> {
+    fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.put(table, key, value)
+    }
+
+    fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete(table, key)
+    }
+
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.count(table);
+        self.inner.delete_range(table, start, end)
+    }
+
+    fn commit(self) -> Result<(), StorageError> {
+        self.inner.commit()
+    }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback()
+    }
+}
+
+#[test]
+fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let entry_writes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: test_engine::open(directory.path().join("drop.rhizodb")),
+        entry_writes: Rc::clone(&entry_writes),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for i in 0..200 {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([
+                    (text, PropertyValue::String(format!("word{i} graph"))),
+                    (
+                        at,
+                        PropertyValue::List(vec![
+                            PropertyValue::Float(1.0),
+                            PropertyValue::Float(f64::from(i)),
+                        ]),
+                    ),
+                ]),
+            })
+            .unwrap();
+    }
+    write
+        .create_keyword_index("more words", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    write.commit().unwrap();
+    entry_writes.set(0);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("points").unwrap());
+    write.commit().unwrap();
+    assert!(
+        entry_writes.get() <= ENTRY_TABLES.len(),
+        "{} entry writes",
+        entry_writes.get()
+    );
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction.scan_prefix(Table::Vectors, &[]).unwrap(),
+        vec![]
+    );
+    for neighbour in ["words", "more words"] {
+        assert_eq!(
+            read.keyword_search(neighbour, ElementKind::Node, "graph", 1000)
+                .unwrap()
+                .len(),
+            200,
+            "{neighbour}"
+        );
+    }
+    drop(read);
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    assert!(write.drop_index("more words").unwrap());
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    for table in ENTRY_TABLES {
+        assert_eq!(read.transaction.scan_prefix(table, &[]).unwrap(), vec![]);
+    }
+}
+
+#[test]
+fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .transaction
+        .put(
+            Table::Metadata,
+            keys::NEXT_INDEX_ID_KEY,
+            &u64::from(u32::MAX - 1).to_be_bytes(),
+        )
+        .unwrap();
+    for name in ["below", "words"] {
+        write
+            .create_keyword_index(name, IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+    }
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    write
+        .create_node(NodeRecord {
+            labels: [label].into(),
+            properties: Properties::from([(text, PropertyValue::String("graph".to_owned()))]),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    assert!(write.drop_index("words").unwrap());
+    write.commit().unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("below", ElementKind::Node, "graph", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+    for table in ENTRY_TABLES {
+        for (key, _) in read.transaction.scan_prefix(table, &[]).unwrap() {
+            assert!(
+                key.starts_with(&keys::index_prefix(u32::MAX - 1)),
+                "{table:?} keeps {key:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_vector_scores_of_either_sign_tie_in_ascending_id_order() {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .create_vector_index(
+            "dots",
+            IndexTarget::Label("Doc"),
+            "at",
+            2,
+            VectorMetric::DotProduct,
+        )
+        .unwrap();
+    let label = write.intern_token("Doc").unwrap();
+    let at = write.intern_token("at").unwrap();
+    for vector in [[-1.0, -2.0], [1.0, 2.0]] {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    at,
+                    PropertyValue::List(vector.map(PropertyValue::Float).to_vec()),
+                )]),
+            })
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let found = graph
+        .read()
+        .unwrap()
+        .vector_search("dots", ElementKind::Node, &[0.0, 0.0], 10)
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|(id, score)| (*id, score.to_bits()))
+            .collect::<Vec<_>>(),
+        vec![(0, 0.0f64.to_bits()), (1, 0.0f64.to_bits())]
+    );
 }

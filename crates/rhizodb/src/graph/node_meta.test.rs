@@ -414,6 +414,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(48)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn node_meta_matches_a_model_through_commits_rollbacks_reopens_and_crashes(
         ops in prop::collection::vec(op(), 1..80),
     ) {
@@ -465,6 +466,7 @@ fn single_commits(rounds: usize, seed: u64) -> Result<(), TestCaseError> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn many_one_node_commits_across_a_group_edge_read_back_after_each() {
     single_commits(test_scale::cases(300).min(5000) as usize, 7).unwrap();
 }
@@ -598,6 +600,7 @@ fn version_of(read: &GraphTx<impl ReadTransaction>) -> usize {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn readers_during_writes_see_the_snapshot_they_began_at() {
     let fs = SimFs::new();
     let graph = open(&fs);

@@ -377,6 +377,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_lookup_finds_what_a_scan_finds_after_any_writes(
         writes in prop::collection::vec(write(), 0..30),
         lookups in prop::collection::vec((0..LOOKUPS.len(), value(), value()), 1..12),
@@ -430,6 +431,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_lookup_by_an_expression_finds_what_a_scan_finds(
         writes in prop::collection::vec(write(), 0..30),
         lookups in prop::collection::vec((0..EXPRESSION_LOOKUPS.len(), value(), value()), 1..12),

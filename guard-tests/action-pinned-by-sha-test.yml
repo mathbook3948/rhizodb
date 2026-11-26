@@ -1,6 +1,7 @@
 id: action-pinned-by-sha
 valid:
   - "steps:\n  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+  - "jobs:\n  report:\n    uses: ./.github/workflows/report.yml\n"
 invalid:
   - "steps:\n  - uses: actions/checkout@v7\n"
   - "steps:\n  - uses: actions/checkout@main\n"

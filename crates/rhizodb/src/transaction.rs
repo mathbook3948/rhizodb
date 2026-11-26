@@ -15,7 +15,7 @@ use crate::temporal::DateTime;
 
 /// A snapshot of the graph that several queries read, begun with
 /// [`Database::begin_read`](crate::Database::begin_read). Commits made after it began stay out of
-/// its view. Dropping it ends it.
+/// its view. Dropping it ends it. Threads can share it and run queries on it at once.
 ///
 /// ```
 /// use rhizodb::Database;
@@ -91,6 +91,13 @@ impl<'db> ReadTransaction<'db> {
 /// send(db.begin_write()?);
 /// # Ok::<(), rhizodb::Error>(())
 /// ```
+///
+/// ```compile_fail
+/// fn share<T: Sync>(_: &T) {}
+/// let db = rhizodb::Database::in_memory()?;
+/// share(&db.begin_write()?);
+/// # Ok::<(), rhizodb::Error>(())
+/// ```
 #[must_use = "a write transaction rolls back when it is dropped without a commit"]
 pub struct WriteTransaction<'db> {
     tx: Option<GraphTx<<Backend as Storage>::Write<'db>>>,
@@ -112,18 +119,18 @@ impl<'db> WriteTransaction<'db> {
         }
     }
 
-    /// Runs one GQL query in the transaction and returns its rows. A query that fails rolls back
-    /// the whole transaction.
+    /// Runs one GQL query in the transaction and returns its rows. A query that fails or panics
+    /// rolls back the whole transaction.
     ///
     /// Fails with the kind that names what is wrong with the query, such as a syntax, binding,
     /// type, or value error, and with
     /// [`ErrorKind::TransactionAborted`](crate::ErrorKind::TransactionAborted) on every call
     /// after a query in the transaction has failed.
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        let tx = self.tx.as_mut().ok_or_else(aborted)?;
-        let result = query::execute_write(tx, &self.began, self.statements, query, parameters);
-        if result.is_err() {
-            self.tx = None;
+        let mut tx = self.tx.take().ok_or_else(aborted)?;
+        let result = query::execute_write(&mut tx, &self.began, self.statements, query, parameters);
+        if result.is_ok() {
+            self.tx = Some(tx);
         }
         result
     }

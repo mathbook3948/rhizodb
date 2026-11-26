@@ -39,9 +39,12 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The simulated file system is deterministic for a given seed.
 - The simulated file system holds several files and can inject faults into one of them alone.
 - A simulated crash keeps every synced write and may drop, reorder, or tear at 512-byte sectors each write since the last sync.
+- A write torn with garbage may also garble the other sectors of its 4 KiB unit, synced ones included, as a device that rewrites a whole page or sector does.
 - A simulated crash may lose a change of file length, a create, a rename, or a remove that was not synced.
 - The simulated file system can fail every operation after a chosen count, once or from then on.
-- A failed fsync in the simulated file system fails every later fsync of that file.
+- A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
+- A failed sync of the simulated file system's names fails every later one.
+- The copy is closed cleanly before the rename, so the renamed file needs no log.
 - `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
 - Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
@@ -53,6 +56,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The database file is made of 4096-byte blocks.
 - Blocks 0 and 1 of the database file are two header slots, written in turn, and the valid slot of the higher generation describes the database.
 - A header slot of a generation of the other slot's parity is invalid.
+- A header slot whose generation, LSNs, first log segment, or extent counter is 2^63 or more is invalid, so no increment of one overflows.
 - A header slot of another major engine format, a newer minor one, or with an unknown flag refuses the file instead of falling back to the other slot.
 - An extent is 1024 blocks, and extent slot n starts at block 2 + 1024 n.
 - A block reference holds the extent id in its high 44 bits and the block inside the extent in its low 20, and zero refers to nothing.
@@ -62,18 +66,24 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Page checksums are seeded with the database id, so a page copied from another database is corruption.
 - Tables have stable numeric ids, with 1 to 255 for the engine, 256 to 511 for the graph's tables, and the rest reserved.
 - Log segments are files named after the database file with `-wal-` and the segment number in 16 hex digits.
-- Log segments are made of 512-byte blocks, and each record starts a block of its own, so an append never rewrites a synced sector.
+- Log segments are made of 512-byte blocks, and the header and each record start a 4 KiB unit of their own, so an append never rewrites a page or a 4 KiB device sector that holds synced data.
+- A segment header of engine format minor 3 or later records the 4 KiB unit its records start at, and a segment of an earlier minor, whose records start at 512-byte blocks, replays and takes appends at those blocks.
+- A segment grows in steps of 1 MiB of synced zeros, up to the segment target, so an append writes into allocated blocks instead of growing the file.
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
 - Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts, and so is a damaged header of a last segment that holds such a record.
+- Recovery looks for such a record only where the LSN field holds an LSN a record there could carry, and hashes nothing else, so a torn tail of random bytes is scanned in linear time.
 - A log that ends before the checkpoint's LSN is corruption.
+- A segment longer than the segment target and longer than a header and the longest record is corruption, refused before recovery reads it.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
 - On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets a refusal of access at any step of creating the database waits and tries again as it does for a locked staging file.
-- Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
+- Opening a cleanly closed database starts a log with a new salt, which a header without the clean flag records before any commit, and removes leftover segments once that header is durable.
+- Opening a database after an unclean shutdown writes every replayed commit into the file under a clean header and then starts a new log as for a cleanly closed database, so no commit rests on log records or a header that only the page cache held, and a power loss before that header is durable leaves the old log as it was.
+- That checkpoint places nothing in free blocks or free slots and cuts nothing off the file, since the header the open read may be one only the page cache held, and the older header in the other slot may still reach those blocks.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
@@ -100,6 +110,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A run's header names its table, its role, and the first bytes, length, and hash of the key it belongs to.
 - Each page owns the runs of its long keys, which are rewritten with it, while a value's run stays until its entry changes.
 - A checkpoint packs cells greedily on the rightmost path of a table, so appends leave full pages, and spreads cells evenly elsewhere.
+- A short page joined with its neighbour is packed greedily too when the pair ends the rightmost path, so an append that leaves a short last page splits no full page in two.
 - A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child until the root has several children or is a leaf.
 - Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
 - The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
@@ -122,11 +133,13 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A free slot takes a new extent only in a later checkpoint and only once no reader holds a tree older than the one that dropped it, so neither a durable header nor a snapshot loses a page.
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
 - A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread, both before it writes and once its header is durable.
+- An open drops the free slots after the last extent in use from the extent table, so the work of finding free slots grows with the file and not with a count a damaged catalog records, and an extent that starts past the end of the file fails the open as corrupt data.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
 - After each checkpoint, a clean close's included, the engine compacts the file when it holds more than twice its live data plus one extent, and has grown by its live data since the last compaction, so a file that has lost most of its data gives the space back by the time it closes.
 - A clean close that compacted writes one more clean header, so the file it leaves needs no log.
 - The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
+- An automatic compaction waits while a snapshot or a write holds a tree older than the durable one, since its second copy could reuse no slot its first copy empties, and the background thread starts it once those trees are gone, while inline checkpoints try again at the next checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
 - A checkpoint makes its work durable in stages: once a stage has freed an eighth of the file's live blocks, and at least 256, it syncs the file and writes a header, so the next stage reuses the blocks it freed and a rewrite of most of the file does not double it.
@@ -137,6 +150,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - With background checkpoints, the writer only drops those segments from the log's list and the checkpoint thread removes their files, so no commit waits for the removal.
+- A segment file that fails to be removed, or is already gone, poisons nothing, since no durable header needs it, and the next open removes it.
 - The background checkpoint thread keeps each memtable it wrote until no snapshot holds it and frees it then, so no commit or reader frees a frozen memtable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
@@ -146,6 +160,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
 - Every test of `Database` and of the graph layer runs on the engine.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
+- `check` takes the durable header, extent table, catalog, and tree, then walks them without the lock that checkpoints take, and the tree it holds keeps its blocks from reuse until it ends.
 
 ## Open
 
@@ -156,3 +171,4 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - How a point read that overlaps a background checkpoint keeps its speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
+- How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header.

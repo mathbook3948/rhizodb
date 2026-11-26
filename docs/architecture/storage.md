@@ -31,6 +31,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - A backup never replaces an existing file or directory, and fails as a storage error instead.
 - A failed backup removes its staging file, and a crashed one leaves it behind for the host to delete.
 - The own engine closes its copy before linking it, which checkpoints the whole log into the file, and fails the backup when a log segment is left.
+- When the own engine fails its copy, it removes the copy's log segments too, since they belong to a staging file that no later open finds.
 
 ## Open
 

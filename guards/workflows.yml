@@ -23,7 +23,7 @@ rule:
 id: action-pinned-by-sha
 language: yaml
 severity: error
-message: Each `uses:` names an action at a full 40-character commit SHA, never at a tag or branch that can move.
+message: Each `uses:` names an action at a full 40-character commit SHA, never at a tag or branch that can move, or a workflow of this repository.
 files:
   - .github/workflows/*.yml
 rule:
@@ -35,4 +35,4 @@ rule:
     - has:
         field: value
         not:
-          regex: ^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$
+          regex: ^([A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}|\./\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml)$

@@ -55,3 +55,10 @@ path = "fuzz_targets/engine_file.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dump_import"
+path = "fuzz_targets/dump_import.rs"
+test = false
+doc = false
+bench = false

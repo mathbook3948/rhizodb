@@ -11,6 +11,8 @@ A host calls RhizoDB on threads of its own, often with the 2 MiB stack Rust give
 - A query, from parsing its text to returning its last value, fits in 1 MiB of thread stack in both debug and release builds, so a thread with the 2 MiB default keeps half of it for the host.
 - No input can overflow the stack: each recursion is either bounded by a limit that fails with an error kind or replaced by a loop over a stack on the heap.
 - The parser bounds how deeply query text nests and fails past that with `SyntaxErrorKind::NestingTooDeep`.
+- A chain of one of `AND`, `OR`, and `XOR` is parsed into a balanced tree, and a chain of comparisons is kept flat, so neither spends a nesting level per operator, while every other infix operator spends one.
+- A list the query text spells flat, such as the tests of a simple `CASE` branch or the conditions of a column scan, is joined into a balanced tree wherever a later pass turns it into a tree.
 - Every pass after parsing, from binding and type checks to evaluation and dropping the plan, recurses no deeper than the parser allowed.
 - A function that recurses over the query keeps its frame small, so a large `match` hands each case to a function of its own and large syntax tree variants are boxed.
 - A value in a query nests lists and maps at most 128 levels deep.

@@ -252,6 +252,57 @@ fn a_long_chain_of_next_statements_runs_on_a_small_stack() {
 }
 
 #[test]
+fn a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack() {
+    let test = "a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a0: 1}), (:L {a0: 1, a1: 1})");
+    let entries: Vec<String> = (0..5_000).map(|key| format!("a{key}: 1")).collect();
+    let entries = entries.join(", ");
+    on_small_stack(|| {
+        for text in [
+            format!("MATCH (n:L {{{entries}}}) RETURN count(*)"),
+            format!("MATCH (n {{{entries}}}) RETURN count(*)"),
+        ] {
+            assert_eq!(single(&db, &text), int(0));
+        }
+        assert_eq!(
+            single(&db, "MATCH (n:L {a0: 1, a1: 1}) RETURN count(*)"),
+            int(1)
+        );
+    });
+}
+
+#[test]
+fn long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack() {
+    let test = "long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a: 7}), (:L {a: 20000})");
+    let ors: Vec<String> = (0..20_000).map(|value| format!("n.a = {value}")).collect();
+    let tests: Vec<String> = (0..20_000).map(|value| value.to_string()).collect();
+    let texts = [
+        format!("MATCH (n:L) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!("MATCH (n) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!(
+            "MATCH (n:L) RETURN sum(CASE n.a WHEN {} THEN 1 ELSE 0 END)",
+            tests.join(", ")
+        ),
+        format!("RETURN toInteger(true{})", " AND true".repeat(20_000)),
+        format!("RETURN toInteger(0 < 1{})", " <= 1".repeat(20_000)),
+    ];
+    on_small_stack(|| {
+        for text in &texts {
+            assert_eq!(single(&db, text), int(1), "{}", &text[..40]);
+        }
+    });
+}
+
+#[test]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {
@@ -506,6 +557,42 @@ fn range_refuses_to_build_a_list_past_its_limit_however_little_is_read() {
 }
 
 #[test]
+fn strings_and_lists_a_query_builds_stop_at_their_length_limits() {
+    let test = "strings_and_lists_a_query_builds_stop_at_their_length_limits";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    let wide = Parameters::new().with("text", "x".repeat(20_000));
+    for text in [
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s + s))",
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s || s))",
+        "RETURN size(reduce(s = 1, i IN range(1, 45) | s + toString(s)))",
+        "RETURN size(range(1, 10000000) + 0)",
+        "RETURN size(0 + range(1, 10000000))",
+        "RETURN size(range(1, 10000000) + [0])",
+        "RETURN size(range(1, 10000000) || [0])",
+        "RETURN size(replace($text, '', $text))",
+        "RETURN size(replace($text, 'x', $text))",
+    ] {
+        assert_eq!(
+            db.execute(text, &wide).unwrap_err().kind(),
+            ErrorKind::NumberOutOfRange,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        db.execute(
+            "RETURN size(replace($text, 'x', 'yy')), size(range(1, 9999999) + 0)",
+            &wide
+        )
+        .unwrap()
+        .rows(),
+        [vec![int(40_000), int(10_000_000)]]
+    );
+}
+
+#[test]
 fn skip_and_limit_at_the_integer_maximum_neither_overflow_nor_allocate() {
     let db = db();
     assert_eq!(
@@ -577,6 +664,7 @@ fn names_of_a_megabyte_are_stored_and_read_back() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_write_transaction_of_many_statements_and_nodes_commits_whole_or_rolls_back_whole() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.rhizodb");
@@ -680,6 +768,7 @@ fn fastest_on_a_node_with_properties(count: i64, work: &str, wide: Wide) -> Dura
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn reading_or_deleting_every_property_of_a_node_takes_time_linear_in_their_number() {
     for work in [
         "MATCH (n:Wide) RETURN size(keys(properties(n)))",
@@ -725,6 +814,7 @@ fn fastest_on_a_relationship_with_properties(count: i64, work: &str) -> Duration
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn replacing_every_property_of_a_relationship_takes_time_linear_in_their_number() {
     for work in [
         "MATCH ()-[r:WIDE]->() SET r = {}",
@@ -828,6 +918,7 @@ fn fastest(db: &Database, query: &str) -> Duration {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_chain_of_let_or_with_clauses_takes_time_linear_in_its_length() {
     let db = db();
     let lets = |count: usize| {
@@ -869,6 +960,7 @@ fn label_matches_in_one_transaction(statements: i64) -> Duration {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_label_scan_in_a_write_transaction_skips_the_nodes_it_created_without_the_label() {
     let small = (0..3)
         .map(|_| label_matches_in_one_transaction(2_000))

@@ -683,6 +683,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn indexes_stay_exact_across_writes_rollbacks_drops_and_reopens(
         initial in prop::collection::vec(0usize..20, SLOTS),
         steps in prop::collection::vec(step(), 1..10),

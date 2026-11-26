@@ -21,7 +21,7 @@ RhizoDB uses [mise](https://mise.jdx.dev) to pin the Rust toolchain and the chec
 	mise install
 	```
 
-The `commit-msg` hook checks the commit subject, the `pre-commit` hook runs the fast checks, and the `pre-push` hook runs every check.
+The `commit-msg` hook checks the commit subject, the `pre-commit` hook runs the fast checks, and the `pre-push` hook runs `mise run check`.
 
 ## Run the checks
 
@@ -29,7 +29,15 @@ The `commit-msg` hook checks the commit subject, the `pre-commit` hook runs the 
 mise run check
 ```
 
-This runs `rustfmt`, the `ast-grep` rules in `guards/`, the `xtask` checks, `cargo deny`, `clippy`, and the tests, including the openCypher TCK and the crash test. CI runs the same command on Linux, macOS, and Windows, checks that the crate packages, and checks every commit in the pull request.
+This runs `rustfmt`, the `ast-grep` rules in `guards/`, the `xtask` checks, `cargo deny`, `clippy`, the examples, and every test not marked ignored, including the openCypher TCK and the GQL scenarios. CI runs the same command on Linux, macOS, and Windows, checks that the crate packages, and checks every commit in the pull request.
+
+The randomized, crash at every point, kill, stress, timing, and heap growth tests are marked ignored, so `mise run check` compiles them but leaves them out. `mise run random` runs them:
+
+```bash
+mise run random
+```
+
+CI runs it on every push to `main` and opens an issue for each test that fails there, with the seed it ran. Mark a new test of that kind `#[ignore = "left out of mise run check, run by mise run random"]`.
 
 `mise run differential` compares query results with LadybugDB. It needs CMake, a C++ compiler, and OpenSSL, and runs in its own CI workflow, so you can leave it to CI.
 
@@ -44,6 +52,7 @@ The checks enforce these rules, so you do not need to remember them:
 
 | Command | What it runs | When |
 | --- | --- | --- |
+| `mise run random` | Every test that `mise run check` leaves out, at the case counts CI runs | Every push to `main`, and changes to storage, transactions, durability, or concurrency |
 | `mise run storage-deep` | Storage, engine, crash, dump, node meta, and property column tests at 100 times the random cases | Changes to storage, the graph layer, or the dump format |
 | `mise run random-deep` | Isolation history check, kill-and-reopen, random transaction model, damaged files, concurrency, resource limits, killed backups, and snapshot stress, at 100 times the cases | Changes to transactions, durability, or concurrency |
 | `mise run fuzz 600` | Every fuzz target for the given seconds each; needs nightly Rust and cargo-fuzz | Changes to the parser, decoders, or file handling |

@@ -3,7 +3,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::is_nfkc_quick;
 use unicode_segmentation::UnicodeSegmentation;
 
-const VERSION: u32 = 8;
+const VERSION: u32 = 10;
 
 const PROBE: &str = concat!(
     "Don't stop at 3.14, e-mail_me or ŌΔΟΣ İstanbul STRAßE Ǆemal ᲛᲐᲠᲗ ᏣᎳᎩ Ꭰ. ",
@@ -17,15 +17,42 @@ const PROBE: &str = concat!(
     "ก่อน ๒๕๖๗ a\u{e48} ພາສາລາວ ភាសាខ្មែរ မြန်မာဘာသာ \u{1a20}\u{1a60}\u{1a21} \u{aa80}\u{aab0} ",
     "\u{19d1}\u{1950}\u{1951} \u{11700}\u{1171d}\u{116d0} \u{a9e0}\u{aa60} ",
     "a\u{e31} ก\u{e31}a\u{e31} \u{e31}ก ㅋㅋㅋ ㅠㅠ ㄱ가나 ﾡﾡﾥ \u{1100}\u{1100}\u{1161} \u{1113}\u{1161} \u{a960}\u{d7b0} ",
-    "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc",
+    "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc Ver\u{ad}si\u{2060}cherung צה\"ל",
 );
 
-/// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
-/// exercises the Unicode tables the tokenizer depends on, including recently assigned and still
-/// unassigned code points, so a change to those tables that touches the probe changes the
-/// fingerprint even when the version does not.
+/// The Unicode versions of the tables the tokenizer reads: the standard library's character
+/// properties and case mapping, word and grapheme segmentation, and normalization.
+pub(crate) fn unicode_versions() -> [(u64, u64, u64); 3] {
+    let (major, minor, update) = char::UNICODE_VERSION;
+    let (normalization_major, normalization_minor, normalization_update) =
+        unicode_normalization::UNICODE_VERSION;
+    [
+        (u64::from(major), u64::from(minor), u64::from(update)),
+        unicode_segmentation::UNICODE_VERSION,
+        (
+            u64::from(normalization_major),
+            u64::from(normalization_minor),
+            u64::from(normalization_update),
+        ),
+    ]
+}
+
+/// The tokenizer's fingerprint under the tables of this build, as [`fingerprint_of`] gives it.
 pub(crate) fn fingerprint() -> Vec<u8> {
+    fingerprint_of(&unicode_versions())
+}
+
+/// The tokenizer's version, the Unicode version of each table in `unicode`, and its terms and
+/// their positions for a fixed probe text. Any new Unicode version changes the fingerprint, and
+/// the probe, which exercises recently assigned and still unassigned code points, also catches
+/// a change of the tables within one version.
+pub(crate) fn fingerprint_of(unicode: &[(u64, u64, u64)]) -> Vec<u8> {
     let mut out = VERSION.to_be_bytes().to_vec();
+    for (major, minor, update) in unicode {
+        for part in [major, minor, update] {
+            out.extend_from_slice(&part.to_be_bytes());
+        }
+    }
     for purpose in [Purpose::Document, Purpose::Query] {
         for term in terms(PROBE, purpose) {
             out.extend_from_slice(term.text.as_bytes());
@@ -98,7 +125,8 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 }
 
 /// Splits `text` into lowercase terms at Unicode word boundaries, dropping control characters,
-/// so no term holds a zero byte. Text and terms are in Unicode normalization form NFKC, so
+/// so no term holds a zero byte, and invisible format characters such as soft hyphens, so a
+/// term holds only what a reader types. Text and terms are in Unicode normalization form NFKC, so
 /// canonically equivalent text gives the same terms, and so do compatibility forms such as
 /// ligatures and full-width letters. Runs of Hangul, Han, Hiragana, Katakana, and the scripts
 /// that Unicode line breaking leaves to a dictionary, such as Thai, become overlapping pairs of
@@ -107,7 +135,8 @@ pub(crate) fn clauses(text: &str) -> Vec<Clause> {
 /// character, so a run starts at a letter that is not a digit. A cluster that starts with
 /// whitespace, or with a character the Unicode grapheme rules join to the character before it
 /// (Grapheme_Cluster_Break Extend, SpacingMark, or ZWJ), has no base letter and separates words
-/// like a space; a mark with Grapheme_Cluster_Break Other, such as a few spacing marks of
+/// like a space, and so does a double quote, which a query reads as phrase syntax; a mark
+/// with Grapheme_Cluster_Break Other, such as a few spacing marks of
 /// Brahmic scripts, is still taken for a letter. A word starts and ends at a grapheme cluster whose
 /// first character is a letter or digit, so punctuation that a script change leaves at its edge,
 /// and a mark that follows punctuation, are not part of it. Control characters are dropped. Hangul units
@@ -119,6 +148,16 @@ pub(crate) fn terms(text: &str, purpose: Purpose) -> Vec<Term> {
 }
 
 fn nfkc(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.is_ascii() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    if text.chars().any(is_invisible_format) {
+        let visible: String = text
+            .chars()
+            .filter(|character| !is_invisible_format(*character))
+            .collect();
+        return std::borrow::Cow::Owned(visible.nfkc().collect());
+    }
     if is_nfkc_quick(text.chars()) == IsNormalized::Yes {
         std::borrow::Cow::Borrowed(text)
     } else {
@@ -155,7 +194,7 @@ fn scan_by(text: &str, purpose: Purpose, ascii: impl Fn(&str) -> bool) -> Scan {
         }
         let mut word = String::new();
         for cluster in segment.graphemes(true) {
-            if has_no_base(cluster) {
+            if has_no_base(cluster) || cluster.starts_with('"') {
                 scan.push_word(&mut word);
                 scan.flush_run();
                 continue;
@@ -280,6 +319,27 @@ fn has_no_base(cluster: &str) -> bool {
         .get(..=length)
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .is_some_and(|text| text.graphemes(true).count() == 1)
+}
+
+fn is_invisible_format(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x00AD
+            | 0x034F
+            | 0x061C
+            | 0x17B4..=0x17B5
+            | 0x180B..=0x180F
+            | 0x200B
+            | 0x200E..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xFFF0..=0xFFF8
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0000..=0xE0FFF
+    )
 }
 
 fn starts_run(character: char) -> bool {

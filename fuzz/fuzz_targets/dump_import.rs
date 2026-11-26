@@ -1,0 +1,9 @@
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+
+fuzz_target!(|input: &[u8]| {
+    if let Ok(db) = rhizodb::Database::in_memory() {
+        let _ = db.import(input);
+    }
+});

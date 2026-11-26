@@ -885,8 +885,9 @@ fn read_properties<T: WriteTransaction>(
 
 /// Reads a dump from `input` into `graph`, which must hold no node, relationship, or index and
 /// never have held a node or relationship, in write transactions that each commit a bounded
-/// batch of lines.
+/// batch of lines. Write transactions of other threads wait until the import ends.
 pub(crate) fn import<S: Storage>(graph: &Graph<S>, mut input: impl BufRead) -> Result<(), Error> {
+    let _exclusive = graph.exclusive_writes()?;
     let mut tx = graph.write()?;
     if tx.next_ids()? != (0, 0) || !tx.indexes()?.is_empty() {
         return Err(Error::new(

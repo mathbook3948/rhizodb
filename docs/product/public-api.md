@@ -10,6 +10,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 
 - Every public enum is `#[non_exhaustive]`, and so is every struct with public fields.
 - Result types keep their fields private and expose accessor methods, so a field can be added or stored differently.
+- `Node` and `Relationship` return their labels as a `BTreeSet` and their properties as a `BTreeMap`, like `Value::Map`, so hosts look up and iterate them in sorted order, and storing them as other types is a breaking change.
 - `Parameters` and `ProcedureOutput` are types of their own instead of aliases of standard types.
 - A procedure body fails with the standard `Box<dyn Error + Send + Sync>`, named `ProcedureError`, so any error converts with `?` and the query keeps it as the source of its error.
 - `QueryResult` holds every row in memory by contract, and its slice of rows stays.
@@ -24,7 +25,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - A datetime in a named zone reads back from its `Display` text through the zone rules of the reading build, so a changed rule can move it to another instant.
 - `Error` implements `std::error::Error` and is `Send`, `Sync`, and `'static`.
 - `Error::byte_offset` returns the position of a syntax error in the query text and is `Some` exactly when the kind is `ErrorKind::Syntax`.
-- Every public type is `Send` and `Sync`, except that `ReadTransaction` is only `Send` and `WriteTransaction` is neither, and a test asserts it.
+- Every public type is `Send` and `Sync`, except that `WriteTransaction` is neither, and tests assert both.
 - No public signature names a type that hosts cannot name.
 
 ## Open

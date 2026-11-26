@@ -33,6 +33,7 @@ pub(crate) fn parse(input: &str) -> ParseResult<Query> {
         tokens,
         pos: 0,
         depth: 0,
+        peak: 0,
         input_len: input.len(),
         in_where: false,
         pipe_ends_filter: None,
@@ -63,6 +64,7 @@ struct Parser {
     bracket_depths: Vec<usize>,
     pos: usize,
     depth: usize,
+    peak: usize,
     input_len: usize,
     in_where: bool,
     pipe_ends_filter: Option<usize>,
@@ -278,13 +280,15 @@ impl Parser {
 
     fn deepen(&mut self) -> ParseResult<()> {
         self.depth += 1;
+        self.peak = self.peak.max(self.depth);
         if self.depth > MAX_DEPTH {
-            return Err(SyntaxError::new(
-                self.offset(),
-                SyntaxErrorKind::NestingTooDeep,
-            ));
+            return Err(self.too_deep());
         }
         Ok(())
+    }
+
+    fn too_deep(&self) -> SyntaxError {
+        SyntaxError::new(self.offset(), SyntaxErrorKind::NestingTooDeep)
     }
 
     fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> ParseResult<T>) -> ParseResult<T> {

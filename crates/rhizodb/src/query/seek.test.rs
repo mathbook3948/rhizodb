@@ -205,6 +205,7 @@ fn holds(bound: Bound, stored: &Datum, value: &Datum) -> bool {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_seek_finds_exactly_the_values_that_equal_or_compare_to_its_value(
         (stored, value) in values(),
         fill_on_create in any::<bool>(),

@@ -8,6 +8,7 @@ const SEED: u64 = 0xABCD;
 fn segment() -> SegmentHeader {
     SegmentHeader {
         minor: FORMAT_MINOR,
+        record_unit: RECORD_UNIT as u32,
         database_id: 77,
         shard_id: 0,
         sequence: 4,
@@ -258,10 +259,12 @@ fn lengths_outside_the_limits_are_invalid() {
 }
 
 #[test]
-fn padding_rounds_up_to_whole_blocks() {
-    assert_eq!(padded(1), WAL_BLOCK);
-    assert_eq!(padded(WAL_BLOCK), WAL_BLOCK);
-    assert_eq!(padded(WAL_BLOCK + 1), 2 * WAL_BLOCK);
+fn padding_rounds_up_to_whole_units() {
+    for unit in [WAL_BLOCK, RECORD_UNIT] {
+        assert_eq!(padded(1, unit), unit);
+        assert_eq!(padded(unit, unit), unit);
+        assert_eq!(padded(unit + 1, unit), 2 * unit);
+    }
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -281,6 +284,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_batch_round_trips(ops in vec(op_strategy(), 0..20), lsn in 1u64.., hlc in any::<u64>()) {
         let record = sealed(batch_record(lsn, hlc, 5, ops.iter().map(Op::borrowed)).unwrap());
         let (decoded, length) = decode_record(SEED, &record).unwrap();
@@ -289,6 +293,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_bytes_decode_or_fail_without_panicking(bytes in vec(any::<u8>(), 0..600), seal in any::<bool>()) {
         let mut bytes = bytes;
         if seal && bytes.len() >= RECORD_HEADER {
@@ -299,6 +304,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_sealed_record_body_decodes_or_is_refused(body in vec(any::<u8>(), 0..300), kind in 0u8..30, format in 0u8..3) {
         let mut record = record_prefix(1, 0, 0, 1, Kind::Batch, format);
         record[52] = kind;

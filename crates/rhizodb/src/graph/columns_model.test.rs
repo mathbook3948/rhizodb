@@ -439,6 +439,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(test_scale::cases(32)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn property_columns_match_a_model_through_commits_rollbacks_reopens_and_crashes(
         ops in prop::collection::vec(op(), 1..60),
     ) {
@@ -931,6 +932,7 @@ fn version_of(read: &GraphTx<impl ReadTransaction>, b: Token<PropertyKey>) -> us
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn readers_during_column_writes_see_the_snapshot_they_began_at() {
     let (_fs, graph, mut model) = graph_of(GROUP + 50, |id| {
         let mut values = values_of(id);

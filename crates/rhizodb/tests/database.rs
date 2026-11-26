@@ -185,3 +185,16 @@ fn a_query_run_again_without_a_parameter_it_reads_fails() {
     let error = db.execute(query, &rhizodb::Parameters::new()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::MissingParameter);
 }
+
+#[test]
+fn opening_without_create_refuses_an_empty_file_and_leaves_it_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    std::fs::File::create(&path).unwrap();
+    let refused = rhizodb::OpenOptions::new()
+        .create(false)
+        .open(&path)
+        .unwrap_err();
+    assert_eq!(refused.kind(), rhizodb::ErrorKind::DatabaseNotFound);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}
