@@ -171,6 +171,10 @@ pub(crate) fn component(value: &Temporal, key: &str) -> Result<Datum, Error> {
     match build::component(value, key) {
         Some(Component::Integer(value)) => Ok(Datum::Integer(value)),
         Some(Component::Text(value)) => Ok(Datum::String(value)),
+        Some(Component::Overflow) => Err(Error::new(
+            ErrorKind::IntegerOverflow,
+            format!("the component `{key}` does not fit in an integer"),
+        )),
         None => Err(Error::new(
             ErrorKind::InvalidTemporalValue,
             format!("a {} has no component `{key}`", value.type_name()),
