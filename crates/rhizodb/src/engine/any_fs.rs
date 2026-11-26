@@ -187,7 +187,10 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
         .ok_or_else(|| {
             EngineError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("the database path {} names no file", path.display()),
+                format!(
+                    "the database path {} names no file in UTF-8",
+                    path.display()
+                ),
             ))
         })?;
     let directory = match path.parent() {

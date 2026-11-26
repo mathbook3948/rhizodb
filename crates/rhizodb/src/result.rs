@@ -101,8 +101,10 @@ impl<K: Into<String>, V: Into<Value>, const N: usize> From<[(K, V); N]> for Para
 /// A value displays as GQL text, so an output line reads like the query that could have produced
 /// it. For `Null`, `Boolean`, `Integer`, a finite `Float`, `String`, `Temporal`, and lists and
 /// maps of them, the text is an expression that evaluates back to an equal value, and that holds
-/// in every later release. `Bytes`, a non-finite `Float`, and anything holding a node,
-/// relationship, or path display for people to read, and their text may change.
+/// in every later release. A datetime in a named zone reads back through the zone rules of the
+/// build that reads it, so a changed rule can move it to another instant. `Bytes`, a non-finite
+/// `Float`, and anything holding a node, relationship, or path display for people to read, and
+/// their text may change.
 ///
 /// | Value | Output |
 /// | --- | --- |
