@@ -150,6 +150,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
+- A run of one block goes through the block cache as a page does, and an item of one such run is read in place, since relationship chunks of a few KiB are read once per relationship.
+- A run of more blocks is read from the file each time, so one large item cannot push many pages out of the cache.
 - The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
 - A scan that misses the cache on a child of a branch reads that child with the children after it in the scan's range that lie within the next 32 blocks of the same extent, in one read, and keeps each of them that checks.
 - A point read takes no pages along, since its next read lies elsewhere in the file.

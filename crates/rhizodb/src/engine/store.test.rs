@@ -951,6 +951,61 @@ fn a_scan_of_a_reopened_file_reads_each_run_of_leaves_in_one_read() {
 }
 
 #[test]
+fn a_value_of_one_block_outside_its_page_is_read_from_the_file_once() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let value = |round: u8| vec![round; 2 << 10];
+    let mut write = engine.begin_write().unwrap();
+    for key in 0..64u8 {
+        write.put(Table::Nodes, &[key], &value(key)).unwrap();
+    }
+    write.commit().unwrap();
+    engine.close().unwrap();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    let reads_of = |engine: &Engine<SimFs>| {
+        let read = engine.begin_read().unwrap();
+        let before = fs.operations();
+        let mut found = Vec::new();
+        read.visit_prefix(Table::Nodes, &[], |key, bytes| {
+            found.push((key[0], bytes.to_vec()));
+            Ok::<(), StorageError>(())
+        })
+        .unwrap();
+        for key in 0..64u8 {
+            assert_eq!(
+                read.get(Table::Nodes, &[key]).unwrap(),
+                Some(found[key as usize].1.clone())
+            );
+        }
+        (found, fs.operations() - before)
+    };
+
+    let (first, _) = reads_of(&engine);
+    let (again, reads) = reads_of(&engine);
+    for round in 1..4u8 {
+        let mut write = engine.begin_write().unwrap();
+        for key in 0..64u8 {
+            write
+                .put(Table::Nodes, &[key], &value(key ^ round << 6))
+                .unwrap();
+        }
+        write.commit().unwrap();
+        engine.checkpoint().unwrap();
+    }
+    let (rewritten, _) = reads_of(&engine);
+
+    let expected = |round: u8| {
+        (0..64u8)
+            .map(|key| (key, value(key ^ round << 6)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(first, expected(0));
+    assert_eq!(again, first);
+    assert_eq!(reads, 0);
+    assert_eq!(rewritten, expected(3));
+}
+
+#[test]
 fn a_filtered_prefix_visit_reads_only_the_values_it_wants() {
     let fs = SimFs::new();
     let engine = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();

@@ -185,6 +185,22 @@ pub(crate) fn decode_run<'a>(
         )));
     }
     let header = PageHeader::open(seed, bytes, run.at)?;
+    decode_checked_run(header, bytes, run, role)
+}
+
+/// [`decode_run`] of bytes whose page header already passed its checks.
+pub(crate) fn decode_checked_run(
+    header: PageHeader,
+    bytes: &[u8],
+    run: RunRef,
+    role: Role,
+) -> Result<(PageHeader, Run<'_>), EngineError> {
+    if bytes.len() != run.blocks as usize * BLOCK {
+        return Err(EngineError::corrupt(format!(
+            "the run at {:?} was read with the wrong length",
+            run.at
+        )));
+    }
     header.expect(role.kind(), run.lsn)?;
     let mut reader = Reader::new(&bytes[PAGE_HEADER..], "a run header");
     let total = reader.u64()?;

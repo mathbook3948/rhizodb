@@ -8,6 +8,7 @@ use super::blob::BlobRef;
 use super::blob::RUN_PAYLOAD_LIMIT;
 use super::blob::Role;
 use super::blob::RunRef;
+use super::blob::decode_checked_run;
 use super::blob::decode_run;
 use super::blob::item_checksum;
 use super::block_file::BlockFile;
@@ -36,7 +37,45 @@ pub(crate) trait PageSource: Send + Sync + fmt::Debug {
 
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError>;
 
+    /// The block of a run of one block, through the cache, which keeps it once it checks.
+    fn run_block(&self, run: RunRef) -> Result<CachedPage, EngineError>;
+
     fn seed(&self) -> u64;
+}
+
+/// Calls `read` with a whole item, in place when it is one run of one block, which the cache
+/// then keeps, and checked as [`load_blob`] checks it.
+pub(crate) fn read_blob<T>(
+    source: &dyn PageSource,
+    blob: &BlobRef,
+    role: Role,
+    read: impl FnOnce(&[u8]) -> T,
+) -> Result<T, EngineError> {
+    if blob.first.blocks == 1 {
+        let held = source.run_block(blob.first)?;
+        let (_, decoded) = decode_checked_run(held.header, &held.bytes, blob.first, role)?;
+        if decoded.next.at.is_null() {
+            whole(blob, decoded.total, decoded.payload)?;
+            return Ok(read(decoded.payload));
+        }
+    }
+    Ok(read(&load_blob(source, blob, role)?))
+}
+
+fn whole(blob: &BlobRef, total: u64, bytes: &[u8]) -> Result<(), EngineError> {
+    if total != blob.length {
+        return Err(EngineError::corrupt(format!(
+            "the run at {:?} does not belong to its item",
+            blob.first.at
+        )));
+    }
+    if bytes.len() as u64 != blob.length || item_checksum(bytes) != blob.checksum {
+        return Err(EngineError::corrupt(format!(
+            "the item at {:?} fails its checksum",
+            blob.first.at
+        )));
+    }
+    Ok(())
 }
 
 /// Reads a whole item from its chain of runs, and fails as corruption unless every run checks
@@ -51,8 +90,15 @@ pub(crate) fn load_blob(
     let mut run = blob.first;
     let most_runs = length / RUN_PAYLOAD_LIMIT + 1;
     for _ in 0..most_runs {
-        let blocks = source.run_bytes(run)?;
-        let (_, decoded) = decode_run(source.seed(), &blocks, run, role)?;
+        let held;
+        let read;
+        let (_, decoded) = if run.blocks == 1 {
+            held = source.run_block(run)?;
+            decode_checked_run(held.header, &held.bytes, run, role)?
+        } else {
+            read = source.run_bytes(run)?;
+            decode_run(source.seed(), &read, run, role)?
+        };
         if decoded.total != blob.length || bytes.len() + decoded.payload.len() > length {
             return Err(EngineError::corrupt(format!(
                 "the run at {:?} does not belong to its item",
@@ -235,6 +281,15 @@ impl<B: BlockFile> PageSource for Pages<B> {
         let mut bytes = vec![0; run.blocks as usize * BLOCK];
         self.file.read(first, &mut bytes)?;
         Ok(bytes)
+    }
+
+    fn run_block(&self, run: RunRef) -> Result<CachedPage, EngineError> {
+        if let Some(page) = self.cache.get(run.at) {
+            return Ok(page);
+        }
+        let mut bytes = vec![0; BLOCK];
+        self.file.read(self.physical(run.at, 1)?, &mut bytes)?;
+        self.keep(run.at, &bytes)
     }
 
     fn seed(&self) -> u64 {

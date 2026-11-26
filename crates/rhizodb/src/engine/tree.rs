@@ -21,6 +21,7 @@ use super::node::Node;
 use super::page::PageKind;
 use super::pages::PageSource;
 use super::pages::load_blob;
+use super::pages::read_blob;
 use super::view::Visit;
 use super::view::Wanted;
 use crate::storage::StorageError;
@@ -306,7 +307,7 @@ impl Tree {
                 return match node.value(index)? {
                     CellValue::Inline(value) => Ok(Some(read(value))),
                     CellValue::External(blob) => {
-                        Ok(Some(read(&load_blob(&*self.source, &blob, Role::Value)?)))
+                        read_blob(&*self.source, &blob, Role::Value, read).map(Some)
                     }
                 };
             }
@@ -489,8 +490,8 @@ impl Tree {
                         visit(key, &[])?;
                     }
                     CellValue::External(blob) => {
-                        let value = load_blob(&*self.source, &blob, Role::Value).map_err(lift)?;
-                        visit(key, &value)?;
+                        read_blob(&*self.source, &blob, Role::Value, |value| visit(key, value))
+                            .map_err(lift)??;
                     }
                 }
             }
