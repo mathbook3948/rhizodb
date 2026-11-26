@@ -67,7 +67,7 @@ pub use value::read_value_for_fuzzing;
 
 /// The README, whose example runs as a doctest.
 #[cfg(doctest)]
-#[doc = include_str!("../../../README.md")]
+#[doc = include_str!("../README.md")]
 pub struct Readme;
 
 /// Runs the storage engine's decoders on `bytes` for the fuzzer, and fails when a decoded value

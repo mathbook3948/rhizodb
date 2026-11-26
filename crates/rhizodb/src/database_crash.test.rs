@@ -287,11 +287,13 @@ fn operations() -> (u64, u64) {
     (opened, fs.operations())
 }
 
-fn points(from: u64, total: u64, budget: u64) -> Vec<u64> {
+fn points(from: u64, total: u64, budget: u64, seed: u64) -> Vec<u64> {
     let span = total - from;
     let stride = (span / budget.max(1)).max(1);
-    let mut points: Vec<u64> = (from..total).step_by(stride as usize).collect();
-    let mut state = total;
+    let mut points: Vec<u64> = (from + seed % stride..total)
+        .step_by(stride as usize)
+        .collect();
+    let mut state = total ^ seed;
     for _ in 0..budget / 4 {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -307,9 +309,10 @@ fn crash_during_workload(failure: Failure) {
     let (opened, total) = operations();
     let budget = u64::from(test_scale::cases(40));
     let seeds = u64::from(test_scale::cases(1)).min(16);
+    let seed = test_scale::seed();
     let mut expected = Expected::default();
     let mut problems = Vec::new();
-    for at in points(opened, total, budget) {
+    for at in points(opened, total, budget, seed) {
         let fs = SimFs::new();
         let run = match open(&fs) {
             Ok(db) => {
@@ -331,7 +334,23 @@ fn crash_during_workload(failure: Failure) {
             }
         }
     }
-    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    assert!(
+        problems.is_empty(),
+        "replay with RHIZODB_TEST_SEED={seed}\n{}",
+        problems.join("\n")
+    );
+}
+
+#[test]
+fn the_sampled_points_reach_every_operation_across_seeds() {
+    let (from, total, budget) = (100, 1_000, 40);
+    let mut reached = std::collections::BTreeSet::new();
+    for seed in 0..budget {
+        let points = points(from, total, budget, seed);
+        assert!(points.iter().all(|at| (from..total).contains(at)));
+        reached.extend(points);
+    }
+    assert_eq!(reached, (from..total).collect());
 }
 
 #[test]
