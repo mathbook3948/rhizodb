@@ -83,7 +83,7 @@ impl Parser {
         condition
     }
 
-    fn pipe_ending<T>(
+    pub(super) fn pipe_ending<T>(
         &mut self,
         ends: Option<usize>,
         parse: impl FnOnce(&mut Self) -> ParseResult<T>,
@@ -104,7 +104,12 @@ impl Parser {
     }
 
     fn binary(&mut self, min_precedence: u8) -> ParseResult<Expr> {
-        self.nested(|parser| parser.binary_chain(min_precedence))
+        self.nested(|parser| {
+            let outer = std::mem::replace(&mut parser.peak, parser.depth);
+            let chain = parser.binary_chain(min_precedence);
+            parser.peak = parser.peak.max(outer);
+            chain
+        })
     }
 
     fn binary_chain(&mut self, min_precedence: u8) -> ParseResult<Expr> {
@@ -115,7 +120,14 @@ impl Parser {
             if precedence < min_precedence {
                 break;
             }
-            self.deepen()?;
+            if let Infix::Binary(op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor), _) = infix {
+                in_comparison_chain = false;
+                lhs = self.logic_chain(op, precedence, lhs)?;
+                continue;
+            }
+            if !(in_comparison_chain && matches!(infix, Infix::Comparison(_))) {
+                self.deepen()?;
+            }
             lhs = match infix {
                 Infix::Is => {
                     in_comparison_chain = false;
@@ -132,6 +144,22 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    fn logic_chain(&mut self, op: BinaryOp, precedence: u8, first: Expr) -> ParseResult<Expr> {
+        let mut operands = vec![(first, self.peak)];
+        while matches!(self.peek_infix(), Some(Infix::Binary(next, _)) if next == op) {
+            self.pos += 1;
+            let outer = std::mem::replace(&mut self.peak, self.depth);
+            let operand = self.binary(precedence + 1)?;
+            operands.push((operand, std::mem::replace(&mut self.peak, outer)));
+        }
+        let (chain, peak) = balanced(op, operands);
+        if peak > super::MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.peak = self.peak.max(peak);
+        Ok(chain)
     }
 
     fn is_suffix(&mut self, lhs: Expr) -> ParseResult<Expr> {
@@ -425,8 +453,12 @@ impl Parser {
     }
 
     fn paren_starts_pattern(&self) -> bool {
+        self.paren_at_starts_pattern(self.pos)
+    }
+
+    fn paren_at_starts_pattern(&self, start: usize) -> bool {
         let mut open = 0usize;
-        for (index, token) in self.tokens.iter().enumerate().skip(self.pos) {
+        for (index, token) in self.tokens.iter().enumerate().skip(start) {
             match token.kind {
                 TokenKind::Punct(Punct::LParen) => open += 1,
                 TokenKind::Punct(Punct::RParen) => {
@@ -473,7 +505,10 @@ impl Parser {
 
     fn at_pattern_comprehension(&self) -> bool {
         (self.at_punct(Punct::LParen) && self.paren_starts_pattern())
-            || (self.at_word() && self.punct_at(1, Punct::Eq) && self.punct_at(2, Punct::LParen))
+            || (self.at_word()
+                && self.punct_at(1, Punct::Eq)
+                && self.punct_at(2, Punct::LParen)
+                && self.paren_at_starts_pattern(self.pos + 2))
     }
 
     fn pattern_comprehension(&mut self) -> ParseResult<Expr> {
@@ -502,15 +537,22 @@ impl Parser {
         if !self.at_clause_start() {
             return Err(self.unexpected());
         }
-        let query = self.nested(Self::single_query)?;
+        let query = self.inner_query()?;
         self.expect_punct(Punct::RBrace)?;
         Ok(query)
+    }
+
+    fn inner_query(&mut self) -> ParseResult<SingleQuery> {
+        let outer = std::mem::replace(&mut self.in_where, false);
+        let query = self.nested(Self::single_query);
+        self.in_where = outer;
+        query
     }
 
     fn subquery_body(&mut self) -> ParseResult<Subquery> {
         self.pos += 2;
         let body = if self.at_clause_start() {
-            Subquery::Query(self.nested(Self::single_query)?)
+            Subquery::Query(self.inner_query()?)
         } else {
             let patterns = self.pattern_parts()?;
             let filter = if self.eat_keyword("WHERE") {
@@ -686,24 +728,29 @@ impl Parser {
         })))
     }
 
+    fn trim_has_from(&self) -> bool {
+        let depth = self.bracket_depth();
+        (self.pos..self.tokens.len())
+            .take_while(|&at| self.bracket_depths.get(at).copied().unwrap_or(0) >= depth)
+            .any(|at| {
+                let ahead = at - self.pos;
+                self.bracket_depths.get(at) == Some(&depth)
+                    && self.keyword_at(ahead, "FROM")
+                    && !(ahead > 0 && self.keyword_at(ahead - 1, "DISTINCT"))
+            })
+    }
+
     fn trim_from(&mut self) -> ParseResult<Option<Expr>> {
-        let start = self.pos;
+        if !self.trim_has_from() {
+            return Ok(None);
+        }
         let side = ["LEADING", "TRAILING", "BOTH"]
             .into_iter()
             .find(|side| self.eat_keyword(side));
-        if side.is_some() && self.at_punct(Punct::RParen) {
-            self.pos = start;
-            return Ok(None);
-        }
         let characters = if self.at_keyword("FROM") {
             None
         } else {
-            let characters = self.expression()?;
-            if side.is_none() && !self.at_keyword("FROM") {
-                self.pos = start;
-                return Ok(None);
-            }
-            Some(characters)
+            Some(self.expression()?)
         };
         self.expect_keyword("FROM")?;
         let source = self.expression()?;
@@ -841,6 +888,25 @@ fn quantifier_named(name: &Name) -> Option<Quantifier> {
     } else {
         None
     }
+}
+
+fn balanced(op: BinaryOp, mut operands: Vec<(Expr, usize)>) -> (Expr, usize) {
+    if operands.len() == 1
+        && let Some(operand) = operands.pop()
+    {
+        return operand;
+    }
+    let right = operands.split_off(operands.len().div_ceil(2));
+    let (lhs, lhs_peak) = balanced(op, operands);
+    let (rhs, rhs_peak) = balanced(op, right);
+    (
+        Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        },
+        lhs_peak.max(rhs_peak) + 1,
+    )
 }
 
 #[cfg(test)]

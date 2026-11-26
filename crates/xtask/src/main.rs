@@ -3,6 +3,7 @@ mod docs;
 mod failures;
 mod forbidden_chars;
 mod hooks;
+mod readme;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -26,9 +27,10 @@ fn main() -> ExitCode {
             rest.first().map(String::as_str),
             rest.get(1).map(String::as_str),
         ),
+        "readme" => readme::check(&workspace_root),
         _ => {
             eprintln!(
-                "usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks|failures>"
+                "usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks|failures|readme>"
             );
             return ExitCode::from(2);
         }

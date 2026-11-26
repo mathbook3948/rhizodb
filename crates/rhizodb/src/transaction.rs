@@ -111,18 +111,18 @@ impl<'db> WriteTransaction<'db> {
         }
     }
 
-    /// Runs one GQL query in the transaction and returns its rows. A query that fails rolls back
-    /// the whole transaction.
+    /// Runs one GQL query in the transaction and returns its rows. A query that fails or panics
+    /// rolls back the whole transaction.
     ///
     /// Fails with the kind that names what is wrong with the query, such as a syntax, binding,
     /// type, or value error, and with
     /// [`ErrorKind::TransactionAborted`](crate::ErrorKind::TransactionAborted) on every call
     /// after a query in the transaction has failed.
     pub fn execute(&mut self, query: &str, parameters: &Parameters) -> Result<QueryResult, Error> {
-        let tx = self.tx.as_mut().ok_or_else(aborted)?;
-        let result = query::execute_write(tx, &self.began, self.statements, query, parameters);
-        if result.is_err() {
-            self.tx = None;
+        let mut tx = self.tx.take().ok_or_else(aborted)?;
+        let result = query::execute_write(&mut tx, &self.began, self.statements, query, parameters);
+        if result.is_ok() {
+            self.tx = Some(tx);
         }
         result
     }

@@ -636,3 +636,16 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_pattern_filter_that_cannot_be_boolean_fails_before_any_match_is_found() {
+    let db = db();
+    let expected = error_kind(&db, "MATCH (n) WHERE 1 RETURN n");
+    for query in [
+        "MATCH (n) WHERE EXISTS { (n)-->(m) WHERE 1 } RETURN n",
+        "MATCH (n) RETURN [(n)-->(m) WHERE 'x' | m] AS l",
+        "MATCH (n) RETURN COUNT { (n)-->(m) WHERE [] } AS c",
+    ] {
+        assert_eq!(error_kind(&db, query), expected, "{query}");
+    }
+}

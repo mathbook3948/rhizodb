@@ -60,6 +60,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The database file is made of 4096-byte blocks.
 - Blocks 0 and 1 of the database file are two header slots, written in turn, and the valid slot of the higher generation describes the database.
 - A header slot of a generation of the other slot's parity is invalid.
+- A header slot whose generation, LSNs, first log segment, or extent counter is 2^63 or more is invalid, so no increment of one overflows.
 - A header slot of another major engine format, a newer minor one, or with an unknown flag refuses the file instead of falling back to the other slot.
 - An extent is 1024 blocks, and extent slot n starts at block 2 + 1024 n.
 - A block reference holds the extent id in its high 44 bits and the block inside the extent in its low 20, and zero refers to nothing.
@@ -107,6 +108,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A run's header names its table, its role, and the first bytes, length, and hash of the key it belongs to.
 - Each page owns the runs of its long keys, which are rewritten with it, while a value's run stays until its entry changes.
 - A checkpoint packs cells greedily on the rightmost path of a table, so appends leave full pages, and spreads cells evenly elsewhere.
+- A short page joined with its neighbour is packed greedily too when the pair ends the rightmost path, so an append that leaves a short last page splits no full page in two.
 - A rewritten page under a quarter full is merged with a sibling, and a root with one child gives way to that child until the root has several children or is a leaf.
 - Every page and run a checkpoint writes carries the checkpoint's LSN and header generation.
 - The catalog holds every table's root, height, and entry count, and the whole extent table, written as a run at each checkpoint.
@@ -129,11 +131,13 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A free slot takes a new extent only in a later checkpoint and only once no reader holds a tree older than the one that dropped it, so neither a durable header nor a snapshot loses a page.
 - An extent in a reused slot has a new id, so a page left there by the extent before it fails as written for another block.
 - A checkpoint cuts the file after the last written block of the last extent in use when the slots after it are free and unread, both before it writes and once its header is durable.
+- An open drops the free slots after the last extent in use from the extent table, so the work of finding free slots grows with the file and not with a count a damaged catalog records, and an extent that starts past the end of the file fails the open as corrupt data.
 - `compact` writes every commit into the file, then copies every table into new full pages twice, so the first copy empties every old extent and the second fills the lowest free slots.
 - After each checkpoint, a clean close's included, the engine compacts the file when it holds more than twice its live data plus one extent, and has grown by its live data since the last compaction, so a file that has lost most of its data gives the space back by the time it closes.
 - A clean close that compacted writes one more clean header, so the file it leaves needs no log.
 - The extent in that bound is the room of the open extent, which a compaction cannot give back, so a small file that compaction cannot shrink is not compacted at every open.
 - An automatic compaction runs where the checkpoint ran, on the background thread or inline, and a failed one poisons the engine like a failed checkpoint.
+- An automatic compaction waits while a snapshot or a write holds a tree older than the durable one, since its second copy could reuse no slot its first copy empties, and the background thread starts it once those trees are gone, while inline checkpoints try again at the next checkpoint.
 - A commit holds no tree of its own while it starts a checkpoint, so an inline compaction can reuse every slot it empties.
 - A checkpoint freezes the memtable under the writer lock, writes the frozen versions into the file, syncs it, and writes and syncs the other header slot.
 - A checkpoint makes its work durable in stages: once a stage has freed an eighth of the file's live blocks, and at least 256, it syncs the file and writes a header, so the next stage reuses the blocks it freed and a rewrite of most of the file does not double it.
@@ -144,6 +148,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A checkpoint starts when the memtable passes 64 MiB or the log passes 256 MiB.
 - Log segments before the one that holds the checkpoint's next LSN are removed after the header that no longer needs them is durable.
 - With background checkpoints, the writer only drops those segments from the log's list and the checkpoint thread removes their files, so no commit waits for the removal.
+- A segment file that fails to be removed, or is already gone, poisons nothing, since no durable header needs it, and the next open removes it.
 - The background checkpoint thread keeps each memtable it wrote until no snapshot holds it and frees it then, so no commit or reader frees a frozen memtable.
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
@@ -155,6 +160,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Every test of `Database` runs on the engine, and each redb fixture is converted as it is opened.
 - The engine is checked byte for byte against the redb backend over random operations.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
+- `check` takes the durable header, extent table, catalog, and tree, then walks them without the lock that checkpoints take, and the tree it holds keeps its blocks from reuse until it ends.
 
 ## Open
 

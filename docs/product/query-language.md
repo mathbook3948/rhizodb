@@ -118,7 +118,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - A `:` may follow a `|`, as in Cypher's `[:T|:U]`.
 - A label test in an expression takes a label expression after `:` or after `IS LABELED`, and `IS NOT LABELED` is its negation.
 - `IS LABELED` and `IS NOT LABELED` bind like `IS NULL`.
-- Inside the `WHERE` of a list or pattern comprehension, a `|` that no parenthesis, bracket, brace, or `CASE` within the filter encloses starts the projection, so only a label disjunction at the top of the filter needs parentheses.
+- Inside the `WHERE` of a list or pattern comprehension, a `|` that no parenthesis, bracket, brace, `CASE`, or the angle brackets of a type within the filter encloses starts the projection, so only a label disjunction at the top of the filter needs parentheses.
 - A node in a pattern that creates takes only a label or a conjunction of labels, and anything else fails with its own error kind.
 - `SET` and `REMOVE` take labels after `:` or `IS` in the same forms, so `n:A:B`, `n:A&B`, and `n IS A&B` name the same labels, and a label expression with `|`, `!`, or `%` fails with the same error kind.
 - A `DELETE` target that is a label test, alone or under `NOT`, `AND`, `OR`, or `XOR`, fails as an invalid delete rather than as an argument of the wrong type.
@@ -132,7 +132,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - The type of a relationship deleted earlier in the same query stays readable, through `type()` and label tests.
 - Reading the labels of a node deleted earlier in the same query fails.
 - A `MERGE` property that evaluates to null is an error.
-- `range()` has a length cap, so one query cannot exhaust the host's memory.
+- A list a query builds has a length cap and a string a query builds a byte cap, so neither `range()` nor doubling a value with `+`, `||`, or `replace()` can make one value exhaust the host's memory.
+- A list or string past its cap fails with `ErrorKind::NumberOutOfRange` before it is allocated.
 - Floats convert to strings in the same form as the openCypher reference implementation.
 - Each function declares the argument types it accepts once, and both the check on the query text and the check on data read that declaration.
 - `length()` takes a path, and `size()` takes a list or a string.
@@ -162,6 +163,7 @@ GQL is the reference language, but the only public conformance suite is the open
 - Temporal values follow openCypher: `date`, `localtime`, `time`, `localdatetime`, `datetime`, and `duration` build them from a map, a string, or another temporal value.
 - The temporal functions `truncate`, `transaction`, `statement`, `realtime`, `fromepoch`, `fromepochmillis`, `between`, `inMonths`, `inDays`, and `inSeconds` exist under the openCypher names.
 - A temporal value built without a time zone gets UTC.
+- A datetime string with both an offset and a zone name takes its instant from the local time and the offset, and is then shown in the named zone.
 - The `statement` clock and the clock of a call without arguments read one instant per query, so two calls in one query agree.
 - The `transaction` clock reads one instant per transaction, as decided in the transactions doc.
 - The `realtime` clock reads the system clock at each call.
@@ -215,3 +217,4 @@ GQL is the reference language, but the only public conformance suite is the open
 
 - Whether a variable, alias, or `YIELD` name that is a reserved word fails where it is bound, as in Cypher, rather than where the query reads it back.
 - What `TRUE`, `FALSE`, `NULL`, `DISTINCT`, and `NOT` mean when bound as a variable, since reading one back now gives the literal, the modifier, or the operator instead of the variable.
+- Whether a query gets a memory budget of its own, since values under the caps can still multiply through nested list comprehensions.
