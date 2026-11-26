@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use super::records::Properties;
 use super::*;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::value::PropertyValue;
 
 const DATABASE_ENV: &str = "RHIZODB_CRASH_DATABASE";
@@ -132,7 +133,7 @@ fn link_record(tokens: &Tokens, iteration: u64) -> RelationshipRecord {
     }
 }
 
-fn write_iteration(graph: &Graph<RedbStorage>, iteration: u64) {
+fn write_iteration(graph: &Graph<TestStorage>, iteration: u64) {
     let mut write = graph.write().unwrap();
     let tokens = Tokens::intern(&mut write);
     if iteration == 0 {
@@ -245,13 +246,13 @@ fn first_differences<K: Ord + Copy + std::fmt::Debug, V: PartialEq + std::fmt::D
         .collect()
 }
 
-fn recover(path: &Path) -> (Graph<RedbStorage>, Result<u64, String>) {
-    let graph = Graph::open(RedbStorage::open(path).unwrap()).unwrap();
+fn recover(path: &Path) -> (Graph<TestStorage>, Result<u64, String>) {
+    let graph = Graph::open(test_engine::open(path)).unwrap();
     let verdict = verify(&graph);
     (graph, verdict)
 }
 
-fn verify(graph: &Graph<RedbStorage>) -> Result<u64, String> {
+fn verify(graph: &Graph<TestStorage>) -> Result<u64, String> {
     let read = graph.read().unwrap();
     let violations = read.check_integrity().unwrap();
     if !violations.is_empty() {
@@ -285,7 +286,7 @@ fn crash_writer() {
     let Ok(path) = std::env::var(DATABASE_ENV) else {
         return;
     };
-    let graph = Graph::open(RedbStorage::open(path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(path)).unwrap();
     let mut stdout = std::io::stdout();
     writeln!(stdout, "{READY_LINE}").unwrap();
     stdout.flush().unwrap();
@@ -296,7 +297,7 @@ fn crash_writer() {
     }
 }
 
-type Damage = fn(&mut GraphTx<<RedbStorage as Storage>::Write<'_>>, &Tokens);
+type Damage = fn(&mut GraphTx<<TestStorage as Storage>::Write<'_>>, &Tokens);
 
 struct Writer {
     child: Child,
@@ -358,8 +359,8 @@ impl Drop for Writer {
 #[test]
 fn the_oracle_accepts_whole_iterations_and_continues_the_sequence() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("oracle.redb");
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let path = directory.path().join("oracle.rhizodb");
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     assert_eq!(verify(&graph), Ok(0));
     for iteration in 0..4 {
         write_iteration(&graph, iteration);
@@ -395,7 +396,7 @@ fn the_oracle_rejects_a_partially_applied_iteration() {
         },
     ];
     for damage in tear_down {
-        let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+        let graph = Graph::open(test_engine::in_memory()).unwrap();
         for iteration in 0..3 {
             write_iteration(&graph, iteration);
         }
@@ -415,7 +416,7 @@ fn a_database_survives_the_writer_being_killed_at_varied_points() {
     let directory = tempfile::tempdir().unwrap();
     for trial in 0..TRIALS {
         let (lines_before_kill, delay_micros) = kill_point(trial);
-        let path = directory.path().join(format!("trial-{trial}.redb"));
+        let path = directory.path().join(format!("trial-{trial}.rhizodb"));
         let mut writer = Writer::spawn(&path);
         writer.wait_until_ready();
         let mut reported: Vec<u64> = (0..lines_before_kill)

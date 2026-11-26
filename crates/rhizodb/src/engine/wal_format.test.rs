@@ -8,6 +8,7 @@ const SEED: u64 = 0xABCD;
 fn segment() -> SegmentHeader {
     SegmentHeader {
         minor: FORMAT_MINOR,
+        record_unit: RECORD_UNIT as u32,
         database_id: 77,
         shard_id: 0,
         sequence: 4,
@@ -258,10 +259,12 @@ fn lengths_outside_the_limits_are_invalid() {
 }
 
 #[test]
-fn padding_rounds_up_to_whole_blocks() {
-    assert_eq!(padded(1), WAL_BLOCK);
-    assert_eq!(padded(WAL_BLOCK), WAL_BLOCK);
-    assert_eq!(padded(WAL_BLOCK + 1), 2 * WAL_BLOCK);
+fn padding_rounds_up_to_whole_units() {
+    for unit in [WAL_BLOCK, RECORD_UNIT] {
+        assert_eq!(padded(1, unit), unit);
+        assert_eq!(padded(unit, unit), unit);
+        assert_eq!(padded(unit + 1, unit), 2 * unit);
+    }
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {

@@ -7,16 +7,16 @@ use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 
 const GROUP: u64 = meta::SLOTS as u64;
 
-type Work = fn(&mut GraphTx<<RedbStorage as Storage>::Write<'_>>, &mut Model);
+type Work = fn(&mut GraphTx<<TestStorage as Storage>::Write<'_>>, &mut Model);
 
-fn open(fs: &SimFs) -> Graph<RedbStorage> {
-    Graph::open(sim_backend::storage(fs).unwrap()).unwrap()
+fn open(fs: &SimFs) -> Graph<TestStorage> {
+    Graph::open(test_engine::on_sim(fs).unwrap()).unwrap()
 }
 
 fn relabel(write: &mut GraphTx<impl WriteTransaction>, model: &mut Model, id: u64, label: usize) {
@@ -66,12 +66,12 @@ fn prepare(fs: &SimFs, small: u64) -> Model {
     model
 }
 
-fn one_node(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn one_node(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     create(write, model, labels_of(0b10_0001), Some(-1));
     relabel(write, model, 5, 4);
 }
 
-fn many_nodes(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn many_nodes(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     for slot in 0..300 {
         create(write, model, labels_of((slot % 11) as u8), None);
     }
@@ -81,7 +81,7 @@ fn many_nodes(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &
     }
 }
 
-fn empty_a_group(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn empty_a_group(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     let doomed: Vec<u64> = model
         .nodes
         .range(GROUP..2 * GROUP)
@@ -128,7 +128,7 @@ fn crash_at_every_operation(small: u64, work: Work) {
             };
             for mode in modes(seeds) {
                 let recovered = fs.crash(mode);
-                let graph = match sim_backend::storage(&recovered)
+                let graph = match test_engine::on_sim(&recovered)
                     .map_err(GraphError::from)
                     .and_then(Graph::open)
                 {
@@ -193,7 +193,7 @@ fn a_crash_inside_a_commit_that_empties_a_group_leaves_the_graph_before_or_after
     crash_at_every_operation(10, empty_a_group);
 }
 
-fn fold_deltas(write: &mut GraphTx<<RedbStorage as Storage>::Write<'_>>, model: &mut Model) {
+fn fold_deltas(write: &mut GraphTx<<TestStorage as Storage>::Write<'_>>, model: &mut Model) {
     for id in (1..160).step_by(2).take(meta::MAX_DELTAS) {
         relabel(write, model, id, 1);
     }

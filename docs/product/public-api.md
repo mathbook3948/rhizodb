@@ -18,7 +18,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - New database settings go on `OpenOptions`, and `Database::open` stays the same as opening with the default options.
 - Procedures register through a shared reference at any time, so a database inside an `Arc` can still gain them.
 - `NodeId` and `RelationshipId` convert to and from `u64`, so a host can store an ID and compare it later.
-- Functions that only the fuzz targets call exist only with the non-default `fuzzing` feature and are not part of the API.
+- Functions that only the fuzz targets call exist only under `cfg(fuzzing)`, which cargo-fuzz sets, so no cargo feature exposes them and they are not part of the API.
 - A storage failure that a host handles differently from the rest, such as a file already open elsewhere or a backup target that exists, has an error kind of its own, and every other storage failure stays `ErrorKind::Storage`.
 - `Value`, `Node`, `Relationship`, and `Path` implement `Display` as GQL text without element IDs, so a host prints a result without writing a formatter and reads typed accessors when it needs data.
 - The `Display` text of null, booleans, integers, finite floats, strings, temporals, and lists and maps of them is a GQL expression that evaluates back to an equal value in every later release, while the text of bytes, non-finite floats, and elements is for reading only.

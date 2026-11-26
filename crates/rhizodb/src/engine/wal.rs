@@ -9,6 +9,8 @@ use super::header::FORMAT_MINOR;
 use super::header::Header;
 use super::layout::WAL_BLOCK;
 use super::wal_format::NotRecord;
+use super::wal_format::RECORD_LIMIT;
+use super::wal_format::RECORD_UNIT;
 use super::wal_format::Record;
 use super::wal_format::SegmentHeader;
 use super::wal_format::decode_record;
@@ -22,6 +24,10 @@ pub(crate) struct LogIdentity {
     pub(crate) shard_id: u64,
     pub(crate) salt: u64,
 }
+
+const HEADER_BLOCKS: u64 = (RECORD_UNIT / WAL_BLOCK) as u64;
+
+const PREALLOCATED: u64 = (1 << 20) / WAL_BLOCK as u64;
 
 fn wal_block() -> Result<BlockSize, EngineError> {
     BlockSize::new(WAL_BLOCK).ok_or(EngineError::TooLarge)
@@ -57,10 +63,11 @@ struct Segment {
     sequence: u64,
     first_lsn: u64,
     blocks: u64,
+    allocated: u64,
 }
 
 /// The write-ahead log of one database: segments of whole sector blocks, each record starting a
-/// block of its own, so an append never rewrites a synced sector.
+/// 4 KiB unit of its own, so an append never rewrites a unit that holds synced data.
 /// Log segments no durable header needs, which the log no longer lists.
 #[derive(Debug)]
 pub(crate) struct Detached<F: FileSystem> {
@@ -114,7 +121,8 @@ impl<F: FileSystem> Wal<F> {
             segments_oldest_first: vec![Segment {
                 sequence,
                 first_lsn: next_lsn,
-                blocks: 1,
+                blocks: HEADER_BLOCKS,
+                allocated: HEADER_BLOCKS,
             }],
             active,
             active_header,
@@ -124,7 +132,8 @@ impl<F: FileSystem> Wal<F> {
 
     /// Opens the log `header` names after a crash and calls `replay` with every record after
     /// the checkpoint, in LSN order. A torn tail of the last segment is cut off, an unfinished
-    /// last segment is removed, and any other damage fails as corruption.
+    /// last segment is removed, and any other damage fails as corruption. Segments before the
+    /// first one `header` names are left for the caller to remove.
     pub(crate) fn recover(
         fs: Arc<F>,
         base: &str,
@@ -138,12 +147,6 @@ impl<F: FileSystem> Wal<F> {
             salt: header.wal.salt,
         };
         let mut sequences = segment_files(&*fs, base)?;
-        for stale in sequences
-            .iter()
-            .filter(|seq| **seq < header.wal.first_segment)
-        {
-            fs.remove(&segment_name(base, *stale))?;
-        }
         sequences.retain(|seq| *seq >= header.wal.first_segment);
         if sequences.first() != Some(&header.wal.first_segment) {
             return Err(EngineError::WalMissing);
@@ -165,6 +168,13 @@ impl<F: FileSystem> Wal<F> {
             let name = segment_name(base, sequence);
             let file = fs.open(&name, wal_block()?)?;
             let blocks = file.block_count()?;
+            let longest =
+                segment_target.max((RECORD_UNIT + padded(RECORD_LIMIT, RECORD_UNIT)) as u64);
+            if blocks.saturating_mul(WAL_BLOCK as u64) > longest {
+                return Err(EngineError::corrupt(format!(
+                    "log segment {sequence} is longer than any segment the log writes"
+                )));
+            }
             let mut bytes =
                 vec![0; usize::try_from(blocks).map_err(|_| EngineError::TooLarge)? * WAL_BLOCK];
             file.read(0, &mut bytes)?;
@@ -178,7 +188,8 @@ impl<F: FileSystem> Wal<F> {
                         ..SegmentHeader::default()
                     }
                     .record_seed();
-                    if sealed_record_after(seed, &bytes, 0).is_some() {
+                    let next = expected_lsn.unwrap_or(after);
+                    if sealed_record_after(seed, &bytes, WAL_BLOCK, WAL_BLOCK, next).is_some() {
                         return Err(EngineError::corrupt(format!(
                             "the header of log segment {sequence} is damaged, but synced records follow it"
                         )));
@@ -212,8 +223,9 @@ impl<F: FileSystem> Wal<F> {
                 _ => {}
             }
             let seed = segment_header.record_seed();
+            let unit = segment_header.unit();
             let mut lsn = segment_header.first_lsn;
-            let mut at = WAL_BLOCK;
+            let mut at = unit;
             loop {
                 let rest = bytes.get(at..).unwrap_or_default();
                 match decode_record(seed, rest) {
@@ -222,7 +234,7 @@ impl<F: FileSystem> Wal<F> {
                             replay(record)?;
                         }
                         lsn += 1;
-                        at += padded(length);
+                        at += padded(length, unit);
                     }
                     Ok((record, _)) => {
                         return Err(EngineError::corrupt(format!(
@@ -232,7 +244,9 @@ impl<F: FileSystem> Wal<F> {
                     }
                     Err(NotRecord::Refused(error)) => return Err(error),
                     Err(NotRecord::End | NotRecord::Invalid(_)) if last => {
-                        if let Some(later) = sealed_record_after(seed, &bytes, at) {
+                        if let Some(later) =
+                            sealed_record_after(seed, &bytes, at + unit, unit, lsn + 1)
+                        {
                             return Err(EngineError::corrupt(format!(
                                 "log segment {sequence} is damaged at LSN {lsn}, before a synced \
                                  record at byte {later}"
@@ -249,15 +263,18 @@ impl<F: FileSystem> Wal<F> {
                 }
             }
             let used = (at / WAL_BLOCK) as u64;
-            if last && used < blocks {
+            let mut allocated = blocks;
+            if last && used != blocks {
                 file.set_block_count(used)?;
                 file.sync()?;
+                allocated = used;
             }
             expected_lsn = Some(lsn);
             segments.push(Segment {
                 sequence,
                 first_lsn: segment_header.first_lsn,
                 blocks: used,
+                allocated,
             });
             active = Some((file, segment_header));
         }
@@ -294,7 +311,7 @@ impl<F: FileSystem> Wal<F> {
     pub(crate) fn size(&self) -> u64 {
         self.segments_oldest_first
             .iter()
-            .map(|segment| segment.blocks * WAL_BLOCK as u64)
+            .map(|segment| segment.allocated * WAL_BLOCK as u64)
             .sum()
     }
 
@@ -312,19 +329,31 @@ impl<F: FileSystem> Wal<F> {
                 self.next_lsn
             )));
         }
-        let length = padded(record.len()) as u64;
+        let length = padded(record.len(), self.active_header.unit()) as u64;
         let active = self.active_segment()?;
         let used = active.blocks * WAL_BLOCK as u64;
-        if active.blocks > 1 && used + length > self.segment_target {
+        if used > self.active_header.unit() as u64 && used + length > self.segment_target {
             self.roll_over(hlc)?;
         }
         seal_record(self.active_header.record_seed(), &mut record)?;
-        record.resize(padded(record.len()), 0);
-        let at = self.active_segment()?.blocks;
+        record.resize(padded(record.len(), self.active_header.unit()), 0);
+        let segment = self.active_segment()?;
+        let at = segment.blocks;
+        let end = at + (record.len() / WAL_BLOCK) as u64;
+        let mut allocated = segment.allocated;
         self.active.write(at, &record)?;
+        if end > allocated {
+            let target = self.segment_target / WAL_BLOCK as u64;
+            allocated = (allocated + PREALLOCATED).min(target).max(end);
+            let zeros = usize::try_from(allocated - end).map_err(|_| EngineError::TooLarge)?;
+            if zeros > 0 {
+                self.active.write(end, &vec![0; zeros * WAL_BLOCK])?;
+            }
+        }
         self.active.sync()?;
-        let blocks = (record.len() / WAL_BLOCK) as u64;
-        self.active_segment_mut()?.blocks += blocks;
+        let segment = self.active_segment_mut()?;
+        segment.blocks = end;
+        segment.allocated = allocated;
         self.next_lsn += 1;
         Ok(())
     }
@@ -356,7 +385,8 @@ impl<F: FileSystem> Wal<F> {
         self.segments_oldest_first.push(Segment {
             sequence,
             first_lsn: self.next_lsn,
-            blocks: 1,
+            blocks: HEADER_BLOCKS,
+            allocated: HEADER_BLOCKS,
         });
         Ok(())
     }
@@ -411,15 +441,26 @@ impl<F: FileSystem> Wal<F> {
     }
 }
 
-fn sealed_record_after(seed: u64, bytes: &[u8], at: usize) -> Option<usize> {
-    (at + WAL_BLOCK..bytes.len())
-        .step_by(WAL_BLOCK)
-        .find(|start| {
-            !matches!(
-                decode_record(seed, &bytes[*start..]),
+fn sealed_record_after(
+    seed: u64,
+    bytes: &[u8],
+    from: usize,
+    unit: usize,
+    first_lsn: u64,
+) -> Option<usize> {
+    (from..bytes.len()).step_by(unit).find(|start| {
+        let rest = &bytes[*start..];
+        let highest = first_lsn + ((start - from) / unit) as u64;
+        let lsn = rest
+            .get(12..20)
+            .and_then(|field| <[u8; 8]>::try_from(field).ok())
+            .map(u64::from_le_bytes);
+        lsn.is_some_and(|lsn| (first_lsn..=highest).contains(&lsn))
+            && !matches!(
+                decode_record(seed, rest),
                 Err(NotRecord::End | NotRecord::Invalid(_))
             )
-        })
+    })
 }
 
 fn check_segment(
@@ -454,6 +495,7 @@ fn new_segment<F: FileSystem>(
 ) -> Result<(F::File, SegmentHeader), EngineError> {
     let header = SegmentHeader {
         minor: FORMAT_MINOR,
+        record_unit: RECORD_UNIT as u32,
         database_id: identity.database_id,
         shard_id: identity.shard_id,
         sequence,
@@ -464,7 +506,9 @@ fn new_segment<F: FileSystem>(
     };
     let name = segment_name(base, sequence);
     let file = fs.create(&name, wal_block()?)?;
-    file.write(0, &header.encode())?;
+    let mut first = header.encode();
+    first.resize(RECORD_UNIT, 0);
+    file.write(0, &first)?;
     file.sync()?;
     fs.sync_names()?;
     Ok((file, header))

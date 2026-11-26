@@ -4,17 +4,16 @@ Decides the design of RhizoDB's own storage engine, which stores every database.
 
 ## Background
 
-redb's B-tree and allocator set a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore builds its own engine behind the storage trait, in phases, and leaves room for replication and for spreading data over several disks and servers.
+An off-the-shelf B-tree store sets a floor under the cost of a put, the growth of the file, and its size, and no change to the graph layout removes it. RhizoDB therefore has its own engine behind the storage trait, and leaves room for replication and for spreading data over several disks and servers.
 
 ## Decisions
 
 - RhizoDB's own engine is the only storage backend of `Database`, on disk and in memory.
-- redb stays only to convert the files of earlier releases, with no cargo feature or open option that stores a database in redb.
-- The redb code that writes a database is compiled only for tests, where it is the reference the engine is checked against and a backend for the graph layer's own tests.
 - The engine is a module of the `rhizodb` crate.
-- The engine implements the same storage trait as the redb backend, and the swap changes no graph-layer behavior.
+- The engine implements the storage trait, and the graph layer reaches it only through that trait.
 - A database at rest is one file.
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
+- An open that finds the lock held tries again for half a second before it fails, since a child process the host spawns shares the lock until it starts its program.
 - On a file system without locks the engine opens a database unlocked.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
@@ -40,14 +39,11 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The simulated file system is deterministic for a given seed.
 - The simulated file system holds several files and can inject faults into one of them alone.
 - A simulated crash keeps every synced write and may drop, reorder, or tear at 512-byte sectors each write since the last sync.
+- A write torn with garbage may also garble the other sectors of its 4 KiB unit, synced ones included, as a device that rewrites a whole page or sector does.
 - A simulated crash may lose a change of file length, a create, a rename, or a remove that was not synced.
 - The simulated file system can fail every operation after a chosen count, once or from then on.
-- A failed fsync in the simulated file system fails every later fsync of that file.
-- Opening a redb database converts it by copying every table into a new file and renaming that file over the original.
-- The original redb file stays unchanged until the rename, and opening deletes a leftover conversion file.
-- No backup of the redb file is kept after the conversion.
-- A conversion holds redb's own locks on the redb file until the rename, so it fails while another open holds the file and keeps every other open out.
-- A conversion opens the redb file with redb's integrity check and keeps every write redb makes in memory, so a damaged page fails the conversion as corrupt data and an unclean shutdown is recovered without writing the file.
+- A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
+- A failed sync of the simulated file system's names fails every later one.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
 - `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
@@ -70,18 +66,25 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Page checksums are seeded with the database id, so a page copied from another database is corruption.
 - Tables have stable numeric ids, with 1 to 255 for the engine, 256 to 511 for the graph's tables, and the rest reserved.
 - Log segments are files named after the database file with `-wal-` and the segment number in 16 hex digits.
-- Log segments are made of 512-byte blocks, and each record starts a block of its own, so an append never rewrites a synced sector.
+- Log segments are made of 512-byte blocks, and the header and each record start a 4 KiB unit of their own, so an append never rewrites a page or a 4 KiB device sector that holds synced data.
+- A segment header of engine format minor 3 or later records the 4 KiB unit its records start at, and a segment of an earlier minor, whose records start at 512-byte blocks, replays and takes appends at those blocks.
+- A segment grows in steps of 1 MiB of synced zeros, up to the segment target, so an append writes into allocated blocks instead of growing the file.
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
 - Damage in the last segment followed by a record that passes its checksum is corruption, since every append is synced before the next one starts, and so is a damaged header of a last segment that holds such a record.
+- Recovery looks for such a record only where the LSN field holds an LSN a record there could carry, and hashes nothing else, so a torn tail of random bytes is scanned in linear time.
 - A log that ends before the checkpoint's LSN is corruption.
+- A segment longer than the segment target and longer than a header and the longest record is corruption, refused before recovery reads it.
 - Segments wholly before the checkpoint are removed, not reused.
 - The database file is created under a staging name and renamed into place once its header is synced.
 - Opens that race to create a database take turns through a lock on the staging file, so exactly one of them creates the database and the others find that database.
 - Opening reuses a staging file left by an interrupted open, and removes one found next to an existing database.
 - On Windows, a staging file that another open is removing refuses access until it is gone, so an open that meets a refusal of access at any step of creating the database waits and tries again as it does for a locked staging file.
-- Opening a cleanly closed database removes leftover segments and starts a log with a new salt, which a header without the clean flag records before any commit.
+- Opening a cleanly closed database starts a log with a new salt, which a header without the clean flag records before any commit, and removes leftover segments once that header is durable.
+- Opening a database after an unclean shutdown writes every replayed commit into the file under a clean header and then starts a new log as for a cleanly closed database, so no commit rests on log records or a header that only the page cache held, and a power loss before that header is durable leaves the old log as it was.
+- That checkpoint places nothing in free blocks or free slots and cuts nothing off the file, since the header the open read may be one only the page cache held, and the older header in the other slot may still reach those blocks.
+- The open compacts the file only once the new log's header is durable, since a compaction that cannot reuse free space only grows the file.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
@@ -153,12 +156,10 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
-- The block cache's default size matches redb's, so a database moved to the engine keeps its memory ceiling.
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.
-- Every test of `Database` runs on the engine, and each redb fixture is converted as it is opened.
-- The engine is checked byte for byte against the redb backend over random operations.
+- Every test of `Database` and of the graph layer runs on the engine.
 - `check` walks every tree from the durable header and compares key order, key ranges, entry counts, and each extent's live blocks with what it reaches.
 - `check` takes the durable header, extent table, catalog, and tree, then walks them without the lock that checkpoints take, and the tree it holds keeps its blocks from reuse until it ends.
 
@@ -168,6 +169,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - How a cleaner moves the live blocks of partly live extents without copying the whole file, so an automatic compaction does not stall writers of a large database.
 - How a write set larger than the memtable is ingested.
 - How the extent table is written when rewriting it whole at every checkpoint costs too much.
-- How a point read that overlaps a background checkpoint keeps redb's speed, since the checkpoint's memory traffic slows it.
+- How a point read that overlaps a background checkpoint keeps its speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
+- How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header and loses acknowledged commits without an error.

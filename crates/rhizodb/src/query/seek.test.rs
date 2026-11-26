@@ -21,7 +21,7 @@ use crate::query::compare::equals;
 use crate::storage::Storage;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
 use crate::temporal::Date;
 use crate::temporal::DateTime;
 use crate::temporal::Duration;
@@ -210,7 +210,7 @@ proptest! {
         (stored, value) in values(),
         fill_on_create in any::<bool>(),
     ) {
-        let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+        let graph = Graph::open(test_engine::in_memory()).unwrap();
         let mut write = graph.write().unwrap();
         let label: Token<Label> = write.intern_token("P").unwrap();
         let key: Token<PropertyKey> = write.intern_token("k").unwrap();

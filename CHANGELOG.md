@@ -4,63 +4,8 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
-### Added
-
-- `Error::byte_offset` gives the byte offset in the query text where the parser noticed a syntax error, so a host can underline the bad spot. It is `Some` exactly when `Error::kind` is `ErrorKind::Syntax`.
-- Embedded property graph storage in one database file of RhizoDB's own storage engine, beside a write-ahead log that a clean close empties, with a versioned on-disk format that upgrades older databases on open. Every page carries a checksum, so damage fails as corrupt data where it is read.
-- Node labels kept as interned label sets in one node meta chunk per 4096 node IDs, so label tests read no node record and `MATCH (n:Label) RETURN count(*)` reads one chunk per 4096 nodes.
-- `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
-- Node meta carries checksums, so a damaged chunk or delta fails the read as corrupt data instead of answering wrongly.
-- Node properties kept in one column per property key and 4096 node IDs, typed when its values share a type, so a scan, filter, sort, or aggregate reads only the properties it uses, a commit that changes a few nodes writes a small checksummed delta per value, and a damaged column fails the read as corrupt data. Databases of earlier formats move their node records into columns on open.
-- Relationships kept in compressed sparse row segments per 16 node IDs, relationship type, and direction, with a small checksummed delta per node for small commits, so a loaded graph takes about half the disk space and a damaged segment fails the read as corrupt data. Databases of earlier formats move their adjacency into segments on open.
-- GQL queries through `Database::execute`, with Cypher `CREATE` accepted as GQL `INSERT`.
-- Temporal values: dates, times, datetimes with zones, and durations.
-- Host-registered procedures callable with `CALL`, outside the `db` namespace that built-in procedures reserve, and full `EXISTS { ... }` subqueries.
-- Regular expression matching with `=~`.
-- GQL linear statements `FILTER` and `LET`, label expressions with `|`, `&`, `!`, `%`, and parentheses in patterns and in `IS [NOT] LABELED`, label sets after `IS` or `&` in `SET` and `REMOVE`, and every GQL edge orientation, including `~`, `<~`, and `~>`.
-- `COUNT { ... }` and `COLLECT { ... }` subqueries, and `reduce()`.
-- `CALL { ... }` subqueries with GQL variable scope clauses, `OPTIONAL CALL`, and `UNION` inside, the GQL string and numeric functions, `trim(... FROM ...)`, simple `CASE` branches with lists of tests and comparisons, and `ORDER BY ... NULLS FIRST | LAST`.
-- GQL's `EXCEPT`, `INTERSECT`, each with `ALL` or `DISTINCT`, and `OTHERWISE` between queries and inside `CALL { ... }`.
-- GQL's `||` concatenation of strings and of lists.
-- The functions `randomUUID`, `haversin`, `timestamp`, `ceiling`, `toBooleanList`, `toIntegerList`, `toFloatList`, `toStringList`, `vector.similarity.cosine`, and `vector.similarity.euclidean`, `round` with a precision and a rounding mode, and GQL's `CURRENT_DATE`, `CURRENT_TIME`, `CURRENT_TIMESTAMP`, `LOCAL_TIME`, and `LOCAL_TIMESTAMP`.
-- Value type predicates `IS [NOT] TYPED` and `IS [NOT] ::`, `CAST(value AS type)` with the new `ErrorKind::InvalidCast`, `valueType()`, `normalize()`, `IS [NOT] [form] NORMALIZED`, `IS [NOT] TRUE`, `FALSE`, and `UNKNOWN`, and `IS [NOT] DISTINCT FROM`.
-- GQL's `VALUE { ... }` subqueries, and the new `ErrorKind::CardinalityViolation` for one that returns more than one row.
-- GQL's `NEXT` between statements, with `NEXT YIELD`, at the top of a query and inside `CALL { ... }`.
-- Updating `CALL { ... }` subqueries, which run their writes once per incoming row in the enclosing transaction, may end without `RETURN`, and work with scope clauses, `OPTIONAL CALL`, and `UNION`.
-- Explicit read and write transactions through `Database::begin_read` and `Database::begin_write`.
-- Keyword (BM25) and exact vector indexes, kept in the same transaction as the data they index, created with `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryNodes` and `CALL db.index.vector.queryNodes`.
-- Keyword and vector indexes over the properties of relationships of one type, created by passing `IndexTarget::RelationshipType` to `Database::create_keyword_index` and `Database::create_vector_index`, and searched with `CALL db.index.keyword.queryRelationships` and `CALL db.index.vector.queryRelationships`, which yield `relationship` and `score`.
-- Keyword queries match `"quoted phrases"` and `prefix*` terms, compare text in Unicode normalization form NFKC, and find words inside Thai, Lao, Khmer, and Myanmar text.
-- Property indexes over one property of the nodes of a label or the relationships of a type, created with `Database::create_property_index`, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=` on that property, and `id()` lookups in `WHERE` that read an element by ID instead of scanning.
-- `OpenOptions`, whose `create(false)` fails with the new `ErrorKind::DatabaseNotFound` instead of creating a missing file, and where later settings will go.
-- Read queries that match from many start nodes split them across threads, set with `OpenOptions::threads` and `OpenOptions::parallel_threshold`, and return the same rows in the same order as on one thread. `OpenOptions::in_memory` opens an in-memory database with these settings.
-- `NodeId::from_u64` and `RelationshipId::from_u64`, for a host that stored an ID as a number.
-- `ErrorKind::DatabaseAlreadyOpen` and `ErrorKind::BackupTargetExists`, which opening a file that another `Database` holds and a backup to a path that already holds something report instead of `ErrorKind::Storage`.
-- Online backups with `Database::backup_to`, which copies one snapshot of the committed database into a new file while readers and writers carry on, and never leaves a partial file at its path. Restoring a backup is opening it.
-- Logical dumps with `Database::export` and `Database::import`: a versioned JSON Lines format that keeps node and relationship IDs, labels, index definitions, and every value's exact type, imported in bounded batches into a new database. New error kinds `Io`, `InvalidDump`, `UnsupportedDumpVersion`, and `DatabaseNotEmpty` report their failures.
-- `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
-- Automatic space reclaim: after a checkpoint, a clean close's included, a file that holds more than twice its live data plus 4 MiB, and has grown by its live data since the last compaction, is compacted, so a long-running host's file does not grow without bound and a database that lost most of its data gives the space back by the time it closes.
-- `Display` for `Value`, `Node`, `Relationship`, and `Path` as GQL text such as `{k: [1, 'a']}`, `date('2024-02-29')`, `(:Person {name: 'Ada'})`, and `<(:A)-[:T]->(:B)>`, so a host can print query results without writing a formatter; the text of null, booleans, integers, finite floats, strings, temporals, and lists and maps of them reads back as an equal value.
-
 ### Changed
 
-- **Breaking:** `Database::open` and `Database::in_memory` store data with RhizoDB's own storage engine instead of redb, so the database file has a new format. Opening a file that an earlier build stored with redb converts it: every redb page is checked, every table is copied into a new file, and that file is renamed over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was. A converted file cannot be opened by an earlier build.
-- `Value` and `Temporal` are `#[non_exhaustive]`, so a match on them needs a catch-all arm.
-- `Node` and `Relationship` keep their fields private. Read them with `id()`, `labels()`, `has_label()`, `relationship_type()` (formerly the field `rel_type`), `start()`, `end()`, `properties()`, and `property()`.
-- `Parameters` is a type of its own instead of an alias of `BTreeMap`. Build it with `new`, `insert`, `with`, `from` an array of pairs, or `collect`, and read it with `get`.
-- A procedure body returns `Result<ProcedureOutput, ProcedureError>`, where `ProcedureOutput` is a type of its own built from a `Vec` of rows, by `collect`, or with `push_row`, and `ProcedureError` is `Box<dyn Error + Send + Sync>`.
-- `Database::register_procedure` takes `&self`, so a database shared through an `Arc` can register procedures.
-- The fuzzing entry points `read_value_for_fuzzing`, `decode_engine_formats_for_fuzzing`, `open_damaged_engine_file_for_fuzzing`, and `parse_for_fuzzing` exist only with the non-default `fuzzing` cargo feature, and `parse_for_fuzzing` moved from the hidden `gql` module to the crate root, which no longer exports `gql`.
-- A keyword index stores the postings of each term in blocks of 128 consecutive element IDs instead of one entry per element, so building and searching one take about half the time. Opening a database of an earlier format moves its postings into blocks without tokenizing its text again, and an earlier build cannot open the result.
-- `WriteTransaction` is no longer `Send`, so it stays on the thread that began it. Moved to another thread, a second write begun there waited for itself forever.
-- The database file ends after its live data: a checkpoint puts tree pages, long keys and values, and the catalog in one open extent instead of one per kind, so a small database takes 0.2 MiB instead of 8 MiB, and a loaded graph's file is close to a third shorter. Files of earlier builds open as before and fill the room left in their open extents.
-- Checkpoints reuse the freed blocks inside partly live extents of the database file, and cut the file's free tail as soon as their header is durable, so loading, deleting, and loading a graph again keeps the file near the size of one load instead of growing to several times its live data. This is engine format 1.2, which an earlier build cannot open, and opening a file of format 1.1 finds its live blocks by walking it once.
-- A checkpoint that rewrites much of the database makes its work durable in stages and reuses each stage's freed blocks in the next, so deleting a tenth of the medium benchmark graph, which rewrites nearly every page, leaves a 16.8 MiB file instead of 28.3 MiB.
-- A scan that starts in the page where the previous scan of the same transaction started reads that page without searching down from the root, so traversals and aggregates over relationships read storage with fewer comparisons.
-- The threads that `OpenOptions::threads` sets are a budget the database's read queries share: a query splits its start nodes only across threads that other read queries leave idle. Concurrent queries no longer each spawn a full set of helpers onto the same cores, so four readers of the load benchmark read 1.8 times as fast and eight readers 3 times as fast as with a full set per query.
-- A commit no longer waits for the log segments a background checkpoint freed to be removed, or for the memtable that checkpoint wrote to be freed, which made the first commits after each checkpoint take up to half a second under sustained writes. The checkpoint thread does both.
-- A commit that deletes a key no checkpoint has written drops its tombstone once every open snapshot sees the delete, so reads beside a steady writer no longer slow down with every commit until the next checkpoint. Beside one writer, a mix of lookups, scans, and traversals reads twice as fast as before at the medium benchmark scale.
-- Writing a batch of rows takes fewer allocations: the maps of a parameter share their keys, an index into a list parameter reads the item in place, and a relationship's record is encoded once into a buffer the transaction keeps, so a bulk load of a medium graph runs about a fifth fewer instructions.
 - A pattern whose start node has no ID lookup or index starts from its end node when that node is already bound or has one, so `MATCH (q:Person)-[:LIVES_IN]->(c)` after `c` is bound, or `MATCH (:Person)-[k:KNOWS]->(h:Person {id: $id})`, reads only the relationships of that node. Grouping the oldest person of each of a hundred cities this way runs 33 times as fast on the medium benchmark graph.
 - A `MATCH` filter whose every condition is a comparison, `IS NULL`, `IN` a list, or a string test on the elements its pattern binds tests each condition as soon as the elements it reads are bound, so a traversal with a filter on every hop stops a partial match at the first hop it fails. A three-hop traversal with a filter on every hop runs twice as fast.
 - A query that reads the properties of many relationships reads each stored chunk of 32 relationships from storage once rather than once per relationship, so counting the `KNOWS` relationships of the medium benchmark graph with a filter on a relationship property runs four times as fast.
@@ -68,59 +13,66 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A scan of one label computes operators, function calls, and indexing over the properties it reads, so a query that orders, groups, or filters by such a value, such as `ORDER BY p.age * 7 % 13 + p.id % 5 LIMIT 20` or `RETURN upper(substring(p.name, 0, 1)), count(*)`, no longer builds a row per node. Ordering twenty thousand persons by a computed score runs six times as fast.
 - `EXISTS { MATCH ... }` and `COUNT { MATCH ... }` over a single `MATCH` count the matches without building a row for each, and `EXISTS` stops at the first match when nothing it would test after that could fail. Filtering the persons of the medium benchmark graph by `COUNT { MATCH (p)<-[:KNOWS]-(:Person) } >= 20` runs twice as fast.
 
-### Fixed
+## 0.1.0
 
-- Appending keys in small commits split a full page in two at many checkpoints, so tables loaded in key order, such as new node IDs, kept about one half-full page per such checkpoint. Appends now leave full pages.
-- `Database::check` held the lock that checkpoints take for its whole walk of the file, so on a large database checkpoints and then commits stalled until it finished. It now reads the last checkpoint without that lock.
-- A damaged header whose generation, LSN, or log segment counter sat near the top of its range could panic in a debug build or wrap around in release. Such a header now fails as corrupt data.
-- An automatic compaction that ran while a read transaction was open could not reuse the space it emptied, so it grew the file instead of shrinking it and held off the next compaction. It now waits until the transactions that began before the checkpoint have ended.
-- A damaged database file whose catalog claimed a huge number of extent slots opened, then made its first checkpoint run out of memory. An open now ignores the free slots after the last extent in use, and fails as corrupt data when an extent starts past the end of the file.
-- A backup that failed, for example on a full disk, left the log segments of its staging copy in the target directory for good. They are now removed with the staging file.
-- A log segment that the engine failed to remove after a checkpoint, for example one another program held open on Windows or one already deleted, made every later commit fail until the database was reopened. The segment is now left for the next open to remove.
-- The doctests compile from the published package, whose README the crate now includes, so `cargo test` runs in an unpacked copy of the crate.
-- Opening a file whose storage-engine format is newer than this build fails with `ErrorKind::UnsupportedFormatVersion` instead of `ErrorKind::Storage`, so a host that rolls back a release can tell it from a disk fault.
-- A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
-- A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.
-- `SET r = {...}` and `SET r += {...}` on a relationship rewrote its whole record once per property, so replacing the properties of a relationship with thousands of them took seconds. They now write the record once.
-- `SET n:A:B:...` and `REMOVE n:A:B:...` stored a label set for every label in between, which is never deleted, so removing 3,000 labels from one node grew the file by over 100 MB. They now store only the label set the node ends with.
-- `SET n:A SET n:B ...` and statements that each change the labels of a node in one transaction stored a label set for every step, so adding and removing 2,000 labels one clause at a time grew the file by 142 MB. A transaction now stores only the label sets its nodes have when it commits.
-- A query of many `LET` clauses took time quadratic in their number to parse and bind, and one of many `WITH` clauses took quadratic time to run, so 16,000 `LET` clauses took 30 seconds in a debug build and 32,000 `WITH` clauses 12 seconds in release. Both now take linear time.
-- Reading every property of a committed node, as `properties(n)`, `keys(n)`, `SET n = {...}`, and `DELETE` do, took time quadratic in its number of properties, so a node with 50,000 properties took seconds to delete. It now takes linear time.
-- A property index serves a condition whose value is any expression over earlier variables, such as `MATCH (n:L {id: i + 1})` after `UNWIND`, instead of only a literal, a parameter, a variable, or a property, so such a lookup no longer scans the label once per row.
-- A deeply nested parameter or procedure result, and query text nested close to the parser's limit in a debug build, no longer overflow the stack and abort the host process. A query now fits in 1 MiB of thread stack in debug and release builds, and a value that nests lists and maps deeper than 128 levels fails with the new `ErrorKind::NestingTooDeep`.
-- A regular expression nested deeper than 64 groups fails with `ErrorKind::InvalidRegex`.
-- A variable-length relationship over a long path, or a pattern of many steps, no longer overflows the stack and aborts the host process, because matching keeps its search on the heap.
-- A power loss while `Database::open` created a new file could leave a file that every later open refused. The file is now written under a staging name, synced, and linked into place.
-- A thread holding a write transaction that began another write, or ran a writing query, could wait for itself forever instead of failing with `ErrorKind::WriteTransactionOnThisThread`, when another thread had committed just before it took the write lock.
-- A damaged redb file on which redb panics while it is converted fails with `ErrorKind::CorruptData` instead of ending the host process. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.
-- `DETACH DELETE` of a node that many matched rows name read its relationships once per row, so deleting a hub through `MATCH (h:Hub)<-[:FOLLOWS]-(f) DETACH DELETE h` took time and memory quadratic in its degree, and 16,000 followers took seven seconds. Each node and relationship is now deleted once.
-- Dropping an index, and rebuilding a keyword index on open, copied every entry of the index into memory, vectors and postings included, and logged one delete per entry. They now delete the entries by range.
-- Vector scores of -0.0 sorted below equal scores of 0.0, so elements that both scored zero came out of a vector search out of ascending ID order, and the score read -0.0. Zero scores are now always 0.0.
-- `Database::stats` failed with `ErrorKind::WriteTransactionOnThisThread` on a thread that held a write transaction, although it waits for no transaction. It now answers there.
-- `OpenOptions::create(false)` wrote a new database into an existing empty file. Opening an empty file without `create` now fails with `ErrorKind::DatabaseNotFound` and leaves the file as it was.
-- `Database::import` let writes from other threads commit between its batches, so a concurrent `INSERT` could take an ID the dump still had to import and fail the import as `ErrorKind::CorruptData`, or land in a gap of the dump's IDs unnoticed. Write transactions and writing queries on other threads now wait until the import ends.
-- A commit that created or dropped an index held a lock that every new read transaction waits for through its whole storage commit, including the log write, its sync, and a wait for a checkpoint, so creating an index over a large graph stalled every read query for seconds. Reads now begin while such a commit runs and see the snapshot before it.
-- Creating a relationship read and checksummed the whole node meta chunk of each endpoint, so a load of relationships between nodes of earlier transactions spent most of its time on checksums. A write transaction now checks each chunk once.
-- Invisible format characters such as a soft hyphen, a word joiner, or a byte order mark inside a word stayed in its keyword term, so text pasted with soft hyphens was not found by the word typed without them. Keyword indexes now drop them from text and queries, and keyword indexes built before are rebuilt when the database opens.
-- A Hebrew acronym written with an ASCII double quote, such as `צה"ל`, was stored as one keyword term that no query could produce, since a query reads the quote as the edge of a phrase. A double quote now separates words in stored text too, and keyword indexes built before are rebuilt when the database opens.
-- A dependency update that brought new Unicode tables for word segmentation or normalization left keyword indexes built under the old tables in place unless the change touched a fixed probe text, so keyword search could miss documents unnoticed. The recorded tokenizer now includes the Unicode version of every table it reads, so any new version rebuilds keyword indexes when the database opens.
-- A query that panicked inside `WriteTransaction::execute`, such as one calling a host procedure that panics, left the writes it had made in the transaction, and a host that caught the panic could commit half a statement. The panic now rolls back the transaction, and later calls fail with `ErrorKind::TransactionAborted`.
-- A type with a million postfix `LIST` or `ARRAY` suffixes, as in `IS TYPED INT LIST LIST ...`, no longer overflows the stack and aborts the host process. Each suffix counts toward the parser's nesting limit, so a type nested too deeply fails with `SyntaxErrorKind::NestingTooDeep`.
-- Nested `trim(...)` calls took time exponential in their depth to parse, so a query of a few hundred bytes could keep a thread busy for hours. `trim` now looks for `FROM` among its arguments once and parses them once, which also lets variables named `both`, `leading`, or `trailing` be read inside `trim`, as in `trim(both.name)`.
-- A constant grouping key, such as `1 AS one`, `$t AS t`, or `date() AS today`, made the same constant inside an aggregating item or its `ORDER BY` fail with `ErrorKind::AmbiguousAggregationExpression`, as in `RETURN 1 AS one, count(*) + 1 AS c`. A key that reads no variable no longer stands in for an equal expression.
-- `CURRENT_DATE`, `CURRENT_TIMESTAMP`, and the other clock names failed with `ErrorKind::UndefinedVariable` inside an aggregating item or the `ORDER BY` of an aggregating projection, as in `RETURN max(e.at) < CURRENT_DATE`. They now read the statement clock there too.
-- A short query could abort the host process by doubling a string or a list in `reduce`, as in `reduce(s = 'x', i IN range(1, 45) | s + s)`, or by `replace()` with an empty pattern, since only `range()` had a length cap. A list built with `+` or `||` now holds at most 10,000,000 items, a string built with `+`, `||`, or `replace()` at most 256 MiB, and either fails with `ErrorKind::NumberOutOfRange` before it is allocated.
-- `datetime()` of a string with both an offset and a zone name, such as `'2024-07-01T12:00+05:00[Europe/Paris]'`, ignored the offset and took the instant from the zone's rules, shifting the instant without an error when the two disagreed. The offset now gives the instant, which is then shown in the named zone, as dump imports already did.
-- The `milliseconds`, `microseconds`, and `nanoseconds` of a duration and the `epochMillis` of a datetime saturated at the integer limits when they did not fit, so a duration of a few centuries gave 9223372036854775807 nanoseconds. They now fail with `ErrorKind::IntegerOverflow`.
-- `date.truncate` and the other truncate functions returned the date unchanged when the start of the unit fell before the earliest supported date, as for the millennium of year -999999999. They now fail with `ErrorKind::InvalidTemporalValue`.
-- `toInteger` of a decimal string read it through a float, so `toInteger('-9223372036854775809')` gave the smallest integer instead of null and `toInteger('9007199254740993.5')` lost its last digit. A string without an exponent now has its whole part read exactly.
-- A node pattern whose property map repeated a key, as in `MATCH (n:L {x: 10 / $zero, x: 1})`, skipped evaluating the earlier value when the query scanned columns, so it returned rows where other plans failed. Such a pattern now always evaluates every entry.
-- A filter of `EXISTS { pattern WHERE ... }`, `COUNT { pattern WHERE ... }`, or a pattern comprehension that cannot be boolean now fails before any data is read, as a `WHERE` does, instead of only once a match reaches it.
-- An aggregate in the `ORDER BY` of an aggregating projection read a projected name as the input variable of that name, so `WITH x AS y, count(*) AS c ORDER BY sum(y)` failed with `ErrorKind::UndefinedVariable` and `WITH n.v AS n, count(*) AS c ORDER BY max(n)` sorted by the old `n` without an error. A name that renames a variable now reads that variable, and one that projects any other expression fails with `ErrorKind::AmbiguousAggregationExpression`.
-- An uncorrelated `CALL { ... }` inside a subquery next to a projection that hides outer variables, as in `ORDER BY COUNT { CALL { MATCH (n) RETURN n AS m } RETURN m }`, was rejected because its own variables were taken for the hidden ones.
-- `[a = (b)]` and other one-item lists of a comparison with a parenthesized value were parsed as pattern comprehensions and failed. A list starts a pattern comprehension only when a relationship follows the parenthesis.
-- A type union inside `ANY<...>` or `LIST<...>` in the `WHERE` of a list comprehension, as in `[x IN l WHERE x IS :: ANY<INTEGER | STRING> | x]`, ended the filter at its `|`.
-- A pattern used as a predicate in the `RETURN` or `WITH` of a subquery inside a `WHERE` was accepted, though the same clause rejects it everywhere else.
-- A node pattern with about a thousand properties, as in `MATCH (n:L {a0: 1, a1: 1, ...})`, overflowed the stack and aborted the host process when the query scanned columns, because its conditions were joined into one chain as deep as the map was long. They are now joined into a balanced tree.
-- About 125 `OR`, `AND`, or `XOR` operators or chained comparisons in one expression, as a query builder writes for `n.id = 1 OR n.id = 2 OR ...`, failed with `SyntaxErrorKind::NestingTooDeep` though nothing in the query nests. Such chains now take any length, and a simple `CASE` branch with thousands of tests, which overflowed the stack and aborted the host process, runs too. Other infix operators such as `+` still count one nesting level each.
-- An aggregate argument that called `rand()` inside a list comprehension, a quantifier, `reduce`, a pattern comprehension, or the `WHERE` of an `EXISTS` or `COUNT` pattern was accepted, as in `collect([x IN range(1, 3) | rand()])`. It now fails with `ErrorKind::NonConstantExpression`, as `rand()` directly in the argument does.
+The first release: an embedded, schemaless property graph database for Rust programs, queried with GQL.
+
+### Added
+
+#### Storage and durability
+
+- One database file of RhizoDB's own storage engine, beside a write-ahead log that a clean close empties. Every page carries a checksum, so damage fails with `ErrorKind::CorruptData` where it is read.
+- A commit returns once its log record is synced, and a crash or power loss keeps every acknowledged commit. Checkpoints write the log into the file in the background.
+- An exclusive lock on the open file, on a file system with file locks, so a second `Database` on the same file, in this process or another, fails with `ErrorKind::DatabaseAlreadyOpen`.
+- Nodes keep their labels as interned label sets and their properties in typed columns per property key, and relationships live in compressed adjacency segments, so scans, filters, aggregates, and label counts read only what they use.
+- Automatic space reclaim: a file that holds much more than its live data is compacted after a checkpoint, so a long-running host's file does not grow without bound.
+- `Database::in_memory` and `OpenOptions::in_memory` run the same engine in memory.
+
+#### Query language
+
+- GQL queries through `Database::execute`, with `MATCH`, `OPTIONAL MATCH`, `INSERT` (and Cypher `CREATE`), `SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, `MERGE`, `UNWIND`, `WITH`, `FILTER`, `LET`, `NEXT`, `ORDER BY ... NULLS FIRST | LAST`, `UNION`, `EXCEPT`, `INTERSECT`, and `OTHERWISE`.
+- Label expressions with `|`, `&`, `!`, `%`, and parentheses, every GQL edge orientation, `IS [NOT] LABELED`, and variable-length relationships in the Cypher form `-[:R*1..3]->`. GQL path quantifiers such as `->{1,3}` are not supported and fail as a syntax error.
+- Subqueries: `EXISTS`, `COUNT`, `COLLECT`, and `VALUE { ... }`, and `CALL { ... }` with variable scope clauses, `OPTIONAL CALL`, and updating bodies.
+- Values: null, booleans, integers, floats, strings, bytes, lists, maps, nodes, relationships, paths, and temporals (dates, times, datetimes with zones, and durations).
+- Type predicates `IS [NOT] TYPED` and `IS [NOT] ::`, `CAST(value AS type)`, `valueType()`, `normalize()` and `IS [NOT] NORMALIZED`, `IS [NOT] TRUE | FALSE | UNKNOWN`, and `IS [NOT] DISTINCT FROM`.
+- The GQL string, numeric, list, and temporal functions, regular expressions with `=~`, `reduce()`, and `vector.similarity.cosine` and `vector.similarity.euclidean`.
+- Host-registered procedures with `Database::register_procedure`, called with `CALL` outside the `db` namespace that built-in procedures reserve.
+
+#### Transactions
+
+- Every query runs in its own transaction, and `Database::begin_read` and `Database::begin_write` open explicit ones: snapshot reads, and one writer at a time.
+- Read queries that match from many start nodes split them across threads, set with `OpenOptions::threads` and `OpenOptions::parallel_threshold`, and return the same rows in the same order as on one thread.
+
+#### Indexes
+
+- Keyword (BM25) indexes with `"quoted phrases"` and `prefix*` terms and text compared in Unicode normalization form NFKC. Text without spaces between words, such as Hangul, Han, Hiragana, Katakana, Thai, Lao, Khmer, and Myanmar, is indexed as overlapping pairs of characters, since no word dictionary splits it.
+- Exact vector indexes with cosine, euclidean, and dot product metrics.
+- Property indexes over one property, which `MATCH` and `MERGE` read for `=`, `IN`, `<`, `<=`, `>`, and `>=`.
+- Indexes are created and dropped through `Database::create_keyword_index`, `Database::create_vector_index`, `Database::create_property_index`, and `Database::drop_index`, which take an `IndexTarget` and, for vectors, a `VectorMetric`. GQL has no index statements.
+- Every index covers the nodes of a label or the relationships of a type, changes in the same transaction as the data it covers, and is searched with `CALL db.index.keyword.queryNodes`, `queryRelationships`, and their `db.index.vector` counterparts.
+
+#### Operations
+
+- Online backups with `Database::backup_to`, which copy one snapshot into a new file while readers and writers carry on and never leave a partial file. Restoring a backup is opening it.
+- Logical dumps with `Database::export` and `Database::import`, a versioned JSON Lines format that keeps IDs, labels, index definitions, and every value's exact type.
+- `Database::compact`, `Database::stats`, and `Database::check` for giving space back, reading the file's size, live data, log, and cache counts, and checking every page.
+
+#### API
+
+- `Database`, `OpenOptions`, `DatabaseStats`, `ReadTransaction`, `WriteTransaction`, `QueryResult`, `Value`, `Node`, `Relationship`, `Path`, `NodeId`, `RelationshipId`, `Parameters`, `IndexTarget`, `VectorMetric`, `Procedure`, `ProcedureOutput`, `ProcedureError`, `ValueType`, and the temporal types.
+- `Error` with `Error::kind` for a stable `ErrorKind`, and `Error::byte_offset` and `SyntaxErrorKind` for where and why the parser refused a query.
+- `Display` for `Value`, `Node`, `Relationship`, and `Path` as GQL literals, so a host can print query results without writing a formatter.
+- `Value`, `Temporal`, `ErrorKind`, `SyntaxErrorKind`, `ValueType`, and `DatabaseStats` are `#[non_exhaustive]`, so later releases can add to them, and `WriteTransaction` stays on the thread that began it.
+- The minimum supported Rust version is 1.100.
+
+### Notes
+
+- A database file written by a pre-release build opens only if its graph format is 11 or later, and an older one fails with `ErrorKind::UnsupportedFormatVersion`. Files this release writes use engine format 1.3, which earlier pre-release builds refuse.
+- An open that finds the file lock held tries again for about half a second before it fails with `ErrorKind::DatabaseAlreadyOpen`, since a child process the host spawns shares the lock until it starts its program.
+- `OpenOptions::create(false)` refuses a missing or empty file with `ErrorKind::DatabaseNotFound`, and leaves an empty file as it was.
+- `Database::import` makes write transactions on other threads wait until it ends.
+- The first open after a change of the keyword tokenizer, such as a dependency update that brings new Unicode tables, rebuilds every keyword index in that open.
+
+### Known limitations
+
+- An open that reads a header only the operating system's page cache held, as after a failed fsync or a process that stopped before its header was synced, writes its clean header into the slot of the one durable header. A power loss that tears that write falls back to an older header and loses acknowledged commits without an error.

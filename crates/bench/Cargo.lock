@@ -375,7 +375,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bench"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "cozo",
  "duckdb",
@@ -2448,15 +2448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redb"
-version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11175cc688ba1b9d3cec4fe582fd82cb97e2a82e28ccc8101b7b8030a8003280"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "redis"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2530,12 +2521,11 @@ checksum = "4389f1d5789befaf6029ebd9f7dac4af7f7e3d61b69d4f30e2ac02b57e7712b0"
 
 [[package]]
 name = "rhizodb"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "crc32fast",
  "jiff",
  "memchr",
- "redb",
  "regex-automata",
  "regex-syntax",
  "twox-hash 2.1.5",

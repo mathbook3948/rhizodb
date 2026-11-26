@@ -9,8 +9,8 @@ use proptest::test_runner::TestCaseError;
 use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::test_scale;
 
 pub(super) const LABELS: [&str; 6] = ["A", "B", "C", "D", "E", "F"];
@@ -358,8 +358,8 @@ fn apply(
     Ok(())
 }
 
-pub(super) fn open(fs: &SimFs) -> Graph<RedbStorage> {
-    Graph::open(sim_backend::storage(fs).unwrap()).unwrap()
+pub(super) fn open(fs: &SimFs) -> Graph<TestStorage> {
+    Graph::open(test_engine::on_sim(fs).unwrap()).unwrap()
 }
 
 fn run(ops: &[Op]) -> Result<(), TestCaseError> {

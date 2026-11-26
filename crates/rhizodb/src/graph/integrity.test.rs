@@ -6,7 +6,8 @@ use crate::graph::Token;
 use crate::graph::VectorMetric;
 use crate::storage::Storage;
 use crate::storage::WriteTransaction;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 use crate::value::PropertyValue;
 
 const PERSON: u32 = 0;
@@ -18,10 +19,10 @@ const CAROL: NodeId = NodeId(2);
 const FRIENDSHIP: RelationshipId = RelationshipId(0);
 const LOOP: RelationshipId = RelationshipId(1);
 
-type Write<'a> = <RedbStorage as Storage>::Write<'a>;
+type Write<'a> = <TestStorage as Storage>::Write<'a>;
 
-fn healthy_graph() -> Graph<RedbStorage> {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+fn healthy_graph() -> Graph<TestStorage> {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     let person = write.intern_token::<Label>("Person").unwrap();
     let knows = write.intern_token::<RelationshipType>("KNOWS").unwrap();
@@ -53,11 +54,11 @@ fn healthy_graph() -> Graph<RedbStorage> {
     graph
 }
 
-fn violations_of(graph: &Graph<RedbStorage>) -> Vec<IntegrityViolation> {
+fn violations_of(graph: &Graph<TestStorage>) -> Vec<IntegrityViolation> {
     graph.read().unwrap().check_integrity().unwrap()
 }
 
-fn corrupt(graph: &Graph<RedbStorage>, edit: impl FnOnce(&mut Write<'_>)) {
+fn corrupt(graph: &Graph<TestStorage>, edit: impl FnOnce(&mut Write<'_>)) {
     let mut write = graph.storage.begin_write().unwrap();
     edit(&mut write);
     write.commit().unwrap();
@@ -109,7 +110,7 @@ fn a_graph_after_edits_and_deletes_passes() {
 
 #[test]
 fn an_empty_database_passes() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     assert_eq!(violations_of(&graph), vec![]);
 }
 
@@ -980,7 +981,7 @@ fn every_violation_is_reported_not_just_the_first() {
     }));
 }
 
-fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error::Error> {
+fn run_query(graph: &Graph<TestStorage>, query: &str) -> Result<(), crate::error::Error> {
     crate::query::execute(
         graph,
         &crate::query::Statements::default(),
@@ -990,7 +991,7 @@ fn run_query(graph: &Graph<RedbStorage>, query: &str) -> Result<(), crate::error
     .map(|_| ())
 }
 
-fn count(graph: &Graph<RedbStorage>, query: &str) -> usize {
+fn count(graph: &Graph<TestStorage>, query: &str) -> usize {
     crate::query::execute(
         graph,
         &crate::query::Statements::default(),
@@ -1004,7 +1005,7 @@ fn count(graph: &Graph<RedbStorage>, query: &str) -> usize {
 
 #[test]
 fn a_graph_stays_consistent_after_queries_that_delete_connected_nodes() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     run_query(&graph, "CREATE (:A)-[:R]->(:B)").unwrap();
 
     let refused = run_query(&graph, "MATCH (a:A)-[r]->() DELETE a").unwrap_err();
@@ -1022,7 +1023,7 @@ fn a_graph_stays_consistent_after_queries_that_delete_connected_nodes() {
 
 #[test]
 fn clearing_a_property_that_never_existed_does_not_intern_its_name() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     run_query(&graph, "CREATE (:A {k: 1})-[:R]->(:B)").unwrap();
     for query in [
         "MATCH (n) REMOVE n.typo",
@@ -1050,7 +1051,7 @@ fn clearing_a_property_that_never_existed_does_not_intern_its_name() {
 const NAMES_INDEX: u32 = 0;
 const POINTS_INDEX: u32 = 1;
 
-fn indexed_graph() -> Graph<RedbStorage> {
+fn indexed_graph() -> Graph<TestStorage> {
     let graph = healthy_graph();
     let mut write = graph.write().unwrap();
     write
@@ -1255,7 +1256,7 @@ fn an_index_counter_behind_the_indexes_is_caught() {
 
 const FRIENDSHIP_NOTES_INDEX: u32 = 0;
 
-fn relationship_indexed_graph() -> Graph<RedbStorage> {
+fn relationship_indexed_graph() -> Graph<TestStorage> {
     let graph = healthy_graph();
     let mut write = graph.write().unwrap();
     write
@@ -1370,7 +1371,7 @@ fn an_index_over_an_unnamed_relationship_type_is_caught() {
 
 #[test]
 fn relationship_indexes_stay_consistent_through_every_query_that_writes_relationships() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     write
         .create_keyword_index("notes", IndexTarget::RelationshipType("R"), &["note"])

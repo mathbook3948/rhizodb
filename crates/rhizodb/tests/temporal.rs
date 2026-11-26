@@ -18,7 +18,7 @@ fn text(db: &Database, query: &str) -> String {
 #[test]
 fn temporal_values_survive_being_stored_and_reopened() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph.redb");
+    let path = dir.path().join("graph.rhizodb");
     let stored = "datetime('2015-07-21T21:40:32.142+02:00[Europe/Stockholm]')";
     {
         let db = Database::open(&path).unwrap();

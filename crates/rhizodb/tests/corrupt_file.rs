@@ -69,15 +69,6 @@ fn probe(inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Outcomes {
     probe_on(&pristine, inputs)
 }
 
-/// The undamaged `db_file` target file of format 8, which the checked-in fuzzer inputs were
-/// found on. Its damages hit the same bytes there, and the open upgrades what is left.
-fn format_eight_pristine() -> Vec<u8> {
-    std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/format-8-db-file.redb"),
-    )
-    .unwrap()
-}
-
 fn probe_on(pristine: &[u8], inputs: impl IntoIterator<Item = (String, Vec<u8>)>) -> Outcomes {
     let directory = tempfile::tempdir().unwrap();
     let damaged = directory.path().join("damaged.rhizodb");
@@ -140,32 +131,6 @@ fn fuzzer_inputs() -> Vec<(String, Vec<u8>)> {
 fn every_fuzzer_input_fails_without_a_panic_on_the_current_file() {
     let outcomes = probe(fuzzer_inputs());
     assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
-}
-
-#[test]
-fn the_undamaged_format_eight_file_upgrades_and_answers_every_probe() {
-    let outcomes = probe_on(
-        &format_eight_pristine(),
-        [("undamaged".to_owned(), Vec::new())],
-    );
-    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
-    assert_eq!(
-        outcomes.failures,
-        vec![("undamaged".to_owned(), Vec::new())]
-    );
-}
-
-#[test]
-fn every_fuzzer_input_that_damaged_a_file_fails_as_corrupt_data_without_a_panic() {
-    let outcomes = probe_on(&format_eight_pristine(), fuzzer_inputs());
-    assert!(outcomes.panics.is_empty(), "{}", outcomes.panics.join("\n"));
-    let unreported: Vec<String> = outcomes
-        .failures
-        .iter()
-        .filter(|(_, kinds)| !kinds.contains(&ErrorKind::CorruptData))
-        .map(|(name, kinds)| format!("{name}: {kinds:?}"))
-        .collect();
-    assert!(unreported.is_empty(), "{}", unreported.join("\n"));
 }
 
 #[test]

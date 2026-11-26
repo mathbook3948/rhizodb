@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
+use std::mem;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -14,6 +16,8 @@ use super::mem_fs::byte_index;
 use super::mem_fs::read_blocks;
 use super::mem_fs::resize_blocks;
 use super::mem_fs::write_blocks;
+
+const DEVICE_UNIT: usize = 4096;
 
 /// A deterministic simulated file system that tells what was synced from what was only
 /// written, so a test can build the files a power loss could leave and inject I/O errors.
@@ -39,9 +43,11 @@ pub(crate) enum Crash {
     /// Every write reached the disk.
     KeepUnsynced,
     /// The seed picks, for each block of each unsynced write, whether it is lost, kept, or
-    /// torn at sectors into new, old, and garbage bytes, applies the kept ones in a shuffled
-    /// order, may lose an unsynced change of length, and keeps a prefix of the unsynced name
-    /// changes.
+    /// torn at sectors into new, old, and garbage bytes, and a torn block may also garble
+    /// other sectors of its 4 KiB unit, synced ones included. It applies the kept writes in a
+    /// shuffled order, may lose an unsynced change of length, and keeps a prefix of the
+    /// unsynced name changes. Writes a failed sync left behind are treated the same, before
+    /// the writes after it.
     Scramble { seed: u64 },
     /// Like [`Crash::Scramble`], but each sector holds its old or its new bytes, never
     /// garbage, as on a device whose sector writes are atomic.
@@ -57,7 +63,7 @@ pub(crate) enum Failure {
     FromThenOn,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct State {
     inodes: Vec<Inode>,
     live_names: BTreeMap<String, usize>,
@@ -74,7 +80,7 @@ struct Inode {
     live: Vec<u8>,
     durable: Vec<u8>,
     pending: Vec<DataChange>,
-    sync_failed: bool,
+    unsettled: Vec<DataChange>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +101,7 @@ struct Fault {
     remaining: u64,
     failure: Failure,
     inode: Option<usize>,
+    syncs_only: bool,
     failing: bool,
 }
 
@@ -111,7 +118,7 @@ fn not_found(name: &str) -> io::Error {
 }
 
 impl State {
-    fn operate(&mut self, inode: Option<usize>) -> io::Result<()> {
+    fn operate(&mut self, inode: Option<usize>, sync: bool) -> io::Result<()> {
         self.operations += 1;
         let Some(fault) = &mut self.fault else {
             return Ok(());
@@ -121,6 +128,9 @@ impl State {
         }
         if fault.failing {
             return Err(injected());
+        }
+        if fault.syncs_only && !sync {
+            return Ok(());
         }
         if fault.remaining > 0 {
             fault.remaining -= 1;
@@ -190,6 +200,7 @@ impl SimFs {
             remaining: operations,
             failure,
             inode: None,
+            syncs_only: false,
             failing: false,
         });
     }
@@ -207,6 +218,38 @@ impl SimFs {
             remaining: operations,
             failure,
             inode: Some(inode),
+            syncs_only: false,
+            failing: false,
+        });
+        Ok(())
+    }
+
+    /// Like [`SimFs::fail_after`], counting only syncs of files and of the names, though a
+    /// failure from then on fails every later operation.
+    pub(crate) fn fail_sync_after(&self, syncs: u64, failure: Failure) {
+        lock(&self.state).fault = Some(Fault {
+            remaining: syncs,
+            failure,
+            inode: None,
+            syncs_only: true,
+            failing: false,
+        });
+    }
+
+    /// Like [`SimFs::fail_file_after`], counting only syncs of the file named `name`.
+    pub(crate) fn fail_file_sync_after(
+        &self,
+        name: &str,
+        syncs: u64,
+        failure: Failure,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
+        state.fault = Some(Fault {
+            remaining: syncs,
+            failure,
+            inode: Some(inode),
+            syncs_only: true,
             failing: false,
         });
         Ok(())
@@ -235,6 +278,14 @@ impl SimFs {
     /// The number of operations called so far, failed ones included.
     pub(crate) fn operations(&self) -> u64 {
         lock(&self.state).operations
+    }
+
+    /// A separate file system in the state of this one, its unsynced writes and armed
+    /// failure included.
+    pub(crate) fn fork(&self) -> SimFs {
+        SimFs {
+            state: Arc::new(Mutex::new(lock(&self.state).clone())),
+        }
     }
 
     /// The file system a power loss now could leave, with every write in it synced and no
@@ -272,7 +323,7 @@ impl SimFs {
                 live: bytes.clone(),
                 durable: bytes,
                 pending: Vec::new(),
-                sync_failed: false,
+                unsettled: Vec::new(),
             });
         }
         let names: BTreeMap<String, usize> = names
@@ -306,9 +357,11 @@ enum Torn {
 
 fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
     let mut bytes = inode.durable.clone();
-    let mut order: Vec<&DataChange> = inode.pending.iter().collect();
-    random.shuffle(&mut order);
-    for change in order {
+    let mut unsettled: Vec<&DataChange> = inode.unsettled.iter().collect();
+    random.shuffle(&mut unsettled);
+    let mut pending: Vec<&DataChange> = inode.pending.iter().collect();
+    random.shuffle(&mut pending);
+    for change in unsettled.into_iter().chain(pending) {
         match change {
             DataChange::SetLength(length) => {
                 if random.chance(2) {
@@ -326,6 +379,9 @@ fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
                     _ => {
                         grow(&mut bytes, end);
                         tear(&mut bytes[*start..end], data, random, torn);
+                        if torn == Torn::WithGarbage {
+                            garble_neighbours(&mut bytes, *start..end, random);
+                        }
                     }
                 }
             }
@@ -337,6 +393,16 @@ fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
         bytes.extend_from_slice(&durable[bytes.len()..]);
     }
     bytes
+}
+
+fn garble_neighbours(bytes: &mut [u8], written: Range<usize>, random: &mut SplitMix) {
+    let first = written.start / DEVICE_UNIT * DEVICE_UNIT;
+    let last = written.end.div_ceil(DEVICE_UNIT) * DEVICE_UNIT;
+    for sector in (first..last.min(bytes.len())).step_by(SECTOR_SIZE) {
+        if !written.contains(&sector) && random.chance(3) {
+            bytes[sector..sector + SECTOR_SIZE].fill_with(|| random.next() as u8);
+        }
+    }
 }
 
 fn grow(bytes: &mut Vec<u8>, end: usize) {
@@ -393,7 +459,7 @@ impl FileSystem for SimFs {
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if state.live_names.contains_key(name) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -411,14 +477,14 @@ impl FileSystem for SimFs {
 
     fn open(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
         Ok(self.file(inode, size))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if !state.live_names.contains_key(from) {
             return Err(not_found(from));
         }
@@ -431,7 +497,7 @@ impl FileSystem for SimFs {
 
     fn remove(&self, name: &str) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         if !state.live_names.contains_key(name) {
             return Err(not_found(name));
         }
@@ -443,7 +509,7 @@ impl FileSystem for SimFs {
 
     fn names(&self) -> io::Result<Vec<String>> {
         let mut state = lock(&self.state);
-        state.operate(None)?;
+        state.operate(None, false)?;
         Ok(state.live_names.keys().cloned().collect())
     }
 
@@ -452,7 +518,7 @@ impl FileSystem for SimFs {
         if state.names_sync_failed {
             return Err(injected());
         }
-        if let Err(error) = state.operate(None) {
+        if let Err(error) = state.operate(None, true) {
             state.names_sync_failed = true;
             return Err(error);
         }
@@ -463,19 +529,15 @@ impl FileSystem for SimFs {
 }
 
 impl BlockFile for SimFile {
-    fn block_size(&self) -> BlockSize {
-        self.size
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
     }
 
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         let start = byte_index(self.size.offset(first)?)?;
         state.fits(self.inode, start + buffer.len())?;
         let inode = state.inode(self.inode);
@@ -492,13 +554,13 @@ impl BlockFile for SimFile {
 
     fn block_count(&self) -> io::Result<u64> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         Ok((state.inode(self.inode).live.len() / self.size.bytes()) as u64)
     }
 
     fn is_empty(&self) -> io::Result<bool> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         Ok(state.inode(self.inode).live.is_empty())
     }
 
@@ -508,7 +570,7 @@ impl BlockFile for SimFile {
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.operate(Some(self.inode))?;
+        state.operate(Some(self.inode), false)?;
         let length = byte_index(self.size.offset(count)?)?;
         state.fits(self.inode, length)?;
         let inode = state.inode(self.inode);
@@ -520,16 +582,38 @@ impl BlockFile for SimFile {
 
     fn sync(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
-        if state.inode(self.inode).sync_failed {
-            return Err(injected());
-        }
-        if let Err(error) = state.operate(Some(self.inode)) {
-            state.inode(self.inode).sync_failed = true;
+        let failed = state.operate(Some(self.inode), true);
+        let inode = state.inode(self.inode);
+        let pending = mem::take(&mut inode.pending);
+        if let Err(error) = failed {
+            let writes = pending
+                .into_iter()
+                .filter(|change| matches!(change, DataChange::Write { .. }));
+            inode.unsettled.extend(writes);
             return Err(error);
         }
-        let inode = state.inode(self.inode);
-        inode.durable = inode.live.clone();
-        inode.pending.clear();
+        for change in pending {
+            match change {
+                DataChange::SetLength(length) => {
+                    inode.durable.resize(length, 0);
+                    inode.unsettled.retain(|old| match old {
+                        DataChange::Write { start, .. } => *start < length,
+                        DataChange::SetLength(_) => true,
+                    });
+                }
+                DataChange::Write { start, data } => {
+                    let end = start + data.len();
+                    grow(&mut inode.durable, end);
+                    inode.durable[start..end].copy_from_slice(&data);
+                    inode.unsettled.retain(|old| match old {
+                        DataChange::Write { start: old, data } => {
+                            old + data.len() <= start || *old >= end
+                        }
+                        DataChange::SetLength(_) => true,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }

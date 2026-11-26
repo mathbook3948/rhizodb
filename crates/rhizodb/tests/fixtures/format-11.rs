@@ -1,6 +1,6 @@
-//! Writes the format 11 fixture through the public API of the last commit that wrote format 11.
-//! `generate-format-11.sh` builds it against that commit. Run as `format-11 <path>`, it writes
-//! the database, compacts it, and prints each query the upgrade test checks, each followed by
+//! Writes the format 11 fixture through the public API of the last commit whose own storage
+//! engine wrote format 11. `generate-format-11.sh` builds it against that commit. Run as
+//! `format-11 <path>`, it writes the database, compacts it, closes it, and prints each query the upgrade test checks, each followed by
 //! its answer on an indented line, which the script keeps in `format-11.answers`. The
 //! relationship records it leaves, one entry each, run over hundreds of the chunks of IDs that
 //! format 12 groups them into, with gaps from deleted relationships, records updated after they
@@ -106,7 +106,7 @@ fn main() {
     let Some(path) = args.next() else {
         panic!("usage: format-11 <path>");
     };
-    build(&Database::open(&path).unwrap());
-    let mut database = redb::Database::open(&path).unwrap();
-    while database.compact(redb::CompactionMode::default()).unwrap() {}
+    let db = Database::open(&path).unwrap();
+    build(&db);
+    db.compact().unwrap();
 }
