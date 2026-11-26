@@ -645,16 +645,19 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(64)))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_edit_reads_and_stores_what_a_model_holds(ops in prop::collection::vec(op(), 0..120)) {
         check_against_model(&ops, 0)?;
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_segment_edit_keeps_hubs_as_a_model_does(ops in prop::collection::vec(hub_op(), 0..60), bulk in 0usize..3_000) {
         check_against_model(&ops, bulk)?;
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_segment_encodes_canonically_and_reads_back(
         slots in prop::collection::btree_map(
             0..SEGMENT_SLOTS,
@@ -681,6 +684,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_part_never_reads_as_other_relationships(
         slots in prop::collection::btree_map(
             0..SEGMENT_SLOTS,

@@ -42,6 +42,7 @@ fn read(block: &Block) -> Vec<Posting> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_block_reads_back_what_its_edits_left(edits in edits()) {
         let mut block = Block::default();
         let mut model = BTreeMap::new();
@@ -83,6 +84,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_block_built_in_any_order_has_the_bytes_of_one_built_in_order(
         edits in prop::collection::btree_map(0u64..(1 << BLOCK_SHIFT), postings(), 1..40),
         seed in any::<u64>(),
@@ -101,6 +103,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn damaged_block_bytes_fail_or_read_without_a_panic(
         bytes in prop::collection::vec(any::<u8>(), 0..64),
     ) {

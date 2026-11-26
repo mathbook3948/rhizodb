@@ -123,6 +123,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_text_is_found_by_the_phrase_of_its_own_words(text in mixed_text()) {
         let db = indexed(&format!("{ANCHOR} {text}"));
         let typed = text.replace('"', " ");

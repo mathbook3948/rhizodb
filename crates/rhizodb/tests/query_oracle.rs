@@ -1008,11 +1008,13 @@ fn in_memory_sessions(test: &str, salt: u64, open: impl Fn() -> Database) {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_queries_in_memory_match_the_reference() {
     in_memory_sessions("random_queries_in_memory_match_the_reference", 0, db);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_queries_split_across_threads_match_the_reference() {
     in_memory_sessions(
         "random_queries_split_across_threads_match_the_reference",
@@ -1022,6 +1024,7 @@ fn random_queries_split_across_threads_match_the_reference() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn random_queries_on_a_reopened_file_match_the_reference() {
     let base = seed();
     let directory = tempfile::tempdir().unwrap();

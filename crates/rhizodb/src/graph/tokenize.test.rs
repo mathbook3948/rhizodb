@@ -374,6 +374,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(5000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn no_term_is_empty_holds_whitespace_or_a_control_character(text in mixed_text()) {
         for purpose in PURPOSES {
             for term in terms(&text, purpose) {
@@ -388,6 +389,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn no_term_starts_with_a_character_that_joins_the_one_before_it(text in mixed_text()) {
         for purpose in PURPOSES {
             for term in terms(&text, purpose) {
@@ -402,6 +404,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn positions_start_at_zero_and_never_go_back(text in mixed_text()) {
         let query = terms(&text, Purpose::Query);
         let document = terms(&text, Purpose::Document);
@@ -430,6 +433,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_space_between_two_texts_gives_the_terms_of_each_in_turn(
         left in mixed_text(),
         right in mixed_text(),
@@ -463,6 +467,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn typing_a_stored_term_finds_a_term_the_text_stored(text in mixed_text()) {
         let stored: Vec<String> = terms(&text, Purpose::Document)
             .into_iter()
@@ -503,6 +508,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(20000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn ascii_segments_give_the_terms_the_unicode_steps_give(text in ascii_heavy_text()) {
         for purpose in PURPOSES {
             let scan = scan(&nfkc(&text), purpose);

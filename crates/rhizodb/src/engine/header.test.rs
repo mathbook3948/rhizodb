@@ -290,11 +290,13 @@ fn header_strategy() -> impl Strategy<Value = Header> {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_header_round_trips(header in header_strategy()) {
         prop_assert_eq!(Header::decode(&header.encode()).unwrap(), header);
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_block_decodes_or_fails_without_panicking(
         bytes in proptest::collection::vec(any::<u8>(), BLOCK),
         magic in any::<bool>(),

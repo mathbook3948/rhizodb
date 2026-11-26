@@ -352,11 +352,13 @@ fn the_sampled_points_reach_every_operation_across_seeds() {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_at_any_point_of_a_workload_recovers_the_acknowledged_steps() {
     crash_during_workload(Failure::FromThenOn);
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn one_failed_write_or_sync_in_a_workload_loses_only_its_own_step() {
     crash_during_workload(Failure::Once);
 }
@@ -383,6 +385,7 @@ fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole_empty_one() {
     let (opened, _) = operations();
     let seeds = u64::from(test_scale::cases(2)).min(16);

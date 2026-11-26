@@ -405,6 +405,7 @@ fn crashes(seeds: u64) -> Vec<Crash> {
 }
 
 #[test]
+#[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_and_power_loss_keeps_each_acknowledged_record() {
     let total = {
         let fs = SimFs::new();

@@ -348,6 +348,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(6000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn multiplying_by_a_float_matches_exact_arithmetic(duration in mixed_duration(), factor in float_factor()) {
         let db = &*DATABASE;
         let context = format!("{duration:?} * {factor:e}");
@@ -369,6 +370,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn dividing_by_a_float_matches_exact_arithmetic(duration in mixed_duration(), divisor_value in float_factor()) {
         let db = &*DATABASE;
         let context = format!("{duration:?} / {divisor_value:e}");
@@ -392,6 +394,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn multiplying_by_an_integer_matches_exact_arithmetic(duration in mixed_duration(), factor in integer()) {
         let db = &*DATABASE;
         let context = format!("{duration:?} * {factor}");
@@ -408,6 +411,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn dividing_by_an_integer_matches_exact_arithmetic(duration in mixed_duration(), divisor_value in integer()) {
         let db = &*DATABASE;
         let context = format!("{duration:?} / {divisor_value}");
@@ -429,6 +433,7 @@ proptest! {
     }
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_zero_duration_scales_to_zero_whatever_the_finite_factor(factor in float_factor(), divisor_value in integer()) {
         let db = &*DATABASE;
         let zero = duration_value(Duration::new(0, 0, 0, 0).unwrap());
@@ -457,6 +462,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(4000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_duration_reads_back_the_string_it_prints(duration in duration(), factor in float_factor()) {
         let db = &*DATABASE;
         let scaled_by_query = evaluate_duration(
@@ -523,6 +529,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(4000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_duration_string_keeps_its_whole_part_and_every_nanosecond(
         negative in any::<bool>(),
         whole in whole_digits(),
@@ -711,6 +718,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(3000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn comparison_agrees_with_the_difference_and_not_with_order_by((a, b) in pair()) {
         let db = &*DATABASE;
         let context = format!("{a} vs {b}");
@@ -747,6 +755,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(4000))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_date_moves_by_months_then_days_then_the_whole_days_of_the_time(
         date in date(),
         duration in mixed_duration(),

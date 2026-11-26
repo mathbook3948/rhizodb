@@ -776,6 +776,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_keyword_in_any_letter_case_behaves_as_in_any_slot_and_context(
         keyword in 0..KEYWORDS.len(),
         template in 0..TEMPLATES.len(),

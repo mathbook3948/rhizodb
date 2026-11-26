@@ -109,6 +109,7 @@ fn items_split_into_runs_of_whole_extents() {
 
 proptest! {
     #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
     fn any_resealed_run_decodes_or_fails_without_panicking(bytes in proptest::collection::vec(any::<u8>(), BLOCK)) {
         let mut blocks = bytes;
         blocks[0] = 3;
