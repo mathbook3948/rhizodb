@@ -60,6 +60,21 @@ fn trim_still_takes_a_variable_named_like_a_trim_keyword() {
         single(&db, "WITH ' a ' AS leading RETURN trim(leading) AS t"),
         string("a")
     );
+    assert_eq!(
+        row(
+            &db,
+            "WITH {name: ' b '} AS both, ' l' AS leading, 'x' AS from \
+             RETURN trim(both.name), trim(leading + 'x'), trim(BOTH FROM ' c '), \
+             trim(LEADING 'x' FROM 'xxd'), trim('y' FROM 'yey')"
+        ),
+        [
+            string("b"),
+            string("lx"),
+            string("c"),
+            string("d"),
+            string("e")
+        ]
+    );
 }
 
 #[test]
@@ -454,5 +469,19 @@ fn gql_current_time_functions_read_the_statement_clock() {
     assert_eq!(
         single(&db, "WITH 1 AS current_date RETURN current_date"),
         int(1)
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [date('2000-01-01'), date('2001-01-01')] AS at \
+             RETURN max(at) < CURRENT_DATE AS stale, max(at) AS last, \
+             duration.between(max(at), CURRENT_DATE).years >= 25 AS old \
+             ORDER BY duration.between(last, CURRENT_TIMESTAMP)"
+        ),
+        [[
+            boolean(true),
+            single(&db, "RETURN date('2001-01-01')"),
+            boolean(true)
+        ]]
     );
 }

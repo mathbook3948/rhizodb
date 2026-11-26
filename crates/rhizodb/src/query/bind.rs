@@ -1746,11 +1746,10 @@ impl Binder<'_> {
             return Ok(Some(Expr::Slot(*slot)));
         }
         if let Mode::Grouped(grouping) = mode {
-            if let Some((key, slot)) = grouping
-                .keys
-                .iter()
-                .find(|(key, _)| same_meaning(key, &grouping.input, expr, scope))
-            {
+            if let Some((key, slot)) = grouping.keys.iter().find(|(key, _)| {
+                same_meaning(key, &grouping.input, expr, scope)
+                    && (contains_aggregate(key) || !free_variables(key).is_empty())
+            }) {
                 if !is_simple_key(key) && !contains_aggregate(key) {
                     return Err(error(
                         ErrorKind::AmbiguousAggregationExpression,
@@ -1761,18 +1760,22 @@ impl Binder<'_> {
                 return Ok(Some(Expr::Slot(*slot)));
             }
             if let Some((function, distinct, args)) = aggregate_call(expr) {
-                if grouping.ordering {
+                let aggregate = if grouping.ordering {
                     let registered = self.closed.len();
                     self.aggregate(function, distinct, args, scope)?;
                     self.closed.truncate(registered);
-                }
-                let aggregate = self.aggregate(function, distinct, args, &grouping.input)?;
+                    let input = ordered_input(grouping, scope, args)?;
+                    self.aggregate(function, distinct, args, &input)?
+                } else {
+                    self.aggregate(function, distinct, args, &grouping.input)?
+                };
                 let slot = self.slot();
                 grouping.aggregates.push((aggregate, slot));
                 return Ok(Some(Expr::Slot(slot)));
             }
             if let ast::Expr::Variable(name) = expr
                 && scope.get(&name.0).is_none()
+                && (current_clock(&name.0).is_none() || grouping.input.get(&name.0).is_some())
             {
                 let known = !grouping.ordering && grouping.input.get(&name.0).is_some();
                 return Err(if known {
@@ -2045,7 +2048,7 @@ impl Binder<'_> {
         let held = || Box::new(Expr::Slot(slot));
         let mut branches = Vec::new();
         for branch in &case.branches {
-            let mut condition: Option<Expr> = None;
+            let mut tests = Vec::new();
             for operand in &branch.when {
                 let test = match operand {
                     ast::WhenOperand::Value(value) => Expr::Comparison(
@@ -2060,14 +2063,9 @@ impl Binder<'_> {
                         negated: *negated,
                     },
                 };
-                condition = Some(match condition {
-                    Some(earlier) => {
-                        Expr::Binary(ast::BinaryOp::Or, Box::new(earlier), Box::new(test))
-                    }
-                    None => test,
-                });
+                tests.push(test);
             }
-            if let Some(condition) = condition {
+            if let Some(condition) = any_of(tests) {
                 branches.push((condition, self.expr(&branch.then, scope, mode)?));
             }
         }
@@ -2309,7 +2307,7 @@ impl Binder<'_> {
         let pattern =
             self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
         let filter = match &comprehension.filter {
-            Some(filter) => Some(self.expr(filter, &inner, mode)?),
+            Some(filter) => Some(self.filter(filter, &inner, mode)?),
             None => None,
         };
         let projection = self.expr(&comprehension.projection, &inner, mode)?;
@@ -2386,7 +2384,7 @@ impl Binder<'_> {
             )?);
         }
         let filter = match filter {
-            Some(filter) => Some(self.expr(filter, &inner, mode)?),
+            Some(filter) => Some(self.filter(filter, &inner, mode)?),
             None => None,
         };
         Ok(PatternQuery {
@@ -2685,6 +2683,45 @@ fn aggregate_function(name: &str) -> Option<AggregateFunction> {
         .map(|(_, function)| *function)
 }
 
+fn any_of(mut tests: Vec<Expr>) -> Option<Expr> {
+    if tests.len() <= 1 {
+        return tests.pop();
+    }
+    let later = tests.split_off(tests.len().div_ceil(2));
+    Some(Expr::Binary(
+        ast::BinaryOp::Or,
+        Box::new(any_of(tests)?),
+        Box::new(any_of(later)?),
+    ))
+}
+
+fn ordered_input(
+    grouping: &Grouping,
+    projected: &Scope,
+    args: &[ast::Expr],
+) -> Result<Scope, Error> {
+    let mut input = grouping.input.clone();
+    for name in args.iter().flat_map(free_variables) {
+        let Some(variable) = projected.get(name) else {
+            continue;
+        };
+        let source = grouping.keys.iter().find_map(|(key, slot)| match key {
+            ast::Expr::Variable(source) if *slot == variable.slot => grouping.input.get(&source.0),
+            _ => None,
+        });
+        let Some(source) = source else {
+            return Err(error(
+                ErrorKind::AmbiguousAggregationExpression,
+                format!(
+                    "an aggregate in this ORDER BY can read `{name}` only if it renames a variable"
+                ),
+            ));
+        };
+        input.insert(name, source.slot, source.kind);
+    }
+    Ok(input)
+}
+
 fn aggregate_call(expr: &ast::Expr) -> Option<(AggregateFunction, bool, &[ast::Expr])> {
     match expr {
         ast::Expr::CountStar => Some((AggregateFunction::Count, false, &[])),
@@ -2800,6 +2837,35 @@ fn names_of<'n>(names: impl Iterator<Item = &'n ast::Name>) -> impl Iterator<Ite
     names.map(|name| name.0.as_str())
 }
 
+fn first_statement(query: &ast::Query) -> Vec<&ast::SingleQuery> {
+    match query {
+        ast::Query::Next(blocks) => blocks
+            .first()
+            .map_or_else(Vec::new, |block| union_parts(&block.query).0),
+        _ => union_parts(query).0,
+    }
+}
+
+fn collect_leading_with_free<'a>(
+    single: &'a ast::SingleQuery,
+    bound: &mut Vec<&'a str>,
+    free: &mut Vec<&'a str>,
+) {
+    let Some(ast::Clause::With(with)) = single.clauses.first() else {
+        return;
+    };
+    match &with.projection.items {
+        ast::ProjectionItems::Star(_) => collect_clauses_free(&single.clauses, bound, free),
+        ast::ProjectionItems::Items(items) => {
+            for item in items {
+                if let ast::Expr::Variable(name) = &item.expr {
+                    collect_free_name(name, bound, free);
+                }
+            }
+        }
+    }
+}
+
 fn collect_clauses_free<'a>(
     clauses: &'a [ast::Clause],
     bound: &mut Vec<&'a str>,
@@ -2848,18 +2914,25 @@ fn collect_clauses_free<'a>(
             ast::Clause::Filter(condition) => collect_free(condition, bound, free),
             ast::Clause::CallSubquery(call) => {
                 let (singles, _) = union_parts(&call.body);
-                for single in &singles {
-                    match &call.imports {
-                        Some(ast::Imports::Variables(names)) => {
-                            for name in names {
-                                collect_free_name(name, bound, free);
-                            }
+                match &call.imports {
+                    Some(ast::Imports::Variables(names)) => {
+                        for name in names {
+                            collect_free_name(name, bound, free);
                         }
-                        _ => collect_clauses_free(&single.clauses, bound, free),
+                    }
+                    Some(ast::Imports::All) => {
+                        for single in &singles {
+                            collect_clauses_free(&single.clauses, bound, free);
+                        }
+                    }
+                    None => {
+                        for single in first_statement(&call.body) {
+                            collect_leading_with_free(single, bound, free);
+                        }
                     }
                 }
                 if let Some(ast::Clause::Return(projection)) =
-                    singles.first().and_then(|single| single.clauses.last())
+                    singles.last().and_then(|single| single.clauses.last())
                     && let ast::ProjectionItems::Items(items) = &projection.items
                 {
                     bound.extend(

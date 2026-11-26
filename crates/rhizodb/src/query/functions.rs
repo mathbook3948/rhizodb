@@ -9,6 +9,7 @@ use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 
 use super::compare::equals;
+use super::datum;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::arithmetic;
@@ -964,6 +965,17 @@ impl<T: ReadTransaction> Env<'_, T> {
                         }
                     };
                 };
+                if to.len() > from.len() {
+                    let matches = if from.is_empty() {
+                        text.chars().count().saturating_add(1)
+                    } else {
+                        text.matches(from.as_str()).count()
+                    };
+                    datum::check_string_bytes(
+                        text.len()
+                            .saturating_add(matches.saturating_mul(to.len() - from.len())),
+                    )?;
+                }
                 Ok(Datum::String(text.replace(from.as_str(), to)))
             }
             Function::Temporal(temporal) => {
@@ -1093,11 +1105,23 @@ fn to_integer(value: Datum) -> Result<Datum, Error> {
         Datum::Float(value) => Ok(float_to_integer(value)),
         Datum::Boolean(value) => Ok(Datum::Integer(i64::from(value))),
         Datum::String(text) => Ok(match number_in(&text) {
-            Datum::Float(value) => float_to_integer(value),
+            Datum::Float(value) => whole_part(&text).unwrap_or_else(|| float_to_integer(value)),
             other => other,
         }),
         other => Err(invalid_value(Function::ToInteger, &other)),
     }
+}
+
+fn whole_part(text: &str) -> Option<Datum> {
+    let text = text.trim();
+    if text.contains(['e', 'E']) {
+        return None;
+    }
+    let whole = text.split_once('.').map_or(text, |(whole, _)| whole);
+    if whole.trim_start_matches(['+', '-']).is_empty() {
+        return Some(Datum::Integer(0));
+    }
+    Some(whole.parse::<i64>().map_or(Datum::Null, Datum::Integer))
 }
 
 fn float_to_integer(value: f64) -> Datum {
