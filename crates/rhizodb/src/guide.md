@@ -32,7 +32,9 @@ assert_eq!(result.rows(), [vec![Value::String("Grace".to_owned())]]);
 staging name beside it, synced, and linked into place, so a power loss during creation leaves
 either no file or a whole empty database. A file that is already open, in this process or
 another, fails to open with [`ErrorKind::DatabaseAlreadyOpen`], so two processes never write one
-file. [`OpenOptions`] opens with other settings, such as failing with
+file. The check needs file locks, so on a file system without them, such as some network
+mounts, a second open succeeds and the host must keep to one `Database` per file.
+[`OpenOptions`] opens with other settings, such as failing with
 [`ErrorKind::DatabaseNotFound`] instead of creating a missing file.
 [`Database::in_memory`] makes a database that is gone when dropped.
 

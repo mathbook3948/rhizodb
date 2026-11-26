@@ -465,6 +465,76 @@ fn commits_leave_removing_the_log_a_checkpoint_freed_to_the_checkpoint_thread() 
     assert_eq!(everything(&reopened).unwrap(), committed);
 }
 
+#[derive(Clone, Debug)]
+struct StuckSegments {
+    fs: SimFs,
+    refusal: Arc<std::sync::Mutex<Option<io::ErrorKind>>>,
+}
+
+impl FileSystem for StuckSegments {
+    type File = <SimFs as FileSystem>::File;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.create(name, size)
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<Self::File> {
+        self.fs.open(name, size)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        match *self.refusal.lock().unwrap() {
+            Some(io::ErrorKind::NotFound) if name.contains("-wal-") => {
+                self.fs.remove(name)?;
+                self.fs.remove(name)
+            }
+            Some(kind) if name.contains("-wal-") => Err(io::Error::from(kind)),
+            _ => self.fs.remove(name),
+        }
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn a_log_segment_that_cannot_be_removed_refuses_no_commit_and_goes_at_the_next_open() {
+    for checkpoint in [CheckpointMode::Inline, CheckpointMode::Background] {
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::NotFound] {
+            let fs = StuckSegments {
+                fs: SimFs::new(),
+                refusal: Arc::new(std::sync::Mutex::new(Some(kind))),
+            };
+            let engine = Engine::open(Arc::new(fs.clone()), NAME, tiny(checkpoint)).unwrap();
+
+            fill(&engine, 60);
+            engine.shared.wait_for_checkpoint();
+            fill(&engine, 20);
+            engine.checkpoint().unwrap();
+            engine.compact().unwrap();
+            fill(&engine, 1);
+            let committed = everything(&engine).unwrap();
+            *fs.refusal.lock().unwrap() = None;
+            engine.close().unwrap();
+
+            let reopened = Engine::open(Arc::new(fs.fs.clone()), NAME, tiny(checkpoint)).unwrap();
+            assert_eq!(everything(&reopened).unwrap(), committed);
+            assert_eq!(segment_files(&fs.fs, NAME).unwrap().len(), 1);
+            reopened.close().unwrap();
+            assert_eq!(fs.fs.names().unwrap(), [NAME], "{checkpoint:?} {kind:?}");
+        }
+    }
+}
+
 #[test]
 fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
     let engine = Engine::open(
@@ -994,4 +1064,263 @@ fn rewriting_a_third_of_the_keys_at_every_checkpoint_keeps_the_file_near_its_liv
         largest <= 2 * live + extent,
         "the file reached {largest} bytes for {live} live bytes: {sizes:?}"
     );
+}
+
+#[test]
+fn a_copy_that_fails_on_a_full_device_leaves_no_log_segment() {
+    let source = Engine::open(Arc::new(SimFs::new()), NAME, tiny(CheckpointMode::Inline)).unwrap();
+    let mut write = source.begin_write().unwrap();
+    for key in 0..1000u32 {
+        write
+            .put(Table::NodeChunks, &key.to_be_bytes(), &[7; 1000])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let target = SimFs::new();
+    target.set_capacity(Some(256 << 10));
+    let snapshot = source.begin_read().unwrap();
+
+    let copied = crate::engine::any_fs::write_copy_on(&snapshot, Arc::new(target.clone()), NAME);
+
+    assert!(copied.is_err());
+    assert_eq!(target.names().unwrap(), [NAME]);
+}
+
+#[test]
+fn a_catalog_that_claims_slots_far_past_the_end_of_the_file_opens_without_them() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    fill(&engine, 4);
+    engine.checkpoint().unwrap();
+    let claimed = 1 << 16;
+    lock(&engine.shared.durable).extents.next_slot = claimed;
+    lock(&engine.shared.quarantine).insert(claimed - 1, u64::MAX);
+    fill(&engine, 1);
+    engine.checkpoint().unwrap();
+    assert_eq!(engine.extents().next_slot, claimed);
+    let expected = everything(&engine).unwrap();
+    drop(engine);
+
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+
+    assert!(
+        engine.extents().next_slot < 16,
+        "{}",
+        engine.extents().next_slot
+    );
+    fill(&engine, 1);
+    engine.checkpoint().unwrap();
+    engine.check().unwrap();
+    assert!(everything(&engine).unwrap().len() >= expected.len());
+}
+
+#[test]
+fn a_compaction_that_a_reader_would_hinder_waits_for_it_on_the_checkpoint_thread() {
+    let fs = SimFs::new();
+    let options = EngineOptions {
+        memtable_limit: 256 << 10,
+        wal_limit: 1 << 20,
+        ..tiny(CheckpointMode::Background)
+    };
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    let key = |round: u32, item: u32| (round * 200 + item).to_be_bytes();
+    for round in 0..400 {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..200 {
+            write
+                .put(Table::Nodes, &key(round, item), &[round as u8; 300])
+                .unwrap();
+        }
+        write.commit().unwrap();
+    }
+    engine.shared.wait_for_checkpoint();
+    let loaded = file_bytes(&fs);
+    let pinned = engine.begin_read().unwrap();
+    let mut write = engine.begin_write().unwrap();
+    for round in 0..400 {
+        for item in (0..200).filter(|item| item % 50 != 0) {
+            write.delete(Table::Nodes, &key(round, item)).unwrap();
+        }
+    }
+    write.commit().unwrap();
+    engine.shared.wait_for_checkpoint();
+
+    assert!(
+        file_bytes(&fs) <= loaded + loaded / 8,
+        "a compaction under a reader grew the file from {loaded} to {} bytes",
+        file_bytes(&fs)
+    );
+    assert_eq!(
+        pinned.scan_prefix(Table::Nodes, &[]).unwrap().len(),
+        400 * 200
+    );
+    drop(pinned);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while file_bytes(&fs) > loaded / 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        file_bytes(&fs) <= loaded / 4,
+        "the file kept {} of {loaded} bytes once the reader was gone",
+        file_bytes(&fs)
+    );
+    assert_eq!(everything(&engine).unwrap().len(), 400 * 4);
+    engine.check().unwrap();
+}
+
+#[derive(Debug, Default)]
+struct Gate {
+    state: std::sync::Mutex<(bool, bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+impl Gate {
+    fn pass(&self) {
+        let mut state = self.state.lock().unwrap();
+        if !state.0 {
+            return;
+        }
+        state.0 = false;
+        state.1 = true;
+        self.changed.notify_all();
+        while !state.2 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn arm(&self) {
+        *self.state.lock().unwrap() = (true, false, false);
+    }
+
+    fn wait_until_held(&self) {
+        let mut state = self.state.lock().unwrap();
+        while !state.1 {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn open(&self) {
+        self.state.lock().unwrap().2 = true;
+        self.changed.notify_all();
+    }
+}
+
+#[derive(Debug)]
+struct GatedFile {
+    file: <SimFs as FileSystem>::File,
+    gate: Arc<Gate>,
+}
+
+impl BlockFile for GatedFile {
+    fn block_size(&self) -> BlockSize {
+        self.file.block_size()
+    }
+
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.gate.pass();
+        self.file.read(first, buffer)
+    }
+
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
+        self.file.write(first, buffer)
+    }
+
+    fn block_count(&self) -> io::Result<u64> {
+        self.file.block_count()
+    }
+
+    fn is_empty(&self) -> io::Result<bool> {
+        self.file.is_empty()
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        self.file.lock()
+    }
+
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
+        self.file.set_block_count(count)
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        self.file.sync()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GatedFs {
+    fs: SimFs,
+    gate: Arc<Gate>,
+}
+
+impl FileSystem for GatedFs {
+    type File = GatedFile;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<GatedFile> {
+        Ok(GatedFile {
+            file: self.fs.create(name, size)?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<GatedFile> {
+        Ok(GatedFile {
+            file: self.fs.open(name, size)?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        self.fs.remove(name)
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn a_checkpoint_does_not_wait_for_a_check_that_is_reading_the_file() {
+    let gate = Arc::new(Gate::default());
+    let fs = GatedFs {
+        fs: SimFs::new(),
+        gate: Arc::clone(&gate),
+    };
+    let engine =
+        Arc::new(Engine::open(Arc::new(fs), NAME, manual(CheckpointMode::Inline)).unwrap());
+    fill(&*engine, 40);
+    engine.checkpoint().unwrap();
+    let mut cold = engine.begin_write().unwrap();
+    cold.put(Table::Nodes, b"cold", b"v").unwrap();
+    cold.commit().unwrap();
+    gate.arm();
+    let checking = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || engine.check().map(|report| report.pages))
+    };
+    gate.wait_until_held();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let checkpointing = {
+        let engine = Arc::clone(&engine);
+        std::thread::spawn(move || {
+            let outcome = engine.checkpoint();
+            let _ = done.send(());
+            outcome
+        })
+    };
+    let waited = finished.recv_timeout(Duration::from_secs(5));
+    gate.open();
+
+    assert!(waited.is_ok(), "the checkpoint waited for the check");
+    checkpointing.join().unwrap().unwrap();
+    assert!(checking.join().unwrap().unwrap() > 0);
+    engine.check().unwrap();
 }

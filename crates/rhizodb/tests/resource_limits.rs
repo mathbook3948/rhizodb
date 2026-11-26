@@ -252,6 +252,57 @@ fn a_long_chain_of_next_statements_runs_on_a_small_stack() {
 }
 
 #[test]
+fn a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack() {
+    let test = "a_node_pattern_with_thousands_of_properties_runs_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a0: 1}), (:L {a0: 1, a1: 1})");
+    let entries: Vec<String> = (0..5_000).map(|key| format!("a{key}: 1")).collect();
+    let entries = entries.join(", ");
+    on_small_stack(|| {
+        for text in [
+            format!("MATCH (n:L {{{entries}}}) RETURN count(*)"),
+            format!("MATCH (n {{{entries}}}) RETURN count(*)"),
+        ] {
+            assert_eq!(single(&db, &text), int(0));
+        }
+        assert_eq!(
+            single(&db, "MATCH (n:L {a0: 1, a1: 1}) RETURN count(*)"),
+            int(1)
+        );
+    });
+}
+
+#[test]
+fn long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack() {
+    let test = "long_flat_chains_of_logic_comparisons_and_tests_run_on_a_small_stack";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    run(&db, "INSERT (:L {a: 7}), (:L {a: 20000})");
+    let ors: Vec<String> = (0..20_000).map(|value| format!("n.a = {value}")).collect();
+    let tests: Vec<String> = (0..20_000).map(|value| value.to_string()).collect();
+    let texts = [
+        format!("MATCH (n:L) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!("MATCH (n) WHERE {} RETURN count(*)", ors.join(" OR ")),
+        format!(
+            "MATCH (n:L) RETURN sum(CASE n.a WHEN {} THEN 1 ELSE 0 END)",
+            tests.join(", ")
+        ),
+        format!("RETURN toInteger(true{})", " AND true".repeat(20_000)),
+        format!("RETURN toInteger(0 < 1{})", " <= 1".repeat(20_000)),
+    ];
+    on_small_stack(|| {
+        for text in &texts {
+            assert_eq!(single(&db, text), int(1), "{}", &text[..40]);
+        }
+    });
+}
+
+#[test]
 fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
     let test = "nesting_just_inside_the_parser_limit_runs_on_a_small_stack";
     if !isolated(test, CHILD_LIMIT) {
@@ -502,6 +553,42 @@ fn range_refuses_to_build_a_list_past_its_limit_however_little_is_read() {
     assert_eq!(
         single(&db, "RETURN size(range(1, 1000000))"),
         int(1_000_000)
+    );
+}
+
+#[test]
+fn strings_and_lists_a_query_builds_stop_at_their_length_limits() {
+    let test = "strings_and_lists_a_query_builds_stop_at_their_length_limits";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    let wide = Parameters::new().with("text", "x".repeat(20_000));
+    for text in [
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s + s))",
+        "RETURN size(reduce(s = 'x', i IN range(1, 45) | s || s))",
+        "RETURN size(reduce(s = 1, i IN range(1, 45) | s + toString(s)))",
+        "RETURN size(range(1, 10000000) + 0)",
+        "RETURN size(0 + range(1, 10000000))",
+        "RETURN size(range(1, 10000000) + [0])",
+        "RETURN size(range(1, 10000000) || [0])",
+        "RETURN size(replace($text, '', $text))",
+        "RETURN size(replace($text, 'x', $text))",
+    ] {
+        assert_eq!(
+            db.execute(text, &wide).unwrap_err().kind(),
+            ErrorKind::NumberOutOfRange,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        db.execute(
+            "RETURN size(replace($text, 'x', 'yy')), size(range(1, 9999999) + 0)",
+            &wide
+        )
+        .unwrap()
+        .rows(),
+        [vec![int(40_000), int(10_000_000)]]
     );
 }
 

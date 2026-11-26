@@ -16,6 +16,9 @@ const NOTE_LIMIT: usize = 160;
 pub struct Entry {
     /// An [`Outcome::kind`] other than `agree`.
     pub kind: String,
+    /// For `differ` and `ladybug-rejects`, the [`digest`](crate::compare::digest) of RhizoDB's
+    /// rows, which must not change.
+    pub rhizo: Option<String>,
     /// For `differ`, the documented reason. For the other kinds, the error that was raised.
     pub note: String,
 }
@@ -27,7 +30,7 @@ pub struct Expectations {
     entries: BTreeMap<String, Entry>,
 }
 
-/// A line of the expectations file that is not `kind<TAB>name<TAB>note`.
+/// A line of the expectations file that is not `kind<TAB>name<TAB>rows<TAB>note`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpectationsError {
     /// One-based line number.
@@ -45,9 +48,12 @@ impl fmt::Display for ExpectationsError {
 impl Error for ExpectationsError {}
 
 const KINDS: [&str; 4] = ["differ", "ladybug-rejects", "rhizo-rejects", "both-reject"];
+const KINDS_WITH_RHIZO_ROWS: [&str; 2] = ["differ", "ladybug-rejects"];
+const NO_ROWS: &str = "-";
 
 impl Expectations {
-    /// Reads the file format: one `kind<TAB>name<TAB>note` per line, blank lines ignored.
+    /// Reads the file format: one `kind<TAB>name<TAB>rows<TAB>note` per line, blank lines
+    /// ignored, where `rows` is the digest of RhizoDB's rows, or `-` for a kind without them.
     pub fn parse(text: &str) -> Result<Expectations, ExpectationsError> {
         let mut entries = BTreeMap::new();
         for (index, line) in text.lines().enumerate() {
@@ -58,17 +64,27 @@ impl Expectations {
                 line: index + 1,
                 message: message.to_string(),
             };
-            let mut fields = line.splitn(3, '\t');
-            let (Some(kind), Some(name), Some(note)) =
-                (fields.next(), fields.next(), fields.next())
+            let mut fields = line.splitn(4, '\t');
+            let (Some(kind), Some(name), Some(rows), Some(note)) =
+                (fields.next(), fields.next(), fields.next(), fields.next())
             else {
-                return Err(error("expected kind, name, and note separated by tabs"));
+                return Err(error(
+                    "expected kind, name, rows, and note separated by tabs",
+                ));
             };
             if !KINDS.contains(&kind) {
                 return Err(error(&format!("unknown kind {kind}")));
             }
+            let rhizo = (rows != NO_ROWS).then(|| rows.to_string());
+            if rhizo.is_some() != KINDS_WITH_RHIZO_ROWS.contains(&kind) {
+                return Err(error(&format!(
+                    "{kind} needs {} rows digest",
+                    if rhizo.is_some() { "no" } else { "a" }
+                )));
+            }
             let entry = Entry {
                 kind: kind.to_string(),
+                rhizo,
                 note: note.to_string(),
             };
             if entries.insert(name.to_string(), entry).is_some() {
@@ -82,7 +98,10 @@ impl Expectations {
     pub fn render(&self) -> String {
         self.entries
             .iter()
-            .map(|(name, entry)| format!("{}\t{name}\t{}\n", entry.kind, entry.note))
+            .map(|(name, entry)| {
+                let rows = entry.rhizo.as_deref().unwrap_or(NO_ROWS);
+                format!("{}\t{name}\t{rows}\t{}\n", entry.kind, entry.note)
+            })
             .collect()
     }
 
@@ -109,7 +128,10 @@ impl Expectations {
                 entry.kind,
                 outcome.kind()
             )),
-            (Some(entry), Outcome::Differ(_)) if entry.note == UNEXPLAINED => Err(format!(
+            (Some(entry), _) if entry.rhizo.as_deref() != outcome.rhizo() => Err(format!(
+                "RhizoDB's rows changed from those differences.txt lists, rerun with DIFFERENTIAL_BLESS=1 once they are right: {detail}"
+            )),
+            (Some(entry), Outcome::Differ { .. }) if entry.note == UNEXPLAINED => Err(format!(
                 "differs, and differences.txt does not say why: {detail}"
             )),
             (Some(_), _) => Ok(()),
@@ -124,14 +146,15 @@ impl Expectations {
             .filter(|(_, outcome)| **outcome != Outcome::Agree)
             .map(|(name, outcome)| {
                 let note = match (self.entries.get(name), outcome) {
-                    (Some(entry), Outcome::Differ(_)) if entry.kind == "differ" => {
+                    (Some(entry), Outcome::Differ { .. }) if entry.kind == "differ" => {
                         entry.note.clone()
                     }
-                    (_, Outcome::Differ(_)) => UNEXPLAINED.to_string(),
+                    (_, Outcome::Differ { .. }) => UNEXPLAINED.to_string(),
                     (_, outcome) => outcome.detail().chars().take(NOTE_LIMIT).collect(),
                 };
                 let entry = Entry {
                     kind: outcome.kind().to_string(),
+                    rhizo: outcome.rhizo().map(str::to_string),
                     note,
                 };
                 (name.to_string(), entry)
