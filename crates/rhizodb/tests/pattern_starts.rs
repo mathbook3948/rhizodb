@@ -127,3 +127,30 @@ fn a_later_node_that_an_index_serves_starts_the_match() {
         ]
     );
 }
+
+#[test]
+fn a_later_lookup_that_finds_more_nodes_than_the_leftmost_start_does_not_start_the_match() {
+    let db = db();
+    run(
+        &db,
+        "INSERT (:Solo {n: 1}), (:Solo {n: 2}) WITH 1 AS one \
+         UNWIND range(0, 19) AS i INSERT (:P {id: i, g: 3, active: true})",
+    );
+    for (name, property) in [("p_id", "id"), ("p_g", "g"), ("p_active", "active")] {
+        db.create_property_index(name, IndexTarget::Label("P"), property)
+            .unwrap();
+    }
+    let trap = Parameters::new().with("zero", 0i64);
+    for query in [
+        "MATCH (s:Solo)-[:F]->(b:P {active: true, t: 1 / $zero}) RETURN count(*)",
+        "MATCH (s:Solo)-[:F]->(b:P {t: 1 / $zero}) WHERE b.g = 3 RETURN count(*)",
+        "MATCH (s:Solo)-[:F]->(b:P {t: 1 / $zero}) WHERE b.id >= 10 RETURN count(*)",
+        "MATCH (s:Solo)-[:F]->(m)-[:F]->(b:P {t: 1 / $zero}) WHERE b.g IN [1, 2, 3] \
+         RETURN count(*)",
+        "MATCH (s:Solo {n: 1})-[:F]->(b:P {active: true, t: 1 / $zero}) RETURN count(*)",
+    ] {
+        assert_eq!(rows(&db, query, &trap), Ok(vec![vec![int(0)]]), "{query}");
+    }
+    let query = "MATCH (s:P)-[:F]->(b:P {id: 5, t: 1 / $zero}) RETURN count(*)";
+    assert_eq!(rows(&db, query, &trap), Err(ErrorKind::DivisionByZero));
+}

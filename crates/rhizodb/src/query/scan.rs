@@ -4,7 +4,6 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
-use std::ptr;
 
 use memchr::memmem;
 
@@ -1053,7 +1052,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         if self.check.is_some()
             || self.seek_possible(hop.scan.part)?
-            || !ptr::eq(self.oriented(hop.scan.part)?, hop.scan.part)
+            || self.may_move(hop.scan.part)?
         {
             return Ok(None);
         }

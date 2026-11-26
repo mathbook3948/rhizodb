@@ -321,7 +321,11 @@ fn deterministic(function: Function) -> bool {
     )
 }
 
-type Found = (Vec<u64>, Option<Token<PropertyKey>>);
+enum Lookup {
+    Unserved,
+    Over,
+    Found(Vec<u64>, Option<Token<PropertyKey>>),
+}
 
 enum Indexed {
     /// No index serves it.
@@ -354,18 +358,31 @@ impl<T: ReadTransaction> Env<'_, T> {
         part: &PatternPart,
         row: &Row,
     ) -> Result<Option<Sought>, Error> {
+        self.seek_within(part, row, usize::MAX)
+    }
+
+    /// [`Env::seek_start`], or `None` as soon as the seek that applies finds more than `limit`
+    /// start nodes.
+    pub(crate) fn seek_within(
+        &self,
+        part: &PatternPart,
+        row: &Row,
+        limit: usize,
+    ) -> Result<Option<Sought>, Error> {
         for seek in &part.seeks {
             let (elements, served) = match &seek.key {
-                SeekKey::Id => (self.id_seek(seek, row), None),
-                SeekKey::Property(key) => match self.property_seek(part, seek, key, row)? {
-                    Some((elements, served)) => (Some(elements), served),
-                    None => (None, None),
+                SeekKey::Id => match self.id_seek(seek, row) {
+                    Some(ids) if ids.len() > limit => return Ok(None),
+                    Some(ids) => (ids, None),
+                    None => continue,
+                },
+                SeekKey::Property(key) => match self.property_seek(part, seek, key, row, limit)? {
+                    Lookup::Unserved => continue,
+                    Lookup::Over => return Ok(None),
+                    Lookup::Found(elements, served) => (elements, served),
                 },
             };
-            let Some(elements) = elements else {
-                continue;
-            };
-            return Ok(Some(match seek.element {
+            let sought = match seek.element {
                 SeekElement::Start => Sought {
                     nodes: elements.into_iter().map(NodeId).collect(),
                     labelled: matches!(seek.key, SeekKey::Property(_)),
@@ -376,18 +393,15 @@ impl<T: ReadTransaction> Env<'_, T> {
                     labelled: false,
                     served: None,
                 },
-            }));
+            };
+            return Ok((sought.nodes.len() <= limit).then_some(sought));
         }
         Ok(None)
     }
 
     /// Whether a seek of `part` applies, which may still fail if its value fails to evaluate.
-    /// With `points`, only a seek by `=` or `IN` counts.
-    pub(crate) fn seek_served(&self, part: &PatternPart, points: bool) -> Result<bool, Error> {
+    pub(crate) fn seek_served(&self, part: &PatternPart) -> Result<bool, Error> {
         for seek in &part.seeks {
-            if points && !seek.tests.iter().any(is_point) {
-                continue;
-            }
             let served = match &seek.key {
                 SeekKey::Id => true,
                 SeekKey::Property(key) => {
@@ -461,10 +475,11 @@ impl<T: ReadTransaction> Env<'_, T> {
         seek: &Seek,
         key: &str,
         row: &Row,
-    ) -> Result<Option<Found>, Error> {
+        limit: usize,
+    ) -> Result<Lookup, Error> {
         let (index, property) = match self.seek_index(part, seek, key)? {
-            Indexed::Unserved => return Ok(None),
-            Indexed::Nothing => return Ok(Some((Vec::new(), None))),
+            Indexed::Unserved => return Ok(Lookup::Unserved),
+            Indexed::Nothing => return Ok(Lookup::Found(Vec::new(), None)),
             Indexed::Index(index, property) => (index, property),
         };
         let mut points: Option<Vec<KeyRange>> = None;
@@ -495,10 +510,10 @@ impl<T: ReadTransaction> Env<'_, T> {
                         Compared::Range(found) => {
                             match range.map_or(Some(found.clone()), |held| held.intersect(&found)) {
                                 Some(narrowed) => range = Some(narrowed),
-                                None => return Ok(Some((Vec::new(), None))),
+                                None => return Ok(Lookup::Found(Vec::new(), None)),
                             }
                         }
-                        Compared::Never => return Ok(Some((Vec::new(), None))),
+                        Compared::Never => return Ok(Lookup::Found(Vec::new(), None)),
                         Compared::Unserved => {}
                     }
                 }
@@ -507,9 +522,18 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let served = served.filter(|_| points.is_some());
         let Some(ranges) = points.or_else(|| range.map(|range| vec![range])) else {
-            return Ok(None);
+            return Ok(Lookup::Unserved);
         };
-        Ok(Some((self.tx.property_seek(index, &ranges)?, served)))
+        if limit == usize::MAX {
+            return Ok(Lookup::Found(
+                self.tx.property_seek(index, &ranges)?,
+                served,
+            ));
+        }
+        Ok(match self.tx.property_seek_within(index, &ranges, limit)? {
+            Some(elements) => Lookup::Found(elements, served),
+            None => Lookup::Over,
+        })
     }
 
     fn endpoints(&self, part: &PatternPart, relationships: Vec<u64>) -> Result<Vec<NodeId>, Error> {
