@@ -68,6 +68,7 @@ struct Accumulator {
     total: Total,
     seen: Seen,
     percentile: Option<Datum>,
+    best: Option<Datum>,
 }
 
 struct Total {
@@ -329,6 +330,7 @@ impl Accumulator {
                         self.values.push(value);
                     }
                     AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
+                    AggregateFunction::Min | AggregateFunction::Max => self.keep(function, value),
                     _ => self.values.push(value),
                 }
             }
@@ -344,6 +346,17 @@ impl Accumulator {
             self.same_percentile(value)?;
         }
         Ok(())
+    }
+
+    fn keep(&mut self, function: AggregateFunction, value: Datum) {
+        let wins = match &self.best {
+            None => true,
+            Some(best) if function == AggregateFunction::Min => order(&value, best).is_lt(),
+            Some(best) => order(&value, best).is_ge(),
+        };
+        if wins {
+            self.best = Some(value);
+        }
     }
 
     fn same_percentile(&mut self, value: Datum) -> Result<(), Error> {
@@ -365,6 +378,9 @@ impl Accumulator {
         self.counted += other.counted;
         if let Some(percentile) = other.percentile {
             self.same_percentile(percentile)?;
+        }
+        if let Some(best) = other.best {
+            self.keep(aggregate.function, best);
         }
         for value in other.values {
             if !aggregate.distinct || self.seen.insert(&value) {
@@ -389,8 +405,7 @@ impl Accumulator {
                 Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
             }
             AggregateFunction::Collect => datum::list(values),
-            AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
-            AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
+            AggregateFunction::Min | AggregateFunction::Max => Ok(self.best.unwrap_or(Datum::Null)),
             AggregateFunction::Sum => self.total.sum(),
             AggregateFunction::Avg => Ok(self.total.average()),
             AggregateFunction::StDev | AggregateFunction::StDevP => {

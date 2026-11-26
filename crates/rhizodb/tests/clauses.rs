@@ -746,3 +746,39 @@ fn an_aggregate_argument_the_query_text_decides_fails_before_any_row_is_read() {
         int(0)
     );
 }
+
+#[test]
+fn min_and_max_keep_the_first_least_and_the_last_greatest_of_equal_values() {
+    let db = db();
+    let rows = run(
+        &db,
+        "UNWIND [2, 1, 1.0, 3.0, 3, null] AS x RETURN min(x), max(x), min(toString(x)), max(x % 2)",
+    );
+    assert_eq!(
+        rows,
+        [vec![
+            Value::Integer(1),
+            Value::Integer(3),
+            Value::String("1".to_owned()),
+            Value::Integer(1),
+        ]]
+    );
+    run(
+        &db,
+        "UNWIND range(1, 30000) AS i CREATE (:P {v: i % 7, w: toFloat(i % 7)})",
+    );
+    let rows = run(
+        &db,
+        "MATCH (p:P) RETURN min(p.v), max(p.v), min(p.w), max(p.w), max(p.v + p.w)",
+    );
+    assert_eq!(
+        rows,
+        [vec![
+            Value::Integer(0),
+            Value::Integer(6),
+            Value::Float(0.0),
+            Value::Float(6.0),
+            Value::Float(12.0),
+        ]]
+    );
+}
