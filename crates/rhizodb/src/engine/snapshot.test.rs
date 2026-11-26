@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use super::CHUNK;
 use super::Export;
+use super::HISTORY_LIMIT;
 use super::install;
+use super::seal;
+use super::unseal;
 use crate::engine::block_file::BlockFile;
 use crate::engine::block_file::FileSystem;
 use crate::engine::error::EngineError;
@@ -886,4 +889,77 @@ fn installing_over_another_database_fails_unless_forced_and_keeps_it() {
         expected,
         "a snapshot of the same database was refused"
     );
+}
+
+fn forged(logical: &[u8], fields: &[(usize, &[u8])]) -> Vec<u8> {
+    let mut logical = logical.to_vec();
+    for (at, bytes) in fields {
+        logical[*at..*at + bytes.len()].copy_from_slice(bytes);
+    }
+    seal(&logical)
+}
+
+#[test]
+fn a_stream_that_claims_more_ranges_or_history_than_it_carries_fails_as_corrupt_without_reserving_it()
+ {
+    let (_fs, source, _) = loaded_source(8, 40);
+    let stream = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let logical = unseal(&stream);
+    assert!(
+        logical.len() > CHUNK,
+        "the manifest must sit in a whole first chunk"
+    );
+    assert_eq!(seal(&logical), stream);
+    let huge_ranges = forged(
+        &logical,
+        &[
+            (16, &(1u64 << 60).to_le_bytes()),
+            (40, &(1u64 << 50).to_le_bytes()),
+            (52, &(1u64 << 47).to_le_bytes()),
+        ],
+    );
+    let huge_history = forged(&logical, &[(48, &u32::MAX.to_le_bytes())]);
+    let longest_history = forged(&logical, &[(48, &(HISTORY_LIMIT as u32 + 1).to_le_bytes())]);
+    for stream in [huge_ranges, huge_history, longest_history] {
+        let (target, old) = old_target();
+        let error = install_bytes(&target, &stream).unwrap_err();
+        assert!(error.is_corrupt(), "{error}");
+        let engine = open(&target, TARGET, by_hand()).unwrap();
+        assert_eq!(dump(&engine), old);
+    }
+    let (target, _) = old_target();
+    assert!(install_bytes(&target, &seal(&logical)).is_ok());
+}
+
+#[test]
+fn an_export_refuses_a_history_longer_than_install_reads() {
+    let (_fs, source, _) = loaded_source(1, 4);
+    assert!(matches!(
+        source.export(&vec![7; HISTORY_LIMIT + 1]),
+        Err(EngineError::TooLarge)
+    ));
+    let export = source.export(&vec![7; HISTORY_LIMIT]).unwrap();
+    let (target, _) = old_target();
+    assert!(install_bytes(&target, &read_all(&export, 1 << 16)).is_ok());
+}
+
+#[test]
+fn a_time_limit_past_what_the_clock_reaches_never_releases_an_export() {
+    let options = EngineOptions {
+        pin_limit: std::time::Duration::MAX,
+        ..retaining(0)
+    };
+    let engine = open(&SimFs::new(), SOURCE, options).unwrap();
+    for number in 1..=20 {
+        small_commit(&engine, number);
+    }
+    let export = engine.export(&[]).unwrap();
+    let position = export.position();
+    engine.advance_clock(std::time::Duration::from_secs(100 * 365 * 24 * 3600));
+    for number in 21..=200 {
+        small_commit(&engine, number);
+    }
+    assert!(engine.log_start() <= position + 1);
+    let mut first = vec![0; 100];
+    assert_eq!(export.read_at(0, &mut first).unwrap(), 100);
 }

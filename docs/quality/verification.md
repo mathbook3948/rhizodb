@@ -79,6 +79,7 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A crash at every write point of an apply must leave a position the writer passed, with its export, from which applying the same changes again converges.
 - A test kills a child process that applies changes to a replica on disk at varied points and checks each reopened replica the same way.
 - A fuzz target damages valid changes, reseals their checksums, decodes them, applies them to a replica, and reads it, and must never panic.
+- A fuzz target damages a valid snapshot stream, reseals its chunks, installs it, and reads it, and must never panic or read entries that differ from the source's without an error.
 - Every check rejects a wildcard version and a dependency from an unknown registry or git source, and warns on duplicate versions.
 - A nightly job checks the workspace's locked dependencies against the RustSec advisories, so a new advisory fails the nightly rather than every pull request.
 

@@ -200,7 +200,8 @@ impl OpenOptions {
     /// rewrite, so the file grows by what they rewrite; [`DatabaseStats::held_bytes`] reports
     /// that space. Past the limit the database releases the snapshot, and reading it fails with
     /// [`ErrorKind::SnapshotExpired`](crate::ErrorKind::SnapshotExpired). Set it above the
-    /// longest transfer the host expects.
+    /// longest transfer the host expects. A limit past what the clock can reach, such as
+    /// [`Duration::MAX`](std::time::Duration::MAX), never releases a snapshot.
     pub fn snapshot_time_limit(mut self, limit: std::time::Duration) -> Self {
         self.engine.pin_limit = limit;
         self

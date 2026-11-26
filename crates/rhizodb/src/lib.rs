@@ -86,6 +86,14 @@ pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> 
     engine::fuzz::open_damaged_file(bytes)
 }
 
+/// Damages a snapshot stream by `bytes`, seals it again, installs it, and reads every entry,
+/// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn install_damaged_snapshot_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::install_damaged_stream(bytes)
+}
+
 /// Damages a batch of replication changes by `bytes`, reseals it, decodes it, applies it to a
 /// replica, and reads the replica, for the fuzzer. Fails when decoded changes keep other bytes.
 #[cfg(fuzzing)]
