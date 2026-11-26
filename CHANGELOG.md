@@ -64,6 +64,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- A damaged database file whose catalog claimed a huge number of extent slots opened, then made its first checkpoint run out of memory. An open now ignores the free slots after the last extent in use, and fails as corrupt data when an extent starts past the end of the file.
 - A backup that failed, for example on a full disk, left the log segments of its staging copy in the target directory for good. They are now removed with the staging file.
 - A log segment that the engine failed to remove after a checkpoint, for example one another program held open on Windows or one already deleted, made every later commit fail until the database was reopened. The segment is now left for the next open to remove.
 - A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.

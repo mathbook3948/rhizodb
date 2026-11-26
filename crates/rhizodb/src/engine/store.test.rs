@@ -1085,3 +1085,31 @@ fn a_copy_that_fails_on_a_full_device_leaves_no_log_segment() {
     assert!(copied.is_err());
     assert_eq!(target.names().unwrap(), [NAME]);
 }
+
+#[test]
+fn a_catalog_that_claims_slots_far_past_the_end_of_the_file_opens_without_them() {
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    fill(&engine, 4);
+    engine.checkpoint().unwrap();
+    let claimed = 1 << 16;
+    lock(&engine.shared.durable).extents.next_slot = claimed;
+    lock(&engine.shared.quarantine).insert(claimed - 1, u64::MAX);
+    fill(&engine, 1);
+    engine.checkpoint().unwrap();
+    assert_eq!(engine.extents().next_slot, claimed);
+    let expected = everything(&engine).unwrap();
+    drop(engine);
+
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, manual(CheckpointMode::Inline)).unwrap();
+
+    assert!(
+        engine.extents().next_slot < 16,
+        "{}",
+        engine.extents().next_slot
+    );
+    fill(&engine, 1);
+    engine.checkpoint().unwrap();
+    engine.check().unwrap();
+    assert!(everything(&engine).unwrap().len() >= expected.len());
+}

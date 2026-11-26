@@ -500,6 +500,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             }
             let tree = Tree::new(header.generation, catalog.roots, Arc::clone(&source));
             let mut extents = catalog.extents;
+            extents.fit_file(pages.file_bytes()? / BLOCK as u64)?;
             if let Some(counts) = catalog.live_counts {
                 find_live_blocks(&header, &mut extents, &counts, &runs, &tree)?;
             }
