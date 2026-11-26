@@ -426,3 +426,32 @@ fn files_of_different_block_sizes_live_side_by_side() {
     assert_eq!(database.block_count().unwrap(), 2);
     assert_eq!(fs.open("wal-0", size()).unwrap().block_count().unwrap(), 0);
 }
+
+#[test]
+fn a_scrambled_tear_may_garble_synced_sectors_of_its_4_kib_unit_and_no_others() {
+    let small = BlockSize::new(SECTOR_SIZE).unwrap();
+    let mut garbled_neighbour = false;
+    for seed in 0..SEEDS {
+        let fs = SimFs::new();
+        let file = fs.create("wal-0", small).unwrap();
+        file.write(0, &[1; 2 * BLOCK]).unwrap();
+        file.sync().unwrap();
+        fs.sync_names().unwrap();
+        file.write(3, &[2; SECTOR_SIZE]).unwrap();
+        let crashed = fs.crash(Crash::Scramble { seed });
+        let image = crashed.open("wal-0", small).unwrap();
+        let mut bytes = vec![0; 2 * BLOCK];
+        image.read(0, &mut bytes).unwrap();
+        let (sectors, _) = bytes.as_chunks::<SECTOR_SIZE>();
+        assert!(
+            sectors[8..]
+                .iter()
+                .all(|sector| *sector == [1; SECTOR_SIZE])
+        );
+        garbled_neighbour |= sectors[..8]
+            .iter()
+            .enumerate()
+            .any(|(index, sector)| index != 3 && *sector != [1; SECTOR_SIZE]);
+    }
+    assert!(garbled_neighbour);
+}

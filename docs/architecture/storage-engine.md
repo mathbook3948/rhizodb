@@ -40,6 +40,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The simulated file system is deterministic for a given seed.
 - The simulated file system holds several files and can inject faults into one of them alone.
 - A simulated crash keeps every synced write and may drop, reorder, or tear at 512-byte sectors each write since the last sync.
+- A write torn with garbage may also garble the other sectors of its 4 KiB unit, synced ones included, as a device that rewrites a whole page or sector does.
 - A simulated crash may lose a change of file length, a create, a rename, or a remove that was not synced.
 - The simulated file system can fail every operation after a chosen count, once or from then on.
 - A failed fsync in the simulated file system fails every later fsync of that file.
@@ -70,7 +71,8 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Page checksums are seeded with the database id, so a page copied from another database is corruption.
 - Tables have stable numeric ids, with 1 to 255 for the engine, 256 to 511 for the graph's tables, and the rest reserved.
 - Log segments are files named after the database file with `-wal-` and the segment number in 16 hex digits.
-- Log segments are made of 512-byte blocks, and each record starts a block of its own, so an append never rewrites a synced sector.
+- Log segments are made of 512-byte blocks, and the header and each record start a 4 KiB unit of their own, so an append never rewrites a page or a 4 KiB device sector that holds synced data.
+- A segment header records the unit its records start at, and a segment of an earlier build, whose records start at 512-byte blocks, replays and takes appends at those blocks.
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.

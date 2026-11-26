@@ -7,12 +7,15 @@ use crate::engine::sim_fs::SimFs;
 use crate::engine::wal_format::Body;
 use crate::engine::wal_format::Kind;
 use crate::engine::wal_format::OpRef;
+use crate::engine::wal_format::RECORD_UNIT;
 use crate::engine::wal_format::batch_record;
 use crate::engine::wal_format::record_prefix;
 use crate::test_scale;
 
 const BASE: &str = "graph.rhizo";
-const TARGET: u64 = 4096;
+const TARGET: u64 = 8 * RECORD_UNIT as u64;
+
+const FIRST: u64 = HEADER_BLOCKS;
 
 fn identity() -> LogIdentity {
     LogIdentity {
@@ -213,7 +216,13 @@ fn damage(fs: &SimFs, sequence: u64, block: u64, byte: usize) {
 
 #[test]
 fn damage_before_the_last_segment_is_corruption() {
-    for (block, byte) in [(0, 30), (1, 0), (1, 20), (1, 70), (2, 100)] {
+    for (block, byte) in [
+        (0, 30),
+        (FIRST, 0),
+        (FIRST, 20),
+        (FIRST, 70),
+        (2 * FIRST, 0),
+    ] {
         let fs = filled(40);
         damage(&fs, 2, block, byte);
         let error = lsns(&fs, &header(0, 1)).expect_err("damage was not noticed");
@@ -229,7 +238,7 @@ fn damage_to_the_last_record_ends_the_log_there() {
         .open(&segment_name(BASE, last), wal_block().unwrap())
         .unwrap();
     let blocks = file.block_count().unwrap();
-    damage(&fs, last, blocks - 1, 20);
+    damage(&fs, last, blocks - FIRST, 20);
     let (mut wal, seen) = lsns(&fs, &header(0, 1)).unwrap();
     assert_eq!(seen, (1..=39).collect::<Vec<_>>());
     wal.append(record(40), 0).unwrap();
@@ -242,7 +251,7 @@ fn damage_before_a_synced_record_of_the_last_segment_is_corruption() {
     for byte in [0, 20, 60] {
         let fs = filled(40);
         let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
-        damage(&fs, last, 1, byte);
+        damage(&fs, last, FIRST, byte);
         let error = lsns(&fs, &header(0, 1)).expect_err("damage was not noticed");
         assert!(error.is_corrupt(), "byte {byte}: {error}");
     }
@@ -370,7 +379,7 @@ fn removing_the_whole_log_leaves_no_segment() {
     );
 }
 
-const WORKLOAD: u64 = 30;
+const WORKLOAD: u64 = 40;
 
 fn append_and_checkpoint_until_failure(fs: &SimFs, fail_at: Option<u64>) -> (Header, u64, bool) {
     let mut wal = fresh(fs);
@@ -494,8 +503,9 @@ fn a_damaged_header_of_a_last_segment_that_holds_records_is_corruption() {
 #[test]
 fn a_torn_tail_of_random_bytes_that_read_as_record_lengths_is_cut_off_quickly() {
     let fs = filled(2);
+    let last = *segment_files(&fs, BASE).unwrap().last().unwrap();
     let file = fs
-        .open(&segment_name(BASE, 1), wal_block().unwrap())
+        .open(&segment_name(BASE, last), wal_block().unwrap())
         .unwrap();
     let at = file.block_count().unwrap();
     let mut torn = vec![0u8; 16 << 20];
@@ -538,4 +548,35 @@ fn a_segment_longer_than_any_the_log_writes_is_corruption() {
     let error = Wal::recover(fs, BASE, &header(0, 1), TARGET, |_| Ok(()))
         .expect_err("an oversized segment was read");
     assert!(error.is_corrupt(), "{error}");
+}
+
+#[test]
+fn a_segment_of_an_earlier_build_replays_and_takes_appends_in_its_own_blocks() {
+    let fs = SimFs::new();
+    let header_block = SegmentHeader {
+        minor: FORMAT_MINOR,
+        sequence: 1,
+        first_lsn: 1,
+        database_id: identity().database_id,
+        salt: identity().salt,
+        ..SegmentHeader::default()
+    };
+    let file = fs
+        .create(&segment_name(BASE, 1), wal_block().unwrap())
+        .unwrap();
+    let mut bytes = header_block.encode();
+    for lsn in 1..=3 {
+        let mut sealed = record(lsn);
+        seal_record(header_block.record_seed(), &mut sealed).unwrap();
+        sealed.resize(padded(sealed.len(), WAL_BLOCK), 0);
+        bytes.extend_from_slice(&sealed);
+    }
+    file.write(0, &bytes).unwrap();
+    file.sync().unwrap();
+    fs.sync_names().unwrap();
+    let (mut wal, seen) = lsns(&fs, &header(0, 1)).unwrap();
+    assert_eq!(seen, [1, 2, 3]);
+    wal.append(record(4), 4).unwrap();
+    let (_, again) = lsns(&fs.crash(Crash::DropUnsynced), &header(0, 1)).unwrap();
+    assert_eq!(again, [1, 2, 3, 4]);
 }

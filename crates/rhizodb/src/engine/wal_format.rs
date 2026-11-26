@@ -19,6 +19,10 @@ pub(crate) const RECORD_HEADER: usize = 54;
 /// The longest record the log accepts, so a damaged length never makes a reader allocate more.
 pub(crate) const RECORD_LIMIT: usize = 1 << 30;
 
+/// The unit every record of a segment written by this build starts at, a page and an Advanced
+/// Format sector, so an append never rewrites one that holds a synced record or the header.
+pub(crate) const RECORD_UNIT: usize = 4096;
+
 const SEGMENT_CHECKSUM_AT: usize = WAL_BLOCK - 8;
 
 const BATCH_FORMAT: u8 = 1;
@@ -29,6 +33,7 @@ const CHECKPOINT_FORMAT: u8 = 1;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SegmentHeader {
     pub(crate) minor: u16,
+    pub(crate) record_unit: u32,
     pub(crate) database_id: u128,
     pub(crate) shard_id: u64,
     pub(crate) sequence: u64,
@@ -44,7 +49,7 @@ impl SegmentHeader {
         out.extend_from_slice(&SEGMENT_MAGIC);
         put_u16(&mut out, FORMAT_MAJOR);
         put_u16(&mut out, self.minor);
-        put_u32(&mut out, 0);
+        put_u32(&mut out, self.record_unit);
         put_u128(&mut out, self.database_id);
         put_u64(&mut out, self.shard_id);
         put_u64(&mut out, self.sequence);
@@ -79,11 +84,13 @@ impl SegmentHeader {
                 "log segment format {major}.{minor}"
             )));
         }
-        if reader.u32()? != 0 {
-            return Err(reader.bad("reserved field"));
+        let record_unit = reader.u32()?;
+        if record_unit != 0 && record_unit as usize != RECORD_UNIT {
+            return Err(reader.bad("record unit"));
         }
         let header = Self {
             minor,
+            record_unit,
             database_id: reader.u128()?,
             shard_id: reader.u64()?,
             sequence: reader.u64()?,
@@ -105,6 +112,15 @@ impl SegmentHeader {
     /// log or segment never passes as one of this segment.
     pub(crate) fn record_seed(&self) -> u64 {
         self.salt ^ self.sequence.rotate_left(32)
+    }
+
+    /// The unit each record of this segment starts at, one block for a segment of a build
+    /// before records started at whole units, and the room the header takes.
+    pub(crate) fn unit(&self) -> usize {
+        match self.record_unit {
+            0 => WAL_BLOCK,
+            unit => unit as usize,
+        }
     }
 }
 
@@ -454,10 +470,10 @@ fn decode_batch(reader: &mut Reader<'_>) -> Result<Vec<Op>, EngineError> {
     Ok(ops)
 }
 
-/// The bytes a record of `length` takes in a segment, rounded up to whole blocks so the next
-/// record starts in a block of its own.
-pub(crate) fn padded(length: usize) -> usize {
-    length.div_ceil(WAL_BLOCK) * WAL_BLOCK
+/// The bytes a record of `length` takes in a segment of `unit`, rounded up to whole units so the
+/// next record starts in a unit of its own.
+pub(crate) fn padded(length: usize, unit: usize) -> usize {
+    length.div_ceil(unit) * unit
 }
 
 #[cfg(test)]

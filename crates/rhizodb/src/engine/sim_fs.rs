@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -14,6 +15,8 @@ use super::mem_fs::byte_index;
 use super::mem_fs::read_blocks;
 use super::mem_fs::resize_blocks;
 use super::mem_fs::write_blocks;
+
+const DEVICE_UNIT: usize = 4096;
 
 /// A deterministic simulated file system that tells what was synced from what was only
 /// written, so a test can build the files a power loss could leave and inject I/O errors.
@@ -39,9 +42,10 @@ pub(crate) enum Crash {
     /// Every write reached the disk.
     KeepUnsynced,
     /// The seed picks, for each block of each unsynced write, whether it is lost, kept, or
-    /// torn at sectors into new, old, and garbage bytes, applies the kept ones in a shuffled
-    /// order, may lose an unsynced change of length, and keeps a prefix of the unsynced name
-    /// changes.
+    /// torn at sectors into new, old, and garbage bytes, and a torn block may also garble
+    /// other sectors of its 4 KiB unit, synced ones included. It applies the kept writes in a
+    /// shuffled order, may lose an unsynced change of length, and keeps a prefix of the
+    /// unsynced name changes.
     Scramble { seed: u64 },
     /// Like [`Crash::Scramble`], but each sector holds its old or its new bytes, never
     /// garbage, as on a device whose sector writes are atomic.
@@ -326,6 +330,9 @@ fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
                     _ => {
                         grow(&mut bytes, end);
                         tear(&mut bytes[*start..end], data, random, torn);
+                        if torn == Torn::WithGarbage {
+                            garble_neighbours(&mut bytes, *start..end, random);
+                        }
                     }
                 }
             }
@@ -337,6 +344,16 @@ fn scramble(inode: &Inode, random: &mut SplitMix, torn: Torn) -> Vec<u8> {
         bytes.extend_from_slice(&durable[bytes.len()..]);
     }
     bytes
+}
+
+fn garble_neighbours(bytes: &mut [u8], written: Range<usize>, random: &mut SplitMix) {
+    let first = written.start / DEVICE_UNIT * DEVICE_UNIT;
+    let last = written.end.div_ceil(DEVICE_UNIT) * DEVICE_UNIT;
+    for sector in (first..last.min(bytes.len())).step_by(SECTOR_SIZE) {
+        if !written.contains(&sector) && random.chance(3) {
+            bytes[sector..sector + SECTOR_SIZE].fill_with(|| random.next() as u8);
+        }
+    }
 }
 
 fn grow(bytes: &mut Vec<u8>, end: usize) {
