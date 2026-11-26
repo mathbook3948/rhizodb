@@ -23,7 +23,7 @@ proptest! {
                 Some(record) => model.insert(slot, record.clone()),
                 None => model.remove(&slot),
             };
-            edit.set(slot, record);
+            edit.set(slot, record.as_deref());
         }
         prop_assert_eq!(edit.bytes(), model.values().map(Vec::len).sum::<usize>());
         let Some(stored) = edit.encode() else {
@@ -52,7 +52,7 @@ proptest! {
     ) {
         let mut edit = ChunkEdit::default();
         for (slot, record) in edits {
-            edit.set(slot, record);
+            edit.set(slot, record.as_deref());
         }
         let Some(mut stored) = edit.encode() else {
             return Ok(());
@@ -84,7 +84,7 @@ fn a_relationship_id_splits_into_its_chunk_and_slot() {
 #[test]
 fn a_chunk_with_trailing_bytes_fails_when_listed() {
     let mut edit = ChunkEdit::default();
-    edit.set(3, Some(vec![1, 2]));
+    edit.set(3, Some(&[1, 2]));
     let mut stored = edit.encode().unwrap();
     stored.push(0);
     let chunk = ChunkRef::parse(&stored).unwrap();

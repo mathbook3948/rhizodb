@@ -61,8 +61,8 @@ struct Shard {
     misses: AtomicU64,
 }
 
-/// A sharded CLOCK cache of checked pages keyed by block reference. Pages are immutable, so an
-/// entry is never invalidated.
+/// A sharded CLOCK cache of checked pages keyed by block reference. A block takes a new page
+/// only once no tree reaches its old one, and writing it removes the old page.
 #[derive(Debug)]
 pub(crate) struct Cache {
     shards: Vec<RwLock<Shard>>,
@@ -136,6 +136,25 @@ impl Cache {
             shard.entries.insert(at, entry);
             return;
         }
+    }
+
+    /// Forgets the page held for `at`, whose block is being written again. Its place on the
+    /// clock stays until the hand reaches it.
+    pub(crate) fn remove(&self, at: BlockRef) {
+        let shard = self.shard(at);
+        if !shard
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .contains_key(&at)
+        {
+            return;
+        }
+        shard
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .remove(&at);
     }
 
     /// The lookups that found their page and those that did not, since the cache was made.

@@ -638,6 +638,60 @@ fn an_engine_file_with_an_open_extent_per_kind_of_block_answers_takes_writes_and
     assert_engine_fixture_answers(&Database::open(&path).unwrap());
 }
 
+const ENGINE_ONE_ONE_HOLES: &str = "tests/fixtures/engine-1-1-holes.rhizodb";
+
+fn assert_engine_holes_fixture_answers(db: &Database) {
+    let answers = answers_in("engine-1-1-holes.answers");
+    assert_eq!(answers.len(), 5);
+    for (query, expected) in &answers {
+        assert_eq!(format!("{:?}", run(db, query)), *expected, "{query}");
+    }
+}
+
+#[test]
+fn an_engine_file_that_only_counts_live_blocks_finds_them_and_fills_its_dead_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(ENGINE_ONE_ONE_HOLES),
+        &path,
+    )
+    .unwrap();
+    let before = std::fs::metadata(&path).unwrap().len();
+    {
+        let db = Database::open(&path).unwrap();
+        db.check().unwrap();
+        assert_engine_holes_fixture_answers(&db);
+        let stats = db.stats().unwrap();
+        assert!(
+            stats.live_bytes + (64 << 10) < stats.file_bytes,
+            "the fixture holds no dead blocks: {stats:?}"
+        );
+        db.execute(
+            "UNWIND range(6000, 6299) AS i CREATE (:Item {i: i, age: 1})",
+            &rhizodb::Parameters::new(),
+        )
+        .unwrap();
+    }
+    let db = Database::open(&path).unwrap();
+    db.check().unwrap();
+    let filled = db.stats().unwrap();
+    assert!(
+        filled.file_bytes <= before,
+        "writes that fit in dead blocks grew the file from {before}: {filled:?}"
+    );
+    db.execute(
+        "MATCH (n:Item) WHERE n.i >= 6000 DETACH DELETE n",
+        &rhizodb::Parameters::new(),
+    )
+    .unwrap();
+    assert_engine_holes_fixture_answers(&db);
+    drop(db);
+    let reopened = Database::open(&path).unwrap();
+    reopened.check().unwrap();
+    assert_engine_holes_fixture_answers(&reopened);
+}
+
 const FORMAT_THIRTEEN: &str = "tests/fixtures/format-13.db";
 
 fn copy_of_engine_file(fixture: &str, directory: &Path) -> PathBuf {

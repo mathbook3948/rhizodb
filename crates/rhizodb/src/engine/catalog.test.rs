@@ -1,6 +1,9 @@
 use proptest::prelude::*;
 
 use super::*;
+use crate::engine::codec::put_u16;
+use crate::engine::codec::put_u32;
+use crate::engine::codec::put_u64;
 use crate::engine::extent::Purpose;
 use crate::engine::layout::EXTENT_BLOCKS;
 
@@ -13,7 +16,7 @@ fn sample() -> Catalog {
         ExtentEntry {
             slot: extents.next_slot,
             written: 7,
-            live: 2,
+            used: Blocks::range(1, 1).with(&Blocks::range(5, 1)),
             state: ExtentState::Sealed,
             purpose: Purpose::Meta,
             scheme: 0,
@@ -34,7 +37,11 @@ fn sample() -> Catalog {
             entries: 1234,
         },
     );
-    Catalog { roots, extents }
+    Catalog {
+        roots,
+        extents,
+        live_counts: None,
+    }
 }
 
 #[test]
@@ -58,7 +65,7 @@ fn a_catalog_with_an_unknown_table_or_format_is_unsupported() {
         Err(EngineError::Unsupported(_))
     ));
     let mut bytes = sample().encode().unwrap();
-    bytes[0] = 2;
+    bytes[0] = 3;
     assert!(matches!(
         Catalog::decode(&bytes),
         Err(EngineError::Unsupported(_))
@@ -74,6 +81,78 @@ fn every_cut_of_a_catalog_is_corrupt() {
     let mut longer = bytes.clone();
     longer.push(0);
     assert!(Catalog::decode(&longer).unwrap_err().is_corrupt());
+}
+
+fn counts_only(catalog: &Catalog) -> Vec<u8> {
+    let mut out = vec![1];
+    put_u64(&mut out, catalog.extents.next_slot);
+    put_u64(&mut out, catalog.extents.next_extent.0);
+    for open in catalog.extents.open {
+        put_u64(&mut out, open.map_or(0, |id| id.0));
+    }
+    put_u32(&mut out, catalog.roots.len() as u32);
+    for (table, root) in &catalog.roots {
+        put_u16(&mut out, table.0);
+        put_u64(&mut out, root.page.at.raw());
+        put_u64(&mut out, root.page.lsn);
+        out.push(root.level);
+        put_u64(&mut out, root.entries);
+    }
+    put_u32(&mut out, catalog.extents.entries.len() as u32);
+    for (id, entry) in &catalog.extents.entries {
+        put_u64(&mut out, id.0);
+        put_u64(&mut out, entry.slot);
+        put_u32(&mut out, entry.written);
+        put_u32(&mut out, entry.live());
+        out.push(u8::from(entry.state == ExtentState::Sealed));
+        out.push(entry.purpose.code());
+        out.extend_from_slice(&[0, 0]);
+        put_u64(&mut out, 0);
+        put_u64(&mut out, 0);
+    }
+    out
+}
+
+#[test]
+fn a_catalog_that_counts_live_blocks_only_counts_every_written_block_used_until_a_walk() {
+    let catalog = sample();
+    let decoded = Catalog::decode(&counts_only(&catalog)).unwrap();
+    assert_eq!(decoded.roots, catalog.roots);
+    let counts = decoded.live_counts.as_ref().unwrap();
+    for (id, entry) in &catalog.extents.entries {
+        assert_eq!(counts[id], entry.live());
+        let read = &decoded.extents.entries[id];
+        assert_eq!(read.used, Blocks::range(0, entry.written));
+        assert!(read.free().is_empty());
+    }
+    assert_eq!(
+        Catalog::decode(&catalog.encode().unwrap())
+            .unwrap()
+            .live_counts,
+        None
+    );
+}
+
+#[test]
+fn holes_that_overlap_touch_or_pass_the_written_blocks_are_corrupt() {
+    let catalog = sample();
+    let bytes = catalog.encode().unwrap();
+    let id = *catalog.extents.entries.keys().last().unwrap();
+    let entry = catalog.extents.entries[&id];
+    let holes: Vec<(u32, u32)> = entry.free().ranges().collect();
+    assert_eq!(holes, [(0, 1), (2, 3), (6, 1)]);
+    let at = bytes.len() - 2 - 4 * holes.len();
+    assert_eq!(&bytes[at..at + 2], &(holes.len() as u16).to_le_bytes());
+    for (start, length) in [(1, 1), (2, 4), (6, 2), (0, 0), (5, 1)] {
+        let mut damaged = bytes.clone();
+        let last = bytes.len() - 4;
+        damaged[last..last + 2].copy_from_slice(&(start as u16).to_le_bytes());
+        damaged[last + 2..].copy_from_slice(&(length as u16).to_le_bytes());
+        assert!(
+            Catalog::decode(&damaged).unwrap_err().is_corrupt(),
+            "a last hole of {length} blocks at {start}"
+        );
+    }
 }
 
 proptest! {

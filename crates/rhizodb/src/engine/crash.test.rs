@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::engine::block_file::BlockFile;
 use crate::engine::block_file::FileSystem;
+use crate::engine::extent::Blocks;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
@@ -135,6 +137,7 @@ fn options() -> EngineOptions {
         checkpoint: CheckpointMode::Inline,
         cache_pages: 64,
         reclaim_slack: 64 << 10,
+        stage_floor: 8,
     }
 }
 
@@ -379,10 +382,15 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
     let fs = SimFs::new();
     let engine = open(&fs, background).unwrap();
     let acknowledged = std::sync::atomic::AtomicU64::new(0);
+    let taken = std::sync::atomic::AtomicU64::new(0);
+    let lead = (commits / 30).max(1);
     let mut snapshots = Vec::new();
     std::thread::scope(|scope| {
         scope.spawn(|| {
             for number in 1..=commits {
+                while number > (taken.load(std::sync::atomic::Ordering::SeqCst) + 1) * lead {
+                    std::thread::yield_now();
+                }
                 commit_number(&engine, number).unwrap();
                 acknowledged.store(number, std::sync::atomic::Ordering::SeqCst);
             }
@@ -398,6 +406,7 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
             let crashed = fs.crash(crash);
             let after = acknowledged.load(std::sync::atomic::Ordering::SeqCst);
             snapshots.push((crashed, before, after, crash));
+            taken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             seed += 1;
             let next = before + (commits / 60).max(1);
             while acknowledged.load(std::sync::atomic::Ordering::SeqCst) < next.min(commits) {
@@ -476,6 +485,256 @@ fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
                 states[transactions.len()],
                 "fail at {fail_at}, {crash:?}"
             );
+        }
+    }
+}
+
+fn by_hand() -> EngineOptions {
+    EngineOptions {
+        memtable_limit: u64::MAX,
+        wal_limit: u64::MAX,
+        reclaim_slack: u64::MAX,
+        ..options()
+    }
+}
+
+fn free_blocks(engine: &Engine<SimFs>) -> BTreeMap<crate::engine::layout::ExtentId, Blocks> {
+    engine
+        .extents()
+        .entries
+        .iter()
+        .map(|(id, entry)| (*id, entry.free()))
+        .collect()
+}
+
+fn file_blocks(fs: &SimFs) -> u64 {
+    fs.open(
+        NAME,
+        crate::engine::block_file::BlockSize::new(4096).unwrap(),
+    )
+    .unwrap()
+    .block_count()
+    .unwrap()
+}
+
+fn fail_each_operation_of(
+    base: &SimFs,
+    options: EngineOptions,
+    seeds: u64,
+    states: &[State],
+    start: usize,
+    step: &dyn Fn(&Engine<SimFs>) -> (usize, bool),
+) -> usize {
+    let total = {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, options).unwrap();
+        let before = copy.operations();
+        step(&engine);
+        copy.operations() - before
+    };
+    assert!(total > 20, "the step ran only {total} operations");
+    let mut staged = 0;
+    for fail_at in 0..=total {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, options).unwrap();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        let (acknowledged, in_flight) = step(&engine);
+        drop(engine);
+        for crash in crashes(seeds) {
+            let reopened = open(&copy.crash(crash), options)
+                .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            reopened.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
+            staged += usize::from(reopened.header().staged_lsn != 0);
+            let found = dump(&reopened);
+            let at = start + acknowledged;
+            assert!(
+                found == states[at] || (in_flight && found == states[at + 1]),
+                "fail at {fail_at}, {crash:?}: {acknowledged} commits acknowledged, state differs"
+            );
+        }
+    }
+    staged
+}
+
+fn commit_then_checkpoint(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -> (usize, bool) {
+    let run = run_until_failure(engine, transactions);
+    if !run.in_flight {
+        let _ = engine.checkpoint();
+    }
+    (run.acknowledged, run.in_flight)
+}
+
+#[test]
+fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the_database_whole() {
+    let transactions = transactions(17, 40);
+    let states = states(&transactions);
+    let base = SimFs::new();
+    let engine = open(&base, by_hand()).unwrap();
+    for chunk in transactions[..30].chunks(5) {
+        for writes in chunk {
+            commit(&engine, writes).unwrap();
+        }
+        engine.checkpoint().unwrap();
+    }
+    let holes = free_blocks(&engine);
+    assert!(
+        holes.values().map(Blocks::count).sum::<u32>() > 10,
+        "the base holds no free blocks to fill"
+    );
+    let crashed = base.crash(Crash::DropUnsynced);
+    let rest = &transactions[30..];
+    commit_then_checkpoint(&engine, rest);
+    let filled = engine.extents().entries.iter().any(|(id, entry)| {
+        holes
+            .get(id)
+            .is_some_and(|free| entry.used.intersects(free))
+    });
+    assert!(filled, "the checkpoint placed nothing in a freed block");
+    assert_eq!(dump(&engine), states[40]);
+    drop(engine);
+    fail_each_operation_of(&crashed, by_hand(), 2, &states, 30, &|engine| {
+        commit_then_checkpoint(engine, rest)
+    });
+}
+
+#[test]
+fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the_database_whole() {
+    let big = |index: usize| {
+        (0..2u8)
+            .map(|key| {
+                Write::Put(
+                    Table::NodeColumns,
+                    vec![index as u8, key],
+                    vec![key ^ index as u8; 700_000],
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut transactions: Vec<Vec<Write>> = (0..6).map(big).collect();
+    transactions.push(vec![Write::DeleteRange(
+        Table::NodeColumns,
+        vec![1],
+        vec![6],
+    )]);
+    let states = states(&transactions);
+    let base = SimFs::new();
+    let unstaged = EngineOptions {
+        stage_floor: u64::MAX,
+        ..by_hand()
+    };
+    let engine = open(&base, unstaged).unwrap();
+    for writes in &transactions[..6] {
+        commit(&engine, writes).unwrap();
+        engine.checkpoint().unwrap();
+    }
+    let grown = file_blocks(&base);
+    let crashed = base.crash(Crash::DropUnsynced);
+    let tail = &transactions[6..];
+    let cut = |engine: &Engine<SimFs>| {
+        let outcome = commit_then_checkpoint(engine, tail);
+        if !outcome.1 {
+            let _ = engine.checkpoint();
+        }
+        outcome
+    };
+    cut(&engine);
+    assert_eq!(dump(&engine), states[7]);
+    assert!(
+        file_blocks(&base) * 2 < grown,
+        "deleting the last tables left {} of {grown} blocks",
+        file_blocks(&base)
+    );
+    drop(engine);
+    fail_each_operation_of(&crashed, unstaged, 0, &states, 6, &cut);
+}
+
+#[test]
+fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_database_whole() {
+    let load: Vec<Write> = (0..60u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
+        .collect();
+    let rewrite: Vec<Write> = (0..60u8)
+        .map(|key| {
+            Write::Put(
+                Table::NodeColumns,
+                vec![key],
+                vec![!key; 1500 + usize::from(key)],
+            )
+        })
+        .chain([Write::DeleteRange(Table::NodeColumns, vec![50], vec![55])])
+        .collect();
+    let transactions = vec![load, rewrite];
+    let states = states(&transactions);
+    let base = SimFs::new();
+    let engine = open(&base, by_hand()).unwrap();
+    commit(&engine, &transactions[0]).unwrap();
+    engine.checkpoint().unwrap();
+    let crashed = base.crash(Crash::DropUnsynced);
+    let before = engine.header().generation;
+    commit_then_checkpoint(&engine, &transactions[1..]);
+    assert!(
+        engine.header().generation >= before + 3,
+        "the rewrite was not made durable in stages"
+    );
+    assert_eq!(dump(&engine), states[2]);
+    drop(engine);
+    let staged = fail_each_operation_of(&crashed, by_hand(), 2, &states, 1, &|engine| {
+        commit_then_checkpoint(engine, &transactions[1..])
+    });
+    assert!(staged > 0, "no power loss came back to a staged header");
+}
+
+#[test]
+fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole() {
+    let load: Vec<Write> = (0..25u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 200_000]))
+        .collect();
+    let keep_one = vec![Write::DeleteRange(Table::NodeColumns, vec![1], vec![30])];
+    let transactions = vec![load, keep_one];
+    let states = states(&transactions);
+    let compacting = EngineOptions {
+        reclaim_slack: 0,
+        stage_floor: u64::MAX,
+        ..by_hand()
+    };
+    let base = SimFs::new();
+    let engine = open(&base, compacting).unwrap();
+    commit(&engine, &transactions[0]).unwrap();
+    engine.checkpoint().unwrap();
+    let loaded = file_blocks(&base);
+    let base = base.crash(Crash::DropUnsynced);
+    drop(engine);
+    let total = {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, compacting).unwrap();
+        commit(&engine, &transactions[1]).unwrap();
+        let before = copy.operations();
+        drop(engine);
+        assert!(
+            file_blocks(&copy) * 10 < loaded,
+            "closing after the delete left {} of {loaded} blocks",
+            file_blocks(&copy)
+        );
+        let reopened = open(&copy, compacting).unwrap();
+        assert_eq!(dump(&reopened), states[2]);
+        copy.operations() - before
+    };
+    assert!(total > 20, "closing ran only {total} operations");
+    for fail_at in 0..=total {
+        let copy = base.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, compacting).unwrap();
+        commit(&engine, &transactions[1]).unwrap();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        drop(engine);
+        for crash in crashes(0) {
+            let reopened = open(&copy.crash(crash), compacting)
+                .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
+            reopened.check().unwrap_or_else(|error| {
+                panic!("check after fail at {fail_at}, {crash:?}: {error}")
+            });
+            assert_eq!(dump(&reopened), states[2], "fail at {fail_at}, {crash:?}");
         }
     }
 }
