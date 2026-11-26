@@ -304,14 +304,14 @@ fn elements(db: &Database) -> (Elements, Elements, (u64, u64)) {
     let named = |properties: Properties| -> BTreeMap<String, PropertyValue> {
         properties
             .into_iter()
-            .map(|(key, value)| (tx.token_name(key).unwrap(), value))
+            .map(|(key, value)| (tx.token_name(key).unwrap().to_string(), value))
             .collect()
     };
     let mut nodes = Vec::new();
     tx.visit_nodes(|id, labels, properties| {
         let mut labels: Vec<String> = labels
             .iter()
-            .map(|label| tx.token_name(*label).unwrap())
+            .map(|label| tx.token_name(*label).unwrap().to_string())
             .collect();
         labels.sort();
         nodes.push((id.as_u64(), labels, named(properties)));
@@ -321,7 +321,7 @@ fn elements(db: &Database) -> (Elements, Elements, (u64, u64)) {
     let mut relationships = Vec::new();
     tx.visit_relationships(|id, record| {
         let ends = vec![
-            tx.token_name(record.rel_type).unwrap(),
+            tx.token_name(record.rel_type).unwrap().to_string(),
             record.source.as_u64().to_string(),
             record.target.as_u64().to_string(),
         ];

@@ -12,7 +12,8 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A deleted ID is never reused.
 - Labels, relationship types, and property keys are interned to `u32` tokens in a dictionary table.
 - Each kind of token has its own token space.
-- The database remembers each committed token that a read transaction looks up, and a write transaction never adds to that memory.
+- The database remembers each committed token that a read transaction looks up, by name and by ID, and a write transaction never adds to that memory.
+- A write transaction remembers the tokens it looks up or creates only until it ends.
 - The storage trait is an ordered key-value store over a fixed set of tables, and the graph layer is written once on top of it.
 - Keys of the relationship chunk and adjacency tables are fixed-width big-endian integers, so key order matches ID order.
 - Each relationship is listed twice in adjacency, under its source node for outgoing scans and under its target node for incoming scans.
@@ -89,6 +90,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A query that reads many values of one column of a group loads and checks its segments once, with one prefix scan, and a query that reads only a few, as a traversal does, reads each in place.
 - A query reads only the columns of the properties it reads.
 - Listing a node's properties seeks to the first segment of each column of its group and reads the node's delta.
+- Listing a node's or a relationship's property keys, its labels, or a relationship's type decodes no property value.
 - A part's checksum covers its key, and a delta's checksum covers its key, so an entry read under another key is reported as corruption.
 - Setting a property updates only the indexes on a label of the node that cover that property, and changing a label updates only the indexes on that label.
 - Stored property values are null-free.

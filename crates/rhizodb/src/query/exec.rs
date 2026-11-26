@@ -837,7 +837,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Node {
             id,
-            labels: self.label_names(&record)?.into_iter().collect(),
+            labels: self
+                .label_names(record.labels.iter().copied())?
+                .into_iter()
+                .collect(),
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,
         })
     }
@@ -853,7 +856,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Ok(result::Relationship {
             id,
-            relationship_type: self.tx.token_name(record.rel_type)?,
+            relationship_type: self.tx.token_name(record.rel_type)?.to_string(),
             start: record.source,
             end: record.target,
             properties: self.map_value(self.property_map(&record.properties)?, graveyard)?,

@@ -8,6 +8,11 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 - `OpenOptions::max_value_items` and `OpenOptions::max_value_bytes` set how many list items and map entries, and how many bytes of strings, one value that a query builds may hold, counted through every nested list and map. They default to 10,000,000 items and 256 MiB, and `range()` gives at most `max_value_items` elements.
 
+### Changed
+
+- Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database (once per transaction inside a write transaction) instead of once per element, so returning many elements no longer reads storage once per label and property.
+- `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
+
 ### Fixed
 
 - A short query could still abort the host process by multiplying values that each stayed under the length caps, as in `[x IN range(1, 10000000) | range(1, 10000000)]`, `collect(range(1, 1000))` over many rows, or a `reduce` that appends a new list at every step. List comprehensions, pattern comprehensions, `COLLECT` subqueries, `collect()`, list and map literals, `CAST`, `split()`, `toUpper()`, `toLower()`, and `normalize()` now fail with `ErrorKind::NumberOutOfRange` once their value passes the limits, and the limits count the items and strings of nested lists and maps too.
