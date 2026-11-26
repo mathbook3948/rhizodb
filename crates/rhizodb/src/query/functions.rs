@@ -6,6 +6,8 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::Label;
+use crate::graph::Token;
 use crate::storage::ReadTransaction;
 
 use super::compare::equals;
@@ -13,6 +15,7 @@ use super::datum;
 use super::datum::Datum;
 use super::eval::Env;
 use super::eval::arithmetic;
+use super::eval::deleted;
 use super::eval::float_text;
 use super::scalars;
 use super::shape::INSTANT;
@@ -724,12 +727,16 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Labels => match first {
-                Datum::Node(id) => Ok(Datum::List(Arc::new(
-                    self.label_names(&self.node(id)?)?
-                        .into_iter()
-                        .map(Datum::String)
-                        .collect(),
-                ))),
+                Datum::Node(id) => {
+                    let labels = self
+                        .with_labels(id, <[Token<Label>]>::to_vec)?
+                        .ok_or_else(deleted)?;
+                    let mut names = Vec::with_capacity(labels.len());
+                    for label in labels {
+                        names.push(Datum::String(self.token_name(label)?.to_string()));
+                    }
+                    Ok(Datum::List(Arc::new(names)))
+                }
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
