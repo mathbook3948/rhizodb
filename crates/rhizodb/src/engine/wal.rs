@@ -225,6 +225,35 @@ impl<F: FileSystem> Wal<F> {
         header: &Header,
         retain_from: u64,
         segment_target: u64,
+        replay: impl FnMut(Record) -> Result<(), EngineError>,
+    ) -> Result<Self, EngineError> {
+        Self::read_log(fs, base, header, retain_from, segment_target, true, replay)
+    }
+
+    /// Reads the log `header` names after a crash as [`Wal::recover`] does, failing on the
+    /// same damage, but changes no file, and returns the highest term of the records after the
+    /// checkpoint.
+    pub(crate) fn newest_term_after_checkpoint(
+        fs: Arc<F>,
+        base: &str,
+        header: &Header,
+        segment_target: u64,
+    ) -> Result<u64, EngineError> {
+        let mut newest = 0;
+        Self::read_log(fs, base, header, 0, segment_target, false, |record| {
+            newest = newest.max(record.term);
+            Ok(())
+        })?;
+        Ok(newest)
+    }
+
+    fn read_log(
+        fs: Arc<F>,
+        base: &str,
+        header: &Header,
+        retain_from: u64,
+        segment_target: u64,
+        repair: bool,
         mut replay: impl FnMut(Record) -> Result<(), EngineError>,
     ) -> Result<Self, EngineError> {
         let identity = LogIdentity {
@@ -285,8 +314,10 @@ impl<F: FileSystem> Wal<F> {
                         )));
                     }
                     drop(file);
-                    fs.remove(&name)?;
-                    fs.sync_names()?;
+                    if repair {
+                        fs.remove(&name)?;
+                        fs.sync_names()?;
+                    }
                     break;
                 }
                 Some(Err(error)) => return Err(error),
@@ -354,7 +385,7 @@ impl<F: FileSystem> Wal<F> {
             }
             let used = (at / WAL_BLOCK) as u64;
             let mut allocated = blocks;
-            if last && used != blocks {
+            if repair && last && used != blocks {
                 file.set_block_count(used)?;
                 file.sync()?;
                 allocated = used;

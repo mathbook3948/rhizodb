@@ -971,6 +971,20 @@ fn a_stream_that_claims_more_ranges_or_history_than_it_carries_fails_as_corrupt_
 }
 
 #[test]
+fn a_stream_that_claims_a_file_past_its_extents_fails_as_corrupt_before_sizing_the_file() {
+    let (_fs, source, _) = loaded_source(8, 40);
+    let logical = unseal(&read_all(&source.export(&[]).unwrap(), 1 << 16));
+    for file_blocks in [1u64 << 60, u64::MAX] {
+        let stream = forged(&logical, &[(40, &file_blocks.to_le_bytes())]);
+        let (target, old) = old_target();
+        let error = install_bytes(&target, &stream).unwrap_err();
+        assert!(error.is_corrupt(), "{error}");
+        let engine = open(&target, TARGET, by_hand()).unwrap();
+        assert_eq!(dump(&engine), old);
+    }
+}
+
+#[test]
 fn an_export_refuses_a_history_longer_than_install_reads() {
     let (_fs, source, _) = loaded_source(1, 4);
     assert!(matches!(

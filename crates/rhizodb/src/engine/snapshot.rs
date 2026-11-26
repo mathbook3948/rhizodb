@@ -28,6 +28,7 @@ use super::store::random_u64;
 use super::store::read_header;
 use super::store::replica;
 use super::store::staging_name;
+use super::wal::Wal;
 use crate::error::ErrorKind;
 use crate::storage::StorageError;
 
@@ -450,6 +451,11 @@ fn read_manifest<R: Read>(frames: &mut Frames<R>) -> Result<Manifest, EngineErro
             "the snapshot's length differs from its blocks",
         ));
     }
+    if file_blocks > physical_block(header.next_extent.0, 0)? {
+        return Err(EngineError::corrupt(
+            "the snapshot's file reaches past every extent its header names",
+        ));
+    }
     if !header.clean || header.staged_lsn != 0 || header.checkpoint_lsn != position {
         return Err(EngineError::corrupt(
             "the snapshot's header is not a clean checkpoint at its position",
@@ -539,9 +545,27 @@ pub(crate) fn install<F: FileSystem + 'static>(
         ));
     }
     let local_history = local_history.unwrap_or(0);
-    let local_logged = local.map_or(0, |header| {
-        replica::newest_logged_term(&*fs, name, header.database_id)
-    });
+    let local_logged = match local {
+        Some(header) if !header.clean => {
+            match Wal::newest_term_after_checkpoint(
+                Arc::clone(&fs),
+                name,
+                &header,
+                options.segment_target,
+            ) {
+                Ok(term) => term,
+                Err(_) if force => 0,
+                Err(error) => {
+                    return Err(EngineError::corrupt(format!(
+                        "the log of the database the install would replace is damaged, so an \
+                         older snapshot cannot be told apart; install with force to resync it: \
+                         {error}"
+                    )));
+                }
+            }
+        }
+        _ => 0,
+    };
     let local_term = local
         .map_or(0, |header| header.replication.seen_term)
         .max(local_history)

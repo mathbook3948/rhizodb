@@ -786,29 +786,6 @@ fn open_segment<F: FileSystem>(
     Ok((file, header))
 }
 
-/// The highest term of any record the log segments of the database `base` still hold, read
-/// without recovering them, so a term logged after the last checkpoint counts before the file
-/// is opened again.
-pub(crate) fn newest_logged_term<F: FileSystem>(fs: &F, base: &str, database_id: u128) -> u64 {
-    let Ok(sequences) = segment_files(fs, base) else {
-        return 0;
-    };
-    let mut newest = 0;
-    for sequence in sequences {
-        let Ok((file, header)) = open_segment(fs, base, sequence, database_id) else {
-            continue;
-        };
-        let seed = header.record_seed();
-        let _ = read_segment(&file, &header, 0, u64::MAX, &mut |bytes, _| {
-            if let Ok((record, _)) = decode_record(seed, &bytes) {
-                newest = newest.max(record.term);
-            }
-            Ok(false)
-        });
-    }
-    newest
-}
-
 fn read_segment(
     file: &impl BlockFile,
     header: &SegmentHeader,

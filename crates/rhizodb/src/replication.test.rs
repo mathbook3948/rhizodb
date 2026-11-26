@@ -381,6 +381,59 @@ mod crash {
         assert_eq!(error.kind(), ErrorKind::Fenced);
     }
 
+    #[test]
+    fn an_install_over_a_log_damaged_before_its_end_fails_unless_forced() {
+        use crate::engine::block_file::BlockFile;
+        use crate::engine::block_file::BlockSize;
+        use crate::engine::block_file::FileSystem;
+        let writer = open_on(&SimFs::new(), false);
+        writer.promote(3, b"a").unwrap();
+        insert(&writer, 1);
+        writer.compact().unwrap();
+        let old = snapshot_bytes(&writer);
+        let target = SimFs::new();
+        let replica = install_on(&target, &old).unwrap();
+        let next = install_on(&SimFs::new(), &old).unwrap();
+        next.promote(5, b"b").unwrap();
+        for k in 2..6 {
+            insert(&next, k);
+        }
+        sync(&next, &replica).unwrap();
+        let crashed = target.crash(Crash::KeepUnsynced);
+        drop(replica);
+        let unit = BlockSize::new(crate::engine::layout::WAL_BLOCK).unwrap();
+        let first_record = (4096 / crate::engine::layout::WAL_BLOCK) as u64;
+        let mut damaged = 0;
+        for name in crashed.names().unwrap() {
+            if name == NAME || !name.starts_with(NAME) {
+                continue;
+            }
+            let segment = crashed.open(&name, unit).unwrap();
+            if segment.block_count().unwrap() <= first_record {
+                continue;
+            }
+            let mut block = vec![0; crate::engine::layout::WAL_BLOCK];
+            segment.read(first_record, &mut block).unwrap();
+            block[30] ^= 0xFF;
+            segment.write(first_record, &block).unwrap();
+            segment.sync().unwrap();
+            damaged += 1;
+        }
+        assert!(damaged > 0);
+        let error = install_on(&crashed, &old).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::CorruptData);
+        assert!(error.to_string().contains("force"), "{error}");
+        let engine = crate::engine::snapshot::install(
+            Arc::new(AnyFs::Sim(crashed.clone())),
+            NAME,
+            old.as_slice(),
+            options(),
+            true,
+        )
+        .unwrap();
+        drop(engine);
+    }
+
     fn while_checkpointing<T>(db: &Database, run: impl FnOnce() -> T) -> T {
         let (locked, is_locked) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();

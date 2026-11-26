@@ -576,8 +576,8 @@ impl Database {
     ///
     /// It fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) when a chunk of
     /// the stream fails its checksum, comes from another offset or another snapshot, or the
-    /// stream ends early, or when the database at `path` is too damaged to tell which terms it
-    /// has seen, which [`OpenOptions::force_install`] resyncs, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when reading `input`
+    /// stream ends early, or when the database at `path` or its log is too damaged to tell
+    /// which terms it has seen, which [`OpenOptions::force_install`] resyncs, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when reading `input`
     /// fails. A transfer that was cut off can be retried with a reader that resumes from the
     /// offset it reached, since the snapshot gives the same bytes at every offset.
     ///
