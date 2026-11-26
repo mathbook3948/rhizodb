@@ -6,6 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Added
 
+- `Error::byte_offset` gives the byte offset in the query text where the parser noticed a syntax error, so a host can underline the bad spot. It is `Some` exactly when `Error::kind` is `ErrorKind::Syntax`.
 - Embedded property graph storage in one database file of RhizoDB's own storage engine, beside a write-ahead log that a clean close empties, with a versioned on-disk format that upgrades older databases on open. Every page carries a checksum, so damage fails as corrupt data where it is read.
 - Node labels kept as interned label sets in one node meta chunk per 4096 node IDs, so label tests read no node record and `MATCH (n:Label) RETURN count(*)` reads one chunk per 4096 nodes.
 - `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
@@ -40,6 +41,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `Database::compact`, `Database::stats`, and `Database::check` for databases on RhizoDB's own storage engine: compaction gives back the space of deleted data, `stats` returns a `DatabaseStats` with the file's size and live bytes, its live and free extents, the log's size, and the cache's hits and misses, and `check` reads every page of the file and fails as corrupt data on the first broken invariant.
 - Automatic space reclaim: after a checkpoint, a clean close's included, a file that holds more than twice its live data plus 4 MiB, and has grown by its live data since the last compaction, is compacted, so a long-running host's file does not grow without bound and a database that lost most of its data gives the space back by the time it closes.
 - GQL path search: the selectors `ANY SHORTEST`, `ALL SHORTEST`, `ANY k`, `SHORTEST k`, `SHORTEST k GROUPS`, and `ALL`, the path modes `WALK`, `TRAIL`, `SIMPLE`, and `ACYCLIC`, quantified path patterns `((a)-[r]->(b) WHERE ...){m,n}` with `+` and `*`, quantified edges such as `-[:KNOWS]->+`, and Cypher's `shortestPath` and `allShortestPaths`, with the new `ErrorKind::InvalidPathPattern`. A shortest path between two known nodes is searched from both ends at once, so it reads only the neighbourhoods of the two ends.
+- `Display` for `Value`, `Node`, `Relationship`, and `Path`, in the notation of GQL literals such as `{k: [1, 'a']}`, `(:Person {name: 'Ada'})`, and `<(:A)-[:T]->(:B)>`, so a host can print query results without writing a formatter.
 
 ### Changed
 
