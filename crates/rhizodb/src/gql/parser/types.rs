@@ -70,6 +70,7 @@ impl Parser {
             }]
         };
         while self.at_keyword("LIST") || self.at_keyword("ARRAY") {
+            self.deepen()?;
             self.pos += 1;
             members = vec![TypeMember {
                 value_type: ValueType::List(Box::new(TypeExpr { members })),

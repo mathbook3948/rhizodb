@@ -568,6 +568,8 @@ fn deep_nesting_is_an_error_not_a_stack_overflow() {
             " THEN 1 END".repeat(depth)
         ),
         format!("RETURN {}", "exists { MATCH (a) WHERE ".repeat(depth)),
+        format!("RETURN 1 IS TYPED INT{}", " LIST".repeat(depth)),
+        format!("RETURN 1 IS :: ANY<INT ARRAY{}>", " LIST".repeat(depth)),
     ];
     for input in &inputs {
         let (_, kind) = error(input);
