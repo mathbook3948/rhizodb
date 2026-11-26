@@ -2,6 +2,7 @@ use bench::cli::Options;
 use bench::cli::Servers;
 use bench::cli::benchmark;
 use bench::engine::EngineKind;
+use bench::memory::Memory;
 use bench::report::Agreement;
 use bench::scale::Scale;
 
@@ -37,6 +38,7 @@ fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing
         skip: None,
         engines: Some(embedded()),
         servers: Servers::default(),
+        memory: Memory::default(),
     };
     let reports = benchmark(&options, |_| {}).unwrap().reports;
     let mut problems = Vec::new();
@@ -95,4 +97,39 @@ fn every_workload_runs_on_every_embedded_engine_without_errors_and_with_agreeing
 
     assert!(problems.is_empty(), "{}", problems.join("\n"));
     assert!(reports.len() >= 20, "{}", reports.len());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reads_from_a_small_cache_and_a_cold_page_cache_agree_and_read_the_disk() {
+    let options = Options {
+        scale: Scale::Tiny,
+        reps: 1,
+        only: Some("read/,traverse/,aggregate/,index/vector-search".to_owned()),
+        skip: None,
+        engines: Some(vec![EngineKind::Rhizodb, EngineKind::Ladybugdb]),
+        servers: Servers::default(),
+        memory: Memory {
+            cache_bytes: Some(32 << 20),
+            cold: true,
+        },
+    };
+    let reports = benchmark(&options, |_| {}).unwrap().reports;
+
+    assert!(reports.len() >= 10, "{}", reports.len());
+    for report in &reports {
+        assert!(report.disagreements().is_empty(), "{}", report.name);
+        for series in &report.series {
+            assert_eq!(series.runs.len(), 1, "{} on {:?}", report.name, series);
+            assert_eq!(series.runs[0].errors, 0, "{} on {:?}", report.name, series);
+        }
+    }
+    let scan = reports
+        .iter()
+        .find(|report| report.name == "read/filter-scan")
+        .unwrap();
+    for series in &scan.series {
+        let read = series.runs[0].disk_read_bytes.unwrap_or_default();
+        assert!(read > 0, "{} read nothing from disk", series.engine.name());
+    }
 }

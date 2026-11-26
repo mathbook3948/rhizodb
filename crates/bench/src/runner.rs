@@ -13,6 +13,8 @@ use crate::engine::EngineError;
 use crate::engine::EngineKind;
 use crate::engine::Instance;
 use crate::measure::Measurement;
+use crate::memory::disk_read_bytes;
+use crate::memory::evict;
 use crate::report::Series;
 use crate::report::WorkloadReport;
 use crate::report::agreements;
@@ -27,7 +29,9 @@ use crate::workloads::io_failure;
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub reps: usize,
+    /// Runs only the workloads whose name holds one of these comma-separated parts.
     pub only: Option<String>,
+    /// Leaves out the workloads whose name holds one of these comma-separated parts.
     pub skip: Option<String>,
 }
 
@@ -60,6 +64,7 @@ pub struct Environment<'a> {
     indexed: BTreeMap<EngineKind, Indexed>,
     held: BTreeMap<EngineKind, Held>,
     runs: usize,
+    cold: bool,
 }
 
 impl fmt::Debug for Environment<'_> {
@@ -96,7 +101,39 @@ impl<'a> Environment<'a> {
             indexed: BTreeMap::new(),
             held: BTreeMap::new(),
             runs: 0,
+            cold: false,
         })
+    }
+
+    /// Makes every run of a workload that reads the shared graph start on a database opened
+    /// for it, after the operating system dropped the cached pages of its files.
+    pub fn set_cold(&mut self, cold: bool) {
+        self.cold = cold;
+    }
+
+    fn reopen_cold(&mut self, engine: &dyn Engine, needs: Needs) -> Result<(), EngineError> {
+        let kind = engine.kind();
+        match needs {
+            Needs::Indexed => {
+                let dir = self.engine_dir(kind, "indexed");
+                if let Some(Indexed { instance, state }) = self.indexed.remove(&kind) {
+                    instance.close()?;
+                    evict(&dir).map_err(io_failure)?;
+                    let instance = engine.open(&dir)?;
+                    instance.prepare_search()?;
+                    self.indexed.insert(kind, Indexed { instance, state });
+                }
+            }
+            _ => {
+                let dir = self.engine_dir(kind, "base");
+                if let Some(instance) = self.bases.remove(&kind) {
+                    instance.close()?;
+                }
+                evict(&dir).map_err(io_failure)?;
+                self.bases.insert(kind, engine.open(&dir)?);
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -129,7 +166,7 @@ impl<'a> Environment<'a> {
         fs::create_dir_all(&building).map_err(io_failure)?;
         let scratch = self.scratch();
         fs::create_dir_all(&scratch).map_err(io_failure)?;
-        let instance = engine.open(&building)?;
+        let instance = engine.open_to_load(&building)?;
         instance.create_schema()?;
         instance.prepare_bulk_load(self.data, &scratch)?;
         instance.bulk_load(self.data, &scratch)?;
@@ -170,8 +207,13 @@ impl<'a> Environment<'a> {
         let master = self.master(engine)?;
         let dir = self.engine_dir(engine.kind(), "indexed");
         copy_directory(&master, &dir).map_err(io_failure)?;
+        let building = engine.open_to_load(&dir)?;
+        let state = build_indexes(&*building);
+        building.close()?;
         let instance = engine.open(&dir)?;
-        let state = build_indexes(&*instance);
+        if state.keyword.is_ok() || state.vector.is_ok() {
+            instance.prepare_search()?;
+        }
         self.indexed
             .insert(engine.kind(), Indexed { instance, state });
         Ok(())
@@ -250,25 +292,41 @@ impl<'a> Environment<'a> {
                     self.ensure_held(engine, Held::Loaded)?;
                 } else {
                     self.ensure_base(engine)?;
+                    if self.cold {
+                        self.reopen_cold(engine, Needs::Base)?;
+                    }
                 }
                 let instance = self
                     .bases
                     .get(&kind)
                     .or_else(|| self.indexed.get(&kind).map(|indexed| &indexed.instance));
                 let dir = self.engine_dir(kind, if shared { "server" } else { "base" });
-                (workload.run)(&self.context(engine, instance.map(|b| &**b), None, &dir, &scratch))
+                reading_disk(|| {
+                    (workload.run)(&self.context(
+                        engine,
+                        instance.map(|b| &**b),
+                        None,
+                        &dir,
+                        &scratch,
+                    ))
+                })
             }
             Needs::Indexed => {
                 if shared {
                     self.ensure_held(engine, Held::Indexed)?;
                 } else {
                     self.ensure_indexed(engine)?;
+                    if self.cold {
+                        self.reopen_cold(engine, Needs::Indexed)?;
+                    }
                 }
                 let indexed = self.indexed.get(&kind);
                 let dir = self.engine_dir(kind, if shared { "server" } else { "indexed" });
                 let instance = indexed.map(|i| &*i.instance);
                 let state = indexed.map(|i| &i.state);
-                (workload.run)(&self.context(engine, instance, state, &dir, &scratch))
+                reading_disk(|| {
+                    (workload.run)(&self.context(engine, instance, state, &dir, &scratch))
+                })
             }
             Needs::Copy | Needs::ClosedCopy | Needs::Empty => {
                 let dir = if shared {
@@ -310,11 +368,24 @@ impl<'a> Environment<'a> {
     ) -> Result<Measurement, EngineError> {
         if workload.needs == Needs::Copy {
             let instance = engine.open(dir)?;
-            (workload.run)(&self.context(engine, Some(&*instance), None, dir, scratch))
+            reading_disk(|| {
+                (workload.run)(&self.context(engine, Some(&*instance), None, dir, scratch))
+            })
         } else {
-            (workload.run)(&self.context(engine, None, None, dir, scratch))
+            reading_disk(|| (workload.run)(&self.context(engine, None, None, dir, scratch)))
         }
     }
+}
+
+fn reading_disk(
+    run: impl FnOnce() -> Result<Measurement, EngineError>,
+) -> Result<Measurement, EngineError> {
+    let before = disk_read_bytes();
+    let mut measurement = run()?;
+    measurement.disk_read_bytes = before
+        .zip(disk_read_bytes())
+        .map(|(before, after)| after.saturating_sub(before));
+    Ok(measurement)
 }
 
 fn build_indexes(instance: &dyn Instance) -> IndexState {
@@ -354,15 +425,12 @@ pub fn run_all(
     settings: &Settings,
     mut progress: impl FnMut(&str),
 ) -> Vec<WorkloadReport> {
+    let names = |list: &str| list.split(',').map(str::to_owned).collect::<Vec<_>>();
+    let only = settings.only.as_deref().map(names);
+    let skip = settings.skip.as_deref().map(names);
     let selected = workloads.iter().filter(|workload| {
-        settings
-            .only
-            .as_deref()
-            .is_none_or(|only| workload.name.contains(only))
-            && settings
-                .skip
-                .as_deref()
-                .is_none_or(|skip| !workload.name.contains(skip))
+        let named = |list: &Vec<String>| list.iter().any(|part| workload.name.contains(part));
+        only.as_ref().is_none_or(named) && !skip.as_ref().is_some_and(named)
     });
     let mut reports = Vec::new();
     for workload in selected {

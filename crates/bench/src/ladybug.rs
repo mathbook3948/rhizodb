@@ -28,7 +28,8 @@ use crate::fingerprint::Fingerprint;
 use crate::fingerprint::RowHasher;
 
 const FILE_NAME: &str = "ladybug.lbdb";
-const BUFFER_POOL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// The buffer pool the benchmark gives LadybugDB unless a run sets a cache size.
+pub const BUFFER_POOL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// The directory holding the extensions built from source, which `mise run lbug-extensions`
 /// fills and `LBUG_EXTENSION_DIR` overrides.
@@ -50,9 +51,12 @@ const SCHEMA: [&str; 4] = [
     "CREATE REL TABLE LIVES_IN(FROM Person TO City)",
 ];
 
-/// LadybugDB, opened as a file with its default configuration.
-#[derive(Clone, Copy, Debug)]
-pub struct LadybugEngine;
+/// LadybugDB, opened as a file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LadybugEngine {
+    /// The buffer pool's size, or [`BUFFER_POOL_BYTES`] when `None`.
+    pub cache_bytes: Option<u64>,
+}
 
 struct LadybugInstance {
     database: Database,
@@ -84,12 +88,16 @@ impl Engine for LadybugEngine {
     fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
         let config = SystemConfig::default()
             .max_num_threads(threads())
-            .buffer_pool_size(BUFFER_POOL_BYTES);
+            .buffer_pool_size(self.buffer_pool());
         let database = Database::new(dir.join(FILE_NAME), config).map_err(failed)?;
         Ok(Box::new(LadybugInstance {
             database,
             search: OnceLock::new(),
         }))
+    }
+
+    fn open_to_load(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
+        LadybugEngine::default().open(dir)
     }
 
     fn config(&self) -> serde_json::Value {
@@ -98,10 +106,16 @@ impl Engine for LadybugEngine {
             "pinned": env!("PIN_LBUG"),
             "storage": "file",
             "threads": threads(),
-            "buffer_pool_bytes": BUFFER_POOL_BYTES,
+            "buffer_pool_bytes": self.buffer_pool(),
             "compression": true,
             "extensions": "FTS and VECTOR built from the source of the pinned release",
         })
+    }
+}
+
+impl LadybugEngine {
+    fn buffer_pool(&self) -> u64 {
+        self.cache_bytes.unwrap_or(BUFFER_POOL_BYTES)
     }
 }
 

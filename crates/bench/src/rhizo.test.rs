@@ -6,7 +6,7 @@ fn open(name: &str) -> (std::path::PathBuf, Box<dyn Instance>) {
     let dir = std::env::temp_dir().join(format!("bench-rhizo-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let instance = RhizoEngine.open(&dir).unwrap();
+    let instance = RhizoEngine::default().open(&dir).unwrap();
     (dir, instance)
 }
 

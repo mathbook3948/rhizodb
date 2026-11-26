@@ -354,6 +354,12 @@ pub trait Engine: Sync {
     /// lives in a server connects to it and ignores `dir`.
     fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError>;
 
+    /// Opens the database in `dir` to load the graph that read workloads share, with the
+    /// engine's default cache, since a cache size set for reads may be too small to load in.
+    fn open_to_load(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
+        self.open(dir)
+    }
+
     /// How the engine is configured and which version ran, for the JSON header. Runs once,
     /// after the benchmark.
     fn config(&self) -> serde_json::Value;

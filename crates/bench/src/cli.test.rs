@@ -17,6 +17,7 @@ fn no_arguments_give_the_defaults() {
             engines: None,
             servers: Servers::default(),
             load: Load::default(),
+            memory: Memory::default(),
         })
     );
 }
@@ -38,6 +39,7 @@ fn every_flag_is_read() {
             engines: None,
             servers: Servers::default(),
             load: Load::default(),
+            memory: Memory::default(),
         })
     );
 }
@@ -98,4 +100,18 @@ fn skip_is_read() {
             .as_deref(),
         Some("index/vector")
     );
+}
+
+#[test]
+fn the_cache_size_and_cold_runs_are_read() {
+    let parsed = parse(args(&["--cache-mib", "32", "--cold"])).unwrap();
+
+    assert_eq!(
+        parsed.memory,
+        Memory {
+            cache_bytes: Some(32 << 20),
+            cold: true,
+        }
+    );
+    assert!(parse(args(&["--cache-mib", "0"])).is_err());
 }

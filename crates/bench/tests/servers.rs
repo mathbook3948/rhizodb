@@ -2,6 +2,7 @@ use bench::cli::Options;
 use bench::cli::Servers;
 use bench::cli::benchmark;
 use bench::engine::EngineKind;
+use bench::memory::Memory;
 use bench::report::Agreement;
 use bench::scale::Scale;
 
@@ -41,6 +42,7 @@ fn every_workload_runs_on_the_servers_the_environment_names_with_agreeing_result
         skip: None,
         engines: Some(engines),
         servers,
+        memory: Memory::default(),
     };
     let reports = benchmark(&options, |_| {}).unwrap().reports;
     let mut problems = Vec::new();

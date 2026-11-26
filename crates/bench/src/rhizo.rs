@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use serde_json::json;
+
 use rhizodb::Database;
 use rhizodb::IndexTarget;
+use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Value;
 use rhizodb::VectorMetric;
@@ -32,8 +35,11 @@ const CREATE_KNOWS: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH 
 const CREATE_LIVES_IN: &str = "UNWIND $rows AS r MATCH (a) WHERE id(a) = r.a MATCH (b) WHERE id(b) = r.b CREATE (a)-[:LIVES_IN]->(b)";
 
 /// RhizoDB, opened as a file.
-#[derive(Clone, Copy, Debug)]
-pub struct RhizoEngine;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RhizoEngine {
+    /// The block cache's size, or the library default when `None`.
+    pub cache_bytes: Option<u64>,
+}
 
 #[derive(Debug)]
 struct Prepared {
@@ -64,11 +70,19 @@ impl Engine for RhizoEngine {
     }
 
     fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
-        let database = Database::open(dir.join(FILE_NAME)).map_err(failed)?;
+        let mut options = OpenOptions::new();
+        if let Some(bytes) = self.cache_bytes {
+            options = options.cache_size(usize::try_from(bytes).unwrap_or(usize::MAX));
+        }
+        let database = options.open(dir.join(FILE_NAME)).map_err(failed)?;
         Ok(Box::new(RhizoInstance {
             database,
             prepared: Mutex::new(None),
         }))
+    }
+
+    fn open_to_load(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
+        RhizoEngine::default().open(dir)
     }
 
     fn config(&self) -> serde_json::Value {
@@ -77,7 +91,7 @@ impl Engine for RhizoEngine {
             "pinned": "path dependency on crates/rhizodb",
             "storage": "file",
             "threads": "readers in parallel, one writer",
-            "buffer_pool": "library default",
+            "cache_bytes": self.cache_bytes.map_or(json!("library default"), |bytes| json!(bytes)),
         })
     }
 }

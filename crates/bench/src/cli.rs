@@ -14,6 +14,7 @@ use crate::engine::Engine;
 use crate::engine::EngineKind;
 use crate::falkor::FalkorEngine;
 use crate::ladybug::LadybugEngine;
+use crate::memory::Memory;
 use crate::report::WorkloadReport;
 use crate::report::json;
 use crate::report::table;
@@ -57,6 +58,7 @@ pub struct Arguments {
     pub servers: Servers,
     /// The load scenarios to run in place of the workload suite, when any are named.
     pub load: Load,
+    pub memory: Memory,
 }
 
 /// A command line the binary cannot read.
@@ -67,7 +69,7 @@ impl fmt::Display for UsageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING] [--skip SUBSTRING] [--engines a,b] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT] [--load readers,mixed,sustained|all] [--threads 1,2,4,8] [--seconds N]",
+            "{}\nusage: bench [--scale tiny|small|medium|large] [--reps N] [--only SUBSTRING,...] [--skip SUBSTRING,...] [--engines a,b] [--cache-mib N] [--cold] [--out FILE.json] [--neo4j bolt://HOST:PORT] [--memgraph bolt://HOST:PORT] [--falkordb redis://HOST:PORT] [--load readers,mixed,sustained|all] [--threads 1,2,4,8] [--seconds N]",
             self.0
         )
     }
@@ -75,8 +77,8 @@ impl fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// Reads `--scale`, `--reps`, `--only`, `--engines`, `--out`, and the server URLs. The scale
-/// defaults to `small` and the repetitions to 5.
+/// Reads `--scale`, `--reps`, `--only`, `--engines`, `--out`, the memory settings, and the server
+/// URLs. The scale defaults to `small` and the repetitions to 5.
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, UsageError> {
     let mut parsed = Arguments {
         scale: Scale::Small,
@@ -87,6 +89,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
         engines: None,
         servers: Servers::default(),
         load: Load::default(),
+        memory: Memory::default(),
     };
     let mut arguments = arguments.into_iter();
     while let Some(flag) = arguments.next() {
@@ -143,6 +146,16 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Arguments, U
                     .ok_or_else(|| UsageError(format!("`{text}` is not a positive count")))?;
                 parsed.load.duration = Duration::from_secs(seconds);
             }
+            "--cache-mib" => {
+                let text = value()?;
+                let mib: u64 = text
+                    .parse()
+                    .ok()
+                    .filter(|mib| *mib > 0)
+                    .ok_or_else(|| UsageError(format!("`{text}` is not a positive count")))?;
+                parsed.memory.cache_bytes = Some(mib << 20);
+            }
+            "--cold" => parsed.memory.cold = true,
             "--neo4j" => parsed.servers.neo4j = Some(value()?),
             "--memgraph" => parsed.servers.memgraph = Some(value()?),
             "--falkordb" => parsed.servers.falkordb = Some(value()?),
@@ -161,6 +174,7 @@ pub struct Options {
     pub skip: Option<String>,
     pub engines: Option<Vec<EngineKind>>,
     pub servers: Servers,
+    pub memory: Memory,
 }
 
 /// What a benchmark run produced.
@@ -201,10 +215,14 @@ fn cozo() -> Box<dyn Engine> {
     ))
 }
 
-fn engines_for(servers: &Servers) -> Vec<Box<dyn Engine>> {
+fn engines_for(servers: &Servers, memory: Memory) -> Vec<Box<dyn Engine>> {
     vec![
-        Box::new(RhizoEngine),
-        Box::new(LadybugEngine),
+        Box::new(RhizoEngine {
+            cache_bytes: memory.cache_bytes,
+        }),
+        Box::new(LadybugEngine {
+            cache_bytes: memory.cache_bytes,
+        }),
         Box::new(SqliteEngine),
         duckdb(),
         cozo(),
@@ -221,7 +239,8 @@ pub fn benchmark(options: &Options, progress: impl FnMut(&str)) -> Result<Outcom
     let mut environment = Environment::new(&env::temp_dir(), &plan, &data)
         .map_err(|error| format!("cannot create the scratch directory: {error}"))?;
     let mut skipped = Vec::new();
-    let all = engines_for(&options.servers);
+    environment.set_cold(options.memory.cold);
+    let all = engines_for(&options.servers, options.memory);
     let chosen: Vec<&dyn Engine> = all
         .iter()
         .filter(|engine| {
@@ -310,6 +329,7 @@ pub fn main() -> ExitCode {
         skip: arguments.skip.clone(),
         engines: arguments.engines.clone(),
         servers: arguments.servers.clone(),
+        memory: arguments.memory,
     };
     let outcome = match benchmark(&options, |name| eprintln!("running {name}")) {
         Ok(outcome) => outcome,
@@ -335,6 +355,8 @@ pub fn main() -> ExitCode {
             "knows": plan.persons * plan.knows_per_person,
             "cities": plan.cities,
             "cores": std::thread::available_parallelism().map_or(0, |cores| cores.get()),
+            "cache_bytes": arguments.memory.cache_bytes,
+            "cold": arguments.memory.cold,
             "warnings": warnings,
             "skipped_servers": outcome.skipped,
             "engines": outcome.engines,
@@ -377,7 +399,7 @@ fn load_main(arguments: &Arguments) -> ExitCode {
         .engines
         .clone()
         .unwrap_or_else(|| vec![EngineKind::Rhizodb, EngineKind::Ladybugdb]);
-    let all = engines_for(&arguments.servers);
+    let all = engines_for(&arguments.servers, arguments.memory);
     let chosen: Vec<&dyn Engine> = all
         .iter()
         .filter(|engine| kinds.contains(&engine.kind()))

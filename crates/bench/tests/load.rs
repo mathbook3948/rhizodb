@@ -17,7 +17,7 @@ fn every_load_scenario_runs_on_rhizodb_and_ladybugdb_with_right_answers() {
     let plan = Scale::Tiny.plan();
     let data = Dataset::generate(SEED, plan);
     let mut environment = Environment::new(&env::temp_dir(), &plan, &data).unwrap();
-    let engines: [&dyn Engine; 2] = [&RhizoEngine, &LadybugEngine];
+    let engines: [&dyn Engine; 2] = [&RhizoEngine::default(), &LadybugEngine::default()];
     let load = Load {
         scenarios: Scenario::ALL.to_vec(),
         threads: vec![2],

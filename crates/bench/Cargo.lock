@@ -384,6 +384,7 @@ dependencies = [
  "neo4rs",
  "rhizodb",
  "rusqlite",
+ "rustix",
  "serde_json",
  "tokio",
  "uuid",

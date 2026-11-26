@@ -270,3 +270,90 @@ fn a_failed_load_is_remembered_and_never_leaves_a_master_directory_to_reuse() {
             .exists()
     );
 }
+
+struct Counting {
+    opened: Mutex<usize>,
+}
+
+impl Engine for Counting {
+    fn kind(&self) -> EngineKind {
+        EngineKind::Rhizodb
+    }
+
+    fn dialect(&self) -> crate::engine::Dialect {
+        crate::engine::Dialect::Gql
+    }
+
+    fn open(&self, dir: &Path) -> Result<Box<dyn Instance>, EngineError> {
+        *self.opened.lock().unwrap() += 1;
+        std::fs::write(dir.join("graph"), b"pages").unwrap();
+        Ok(Box::new(FakeInstance))
+    }
+
+    fn config(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
+fn one_row(_: &Context<'_>) -> Result<Measurement, EngineError> {
+    Ok(Measurement {
+        ops: 1,
+        ..Measurement::default()
+    })
+}
+
+fn opens_for_three_reads(cold: bool) -> usize {
+    let plan = Scale::Tiny.plan();
+    let data = Dataset::generate(1, plan);
+    let mut environment = Environment::new(&std::env::temp_dir(), &plan, &data).unwrap();
+    environment.set_cold(cold);
+    let engine = Counting {
+        opened: Mutex::new(0),
+    };
+    let read = Workload {
+        name: "x/read",
+        needs: Needs::Base,
+        comparison: Comparison::Exact,
+        file_only: false,
+        run: one_row,
+    };
+    for _ in 0..3 {
+        let measured = environment.run_once(&engine, &read).unwrap();
+        assert_eq!(measured.ops, 1);
+    }
+    *engine.opened.lock().unwrap()
+}
+
+#[test]
+fn a_cold_read_opens_the_shared_graph_again_for_every_run() {
+    let master_and_base = 2;
+
+    assert_eq!(opens_for_three_reads(false), master_and_base);
+    assert_eq!(opens_for_three_reads(true), master_and_base + 3);
+}
+
+#[test]
+fn only_and_skip_take_comma_separated_parts_of_names() {
+    let plan = Scale::Tiny.plan();
+    let data = Dataset::generate(1, plan);
+    let mut environment = Environment::new(&std::env::temp_dir(), &plan, &data).unwrap();
+    let engine = Counting {
+        opened: Mutex::new(0),
+    };
+    let settings = Settings {
+        reps: 1,
+        only: Some("read/,traverse/".to_owned()),
+        skip: Some("slow,never".to_owned()),
+    };
+    let workloads = [
+        workload("read/one", one_row),
+        workload("read/slow", one_row),
+        workload("traverse/two", one_row),
+        workload("write/three", one_row),
+    ];
+
+    let reports = run_all(&mut environment, &[&engine], &workloads, &settings, |_| {});
+
+    let names: Vec<&str> = reports.iter().map(|report| report.name).collect();
+    assert_eq!(names, ["read/one", "traverse/two"]);
+}

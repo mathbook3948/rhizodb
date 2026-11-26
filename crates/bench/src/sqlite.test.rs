@@ -71,7 +71,7 @@ fn sqlite_and_rhizodb_fingerprint_the_same_row_alike() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("r")).unwrap();
     fs::create_dir_all(dir.join("s")).unwrap();
-    let rhizo = RhizoEngine.open(&dir.join("r")).unwrap();
+    let rhizo = RhizoEngine::default().open(&dir.join("r")).unwrap();
     let sqlite = SqliteEngine.open(&dir.join("s")).unwrap();
 
     let from_rhizo = rhizo

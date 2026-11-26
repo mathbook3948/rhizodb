@@ -21,6 +21,7 @@ pub mod falkor;
 pub mod fingerprint;
 pub mod ladybug;
 pub mod measure;
+pub mod memory;
 pub mod random;
 pub mod readme;
 pub mod report;

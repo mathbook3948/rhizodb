@@ -23,6 +23,8 @@ pub struct Measurement {
     /// What an engine did differently that the report must say, such as a scan in place of an
     /// index.
     pub note: Option<String>,
+    /// The bytes the process read from storage devices during the run, where the system says.
+    pub disk_read_bytes: Option<u64>,
 }
 
 /// Counts what a loop of queries did while it ran.

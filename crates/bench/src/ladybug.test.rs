@@ -7,7 +7,7 @@ fn open(name: &str) -> (std::path::PathBuf, Box<dyn Instance>) {
     let dir = std::env::temp_dir().join(format!("bench-ladybug-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let instance = LadybugEngine.open(&dir).unwrap();
+    let instance = LadybugEngine::default().open(&dir).unwrap();
     instance.create_schema().unwrap();
     (dir, instance)
 }
@@ -40,8 +40,8 @@ fn both_engines_fingerprint_the_same_row_alike() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("r")).unwrap();
     fs::create_dir_all(dir.join("l")).unwrap();
-    let rhizo = RhizoEngine.open(&dir.join("r")).unwrap();
-    let ladybug = LadybugEngine.open(&dir.join("l")).unwrap();
+    let rhizo = RhizoEngine::default().open(&dir.join("r")).unwrap();
+    let ladybug = LadybugEngine::default().open(&dir.join("l")).unwrap();
     let query = Query::new("RETURN 3, 2.5, 'x', true, [1, 2], null");
 
     let from_rhizo = rhizo.session().unwrap().run(&query).unwrap();

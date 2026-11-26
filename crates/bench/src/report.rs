@@ -181,6 +181,15 @@ fn notes(workload: &str, series: &Series) -> String {
     {
         notes.push(format!("incl. close {}", duration_text(close)));
     }
+    let mut disk: Vec<u64> = series
+        .runs
+        .iter()
+        .filter_map(|run| run.disk_read_bytes)
+        .collect();
+    disk.sort_unstable();
+    if let Some(&median) = disk.get(disk.len() / 2).filter(|bytes| **bytes > 0) {
+        notes.push(format!("disk read {}", size_text(median)));
+    }
     if let Some(note) = series.runs.iter().find_map(|run| run.note.clone()) {
         notes.push(note);
     }
@@ -368,6 +377,7 @@ pub fn json(reports: &[WorkloadReport], header: Value) -> Value {
                     "max_ms": stats.map(|s| s.max.as_secs_f64() * 1e3),
                     "runs_ms": series.runs.iter().map(|run| run.elapsed.as_secs_f64() * 1e3).collect::<Vec<_>>(),
                     "close_ms": series.runs.iter().map(|run| run.close.as_secs_f64() * 1e3).collect::<Vec<_>>(),
+                    "disk_read_bytes": series.runs.iter().map(|run| run.disk_read_bytes).collect::<Vec<_>>(),
                     "ops": first.map(|run| run.ops),
                     "ops_per_second": stats.and_then(|s| first.and_then(|run| per_second(run.ops, s.median))),
                     "rows": first.map(|run| run.rows),

@@ -69,6 +69,12 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - The benchmark crate's tests run every workload at tiny scale on the embedded engines built by default in the differential workflow.
 - A server's test runs only when the environment gives its URL.
 - Reopening is measured with a warm page cache.
+- `--cache-mib` gives RhizoDB's block cache and LadybugDB's buffer pool the same size for every open that reads, to measure a graph larger than the engine's cache.
+- The graph that read workloads share is loaded and indexed with each engine's default cache, since a cache sized for reads can be too small for LadybugDB to load or index in.
+- `--cold` starts every run of a read workload on a database opened for it, after the cached pages of its files are dropped from the operating system's page cache, so its first read of each page goes to the disk.
+- Cold runs drop pages with `posix_fadvise`, file by file, so they need no root and leave the rest of the page cache alone, and they run only on Linux.
+- Every run reports the bytes the process read from storage devices, so a cold run shows that it read the disk.
+- `--only` and `--skip` take comma-separated parts of workload names.
 - The README's table compares RhizoDB with LadybugDB at the medium scale with five repetitions, shows every chosen workload whichever engine wins, and names the machine and the date.
 - `mise run bench-readme` measures again and rewrites the README's table, and given a saved report it only rewrites the table.
 - The benchmark builds in release with one codegen unit, so a change to unrelated code cannot move a measurement through how the compiler splits the crate.
