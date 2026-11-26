@@ -1772,6 +1772,7 @@ impl Binder<'_> {
             }
             if let ast::Expr::Variable(name) = expr
                 && scope.get(&name.0).is_none()
+                && (current_clock(&name.0).is_none() || grouping.input.get(&name.0).is_some())
             {
                 let known = !grouping.ordering && grouping.input.get(&name.0).is_some();
                 return Err(if known {

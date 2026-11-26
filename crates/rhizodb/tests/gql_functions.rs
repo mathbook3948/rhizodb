@@ -470,4 +470,18 @@ fn gql_current_time_functions_read_the_statement_clock() {
         single(&db, "WITH 1 AS current_date RETURN current_date"),
         int(1)
     );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [date('2000-01-01'), date('2001-01-01')] AS at \
+             RETURN max(at) < CURRENT_DATE AS stale, max(at) AS last, \
+             duration.between(max(at), CURRENT_DATE).years >= 25 AS old \
+             ORDER BY duration.between(last, CURRENT_TIMESTAMP)"
+        ),
+        [[
+            boolean(true),
+            single(&db, "RETURN date('2001-01-01')"),
+            boolean(true)
+        ]]
+    );
 }
