@@ -249,6 +249,13 @@ fn an_aggregate_argument_cannot_call_rand() {
     for query in [
         "RETURN count(rand())",
         "MATCH (n:Missing) RETURN collect(n.x + rand())",
+        "RETURN collect([x IN range(1, 3) | rand()])",
+        "RETURN collect([x IN range(1, 3) WHERE x < rand() * 3])",
+        "RETURN sum(reduce(a = 0.0, x IN [1, 2] | a + rand()))",
+        "RETURN collect(any(x IN [1, 2] WHERE x < rand()))",
+        "MATCH (n) RETURN collect([(n)-->(m) WHERE rand() < 0.5 | m])",
+        "MATCH (n) RETURN collect([(n)-->(m) | rand()])",
+        "MATCH (n) RETURN count(EXISTS { (n)-->(m) WHERE rand() < 0.5 })",
     ] {
         assert_eq!(
             error_kind(&db, query),
