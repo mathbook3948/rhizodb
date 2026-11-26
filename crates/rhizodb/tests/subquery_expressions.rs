@@ -1,6 +1,7 @@
 mod support;
 
 use rhizodb::ErrorKind;
+use rhizodb::Value;
 use support::*;
 
 fn graph() -> rhizodb::Database {
@@ -267,4 +268,52 @@ fn value_takes_a_query_of_one_column_that_does_not_update() {
         );
     }
     assert_eq!(single(&db, "WITH 2 AS value RETURN value"), int(2));
+}
+
+#[test]
+fn list_literals_type_unions_and_patterns_parse_the_same_wherever_they_nest() {
+    let db = db();
+    assert_eq!(
+        run(
+            &db,
+            "WITH 1 AS a, 1 AS b, true AS x, false AS y, null AS flag \
+             RETURN [a = (b)] AS same, [flag = (x OR y)] AS any, [a = (a + 1)] AS next"
+        ),
+        [vec![
+            Value::List(vec![boolean(true)]),
+            Value::List(vec![Value::Null]),
+            Value::List(vec![boolean(false)])
+        ]]
+    );
+    assert_eq!(
+        run(
+            &db,
+            "RETURN [x IN [1, 'a', true] WHERE x IS :: ANY<INTEGER | STRING> | x] AS a, \
+             [x IN [[1], ['a'], [true]] WHERE x IS :: LIST<INTEGER | STRING> | x] AS l"
+        ),
+        [vec![
+            Value::List(vec![int(1), string("a")]),
+            Value::List(vec![
+                Value::List(vec![int(1)]),
+                Value::List(vec![string("a")])
+            ])
+        ]]
+    );
+    for query in [
+        "MATCH (a) RETURN COLLECT { MATCH (a)-->(b) RETURN (b)-->() AS p }",
+        "MATCH (a) WHERE size(COLLECT { MATCH (a)-->(b) RETURN (b)-->() AS p }) > 0 RETURN a",
+        "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WITH (b)-->() AS p RETURN p } RETURN a",
+    ] {
+        assert!(
+            matches!(error_kind(&db, query), ErrorKind::Syntax(_)),
+            "{query}"
+        );
+    }
+    assert!(
+        run(
+            &db,
+            "MATCH (a) WHERE EXISTS { MATCH (a)-->(b) WHERE (b)-->() RETURN b } RETURN a"
+        )
+        .is_empty()
+    );
 }

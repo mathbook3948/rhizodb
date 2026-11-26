@@ -30,7 +30,7 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - Only the redb backend names redb, which a guard rule checks, so no call can skip the guard.
 - redb's own corruption errors are reported as corrupt data too.
 - A caught panic fails the conversion as corrupt data and leaves the redb file as it was.
-- A poisoned database drops its redb values while an unwind is in progress, so redb writes nothing more and the next open recovers the file from its last commit.
+- After a caught panic the conversion drops its redb values while an unwind is in progress, so redb writes nothing more to the file.
 - The guard relies on `panic = "unwind"`, and a host built with `panic = "abort"` still dies on a damaged file.
 - RhizoDB installs no panic hook, so the host's hook still reports each caught panic.
 - `Database::backup_to` copies every table of one read snapshot into a new database file of the same backend, so restoring a backup is opening it.
@@ -42,6 +42,7 @@ Writing a storage engine from scratch is the riskiest part of a database. Delega
 - A backup never replaces an existing file or directory, and fails as a storage error instead.
 - A failed backup removes its staging file, and a crashed one leaves it behind for the host to delete.
 - The own engine closes its copy before linking it, which checkpoints the whole log into the file, and fails the backup when a log segment is left.
+- When the own engine fails its copy, it removes the copy's log segments too, since they belong to a staging file that no later open finds.
 
 ## Open
 

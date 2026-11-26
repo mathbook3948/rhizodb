@@ -22,3 +22,12 @@ exceptions = [
   { name = "smartstring", allow = ["MPL-2.0"] },
   { name = "priority-queue", allow = ["MPL-2.0"] },
 ]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

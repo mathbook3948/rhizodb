@@ -5,3 +5,5 @@ languageGlobs:
     - pre-commit
     - pre-push
     - commit-msg
+testConfigs:
+  - testDir: guard-tests
