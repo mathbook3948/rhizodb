@@ -18,7 +18,7 @@ use crate::storage::StorageError;
 use crate::storage::Table;
 
 const POSITION_FORMAT: u8 = 3;
-const HISTORY_FORMAT: u8 = 1;
+const HISTORY_FORMAT: u8 = 2;
 
 /// The longest writer id a promotion accepts.
 pub(crate) const WRITER_ID_LIMIT: usize = 64;
@@ -185,6 +185,7 @@ pub struct HistoryEntry {
     writer_id: Vec<u8>,
     start_lsn: u64,
     end_lsn: Option<u64>,
+    incarnation: u128,
 }
 
 impl HistoryEntry {
@@ -206,6 +207,12 @@ impl HistoryEntry {
     /// The LSN of the change where the writer stepped down, if it did.
     pub fn end_lsn(&self) -> Option<u64> {
         self.end_lsn
+    }
+
+    /// The random id of the database file that began the term, which tells apart two files that
+    /// began the same term under the same writer id at the same LSN.
+    pub fn incarnation(&self) -> u128 {
+        self.incarnation
     }
 }
 
@@ -231,6 +238,7 @@ impl History {
             out.extend_from_slice(&entry.term.to_le_bytes());
             out.extend_from_slice(&entry.start_lsn.to_le_bytes());
             out.extend_from_slice(&entry.end_lsn.unwrap_or_default().to_le_bytes());
+            out.extend_from_slice(&entry.incarnation.to_le_bytes());
             out.push(entry.writer_id.len() as u8);
             out.extend_from_slice(&entry.writer_id);
         }
@@ -247,13 +255,13 @@ impl History {
         }
         let (count, mut rest) = rest.split_at(4);
         let count = u32::from_le_bytes([count[0], count[1], count[2], count[3]]) as usize;
-        let mut entries: Vec<HistoryEntry> = Vec::with_capacity(count.min(rest.len() / 25));
+        let mut entries: Vec<HistoryEntry> = Vec::with_capacity(count.min(rest.len() / 41));
         for _ in 0..count {
-            if rest.len() < 25 {
+            if rest.len() < 41 {
                 return Err(malformed());
             }
-            let (fixed, after) = rest.split_at(25);
-            let length = usize::from(fixed[24]);
+            let (fixed, after) = rest.split_at(41);
+            let length = usize::from(fixed[40]);
             if after.len() < length {
                 return Err(malformed());
             }
@@ -264,6 +272,9 @@ impl History {
                 writer_id: writer_id.to_vec(),
                 start_lsn: le_u64(&fixed[8..16]),
                 end_lsn: (end != 0).then_some(end),
+                incarnation: u128::from_le_bytes(
+                    fixed[24..40].try_into().map_err(|_| malformed())?,
+                ),
             };
             let ordered = entries
                 .last()
@@ -540,6 +551,7 @@ impl Database {
                     writer_id: epoch.writer_id,
                     start_lsn: epoch.start_lsn,
                     end_lsn: (epoch.ended_lsn != 0).then_some(epoch.ended_lsn),
+                    incarnation: epoch.incarnation,
                 })
                 .collect(),
         }
@@ -562,8 +574,13 @@ impl Database {
             .iter()
             .zip(&remote_history.entries)
             .take_while(|(left, right)| {
-                (left.term, &left.writer_id, left.start_lsn)
-                    == (right.term, &right.writer_id, right.start_lsn)
+                (left.term, &left.writer_id, left.start_lsn, left.incarnation)
+                    == (
+                        right.term,
+                        &right.writer_id,
+                        right.start_lsn,
+                        right.incarnation,
+                    )
             })
             .count();
         let fork = match (mine.entries.get(common), remote_history.entries.get(common)) {

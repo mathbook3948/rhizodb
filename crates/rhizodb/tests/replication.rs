@@ -569,3 +569,31 @@ fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_follow
     assert_eq!(reopened.role(), Role::Fenced);
     assert_eq!(reopened.history().entries().len(), 1);
 }
+
+#[test]
+fn two_files_that_began_one_term_under_one_writer_id_are_told_apart_by_their_incarnations() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"w").unwrap();
+    writer
+        .execute("INSERT (:N {k: 1})", &Parameters::new())
+        .unwrap();
+    let a = in_memory_replica();
+    let b = in_memory_replica();
+    sync(&writer, &a);
+    sync(&writer, &b);
+    a.promote(5, b"x").unwrap();
+    b.promote(5, b"x").unwrap();
+    for k in 2..5 {
+        b.execute(
+            "INSERT (:N {k: $k})",
+            &Parameters::from([("k".to_owned(), rhizodb::Value::Integer(k))]),
+        )
+        .unwrap();
+    }
+    let history = History::from_bytes(&b.history().to_bytes()).unwrap();
+    assert_eq!(history, b.history());
+    assert!(matches!(
+        a.compare_lineage(&history, &b.position()),
+        Lineage::Diverged { .. }
+    ));
+}

@@ -41,7 +41,9 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - Data that belongs to one node lives in a database file of its own, beside its replica.
 - `changes_since` reads whole records from the log segments on disk after the asker's position, seeding each record with its own segment's salt, and holds no writer lock.
 - `changes_since` stops before a record that would pass its byte limit, except that it always returns one whole record when there is any.
-- `changes_since` fails with `TooFarBehind` when the segment that holds the next record is gone.
+- `changes_since` fails with `TooFarBehind` when the segment that holds the next record is gone, including one removed while it reads.
+- `position`, `changes_since`, and `apply` read the database id and replication fields from a copy beside the durable state, so they never wait on a checkpoint.
+- An install compares the snapshot's term with the highest term the replaced file's header, history, and log segments hold, so a term begun after the last checkpoint counts after a crash.
 - `changes_since` checks the asker's term, writer id, and chain hash against its own history and fails with `Diverged` where they differ.
 - A position past the database's last change in its newest term, or in a later term, gets no changes instead of an error.
 - A writer that hears of a higher term from a peer's position keeps that term in its header and becomes fenced, so a host passes only positions of authenticated peers.
@@ -62,7 +64,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - A replica promoted before it holds the graph's format version records it and the tokenizer as a new database does.
 - `demote` refuses new writes and the commit of an open write transaction at once, waits up to a deadline for that transaction to end, records the step down, and returns the final position.
 - A `demote` that runs out of time fails with `WriterBusy` and leaves the database fenced, and a later `demote` finishes it.
-- `compare_lineage` finds the first LSN where two histories differ and tells whether this database is the same as, behind, ahead of, or diverged from another one.
+- `compare_lineage` finds the first LSN where two histories differ, comparing each term's writer id, first LSN, and the incarnation that began it, and tells whether this database is the same as, behind, ahead of, or diverged from another one.
 - Errors of the replication kinds carry the positions and LSNs behind them, which `Error::replication_failure` returns.
 - After an `apply` that touches index definitions, the graph reloads them before any reader begins, so no reader sees data and definitions of different commits.
 - `apply` and `promote` drop the cached counts of column deltas, which only writers keep.
@@ -71,5 +73,6 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 
 ## Open
 
-- How a replica of a newer build follows a writer that has not upgraded the graph's format yet, since a replica cannot write the upgrade.
+- How a replica or a fenced writer of a newer build follows a writer that has not upgraded the graph's format yet, since opening it as anything but a writer refuses the upgrade with `NotWriter`.
+- How a writer fenced by an unplanned failover rejoins without a snapshot when it holds every change the new writer began from, since its step down at the next LSN conflicts with the new writer's first record there.
 - How a snapshot taken between an upgrade and the writer's next checkpoint, which holds the older graph format a replica cannot upgrade, becomes installable without waiting for that checkpoint.

@@ -591,8 +591,10 @@ impl Database {
     /// position it kept for that peer before, so the peer can read the changes after it with
     /// `changes_since`. Call it with the position a peer reports once it holds the changes up to
     /// there, and with a snapshot's position before that snapshot is dropped.
-    /// Peers are named by 1 to 64 bytes the host chooses. The log is kept in memory of this
-    /// `Database` only: opening the file again forgets every peer.
+    /// Peers are named by 1 to 64 bytes the host chooses. The database file records each
+    /// peer's position with every checkpoint and when it closes, so the peers and the log kept
+    /// for them survive a restart. After a crash the file keeps each peer at the position the
+    /// last checkpoint recorded, and a peer first acknowledged after it is forgotten.
     ///
     /// The kept log is bounded by [`OpenOptions::max_retained_bytes`], past which the peers
     /// furthest behind are released and need a new snapshot. Call
