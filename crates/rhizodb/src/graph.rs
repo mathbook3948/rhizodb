@@ -119,7 +119,7 @@ pub(crate) enum GraphError {
     IndexExists(String),
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
-    ReplicaReadOnly(&'static str),
+    NotWriter(&'static str),
 }
 
 impl fmt::Display for GraphError {
@@ -152,7 +152,9 @@ impl fmt::Display for GraphError {
             ),
             Self::InvalidIndex(reason) => write!(formatter, "invalid index: {reason}"),
             Self::InvalidQueryVector(reason) => write!(formatter, "invalid query vector: {reason}"),
-            Self::ReplicaReadOnly(what) => write!(formatter, "a replica cannot {what}"),
+            Self::NotWriter(what) => {
+                write!(formatter, "a database that is not the writer cannot {what}")
+            }
         }
     }
 }
@@ -261,7 +263,7 @@ impl<S: Storage> Graph<S> {
                 _ => true,
             };
             if replica && upgrade && found.is_some() {
-                return Err(GraphError::ReplicaReadOnly(
+                return Err(GraphError::NotWriter(
                     "upgrade a database written in an older format",
                 ));
             }
@@ -296,7 +298,7 @@ impl<S: Storage> Graph<S> {
             }
             let changed = tx.adopt_current_tokenizer(stale_postings)?;
             if replica && changed && found.is_some() {
-                return Err(GraphError::ReplicaReadOnly(
+                return Err(GraphError::NotWriter(
                     "rebuild keyword indexes for this build's tokenizer",
                 ));
             }
@@ -376,10 +378,6 @@ impl<S: Storage> Graph<S> {
         tx.commit()
     }
 
-    pub(crate) fn is_replica(&self) -> bool {
-        self.replica.load(Ordering::Acquire)
-    }
-
     /// Makes the graph a replica that refuses local writes, or a writer that takes them. A
     /// write transaction that began before stays open, so a caller that needs every write to
     /// have ended waits for the storage's writer after this.
@@ -401,6 +399,7 @@ impl<S: Storage> Graph<S> {
         if *lock(&self.writer) == Some(thread::current().id()) {
             return Err(GraphError::WriterOnThisThread);
         }
+        lock(&self.committed_column_deltas).clear();
         if !indexes {
             return Ok(work(&self.storage));
         }
@@ -423,7 +422,7 @@ impl<S: Storage> Graph<S> {
 
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
         if self.replica.load(Ordering::Acquire) {
-            return Err(GraphError::ReplicaReadOnly("write to the graph"));
+            return Err(GraphError::NotWriter("write to the graph"));
         }
         let current = thread::current().id();
         if *lock(&self.writer) == Some(current) {
@@ -431,7 +430,7 @@ impl<S: Storage> Graph<S> {
         }
         let transaction = self.storage.begin_write()?;
         if self.replica.load(Ordering::Acquire) {
-            return Err(GraphError::ReplicaReadOnly("write to the graph"));
+            return Err(GraphError::NotWriter("write to the graph"));
         }
         *lock(&self.writer) = Some(current);
         let definitions = Arc::clone(&lock(&self.committed_index_definitions));

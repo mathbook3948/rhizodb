@@ -9,6 +9,8 @@ use super::wal_format::NotRecord;
 use super::wal_format::Op;
 use super::wal_format::RECORD_HEADER;
 use super::wal_format::Record;
+use super::wal_format::Step;
+use super::wal_format::chain_after;
 use super::wal_format::decode_record;
 use super::wal_format::seal_record;
 use crate::replication::WRITER_ID_LIMIT;
@@ -34,13 +36,16 @@ pub(crate) struct ChangeRecord {
     pub(crate) bytes: Vec<u8>,
 }
 
-/// Changes that follow `after_lsn`, which the source holds in epoch `after`.
+/// Changes that follow `after_lsn`, which the source holds in epoch `after` with chain hash
+/// `after_chain`, and end in epoch `last` with chain hash `last_chain`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Decoded {
     pub(crate) after: EpochId,
     pub(crate) after_lsn: u64,
+    pub(crate) after_chain: u64,
     pub(crate) records: Vec<ChangeRecord>,
     pub(crate) last: EpochId,
+    pub(crate) last_chain: u64,
 }
 
 impl Decoded {
@@ -74,6 +79,7 @@ pub(crate) fn reseal(mut bytes: Vec<u8>) -> Result<Vec<u8>, EngineError> {
 pub(crate) fn encode(
     after: &EpochId,
     after_lsn: u64,
+    after_chain: u64,
     records: &[Vec<u8>],
 ) -> Result<Vec<u8>, EngineError> {
     let length = records.iter().map(Vec::len).sum::<usize>();
@@ -82,6 +88,7 @@ pub(crate) fn encode(
     out.push(FORMAT);
     put_u64(&mut out, after.term);
     put_u64(&mut out, after_lsn);
+    put_u64(&mut out, after_chain);
     out.push(u8::try_from(after.writer_id.len()).map_err(|_| EngineError::TooLarge)?);
     out.extend_from_slice(&after.writer_id);
     put_u32(
@@ -126,6 +133,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
     }
     let term = reader.u64()?;
     let after_lsn = reader.u64()?;
+    let after_chain = reader.u64()?;
     let length = usize::from(reader.u8()?);
     let after = EpochId {
         term,
@@ -141,6 +149,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
     let mut rest = reader.rest();
     let mut records = Vec::with_capacity(count);
     let mut last = after.clone();
+    let mut chain = after_chain;
     let mut lsn = after_lsn;
     for _ in 0..count {
         let (record, length) = decode_record(CHANGES_SEED, rest).map_err(|error| match error {
@@ -154,6 +163,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
         if record.lsn != lsn {
             return Err(bad(format!("LSN {} where {lsn} was next", record.lsn)));
         }
+        if record.prev != Some(chain) {
+            return Err(bad(format!(
+                "the record at LSN {lsn} does not follow the record before it"
+            )));
+        }
         match &record.body {
             Body::Batch(ops) if record.term == last.term => {
                 for op in ops {
@@ -165,7 +179,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
                     }
                 }
             }
-            Body::Config { writer_id } if record.term > last.term => {
+            Body::Config {
+                writer_id,
+                step: Step::Begin,
+                ..
+            } if record.term > last.term => {
                 last = EpochId {
                     term: record.term,
                     writer_id: writer_id.clone(),
@@ -174,6 +192,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
                     return Err(bad("a configuration names no writer"));
                 }
             }
+            Body::Config {
+                writer_id,
+                step: Step::StepDown,
+                ..
+            } if record.term == last.term && *writer_id == last.writer_id && last.term > 0 => {}
             Body::Batch(_) | Body::Config { .. } => {
                 return Err(bad(format!(
                     "a record of term {} where term {} holds",
@@ -183,6 +206,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
             Body::Checkpoint { .. } => return Err(bad("a checkpoint record")),
         }
         let (bytes, after) = rest.split_at(length);
+        chain = chain_after(chain, bytes);
         records.push(ChangeRecord {
             record,
             bytes: bytes.to_vec(),
@@ -195,8 +219,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Decoded, EngineError> {
     Ok(Decoded {
         after,
         after_lsn,
+        after_chain,
         records,
         last,
+        last_chain: chain,
     })
 }
 
@@ -209,10 +235,10 @@ mod tests;
 #[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn reseal_for_fuzzing(mut bytes: Vec<u8>) -> Vec<u8> {
     use super::wal_format::RECORD_LIMIT;
-    let Some(&length) = bytes.get(MAGIC.len() + 17) else {
+    let Some(&length) = bytes.get(MAGIC.len() + 25) else {
         return bytes;
     };
-    let mut at = MAGIC.len() + 18 + usize::from(length) + 4;
+    let mut at = MAGIC.len() + 26 + usize::from(length) + 4;
     while let Some(head) = bytes.get(at..at + 4) {
         let mut array = [0; 4];
         array.copy_from_slice(head);

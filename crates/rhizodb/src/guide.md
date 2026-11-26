@@ -292,8 +292,9 @@ writer.execute("INSERT (:Order {id: 1})", &Parameters::new())?;
 let replica = OpenOptions::new().replica(true).in_memory()?;
 let changes = writer.changes_since(&replica.position(), 1 << 20)?;
 replica.apply(&changes)?;
-let last = writer.demote()?;
-assert_eq!(replica.position(), last);
+let last = writer.demote(std::time::Duration::from_secs(1))?;
+let rest = writer.changes_since(&replica.position(), 1 << 20)?;
+assert_eq!(replica.apply(&rest)?, last);
 replica.promote(2, b"node-b")?;
 replica.execute("INSERT (:Order {id: 2})", &Parameters::new())?;
 # Ok::<(), rhizodb::Error>(())

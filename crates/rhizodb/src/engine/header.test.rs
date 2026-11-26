@@ -37,6 +37,12 @@ fn sample() -> Header {
         },
         clean: true,
         staged_lsn: 0,
+        replication: Replication {
+            incarnation: 0xFEED_F00D,
+            replica: true,
+            seen_term: 4,
+            checkpoint_chain: 0xC4A1,
+        },
     }
 }
 
@@ -273,6 +279,12 @@ fn header_strategy() -> impl Strategy<Value = Header> {
                         lsn + 1 + hlc % 1000
                     },
                     clean,
+                    replication: Replication {
+                        incarnation: u128::from(hlc) << 3,
+                        replica: clean,
+                        seen_term: lsn / 3,
+                        checkpoint_chain: hlc ^ lsn,
+                    },
                 };
                 for (entry, (present, slot, written)) in header.open.iter_mut().zip(open) {
                     if present == 1 {

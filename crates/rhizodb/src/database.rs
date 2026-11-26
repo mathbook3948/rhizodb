@@ -2,6 +2,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::engine::Role;
 use crate::engine::any_fs;
 use crate::engine::any_fs::AnyFs;
 use crate::engine::store::Engine;
@@ -72,6 +73,7 @@ pub struct OpenOptions {
     replica: bool,
     parallelism: Parallelism,
     engine: EngineOptions,
+    force_install: bool,
 }
 
 impl Default for OpenOptions {
@@ -81,6 +83,7 @@ impl Default for OpenOptions {
             replica: false,
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
+            force_install: false,
         }
     }
 }
@@ -101,22 +104,28 @@ impl OpenOptions {
 
     /// Whether the database opens as a replica, which it does not unless this is set to
     /// `true`. A replica serves reads as any database does, and refuses every local write for
-    /// the whole file with [`ErrorKind::ReplicaReadOnly`](crate::ErrorKind::ReplicaReadOnly):
-    /// queries that update the graph, write transactions, index changes, and imports. A
-    /// replica opened on a missing or empty file creates it without writing the graph's format
-    /// version, so it holds no change until it applies its writer's first one. A file written in
-    /// an older format fails to open as a replica with `ReplicaReadOnly`, since its upgrade is a
-    /// write. Data that belongs to the node itself goes in a database file of its own.
+    /// the whole file with [`ErrorKind::NotWriter`](crate::ErrorKind::NotWriter): queries that
+    /// update the graph, write transactions, index changes, and imports.
+    ///
+    /// A file remembers its [role](crate::Role), so this setting matters only for a file that
+    /// holds no change yet, which becomes a replica and stays one, without writing the graph's
+    /// format version, until it applies its writer's first change. A file that already holds a
+    /// writer's changes fails to open with [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica)
+    /// unless that writer was demoted, and a file written in an older format fails to open as a
+    /// replica with `NotWriter`, since its upgrade is a write. Data that belongs to the node
+    /// itself goes in a database file of its own.
     ///
     /// ```
     /// use rhizodb::ErrorKind;
     /// use rhizodb::OpenOptions;
     /// use rhizodb::Parameters;
+    /// use rhizodb::Role;
     ///
     /// let replica = OpenOptions::new().replica(true).in_memory()?;
+    /// assert_eq!(replica.role(), Role::Replica);
     /// assert!(replica.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
     /// let error = replica.execute("INSERT ()", &Parameters::new()).unwrap_err();
-    /// assert_eq!(error.kind(), ErrorKind::ReplicaReadOnly);
+    /// assert_eq!(error.kind(), ErrorKind::NotWriter);
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     pub fn replica(mut self, replica: bool) -> Self {
@@ -170,6 +179,16 @@ impl OpenOptions {
         self
     }
 
+    /// Whether [`OpenOptions::install_snapshot`] replaces a database that has seen a newer term
+    /// of its history than the snapshot holds, which it refuses with
+    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced) unless this is set to `true`. A snapshot
+    /// of an older term comes from a writer that a later one replaced, so a host forces it only
+    /// to roll a node back on purpose.
+    pub fn force_install(mut self, force: bool) -> Self {
+        self.force_install = force;
+        self
+    }
+
     /// How long a [`Snapshot`] may hold the pages of its checkpoint, which defaults to one hour.
     /// While a snapshot lives the file cannot reuse the space of pages that later commits
     /// rewrite, so the file grows by what they rewrite; [`DatabaseStats::held_bytes`] reports
@@ -185,7 +204,7 @@ impl OpenOptions {
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
         Ok(Database::from_parts(
-            Graph::open_as(in_memory_backend(self.engine)?, self.replica)?,
+            graph_on(in_memory_backend(self.engine)?, self.replica)?,
             Statements::new(self.parallelism),
         ))
     }
@@ -204,7 +223,7 @@ impl OpenOptions {
             ));
         }
         Ok(Database::from_parts(
-            Graph::open_as(open_backend(path, self.engine)?, self.replica)?,
+            graph_on(open_backend(path, self.engine)?, self.replica)?,
             Statements::new(self.parallelism),
         ))
     }
@@ -216,13 +235,23 @@ impl OpenOptions {
         path: impl AsRef<Path>,
         input: impl Read,
     ) -> Result<Database, Error> {
-        let installed =
-            any_fs::install_path(path.as_ref(), input, self.engine).map_err(StorageError::from)?;
+        let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
+            .map_err(StorageError::from)?;
         Ok(Database::from_parts(
-            Graph::open_as(installed, true)?,
+            graph_on(installed, true)?,
             Statements::new(self.parallelism),
         ))
     }
+}
+
+/// The graph over `backend`, which becomes a replica first when `replica` asks for one. A file
+/// that is not the writer opens without writing.
+pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>, Error> {
+    if replica {
+        backend.declare_replica().map_err(StorageError::from)?;
+    }
+    let follows = backend.role() != Role::Writer;
+    Ok(Graph::open_as(backend, follows)?)
 }
 
 fn exists(path: &Path) -> Result<bool, Error> {
@@ -531,13 +560,22 @@ impl Database {
     /// furthest behind are released and need a new snapshot. Call
     /// [`Database::forget_peer`] for a peer that is gone, so it keeps nothing.
     ///
+    /// A position of a newer term than this database has seen tells it that another writer
+    /// took over, so a writer becomes fenced, as [`Database::promote`] describes for a newer
+    /// term.
+    ///
     /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
-    /// peer id or one longer than 64 bytes.
+    /// peer id or one longer than 64 bytes, and with
+    /// [`ErrorKind::TooManyPeers`](crate::ErrorKind::TooManyPeers) for a new peer when 32 are
+    /// kept.
     pub fn acknowledge(&self, peer: &[u8], position: &Position) -> Result<(), Error> {
-        Ok(self
-            .graph
-            .storage()
-            .acknowledge(peer_id(peer)?, position.lsn())
+        let peer = peer_id(peer)?;
+        let storage = self.graph.storage();
+        storage
+            .observe_term(position.term())
+            .map_err(StorageError::from)?;
+        Ok(storage
+            .acknowledge(peer, position.lsn())
             .map_err(StorageError::from)?)
     }
 
@@ -890,3 +928,7 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "database_backup.test.rs"]
 mod backup_tests;
+
+#[cfg(test)]
+#[path = "database_format.test.rs"]
+mod format_tests;

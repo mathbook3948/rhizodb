@@ -14,6 +14,7 @@ use super::codec::put_u32;
 use super::codec::put_u64;
 use super::error::EngineError;
 use super::header::Header;
+use super::header::Replication;
 use super::layout::BLOCK;
 use super::layout::physical_block;
 use super::store::Engine;
@@ -21,8 +22,11 @@ use super::store::EngineOptions;
 use super::store::Pinned;
 use super::store::block_size;
 use super::store::load;
+use super::store::new_incarnation;
 use super::store::open_or_create_staging;
 use super::store::random_u64;
+use super::store::read_header;
+use super::store::replica;
 use super::store::staging_name;
 use crate::error::ErrorKind;
 use crate::storage::StorageError;
@@ -145,6 +149,11 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
     /// The LSN of the newest commit the checkpoint holds.
     pub(crate) fn position(&self) -> u64 {
         self.pinned.header.checkpoint_lsn
+    }
+
+    /// The chain hash of the log after the newest commit the checkpoint holds.
+    pub(crate) fn chain(&self) -> u64 {
+        self.pinned.header.replication.checkpoint_chain
     }
 
     /// The term and writer of the newest commit the checkpoint holds.
@@ -432,6 +441,7 @@ pub(crate) fn install<F: FileSystem + 'static>(
     name: &str,
     input: impl Read,
     options: EngineOptions,
+    force: bool,
 ) -> Result<Engine<F>, EngineError> {
     let existing = match fs.open(name, block_size()?) {
         Ok(file) => {
@@ -441,6 +451,10 @@ pub(crate) fn install<F: FileSystem + 'static>(
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let local_term = existing
+        .as_ref()
+        .and_then(|file| read_header(file).ok())
+        .map_or(0, |(header, _)| header.replication.seen_term);
     let staging = staging_name(name);
     let file = open_or_create_staging(&*fs, &staging)?.ok_or_else(|| {
         io::Error::new(
@@ -450,8 +464,26 @@ pub(crate) fn install<F: FileSystem + 'static>(
     })?;
     file.lock()?;
     let written = write_file(&file, input).and_then(|_| {
-        let loaded = load(file, &options)?;
+        let mut loaded = load(file, &options)?;
         loaded.check()?;
+        let snapshot_term = loaded
+            .header()
+            .replication
+            .seen_term
+            .max(loaded.newest_term()?);
+        if local_term > snapshot_term && !force {
+            return Err(replica::fenced(snapshot_term, local_term));
+        }
+        let header = *loaded.header();
+        loaded.rewrite_header(Header {
+            replication: Replication {
+                incarnation: new_incarnation(),
+                replica: true,
+                seen_term: local_term.max(snapshot_term),
+                ..header.replication
+            },
+            ..header
+        })?;
         Ok(loaded)
     });
     let loaded = match written {

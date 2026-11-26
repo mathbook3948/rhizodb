@@ -110,6 +110,7 @@ fn a_batch_record_round_trips() {
             term: 0,
             hlc: 9,
             txn: 1001,
+            prev: None,
             body: Body::Batch(ops()),
         }
     );
@@ -189,7 +190,7 @@ fn resealed(prefix: Vec<u8>) -> Vec<u8> {
 fn reserved_kinds_and_unknown_formats_are_refused_not_skipped() {
     for kind in Kind::ALL {
         let format = match kind {
-            Kind::Batch | Kind::Checkpoint | Kind::Config => 2,
+            Kind::Batch | Kind::Checkpoint | Kind::Config => 3,
             _ => 1,
         };
         let record = resealed(record_prefix(1, 0, 0, 1, kind, format));
@@ -207,7 +208,7 @@ fn reserved_kinds_and_unknown_formats_are_refused_not_skipped() {
         decode_record(SEED, &resealed(unknown)),
         Err(NotRecord::Refused(EngineError::Unsupported(_)))
     ));
-    let mut newer = record_prefix(1, 0, 0, 1, Kind::Batch, 2);
+    let mut newer = record_prefix(1, 0, 0, 1, Kind::Batch, 3);
     put_u32(&mut newer, 0);
     assert!(matches!(
         decode_record(SEED, &resealed(newer)),
@@ -286,7 +287,7 @@ proptest! {
         let record = sealed(batch_record(lsn, hlc, 5, ops.iter().map(Op::borrowed)).unwrap());
         let (decoded, length) = decode_record(SEED, &record).unwrap();
         prop_assert_eq!(length, record.len());
-        prop_assert_eq!(decoded, Record { lsn, term: 0, hlc, txn: 5, body: Body::Batch(ops) });
+        prop_assert_eq!(decoded, Record { lsn, term: 0, hlc, txn: 5, prev: None, body: Body::Batch(ops) });
     }
 
     #[test]

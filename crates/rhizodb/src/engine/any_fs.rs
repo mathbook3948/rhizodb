@@ -184,7 +184,15 @@ fn split(path: &Path) -> Result<(PathBuf, &str), EngineError> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| EngineError::Unsupported(format!("the database path {}", path.display())))?;
+        .ok_or_else(|| {
+            EngineError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the database path {} names no file in UTF-8",
+                    path.display()
+                ),
+            ))
+        })?;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => Path::new(".").to_path_buf(),
@@ -204,6 +212,7 @@ pub(crate) fn install_path(
     path: &Path,
     input: impl io::Read,
     options: EngineOptions,
+    force: bool,
 ) -> Result<Engine<AnyFs>, EngineError> {
     let (directory, name) = split(path)?;
     install(
@@ -211,6 +220,7 @@ pub(crate) fn install_path(
         name,
         input,
         options,
+        force,
     )
 }
 

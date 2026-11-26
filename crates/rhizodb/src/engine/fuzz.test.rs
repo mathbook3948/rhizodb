@@ -6,6 +6,9 @@ use crate::engine::header::FORMAT_MINOR;
 use crate::engine::layout::ExtentId;
 use crate::engine::layout::TableId;
 use crate::engine::page::PageKind;
+use crate::engine::wal_format::Op;
+use crate::engine::wal_format::batch_record;
+use crate::engine::wal_format::checkpoint_record;
 
 #[test]
 fn valid_encodings_of_every_format_round_trip() {

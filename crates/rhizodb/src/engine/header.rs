@@ -90,6 +90,18 @@ pub(crate) struct WalIdentity {
     pub(crate) salt: u64,
 }
 
+const REPLICA: u32 = 1;
+
+/// What replication keeps outside the log: who this file is, whether it follows a writer, the
+/// highest term it has heard of, and the chain hash of the record at the checkpoint's LSN.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Replication {
+    pub(crate) incarnation: u128,
+    pub(crate) replica: bool,
+    pub(crate) seen_term: u64,
+    pub(crate) checkpoint_chain: u64,
+}
+
 /// One header slot. The valid slot with the higher generation describes the database.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Header {
@@ -109,6 +121,7 @@ pub(crate) struct Header {
     /// The LSN of the newest commit the tree holds, when a checkpoint has made only some of its
     /// stages durable, and zero otherwise. The log still replays from `checkpoint_lsn`.
     pub(crate) staged_lsn: u64,
+    pub(crate) replication: Replication,
 }
 
 impl Header {
@@ -157,6 +170,10 @@ impl Header {
         put_u64(&mut out, self.wal.salt);
         put_u32(&mut out, if self.clean { CLEAN } else { 0 });
         put_u64(&mut out, self.staged_lsn);
+        put_u128(&mut out, self.replication.incarnation);
+        put_u32(&mut out, if self.replication.replica { REPLICA } else { 0 });
+        put_u64(&mut out, self.replication.seen_term);
+        put_u64(&mut out, self.replication.checkpoint_chain);
         out.resize(CHECKSUM_AT, 0);
         retained.encode(&mut out[RETAINED_AT..]);
         let sum = checksum(0, &[&out]);
@@ -229,6 +246,19 @@ impl Header {
             return Err(EngineError::Unsupported(format!("header flags {flags:#x}")));
         }
         let staged_lsn = reader.u64()?;
+        let incarnation = reader.u128()?;
+        let replication_flags = reader.u32()?;
+        if replication_flags & !REPLICA != 0 {
+            return Err(EngineError::Unsupported(format!(
+                "replication flags {replication_flags:#x}"
+            )));
+        }
+        let replication = Replication {
+            incarnation,
+            replica: replication_flags & REPLICA != 0,
+            seen_term: reader.u64()?,
+            checkpoint_chain: reader.u64()?,
+        };
         let reserved = RETAINED_AT - (CHECKSUM_AT - reader.remaining());
         if reader.rest().iter().take(reserved).any(|byte| *byte != 0) {
             return Err(reader.bad("reserved area"));
@@ -254,6 +284,7 @@ impl Header {
             wal,
             clean: flags & CLEAN != 0,
             staged_lsn,
+            replication,
         })
     }
 }

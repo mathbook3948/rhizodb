@@ -79,7 +79,7 @@ fn a_replica_installed_from_a_snapshot_answers_as_the_source_did_at_its_checkpoi
     let error = replica
         .execute("INSERT (:Item)", &Parameters::new())
         .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::ReplicaReadOnly);
+    assert_eq!(error.kind(), ErrorKind::NotWriter);
     drop(replica);
     let reopened = Database::open(&replica_path).unwrap();
     assert_eq!(
@@ -250,4 +250,65 @@ fn a_restarted_writer_still_serves_a_peer_that_lags_behind() {
     let other = Database::open(unpinned.path().join("other.rhizodb")).unwrap();
     let error = other.changes_since(&behind, 1 << 30).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TooFarBehind);
+}
+
+#[test]
+fn an_install_carries_the_newest_term_forward_and_refuses_an_older_snapshot_unless_forced() {
+    let directory = tempfile::tempdir().unwrap();
+    let old_writer = Database::open(directory.path().join("old.rhizodb")).unwrap();
+    old_writer.promote(1, b"node-a").unwrap();
+    load(&old_writer, 1, 20);
+    old_writer.compact().unwrap();
+    let old_bytes = stream(&old_writer.snapshot().unwrap());
+    let new_writer = Database::open(directory.path().join("new.rhizodb")).unwrap();
+    new_writer.promote(3, b"node-b").unwrap();
+    load(&new_writer, 1, 30);
+    new_writer.compact().unwrap();
+    let new_bytes = stream(&new_writer.snapshot().unwrap());
+    let path = directory.path().join("replica.rhizodb");
+    let replica = Database::install_snapshot(&path, new_bytes.as_slice()).unwrap();
+    assert_eq!(replica.role(), rhizodb::Role::Replica);
+    assert_eq!(replica.position().term(), 3);
+    drop(replica);
+    let error = Database::install_snapshot(&path, old_bytes.as_slice()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+    let kept = OpenOptions::new().replica(true).open(&path).unwrap();
+    assert_eq!(
+        count(&kept, "MATCH (n:Item) RETURN count(n)"),
+        Value::Integer(30)
+    );
+    drop(kept);
+    let forced = OpenOptions::new()
+        .force_install(true)
+        .install_snapshot(&path, old_bytes.as_slice())
+        .unwrap();
+    assert_eq!(
+        count(&forced, "MATCH (n:Item) RETURN count(n)"),
+        Value::Integer(20)
+    );
+    load(&old_writer, 21, 25);
+    let stale = old_writer
+        .changes_since(&forced.position(), 1 << 20)
+        .unwrap();
+    assert!(!stale.is_empty());
+    let error = forced.apply(&stale).unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ErrorKind::Fenced,
+        "a stale writer's changes were applied"
+    );
+}
+
+#[test]
+fn acknowledging_a_newer_term_fences_a_writer() {
+    let db = Database::in_memory().unwrap();
+    db.promote(2, b"node-a").unwrap();
+    load(&db, 1, 3);
+    let newer = rhizodb::Position::from_bytes(&db.position().to_bytes()).unwrap();
+    db.acknowledge(b"peer", &newer).unwrap();
+    assert_eq!(db.role(), rhizodb::Role::Writer);
+    let other = Database::in_memory().unwrap();
+    other.promote(5, b"node-b").unwrap();
+    db.acknowledge(b"peer", &other.position()).unwrap();
+    assert_eq!(db.role(), rhizodb::Role::Fenced);
 }

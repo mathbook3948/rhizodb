@@ -131,7 +131,7 @@ fn loaded_source(rounds: u64, rows: u64) -> (SimFs, Engine<SimFs>, State) {
 }
 
 fn install_bytes(fs: &SimFs, bytes: &[u8]) -> Result<Engine<SimFs>, EngineError> {
-    install(Arc::new(fs.clone()), TARGET, bytes, options())
+    install(Arc::new(fs.clone()), TARGET, bytes, options(), false)
 }
 
 fn old_target() -> (SimFs, State) {
@@ -164,11 +164,14 @@ fn an_installed_snapshot_holds_the_checkpoint_it_pinned() {
     assert_eq!(installed.header().checkpoint_lsn, position);
     installed.check().unwrap();
     assert_eq!(dump(&installed), expected);
-    write_round(&installed, 60, 10);
-    let after = dump(&installed);
+    let refused = installed.begin_write().and_then(|mut write| {
+        write.put(Table::Metadata, b"local", b"write")?;
+        write.commit()
+    });
+    assert_eq!(refused.unwrap_err().kind(), ErrorKind::NotWriter);
     drop(installed);
     let reopened = open(&target, TARGET, options()).unwrap();
-    assert_eq!(dump(&reopened), after);
+    assert_eq!(dump(&reopened), expected);
 }
 
 #[test]
@@ -207,7 +210,7 @@ fn installing_over_an_open_database_fails_and_keeps_it() {
     let fs = Arc::new(crate::engine::any_fs::AnyFs::Os(
         crate::engine::os_fs::OsFs::new(target.path().to_path_buf()),
     ));
-    let error = install(fs, TARGET, bytes.as_slice(), options()).unwrap_err();
+    let error = install(fs, TARGET, bytes.as_slice(), options(), false).unwrap_err();
     assert_eq!(
         StorageError::from(error).kind(),
         ErrorKind::DatabaseAlreadyOpen
@@ -295,7 +298,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts: vec![export.len() / 2],
         resume: false,
     };
-    let error = install(Arc::new(target.clone()), TARGET, cut, options()).unwrap_err();
+    let error = install(Arc::new(target.clone()), TARGET, cut, options(), false).unwrap_err();
     assert_eq!(StorageError::from(error).kind(), ErrorKind::Io);
     assert_eq!(dump(&open(&target, TARGET, options()).unwrap()), old);
     let cuts = (1..6).map(|part| export.len() * part / 6 + part).collect();
@@ -305,7 +308,7 @@ fn a_cut_transfer_fails_cleanly_and_a_resumed_one_installs() {
         cuts,
         resume: true,
     };
-    let installed = install(Arc::new(target.clone()), TARGET, resumed, options()).unwrap();
+    let installed = install(Arc::new(target.clone()), TARGET, resumed, options(), false).unwrap();
     assert_eq!(dump(&installed), expected);
 }
 

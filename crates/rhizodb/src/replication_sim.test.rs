@@ -12,7 +12,6 @@ use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
 use crate::error::Error;
 use crate::error::ErrorKind;
-use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::query::Statements;
 use crate::replication::Changes;
@@ -61,7 +60,7 @@ fn open(fs: &SimFs, replica: bool) -> Result<Database, Error> {
     let engine = Engine::open(Arc::new(AnyFs::Sim(fs.clone())), NAME, options())
         .map_err(crate::storage::StorageError::from)?;
     Ok(Database::from_parts(
-        Graph::open_as(engine, replica)?,
+        crate::database::graph_on(engine, replica)?,
         Statements::default(),
     ))
 }
@@ -234,7 +233,7 @@ impl Sim {
             Err(error) => assert!(
                 matches!(
                     error.kind(),
-                    ErrorKind::ReplicaReadOnly | ErrorKind::IndexAlreadyExists
+                    ErrorKind::NotWriter | ErrorKind::IndexAlreadyExists
                 ),
                 "{}: a write failed with {error}",
                 self.context()
@@ -371,7 +370,7 @@ impl Sim {
         let before = self.nodes[node].db.position();
         let recovered = self.nodes[node].fs.crash(mode);
         let writer = node == self.holder || self.stale == Some(node);
-        let db = open(&recovered, true)
+        let db = open(&recovered, false)
             .unwrap_or_else(|error| panic!("{}: reopening failed with {error}", self.context()));
         self.nodes[node].db = db;
         self.nodes[node].fs = recovered;
@@ -382,10 +381,12 @@ impl Sim {
             self.context(),
             before.term()
         );
-        if writer {
+        if node == self.holder {
             let term = before.term();
             self.nodes[node].db.promote(term, &writer_id(node)).unwrap();
             self.note(node);
+        } else if writer {
+            assert_ne!(self.nodes[node].db.role(), crate::replication::Role::Writer);
         } else {
             self.check_replica(node, &Position::start());
         }
@@ -417,7 +418,11 @@ impl Sim {
         self.steps
             .push(format!("handover {} -> {next}", self.holder));
         self.count("handover");
-        let last = self.nodes[self.holder].db.demote().unwrap();
+        let last = self.nodes[self.holder]
+            .db
+            .demote(std::time::Duration::from_secs(5))
+            .unwrap();
+        self.note(self.holder);
         if !self.sync(next, self.holder) {
             self.rebuild(next);
             assert!(
@@ -428,12 +433,18 @@ impl Sim {
         }
         assert_eq!(self.nodes[next].db.position(), last, "{}", self.context());
         self.term += 1;
-        self.nodes[next]
-            .db
-            .promote(self.term, &writer_id(next))
-            .unwrap();
+        self.promote(next).unwrap();
         self.holder = next;
-        self.note(next);
+    }
+
+    fn promote(&mut self, node: usize) -> Result<(), Error> {
+        let before = self.nodes[node].db.position();
+        let held = export(&self.nodes[node].db);
+        self.nodes[node].db.promote(self.term, &writer_id(node))?;
+        let begun = self.nodes[node].db.changes_since(&before, 1).unwrap();
+        self.seen.insert(begun.last().clone(), held);
+        self.note(node);
+        Ok(())
     }
 
     fn failover(&mut self) {
@@ -445,18 +456,10 @@ impl Sim {
             .push(format!("failover {} -> {next}", self.holder));
         self.count("failover");
         self.term += 1;
-        if self.nodes[next]
-            .db
-            .promote(self.term, &writer_id(next))
-            .is_err()
-        {
+        if self.promote(next).is_err() {
             self.rebuild(next);
-            self.nodes[next]
-                .db
-                .promote(self.term, &writer_id(next))
-                .unwrap();
+            self.promote(next).unwrap();
         }
-        self.note(next);
         self.stale = Some(self.holder);
         self.holder = next;
     }
@@ -466,7 +469,11 @@ impl Sim {
             return;
         };
         self.steps.push(format!("demote stale {stale}"));
-        self.nodes[stale].db.demote().unwrap();
+        self.nodes[stale]
+            .db
+            .demote(std::time::Duration::from_secs(5))
+            .unwrap();
+        self.note(stale);
     }
 
     fn partition(&mut self) {
@@ -521,8 +528,29 @@ impl Sim {
         }
     }
 
+    fn check_pairs(&self) {
+        let held: Vec<(Position, Vec<u8>)> = self
+            .nodes
+            .iter()
+            .map(|node| (node.db.position(), export(&node.db)))
+            .collect();
+        for (left, (a, a_export)) in held.iter().enumerate() {
+            for (b, b_export) in &held[left + 1..] {
+                if (a.term(), a.writer_id(), a.lsn()) == (b.term(), b.writer_id(), b.lsn()) {
+                    assert_eq!(a.chain(), b.chain(), "{}", self.context());
+                    assert!(
+                        a_export == b_export,
+                        "{}: {a:?} holds two graphs",
+                        self.context()
+                    );
+                }
+            }
+        }
+    }
+
     fn run(&mut self, steps: usize) {
         for _ in 0..steps {
+            self.check_pairs();
             match self.rng.below(100) {
                 0..=34 => self.write(),
                 35..=69 => self.pull(),

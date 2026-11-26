@@ -56,7 +56,6 @@ mod crash {
     use crate::engine::store::Engine;
     use crate::engine::store::EngineOptions;
     use crate::error::ErrorKind;
-    use crate::graph::Graph;
     use crate::graph::IndexTarget;
     use crate::query::Statements;
     use crate::replication::Changes;
@@ -83,7 +82,7 @@ mod crash {
         let engine = Engine::open(Arc::new(AnyFs::Sim(fs.clone())), NAME, options())
             .map_err(crate::storage::StorageError::from)?;
         Ok(Database::from_parts(
-            Graph::open_as(engine, true)?,
+            crate::database::graph_on(engine, true)?,
             Statements::default(),
         ))
     }
@@ -130,7 +129,8 @@ mod crash {
                 note(&writer);
             }
             if p == 4 {
-                writer.demote().unwrap();
+                writer.demote(std::time::Duration::from_secs(5)).unwrap();
+                note(&writer);
                 writer.promote(2, b"second").unwrap();
                 note(&writer);
             }
@@ -237,5 +237,177 @@ mod crash {
             }
         }
         assert!(crashes > 0);
+    }
+
+    fn open_on(fs: &SimFs, replica: bool) -> Database {
+        let roomy = EngineOptions {
+            memtable_limit: 1 << 30,
+            wal_limit: 1 << 40,
+            ..options()
+        };
+        let engine = Engine::open(Arc::new(AnyFs::Sim(fs.clone())), NAME, roomy)
+            .map_err(crate::storage::StorageError::from)
+            .unwrap();
+        Database::from_parts(
+            crate::database::graph_on(engine, replica).unwrap(),
+            Statements::default(),
+        )
+    }
+
+    fn sync(from: &Database, to: &Database) -> Result<Position, crate::Error> {
+        loop {
+            let changes = from.changes_since(&to.position(), 1 << 14)?;
+            if changes.is_empty() {
+                return Ok(to.position());
+            }
+            to.apply(&changes)?;
+        }
+    }
+
+    fn insert(db: &Database, k: i64) {
+        db.execute("INSERT (:N {k: $p})", &parameters(k)).unwrap();
+    }
+
+    #[test]
+    fn a_killed_writer_and_relay_keep_serving_their_lagging_replicas() {
+        let writer_fs = SimFs::new();
+        let relay_fs = SimFs::new();
+        let writer = open_on(&writer_fs, false);
+        writer.promote(1, b"w").unwrap();
+        let relay = open_on(&relay_fs, true);
+        let lagging = open_on(&SimFs::new(), true);
+        for k in 0..20 {
+            insert(&writer, k);
+        }
+        sync(&writer, &relay).unwrap();
+        sync(&relay, &lagging).unwrap();
+        for k in 20..40 {
+            insert(&writer, k);
+        }
+        sync(&writer, &relay).unwrap();
+        let writer_fs = writer_fs.crash(Crash::DropUnsynced);
+        let relay_fs = relay_fs.crash(Crash::Reorder { seed: 7 });
+        drop(writer);
+        drop(relay);
+        let writer = open_on(&writer_fs, false);
+        let relay = open_on(&relay_fs, false);
+        assert_eq!(writer.role(), crate::replication::Role::Fenced);
+        assert_eq!(relay.role(), crate::replication::Role::Replica);
+        sync(&relay, &lagging).unwrap();
+        writer.promote(1, b"w").unwrap();
+        insert(&writer, 40);
+        sync(&writer, &lagging).unwrap();
+        sync(&writer, &relay).unwrap();
+        assert_eq!(lagging.position(), writer.position());
+        assert_eq!(relay.position(), writer.position());
+        assert_eq!(export(&lagging), export(&writer));
+    }
+
+    #[test]
+    fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
+        let old = open_on(&SimFs::new(), false);
+        old.promote(5, b"a").unwrap();
+        insert(&old, 1);
+        let next = open_on(&SimFs::new(), true);
+        let follower = open_on(&SimFs::new(), true);
+        sync(&old, &next).unwrap();
+        sync(&old, &follower).unwrap();
+        next.promote(6, b"x").unwrap();
+        insert(&next, 2);
+        for k in 3..8 {
+            insert(&old, k);
+        }
+        sync(&old, &follower).unwrap();
+        let error = next
+            .changes_since(&follower.position(), 1 << 20)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Diverged);
+        let fresh = open_on(&SimFs::new(), true);
+        sync(&next, &fresh).unwrap();
+        let stale = old.changes_since(&Position::start(), 1 << 20);
+        if let Ok(stale) = stale {
+            assert!(matches!(
+                fresh.apply(&stale).unwrap_err().kind(),
+                ErrorKind::Fenced | ErrorKind::Diverged
+            ));
+        }
+    }
+
+    #[test]
+    fn a_rolled_back_copy_that_reuses_its_epoch_is_told_apart_by_the_chain() {
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        writer.promote(3, b"w").unwrap();
+        insert(&writer, 1);
+        let copy_fs = fs.crash(Crash::KeepUnsynced);
+        insert(&writer, 2);
+        insert(&writer, 3);
+        let replica = open_on(&SimFs::new(), true);
+        sync(&writer, &replica).unwrap();
+        let copy = open_on(&copy_fs, false);
+        copy.promote(3, b"w").unwrap();
+        insert(&copy, 20);
+        insert(&copy, 30);
+        assert_eq!(copy.position().lsn(), writer.position().lsn());
+        assert_ne!(copy.position(), writer.position());
+        let error = copy
+            .changes_since(&replica.position(), 1 << 20)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Diverged);
+        let behind = open_on(&SimFs::new(), true);
+        sync(&copy, &behind).unwrap();
+        let error = sync(&writer, &behind).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Diverged);
+    }
+
+    #[test]
+    fn a_crash_at_any_write_of_a_promotion_or_demotion_leaves_one_role() {
+        let base = SimFs::new();
+        let db = open_on(&base, false);
+        db.promote(1, b"w").unwrap();
+        insert(&db, 1);
+        drop(db);
+        let probe = base.crash(Crash::KeepUnsynced);
+        let db = open_on(&probe, false);
+        let before = probe.operations();
+        db.promote(1, b"w").unwrap();
+        db.demote(std::time::Duration::from_secs(1)).unwrap();
+        db.promote(2, b"w").unwrap();
+        let operations = probe.operations() - before;
+        drop(db);
+        for failing in 0..operations {
+            for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                let fs = base.crash(Crash::KeepUnsynced);
+                let db = open_on(&fs, false);
+                fs.fail_after(failing, Failure::FromThenOn);
+                let outcome = db
+                    .promote(1, b"w")
+                    .and_then(|_| db.demote(std::time::Duration::from_secs(1)))
+                    .and_then(|_| db.promote(2, b"w"));
+                drop(outcome);
+                let recovered = fs.crash(crash);
+                drop(db);
+                let db = open_on(&recovered, false);
+                let history = db.history();
+                let role = db.role();
+                match history
+                    .entries()
+                    .last()
+                    .map(|entry| (entry.term(), entry.end_lsn()))
+                {
+                    Some((1, None)) | Some((2, None)) => {
+                        assert_eq!(role, crate::replication::Role::Fenced, "{failing}")
+                    }
+                    Some((1, Some(_))) => {
+                        assert_eq!(role, crate::replication::Role::Replica, "{failing}")
+                    }
+                    other => panic!("{other:?} at {failing}"),
+                }
+                let term = history.entries().last().map_or(1, |entry| entry.term());
+                db.promote(term + 1, b"w").unwrap();
+                insert(&db, 9);
+                integrity(&db);
+            }
+        }
     }
 }

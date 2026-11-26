@@ -28,6 +28,10 @@ A replica starts from a copy of the database file and then follows the log from 
 - Installing locks an existing database file first, so it fails while another open holds that file.
 - Until the rename, the existing database and its log stay as they were, so a crash or a failure leaves the old database or none.
 - An installed database removes the old log's segments as it opens, since its header is clean.
+- The installed image's header names a replica with a fresh incarnation, keeps the checkpoint's chain hash, and records as the highest term seen the higher of the replaced database's and the snapshot's, so a stale writer's changes are fenced after any install.
+- Install refuses a snapshot whose newest term is older than the term the replaced database has seen, unless the host forces it.
+- A snapshot's position names the term and writer that the pinned tree's history records for its LSN, and the chain hash its header records.
+- Acknowledging a position of a newer term fences a writer as a promotion elsewhere would.
 - On Windows, which renames no open file, install closes the old database and the staging file before the rename and opens the database again after it, so another open can take the file in between.
 - Off Unix the engine cannot sync a directory, so whether a crash keeps a finished install's rename rests on the file system's own journal of names.
 - A damaged or truncated stream fails the install as corrupt data, and a failing reader fails it as an I/O error.
