@@ -217,8 +217,8 @@ impl<F: FileSystem> Wal<F> {
     /// Opens the log `header` names after a crash and calls `replay` with every record after
     /// the checkpoint, in LSN order. A torn tail of the last segment is cut off, an unfinished
     /// last segment is removed, and any other damage fails as corruption. Segments from
-    /// `retain_from` up to the first one `header` names are kept for peers, and segments before
-    /// both are removed.
+    /// `retain_from` up to the first one `header` names are kept for peers, and the caller
+    /// removes the segments before both.
     pub(crate) fn recover(
         fs: Arc<F>,
         base: &str,
@@ -237,9 +237,6 @@ impl<F: FileSystem> Wal<F> {
             0 => header.wal.first_segment,
             from => from.min(header.wal.first_segment),
         };
-        for stale in sequences.iter().filter(|seq| **seq < kept_from) {
-            fs.remove(&segment_name(base, *stale))?;
-        }
         sequences.retain(|seq| *seq >= header.wal.first_segment);
         if sequences.first() != Some(&header.wal.first_segment) {
             return Err(EngineError::WalMissing);

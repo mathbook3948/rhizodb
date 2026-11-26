@@ -691,10 +691,10 @@ fn start_log<F: FileSystem>(
         ..*header
     };
     let kept = Retained {
-        from: if retained.peers.is_empty() {
-            0
-        } else {
+        from: if wal.first_sequence() < sequence {
             wal.first_sequence()
+        } else {
+            0
         },
         peers: retained.peers.clone(),
     };
@@ -727,14 +727,17 @@ fn make_recovery_durable<F: FileSystem + 'static>(
         return Err(EngineError::Poisoned);
     }
     lock(&shared.droppable).take();
-    drop(writer.wal.take());
+    let recovered_from = writer.wal.take().map_or(0, |wal| wal.first_sequence());
     let hlc = hybrid_clock_after(writer.last_hlc);
     let (wal, header) = start_log(
         fs,
         name,
         &shared.pages,
         &durable.header,
-        &shared.retained_area(),
+        &Retained {
+            from: recovered_from,
+            peers: shared.retained_area().peers,
+        },
         writer.last_lsn,
         hlc,
         shared.options.segment_target,
