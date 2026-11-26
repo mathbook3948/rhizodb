@@ -400,7 +400,9 @@ impl Database {
     /// first and filled as the elements arrive.
     ///
     /// The import commits a batch of lines at a time, so its memory stays bounded by the batch
-    /// and the longest line, however large the dump. A failed import therefore leaves the
+    /// and the longest line, however large the dump. Write transactions and writing queries on
+    /// other threads wait until the import ends, so none lands between two batches, while
+    /// reads go on and see the batches committed so far. A failed import therefore leaves the
     /// batches before the failure committed. Import into a new file and delete it when the
     /// import fails, rather than into a database other code uses.
     ///

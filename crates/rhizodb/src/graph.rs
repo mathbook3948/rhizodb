@@ -5,6 +5,7 @@ use std::collections::btree_map;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
@@ -192,7 +193,7 @@ pub(crate) struct Adjacent {
 #[derive(Debug)]
 pub(crate) struct Graph<S> {
     storage: S,
-    writer: Arc<Mutex<Option<ThreadId>>>,
+    writers: Arc<Writers>,
     committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -284,7 +285,7 @@ impl<S: Storage> Graph<S> {
         let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
         Ok(Self {
             storage,
-            writer: Arc::default(),
+            writers: Arc::default(),
             committed_index_definitions: Arc::new(Mutex::new(definitions)),
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
@@ -332,12 +333,10 @@ impl<S: Storage> Graph<S> {
         })
     }
 
-    /// Opens the one write transaction, waiting for another thread's to end. Fails instead of
-    /// waiting forever when the calling thread already holds it.
     /// Runs `work` on the storage, which may take the storage's writer itself, and fails when
     /// this thread holds the write transaction that work would wait for.
     pub(crate) fn maintain<R>(&self, work: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
-        if *lock(&self.writer) == Some(thread::current().id()) {
+        if lock(&self.writers.slot).writer == Some(thread::current().id()) {
             return Err(GraphError::WriterOnThisThread);
         }
         Ok(work(&self.storage))
@@ -348,18 +347,53 @@ impl<S: Storage> Graph<S> {
         work(&self.storage)
     }
 
-    pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+    /// Keeps write transactions of other threads from beginning until the claim is dropped,
+    /// waiting for another thread's claim to end. The calling thread goes on beginning write
+    /// transactions one after another. Fails when the calling thread holds a write transaction.
+    pub(crate) fn exclusive_writes(&self) -> Result<ExclusiveWrites, GraphError> {
         let current = thread::current().id();
-        if *lock(&self.writer) == Some(current) {
+        let mut slot = lock(&self.writers.slot);
+        if slot.writer == Some(current) {
             return Err(GraphError::WriterOnThisThread);
         }
-        let transaction = self.storage.begin_write()?;
-        *lock(&self.writer) = Some(current);
+        while slot.exclusive.is_some() {
+            slot = wait(&self.writers.released, slot);
+        }
+        slot.exclusive = Some(current);
+        Ok(ExclusiveWrites {
+            writers: Arc::clone(&self.writers),
+        })
+    }
+
+    /// Opens the one write transaction, waiting for another thread's to end and for another
+    /// thread's exclusive writes. Fails instead of waiting forever when the calling thread
+    /// already holds it.
+    pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+        let current = thread::current().id();
+        let transaction = loop {
+            {
+                let mut slot = lock(&self.writers.slot);
+                if slot.writer == Some(current) {
+                    return Err(GraphError::WriterOnThisThread);
+                }
+                while slot.excludes(current) {
+                    slot = wait(&self.writers.released, slot);
+                }
+            }
+            let transaction = self.storage.begin_write()?;
+            let mut slot = lock(&self.writers.slot);
+            if !slot.excludes(current) {
+                slot.writer = Some(current);
+                break transaction;
+            }
+            drop(slot);
+            transaction.rollback()?;
+        };
         let definitions = Arc::clone(&lock(&self.committed_index_definitions));
         Ok(GraphTx {
             transaction,
             _writer: Some(WriterClaim {
-                slot: Arc::clone(&self.writer),
+                writers: Arc::clone(&self.writers),
                 owner: current,
             }),
             index_definitions: OnceLock::from(definitions),
@@ -451,19 +485,59 @@ struct Catalog {
     changed: bool,
 }
 
+#[derive(Debug, Default)]
+struct Writers {
+    slot: Mutex<WriterSlot>,
+    released: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct WriterSlot {
+    writer: Option<ThreadId>,
+    exclusive: Option<ThreadId>,
+}
+
+impl WriterSlot {
+    fn excludes(&self, thread: ThreadId) -> bool {
+        self.exclusive.is_some_and(|owner| owner != thread)
+    }
+}
+
 #[derive(Debug)]
 struct WriterClaim {
-    slot: Arc<Mutex<Option<ThreadId>>>,
+    writers: Arc<Writers>,
     owner: ThreadId,
 }
 
 impl Drop for WriterClaim {
     fn drop(&mut self) {
-        let mut slot = lock(&self.slot);
-        if *slot == Some(self.owner) {
-            *slot = None;
+        let mut slot = lock(&self.writers.slot);
+        if slot.writer == Some(self.owner) {
+            slot.writer = None;
         }
     }
+}
+
+/// Write transactions of other threads wait while it lives.
+#[derive(Debug)]
+pub(crate) struct ExclusiveWrites {
+    writers: Arc<Writers>,
+}
+
+impl Drop for ExclusiveWrites {
+    fn drop(&mut self) {
+        lock(&self.writers.slot).exclusive = None;
+        self.writers.released.notify_all();
+    }
+}
+
+fn wait<'a, V>(
+    condition: &Condvar,
+    guard: std::sync::MutexGuard<'a, V>,
+) -> std::sync::MutexGuard<'a, V> {
+    condition
+        .wait(guard)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {

@@ -512,3 +512,69 @@ fn an_export_while_a_writer_commits_holds_one_commit_whole() {
     stop.store(true, Ordering::Relaxed);
     writer.join().unwrap();
 }
+
+struct Interrupted<'a> {
+    dump: &'a [u8],
+    at: usize,
+    pause_at: usize,
+    pause: Option<Box<dyn FnOnce() + 'a>>,
+}
+
+impl io::Read for Interrupted<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.at >= self.pause_at
+            && let Some(pause) = self.pause.take()
+        {
+            pause();
+        }
+        let rest = &self.dump[self.at..];
+        let count = rest.len().min(buffer.len()).min(4096);
+        buffer[..count].copy_from_slice(&rest[..count]);
+        self.at += count;
+        Ok(count)
+    }
+}
+
+#[test]
+fn a_write_from_another_thread_waits_for_the_whole_import() {
+    let source = db();
+    run(&source, "UNWIND range(1, 25000) AS i INSERT (:Item {i: i})");
+    let dump = exported(&source);
+    let second_batch = dump
+        .match_indices('\n')
+        .nth(15_000)
+        .map(|(at, _)| at)
+        .unwrap();
+    let target = db();
+    let (start, started) = std::sync::mpsc::channel::<()>();
+    let (finish, finished) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let other = &target;
+        let writer = scope.spawn(move || {
+            started.recv().unwrap();
+            run(other, "INSERT (:Intruder)");
+            finish.send(()).unwrap();
+        });
+        let input = Interrupted {
+            dump: dump.as_bytes(),
+            at: 0,
+            pause_at: second_batch,
+            pause: Some(Box::new(|| {
+                start.send(()).unwrap();
+                let landed = finished.recv_timeout(std::time::Duration::from_millis(500));
+                assert!(landed.is_err(), "a write landed between two batches");
+            })),
+        };
+        let imported = target.import(io::BufReader::new(input));
+        assert_eq!(imported.map_err(|error| error.to_string()), Ok(()));
+        writer.join().unwrap();
+    });
+    assert_eq!(
+        single(&target, "MATCH (n:Intruder) RETURN id(n)"),
+        Value::Integer(25000)
+    );
+    assert_eq!(
+        single(&target, "MATCH (n:Item) RETURN count(n)"),
+        Value::Integer(25000)
+    );
+}
