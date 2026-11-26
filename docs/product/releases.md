@@ -13,7 +13,8 @@ The crate is developed and released from its own repository, and hosts depend on
 - Below 1.0, a breaking change to the public API or the on-disk format raises the minor version.
 - A release is a tag `v<version>` on `main` whose version equals the crate version in `Cargo.toml`.
 - Pushing such a tag runs the full check on every supported platform, then publishes the crate to crates.io and creates a GitHub release.
-- Running the release workflow by hand on `main` releases the crate version of `main`'s head the same way, and its GitHub release creates the tag `v<version>` on that commit, for a maintainer or an agent that cannot push tags.
+- A maintainer or an agent that cannot push tags runs the `tag` workflow on `main`, which tags the crate version of `main`'s head through the GitHub API, and then runs the release workflow by hand on that tag, since a tag the workflow token creates starts no workflow by itself.
+- Running the release workflow by hand on `main` releases the crate version of `main`'s head the same way, and its GitHub release creates the tag, but a `release` environment that admits only tags refuses it.
 - Before it publishes, the release workflow runs `mise run random` on the tagged commit with three times its usual cases, since a tag may come before that commit's randomized run on `main`.
 - A release that stopped partway finishes when its workflow is run again, skipping the steps that already happened.
 - The crates.io token is a secret of the `release` environment, which needs a reviewer's approval, and only the step that uploads sets it.

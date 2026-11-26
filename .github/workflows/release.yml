@@ -29,9 +29,9 @@ jobs:
         shell: bash
         run: |
           crate="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rhizodb") | .version')"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$GITHUB_REF" != "refs/tags/$GITHUB_REF_NAME" ]; then
             if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-              echo "a release can be dispatched only from main" >&2
+              echo "a release can be dispatched only from main or a tag" >&2
               exit 1
             fi
             name="v$crate"

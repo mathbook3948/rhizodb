@@ -1,0 +1,45 @@
+name: tag
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
+      - name: Tag the crate version of main's head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "a tag can be cut only from main" >&2
+            exit 1
+          fi
+          crate="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rhizodb") | .version')"
+          name="v$crate"
+          if tagged="$(git rev-parse --quiet --verify "refs/tags/$name^{commit}")"; then
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "tag $name already names another commit" >&2
+              exit 1
+            fi
+            echo "tag $name already names $GITHUB_SHA"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$name" -f sha="$GITHUB_SHA" > /dev/null
+            echo "tagged $GITHUB_SHA as $name"
+          fi
