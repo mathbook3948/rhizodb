@@ -35,9 +35,9 @@ run = [
 ]
 
 [tasks.storage-deep]
-description = "Run the storage, engine, database crash, dump, node meta, property column, and adjacency tests with 100 times the random cases that check runs, as the nightly workflow does"
+description = "Run the storage, engine, database crash, dump, node meta, property column, adjacency, index key, and scan tests with 100 times the random cases that check runs, as the nightly workflow does"
 env = { RHIZODB_TEST_SCALE = "100" }
-run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::upgrade"
+run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::upgrade query::keys query::scan"
 
 [tasks.random-deep]
 description = "Run the randomized integration tests (isolation history check, kill-and-reopen, model of random transactions, damaged files, concurrent writers and readers, large transactions, killed backups, query reference evaluator, heap growth, snapshots held across checkpoints, shuttle schedules) with 100 times the cases that check runs, then every integration test with each read query that can split forced across four threads"
