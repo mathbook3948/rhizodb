@@ -5,10 +5,14 @@ use crate::gql::ast::Expr;
 use crate::gql::ast::Length;
 use crate::gql::ast::Name;
 use crate::gql::ast::NodePattern;
+use crate::gql::ast::PathMode;
+use crate::gql::ast::PathSearch;
+use crate::gql::ast::PathSelector;
 use crate::gql::ast::PatternElement;
 use crate::gql::ast::PatternPart;
 use crate::gql::ast::PatternStep;
 use crate::gql::ast::Properties;
+use crate::gql::ast::QuantifiedPattern;
 use crate::gql::ast::RelationshipPattern;
 use crate::gql::error::SyntaxError;
 use crate::gql::error::SyntaxErrorKind;
@@ -28,28 +32,216 @@ impl Parser {
         } else {
             None
         };
+        if let Some(selector) = self.cypher_shortest() {
+            self.pos += 2;
+            let element = self.pattern_element()?;
+            self.expect_punct(Punct::RParen)?;
+            return Ok(PatternPart {
+                path_variable,
+                search: Some(PathSearch {
+                    selector: Some(selector),
+                    mode: None,
+                    cypher: true,
+                }),
+                element,
+            });
+        }
+        let search = self.path_search()?;
         if self.at_word() && self.punct_at(1, Punct::LParen) {
             return Err(self.unsupported());
         }
         let element = self.pattern_element()?;
         Ok(PatternPart {
             path_variable,
+            search,
             element,
         })
     }
 
-    pub(super) fn pattern_element(&mut self) -> ParseResult<PatternElement> {
-        let start = self.node_pattern()?;
-        let mut steps = Vec::new();
-        while [Punct::Minus, Punct::Lt, Punct::Tilde]
-            .iter()
-            .any(|punct| self.at_punct(*punct))
-        {
-            let relationship = self.relationship_pattern()?;
-            let node = self.node_pattern()?;
-            steps.push(PatternStep { relationship, node });
+    fn cypher_shortest(&self) -> Option<PathSelector> {
+        if !self.punct_at(1, Punct::LParen) {
+            return None;
         }
-        Ok(PatternElement { start, steps })
+        if self.at_keyword("shortestPath") {
+            Some(PathSelector::AnyShortest)
+        } else if self.at_keyword("allShortestPaths") {
+            Some(PathSelector::AllShortest)
+        } else {
+            None
+        }
+    }
+
+    fn path_search(&mut self) -> ParseResult<Option<PathSearch>> {
+        let selector = if self.eat_keyword("ALL") {
+            Some(if self.eat_keyword("SHORTEST") {
+                PathSelector::AllShortest
+            } else {
+                PathSelector::All
+            })
+        } else if self.eat_keyword("ANY") {
+            Some(if self.eat_keyword("SHORTEST") {
+                PathSelector::AnyShortest
+            } else {
+                PathSelector::Any(self.path_count()?.unwrap_or(1))
+            })
+        } else if self.eat_keyword("SHORTEST") {
+            Some(PathSelector::Shortest(0))
+        } else {
+            None
+        };
+        let count = match selector {
+            Some(PathSelector::Shortest(_)) => self.path_count()?,
+            _ => None,
+        };
+        let mode = self.path_mode();
+        if (selector.is_some() || mode.is_some()) && !self.eat_keyword("PATH") {
+            self.eat_keyword("PATHS");
+        }
+        let selector = match selector {
+            Some(PathSelector::Shortest(_)) => {
+                if self.eat_any_keyword(&["GROUP", "GROUPS"]) {
+                    Some(PathSelector::ShortestGroups(count.unwrap_or(1)))
+                } else {
+                    match count {
+                        Some(count) => Some(PathSelector::Shortest(count)),
+                        None => return Err(self.unexpected()),
+                    }
+                }
+            }
+            other => other,
+        };
+        Ok(
+            (selector.is_some() || mode.is_some()).then_some(PathSearch {
+                selector,
+                mode,
+                cypher: false,
+            }),
+        )
+    }
+
+    fn path_count(&mut self) -> ParseResult<Option<u64>> {
+        Ok(match self.kind_at(0) {
+            Some(TokenKind::Integer(count)) => {
+                let count = *count;
+                self.pos += 1;
+                Some(count)
+            }
+            _ => None,
+        })
+    }
+
+    fn path_mode(&mut self) -> Option<PathMode> {
+        [
+            ("WALK", PathMode::Walk),
+            ("TRAIL", PathMode::Trail),
+            ("SIMPLE", PathMode::Simple),
+            ("ACYCLIC", PathMode::Acyclic),
+        ]
+        .into_iter()
+        .find_map(|(keyword, mode)| self.eat_keyword(keyword).then_some(mode))
+    }
+
+    pub(super) fn pattern_element(&mut self) -> ParseResult<PatternElement> {
+        self.element(true)
+    }
+
+    fn element(&mut self, groups: bool) -> ParseResult<PatternElement> {
+        let start = if self.at_group() {
+            NodePattern::anonymous()
+        } else {
+            self.node_pattern()?
+        };
+        let mut steps = Vec::new();
+        loop {
+            if self.at_group() {
+                if !groups {
+                    return Err(self.unsupported());
+                }
+                let group = Box::new(self.quantified_pattern()?);
+                let node = if self.at_punct(Punct::LParen) && !self.at_group() {
+                    self.node_pattern()?
+                } else {
+                    NodePattern::anonymous()
+                };
+                steps.push(PatternStep::Group { group, node });
+            } else if [Punct::Minus, Punct::Lt, Punct::Tilde]
+                .iter()
+                .any(|punct| self.at_punct(*punct))
+            {
+                let mut relationship = self.relationship_pattern()?;
+                if let Some(length) = self.quantifier()? {
+                    if relationship.length.is_some() {
+                        return Err(self.invalid_relationship_pattern());
+                    }
+                    relationship.length = Some(length);
+                }
+                let node = self.node_pattern()?;
+                steps.push(PatternStep::Edge { relationship, node });
+            } else {
+                return Ok(PatternElement { start, steps });
+            }
+        }
+    }
+
+    fn at_group(&self) -> bool {
+        self.at_punct(Punct::LParen) && self.punct_at(1, Punct::LParen)
+    }
+
+    fn quantified_pattern(&mut self) -> ParseResult<QuantifiedPattern> {
+        self.expect_punct(Punct::LParen)?;
+        let element = self.nested(|parser| parser.element(false))?;
+        let filter = if self.eat_keyword("WHERE") {
+            Some(self.predicate()?)
+        } else {
+            None
+        };
+        self.expect_punct(Punct::RParen)?;
+        let Some(length) = self.quantifier()? else {
+            return Err(self.unsupported());
+        };
+        Ok(QuantifiedPattern {
+            element,
+            filter,
+            min: length.min.unwrap_or(0),
+            max: length.max,
+        })
+    }
+
+    fn quantifier(&mut self) -> ParseResult<Option<Length>> {
+        if self.eat_punct(Punct::Star) {
+            return Ok(Some(Length {
+                min: Some(0),
+                max: None,
+            }));
+        }
+        if self.eat_punct(Punct::Plus) {
+            return Ok(Some(Length {
+                min: Some(1),
+                max: None,
+            }));
+        }
+        if !self.at_punct(Punct::LBrace) {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let min = self.path_count()?;
+        let max = if self.eat_punct(Punct::Comma) {
+            self.path_count()?
+        } else if min.is_some() {
+            min
+        } else {
+            return Err(self.invalid_relationship_pattern());
+        };
+        self.expect_punct(Punct::RBrace)?;
+        if let (Some(min), Some(max)) = (min, max)
+            && min > max
+        {
+            return Err(self.invalid_relationship_pattern());
+        }
+        Ok(Some(Length {
+            min: Some(min.unwrap_or(0)),
+            max,
+        }))
     }
 
     pub(super) fn map_entries(&mut self) -> ParseResult<Vec<(Name, Expr)>> {

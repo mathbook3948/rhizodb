@@ -565,7 +565,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     {
                         let id = NodeId(id);
                         set(&mut row, part.start.slot, Datum::Node(id));
-                        if part.steps.is_empty()
+                        if part.node_only()
                             && part.path.is_none()
                             && part.start.labels.is_none()
                             && part.start.properties.is_none()

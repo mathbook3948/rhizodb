@@ -60,7 +60,7 @@ pub(crate) struct NodeScan<'q> {
 
 impl<'q> NodeScan<'q> {
     pub(crate) fn of(found: &'q MatchClause) -> Option<Self> {
-        Self::start(found).filter(|scan| scan.part.steps.is_empty())
+        Self::start(found).filter(|scan| scan.part.node_only())
     }
 
     fn start(found: &'q MatchClause) -> Option<Self> {

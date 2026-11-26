@@ -36,7 +36,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - A path that needs an index its engine lacks loads a fixed number of edges, and the row prints how many.
 - Loading one row per commit is its own workload on every engine.
 - Every engine keeps its default commit durability.
-- The suite covers bulk load with on-disk size, reopen, many small commits, point lookups, scans, ordering, one to three hop traversals, variable-length paths, grouped aggregation, bulk update, detach delete, keyword and vector search with their index builds, and concurrent reads.
+- The suite covers bulk load with on-disk size, reopen, many small commits, point lookups, scans, ordering, one to three hop traversals, variable-length paths, shortest paths between two nodes and from one node, quantified path patterns, grouped aggregation, bulk update, detach delete, keyword and vector search with their index builds, and concurrent reads.
 - The suite includes a `RETURN 1` baseline that shows each engine's cost per query.
 - A workload that needs a feature one engine lacks reports that engine as unsupported instead of failing.
 - Reopening a database file is unsupported for a server.

@@ -722,6 +722,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         args: &[Expr],
         row: &Row,
     ) -> Result<(Datum, Taint), Error> {
+        if let (Function::Length, [Expr::Slot(slot)], None) = (function, args, self.check)
+            && let Some(Datum::Path(path)) = row.get(*slot)
+        {
+            let length = i64::try_from(path.relationships.len()).unwrap_or(i64::MAX);
+            return Ok((Datum::Integer(length), Taint::Clean));
+        }
         let (args, taints) = self.tracked_all(args, row)?;
         let (taint, doubtful) = taint::call(function, &args, taints);
         settle(self.call(function, args), doubtful, taint)

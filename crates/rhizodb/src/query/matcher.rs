@@ -20,6 +20,7 @@ use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
 use super::eval::type_error;
+use super::paths::Found;
 use super::plan::Expr;
 use super::plan::Hops;
 use super::plan::MatchClause;
@@ -45,6 +46,22 @@ pub(crate) enum HopRead {
     Nothing,
 }
 
+impl HopRead {
+    /// The same read from the other end of each relationship.
+    pub(crate) fn reversed(self) -> Self {
+        let flip = |direction| match direction {
+            graph::Direction::Outgoing => graph::Direction::Incoming,
+            graph::Direction::Incoming => graph::Direction::Outgoing,
+            graph::Direction::Both => graph::Direction::Both,
+        };
+        match self {
+            Self::Stored(direction, rel_type) => Self::Stored(flip(direction), rel_type),
+            Self::Tested(direction) => Self::Tested(flip(direction)),
+            Self::Nothing => Self::Nothing,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Known {
     labels: bool,
@@ -63,6 +80,7 @@ struct Search<'s, 'e, T: ReadTransaction> {
     patterns: &'s [PatternPart],
     used: Vec<RelationshipId>,
     trails: Vec<PathIds>,
+    targets: Vec<Option<Vec<NodeId>>>,
 }
 
 #[derive(Debug)]
@@ -80,6 +98,13 @@ enum Frame {
         step_index: usize,
         adjacents: std::vec::IntoIter<Adjacent>,
         extended: bool,
+    },
+    /// The paths a path search found from one start node not tried yet, the last of which
+    /// added `pushed` relationships to those the match uses.
+    Paths {
+        index: usize,
+        found: std::vec::IntoIter<Found>,
+        pushed: usize,
     },
     /// One node of a variable-length walk, which began where the trail had `base` relationships.
     Walk {
@@ -124,6 +149,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 };
                 patterns.len()
             ],
+            targets: vec![None; patterns.len()],
         };
         let mut row = row.clone();
         search.run(&mut row, emit)?;
@@ -216,7 +242,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         })
     }
 
-    fn relationship_matches(
+    pub(crate) fn relationship_matches(
         &self,
         id: RelationshipId,
         pattern: &RelationshipPattern,
@@ -401,7 +427,7 @@ pub(crate) fn counted_nodes(found: &MatchClause) -> Option<(Slot, Option<&str>)>
     let simple = !found.optional
         && found.filter.is_none()
         && part.path.is_none()
-        && part.steps.is_empty()
+        && part.node_only()
         && part.seeks.is_empty()
         && !start.bound
         && start.properties.is_none();
@@ -454,6 +480,36 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                             *extended = true;
                             self.extend(index, &adjacent);
                             self.arrive(index, step_index, adjacent.other, row, &mut frames, emit)?
+                        }
+                        None => {
+                            frames.pop();
+                            true
+                        }
+                    }
+                }
+                Frame::Paths {
+                    index,
+                    found,
+                    pushed,
+                } => {
+                    let index = *index;
+                    let kept = self.used.len() - (*pushed).min(self.used.len());
+                    self.used.truncate(kept);
+                    *pushed = 0;
+                    match found.next() {
+                        Some(path) => {
+                            let part = &self.patterns[index];
+                            match &part.search {
+                                Some(search) => {
+                                    if search.apart {
+                                        *pushed = path.trail.relationships.len();
+                                        self.used.extend(&path.trail.relationships);
+                                    }
+                                    self.env.bind_found(part, search, path, row);
+                                    self.begin_part(index + 1, row, &mut frames, emit)?
+                                }
+                                None => true,
+                            }
                         }
                         None => {
                             frames.pop();
@@ -548,6 +604,9 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let Some(part) = self.patterns.get(index) else {
             return emit(row);
         };
+        if let Some(search) = &part.search {
+            self.targets[index] = self.env.path_targets(part, search, row)?;
+        }
         let (candidates, known) = self.env.start_candidates(part, row)?;
         frames.push(Frame::Part {
             index,
@@ -571,6 +630,28 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             return Ok(true);
         }
         set(row, start.slot, Datum::Node(id));
+        let part = &self.patterns[index];
+        if let Some(search) = &part.search {
+            let ends_at_start = search
+                .end()
+                .is_some_and(|end| end.bound && end.slot == part.start.slot);
+            let start_only = [id];
+            let targets = if ends_at_start {
+                Some(&start_only[..])
+            } else {
+                self.targets[index].as_deref()
+            };
+            let excluded = if search.apart { &self.used[..] } else { &[] };
+            let found = self
+                .env
+                .search_paths(part, search, id, targets, excluded, row)?;
+            frames.push(Frame::Paths {
+                index,
+                found: found.into_iter(),
+                pushed: 0,
+            });
+            return Ok(true);
+        }
         let trail = &mut self.trails[index];
         trail.nodes.clear();
         trail.nodes.push(id);

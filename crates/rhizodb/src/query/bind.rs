@@ -21,13 +21,17 @@ use super::plan::Callee;
 use super::plan::Case;
 use super::plan::Clause;
 use super::plan::Expr;
+use super::plan::Group;
 use super::plan::Hops;
 use super::plan::IdStart;
 use super::plan::Items;
 use super::plan::ListComprehension;
 use super::plan::MatchClause;
+use super::plan::Member;
 use super::plan::MergeClause;
 use super::plan::NodePattern;
+use super::plan::PathMode;
+use super::plan::PathSearch;
 use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::Pipeline;
@@ -39,6 +43,8 @@ use super::plan::ReadClause;
 use super::plan::Reduce;
 use super::plan::RelationshipPattern;
 use super::plan::RemoveAction;
+use super::plan::Segment;
+use super::plan::Selector;
 use super::plan::SetAction;
 use super::plan::Slot;
 use super::plan::Step;
@@ -1001,8 +1007,77 @@ impl Binder<'_> {
             .as_ref()
             .map(|filter| self.filter(filter, scope, &mut Mode::Plain))
             .transpose()?;
-        for (part, first) in patterns.iter_mut().zip(firsts) {
+        let mut ends = firsts.clone();
+        ends.remove(0);
+        ends.push(introduced.len());
+        for (index, part) in patterns.iter().enumerate() {
+            let Some(search) = &part.search else {
+                continue;
+            };
+            if search.selector == Selector::All {
+                continue;
+            }
+            let end = search.end().map_or(part.start.slot, |end| end.slot);
+            let interior: Vec<Slot> = introduced[firsts[index]..ends[index]]
+                .iter()
+                .copied()
+                .filter(|slot| *slot != part.start.slot && *slot != end)
+                .collect();
+            let earlier = &introduced[..firsts[index]];
+            let shares_before = part_elements(part).into_iter().any(|(slot, bound)| {
+                bound && slot != part.start.slot && slot != end && earlier.contains(&slot)
+            });
+            let shares_after = patterns[index + 1..].iter().any(|later| {
+                part_elements(later)
+                    .into_iter()
+                    .any(|(slot, bound)| bound && interior.contains(&slot))
+            });
+            if shares_before || shares_after {
+                return Err(invalid_path(
+                    "a selective path pattern shares only its end nodes with the other patterns of its match",
+                ));
+            }
+        }
+        for (index, (part, first)) in patterns.iter_mut().zip(firsts).enumerate() {
             part.seeks = seek::derive(part, filter.as_ref(), &introduced[first..]);
+            let start = part.start.slot;
+            let Some(search) = &mut part.search else {
+                continue;
+            };
+            if let Some(end) = search.end() {
+                let mut target = PatternPart {
+                    path: None,
+                    start: end.clone(),
+                    steps: Vec::new(),
+                    seeks: Vec::new(),
+                    search: None,
+                };
+                target.seeks = seek::derive(&target, filter.as_ref(), &introduced[first..]);
+                search.target = Some(Box::new(target));
+            }
+            if found.patterns[index]
+                .search
+                .is_some_and(|prefix| prefix.cypher)
+                && let Some(filter) = &filter
+            {
+                let end = search.end().map_or(start, |end| end.slot);
+                let interior: Vec<Slot> = introduced[first..ends[index]]
+                    .iter()
+                    .copied()
+                    .filter(|slot| *slot != start && *slot != end)
+                    .collect();
+                let later = &introduced[ends[index]..];
+                search.filter = seek::conjuncts(filter)
+                    .into_iter()
+                    .filter(|conjunct| {
+                        !seek::independent(conjunct, &interior)
+                            && seek::independent(conjunct, later)
+                    })
+                    .cloned()
+                    .reduce(|left, right| {
+                        Expr::Binary(ast::BinaryOp::And, Box::new(left), Box::new(right))
+                    });
+            }
         }
         let by_id = match patterns.as_slice() {
             [part] => {
@@ -1048,12 +1123,25 @@ impl Binder<'_> {
                 format!("variable `{}` is already bound", path.0),
             ));
         }
+        if part.search.is_some()
+            || part
+                .element
+                .steps
+                .iter()
+                .any(|step| matches!(step, ast::PatternStep::Group { .. }))
+        {
+            return self.searched_part(part, scope, usage, introduced);
+        }
         let start = self.node_pattern(&part.element.start, scope, usage, introduced)?;
         let mut steps = Vec::new();
         for step in &part.element.steps {
-            let relationship =
-                self.relationship_pattern(&step.relationship, scope, usage, introduced)?;
-            let node = self.node_pattern(&step.node, scope, usage, introduced)?;
+            let ast::PatternStep::Edge { relationship, node } = step else {
+                return Err(invalid_path(
+                    "a quantified path pattern needs the path search",
+                ));
+            };
+            let relationship = self.relationship_pattern(relationship, scope, usage, introduced)?;
+            let node = self.node_pattern(node, scope, usage, introduced)?;
             steps.push(Step { relationship, node });
         }
         if matches!(usage, PatternUse::Create | PatternUse::Merge)
@@ -1065,26 +1153,301 @@ impl Binder<'_> {
                 "a bound node cannot be created again",
             ));
         }
-        let path = match &part.path_variable {
-            Some(name) => {
-                if scope.get(&name.0).is_some() {
-                    return Err(error(
-                        ErrorKind::VariableAlreadyBound,
-                        format!("path `{}` also names an element of its pattern", name.0),
-                    ));
-                }
-                let slot = self.slot();
-                scope.insert(&name.0, slot, Kind::Path);
-                introduced.push(slot);
-                Some(slot)
-            }
-            None => None,
-        };
+        let path = self.path_slot(part, scope, introduced)?;
         Ok(PatternPart {
             path,
             start,
             steps,
             seeks: Vec::new(),
+            search: None,
+        })
+    }
+
+    fn path_slot(
+        &mut self,
+        part: &ast::PatternPart,
+        scope: &mut Scope,
+        introduced: &mut Vec<Slot>,
+    ) -> Result<Option<Slot>, Error> {
+        let Some(name) = &part.path_variable else {
+            return Ok(None);
+        };
+        if scope.get(&name.0).is_some() {
+            return Err(error(
+                ErrorKind::VariableAlreadyBound,
+                format!("path `{}` also names an element of its pattern", name.0),
+            ));
+        }
+        let slot = self.slot();
+        scope.insert(&name.0, slot, Kind::Path);
+        introduced.push(slot);
+        Ok(Some(slot))
+    }
+
+    fn searched_part(
+        &mut self,
+        part: &ast::PatternPart,
+        scope: &mut Scope,
+        usage: PatternUse,
+        introduced: &mut Vec<Slot>,
+    ) -> Result<PatternPart, Error> {
+        if matches!(usage, PatternUse::Create | PatternUse::Merge) {
+            return Err(invalid_path(
+                "a pattern that creates takes no path search or quantified path pattern",
+            ));
+        }
+        let prefix = part.search;
+        let cypher = prefix.is_some_and(|prefix| prefix.cypher);
+        if cypher {
+            let single = matches!(
+                part.element.steps.as_slice(),
+                [ast::PatternStep::Edge { relationship, .. }]
+                    if relationship.length.is_none_or(|length| length.min.is_none_or(|min| min <= 1))
+            );
+            if !single {
+                return Err(invalid_path(
+                    "a shortest path function takes one relationship of length 0 or 1 at least",
+                ));
+            }
+        }
+        let mode = match prefix.and_then(|prefix| prefix.mode) {
+            Some(ast::PathMode::Walk) => PathMode::Walk,
+            Some(ast::PathMode::Trail) => PathMode::Trail,
+            Some(ast::PathMode::Simple) => PathMode::Simple,
+            Some(ast::PathMode::Acyclic) => PathMode::Acyclic,
+            None if prefix.is_some() && !cypher => PathMode::Walk,
+            None => PathMode::Trail,
+        };
+        let selector = match prefix.and_then(|prefix| prefix.selector) {
+            None | Some(ast::PathSelector::All) => Selector::All,
+            Some(ast::PathSelector::AnyShortest) => Selector::Paths(1),
+            Some(ast::PathSelector::AllShortest) => Selector::Groups(1),
+            Some(ast::PathSelector::Any(count) | ast::PathSelector::Shortest(count)) => {
+                Selector::Paths(count)
+            }
+            Some(ast::PathSelector::ShortestGroups(count)) => Selector::Groups(count),
+        };
+        let first = introduced.len();
+        let start = self.node_pattern(&part.element.start, scope, usage, introduced)?;
+        let mut segments = Vec::new();
+        for step in &part.element.steps {
+            segments.push(match step {
+                ast::PatternStep::Edge { relationship, node } => match relationship.length {
+                    None => {
+                        let relationship =
+                            self.relationship_pattern(relationship, scope, usage, introduced)?;
+                        let node = self.node_pattern(node, scope, usage, introduced)?;
+                        Segment::Hop(Box::new(Step { relationship, node }))
+                    }
+                    Some(length) => Segment::Group(Box::new(self.edge_group(
+                        relationship,
+                        length,
+                        node,
+                        scope,
+                        usage,
+                        introduced,
+                    )?)),
+                },
+                ast::PatternStep::Group { group, node } => {
+                    Segment::Group(Box::new(self.group(group, node, scope, usage, introduced)?))
+                }
+            });
+        }
+        let unbounded = segments
+            .iter()
+            .any(|segment| matches!(segment, Segment::Group(group) if group.max.is_none()));
+        if mode == PathMode::Walk && selector == Selector::All && unbounded {
+            return Err(invalid_path(
+                "an unbounded quantifier in a WALK path pattern needs a selector, or the mode TRAIL, SIMPLE, or ACYCLIC",
+            ));
+        }
+        let path = self.path_slot(part, scope, introduced)?;
+        let mut own: Vec<Slot> = introduced[first..]
+            .iter()
+            .copied()
+            .filter(|slot| *slot != start.slot)
+            .collect();
+        for segment in &segments {
+            if let Segment::Group(group) = segment {
+                own.extend(group_singletons(group));
+            }
+        }
+        let mut bound_inside = segments
+            .iter()
+            .flat_map(segment_elements)
+            .filter(|(_, bound)| *bound)
+            .map(|(slot, _)| slot);
+        if bound_inside.any(|slot| own.contains(&slot)) {
+            return Err(invalid_path(
+                "a variable appears twice in a searched path pattern other than at its start",
+            ));
+        }
+        let search = PathSearch {
+            selector,
+            mode,
+            apart: prefix.is_none(),
+            segments,
+            filter: None,
+            target: None,
+        };
+        if !search_reads_only(&search, &own) {
+            return Err(invalid_path(
+                "the patterns of a searched path read no variable of the path but its start, and a group's WHERE also those of its own iteration",
+            ));
+        }
+        Ok(PatternPart {
+            path,
+            start,
+            steps: Vec::new(),
+            seeks: Vec::new(),
+            search: Some(Box::new(search)),
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a quantified edge binds both its relationship and the node after it"
+    )]
+    fn edge_group(
+        &mut self,
+        relationship: &ast::RelationshipPattern,
+        length: ast::Length,
+        node: &ast::NodePattern,
+        scope: &mut Scope,
+        usage: PatternUse,
+        introduced: &mut Vec<Slot>,
+    ) -> Result<Group, Error> {
+        let single = ast::RelationshipPattern {
+            variable: None,
+            length: None,
+            ..relationship.clone()
+        };
+        let hop = self.relationship_pattern(&single, scope, usage, &mut Vec::new())?;
+        let mut lists = Vec::new();
+        if let Some(name) = &relationship.variable {
+            if scope.get(&name.0).is_some() {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("variable `{}` is already bound", name.0),
+                ));
+            }
+            let slot = self.slot();
+            scope.insert(&name.0, slot, Kind::RelationshipList);
+            introduced.push(slot);
+            lists.push((Member::Relationship(0), slot));
+        }
+        let entry = self.anonymous_node();
+        let inner = self.anonymous_node();
+        let exit = self.node_pattern(node, scope, usage, introduced)?;
+        Ok(Group {
+            entry,
+            hops: vec![Step {
+                relationship: hop,
+                node: inner,
+            }],
+            filter: None,
+            min: length.min.unwrap_or(1),
+            max: length.max,
+            exit,
+            lists,
+        })
+    }
+
+    fn anonymous_node(&mut self) -> NodePattern {
+        NodePattern {
+            slot: self.slot(),
+            bound: false,
+            labels: None,
+            properties: None,
+        }
+    }
+
+    fn group(
+        &mut self,
+        group: &ast::QuantifiedPattern,
+        node: &ast::NodePattern,
+        scope: &mut Scope,
+        usage: PatternUse,
+        introduced: &mut Vec<Slot>,
+    ) -> Result<Group, Error> {
+        let names = pattern_variables(&group.element);
+        for (at, name) in names.iter().enumerate() {
+            if scope.get(&name.0).is_some() {
+                return Err(error(
+                    ErrorKind::VariableAlreadyBound,
+                    format!("group variable `{}` is already bound", name.0),
+                ));
+            }
+            if names[..at].contains(name) {
+                return Err(invalid_path(format!(
+                    "variable `{}` appears twice in one quantified path pattern",
+                    name.0
+                )));
+            }
+        }
+        let mut inner = scope.clone();
+        let mut members = Vec::new();
+        let entry = self.node_pattern(&group.element.start, &mut inner, usage, &mut Vec::new())?;
+        members.push((
+            Member::Entry,
+            group.element.start.variable.as_ref(),
+            Kind::List,
+        ));
+        let mut hops = Vec::new();
+        for step in &group.element.steps {
+            let ast::PatternStep::Edge { relationship, node } = step else {
+                return Err(invalid_path(
+                    "a quantified path pattern cannot nest another",
+                ));
+            };
+            if relationship.length.is_some() {
+                return Err(invalid_path(
+                    "a quantified path pattern cannot hold a variable-length relationship",
+                ));
+            }
+            let at = hops.len();
+            let relationship =
+                self.relationship_pattern(relationship, &mut inner, usage, &mut Vec::new())?;
+            let pattern = self.node_pattern(node, &mut inner, usage, &mut Vec::new())?;
+            members.push((
+                Member::Relationship(at),
+                step_relationship_variable(step),
+                Kind::RelationshipList,
+            ));
+            members.push((Member::Node(at), node.variable.as_ref(), Kind::List));
+            hops.push(Step {
+                relationship,
+                node: pattern,
+            });
+        }
+        if hops.is_empty() {
+            return Err(invalid_path(
+                "a quantified path pattern needs at least one relationship",
+            ));
+        }
+        let filter = group
+            .filter
+            .as_ref()
+            .map(|filter| self.filter(filter, &inner, &mut Mode::Plain))
+            .transpose()?;
+        let mut lists = Vec::new();
+        for (member, name, kind) in members {
+            if let Some(name) = name {
+                let slot = self.slot();
+                scope.insert(&name.0, slot, kind);
+                introduced.push(slot);
+                lists.push((member, slot));
+            }
+        }
+        let exit = self.node_pattern(node, scope, usage, introduced)?;
+        Ok(Group {
+            entry,
+            hops,
+            filter,
+            min: group.min,
+            max: group.max,
+            exit,
+            lists,
         })
     }
 
@@ -2153,8 +2516,15 @@ impl Binder<'_> {
         scope: &Scope,
         mode: &mut Mode<'_>,
     ) -> Result<Expr, Error> {
-        let scope = &self.pattern_scope(scope, names_of(pattern_variables(element)), mode)?;
-        if let Some(name) = pattern_variables(element).find(|name| scope.get(&name.0).is_none()) {
+        let scope = &self.pattern_scope(
+            scope,
+            names_of(pattern_variables(element).into_iter()),
+            mode,
+        )?;
+        if let Some(name) = pattern_variables(element)
+            .into_iter()
+            .find(|name| scope.get(&name.0).is_none())
+        {
             return Err(error(
                 ErrorKind::UndefinedVariable,
                 format!(
@@ -2165,6 +2535,7 @@ impl Binder<'_> {
         }
         let part = ast::PatternPart {
             path_variable: None,
+            search: None,
             element: element.clone(),
         };
         Ok(Expr::Exists(Box::new(self.pattern_query(
@@ -2301,10 +2672,14 @@ impl Binder<'_> {
         }
         let part = ast::PatternPart {
             path_variable: comprehension.path_variable.clone(),
+            search: None,
             element: comprehension.element.clone(),
         };
-        let mut inner =
-            self.pattern_scope(scope, names_of(pattern_variables(&part.element)), mode)?;
+        let mut inner = self.pattern_scope(
+            scope,
+            names_of(pattern_variables(&part.element).into_iter()),
+            mode,
+        )?;
         let mut introduced = Vec::new();
         let pattern =
             self.pattern_part(&part, &mut inner, PatternUse::Predicate, &mut introduced)?;
@@ -2476,13 +2851,114 @@ fn aggregate_not_allowed(mode: &Mode<'_>) -> Error {
     }
 }
 
-fn pattern_variables(element: &ast::PatternElement) -> impl Iterator<Item = &ast::Name> {
-    element.start.variable.iter().chain(
-        element
-            .steps
+fn pattern_variables(element: &ast::PatternElement) -> Vec<&ast::Name> {
+    let mut names: Vec<&ast::Name> = element.start.variable.iter().collect();
+    for step in &element.steps {
+        match step {
+            ast::PatternStep::Edge { relationship, node } => {
+                names.extend(&relationship.variable);
+                names.extend(&node.variable);
+            }
+            ast::PatternStep::Group { group, node } => {
+                names.extend(pattern_variables(&group.element));
+                names.extend(&node.variable);
+            }
+        }
+    }
+    names
+}
+
+fn step_relationship_variable(step: &ast::PatternStep) -> Option<&ast::Name> {
+    match step {
+        ast::PatternStep::Edge { relationship, .. } => relationship.variable.as_ref(),
+        ast::PatternStep::Group { .. } => None,
+    }
+}
+
+fn invalid_path(message: impl Into<String>) -> Error {
+    error(ErrorKind::InvalidPathPattern, message)
+}
+
+fn search_exprs(search: &PathSearch) -> Vec<&Option<Expr>> {
+    fn step(step: &Step) -> [&Option<Expr>; 2] {
+        [&step.relationship.properties, &step.node.properties]
+    }
+    let mut exprs = vec![&search.filter];
+    for segment in &search.segments {
+        match segment {
+            Segment::Hop(hop) => exprs.extend(step(hop)),
+            Segment::Group(group) => {
+                exprs.push(&group.entry.properties);
+                exprs.extend(group.hops.iter().flat_map(step));
+                exprs.push(&group.filter);
+                exprs.push(&group.exit.properties);
+            }
+        }
+    }
+    exprs
+}
+
+fn group_singletons(group: &Group) -> Vec<Slot> {
+    std::iter::once(group.entry.slot)
+        .chain(
+            group
+                .hops
+                .iter()
+                .flat_map(|hop| [hop.relationship.slot, hop.node.slot]),
+        )
+        .collect()
+}
+
+fn part_elements(part: &PatternPart) -> Vec<(Slot, bool)> {
+    let mut elements = vec![(part.start.slot, part.start.bound)];
+    for step in &part.steps {
+        elements.push((step.relationship.slot, step.relationship.bound));
+        elements.push((step.node.slot, step.node.bound));
+    }
+    for segment in part.search.iter().flat_map(|search| &search.segments) {
+        elements.extend(segment_elements(segment));
+    }
+    elements
+}
+
+fn segment_elements(segment: &Segment) -> Vec<(Slot, bool)> {
+    let step = |step: &Step| {
+        [
+            (step.relationship.slot, step.relationship.bound),
+            (step.node.slot, step.node.bound),
+        ]
+    };
+    match segment {
+        Segment::Hop(hop) => step(hop).to_vec(),
+        Segment::Group(group) => std::iter::once((group.entry.slot, group.entry.bound))
+            .chain(group.hops.iter().flat_map(step))
+            .chain(std::iter::once((group.exit.slot, group.exit.bound)))
+            .collect(),
+    }
+}
+
+fn search_reads_only(search: &PathSearch, own: &[Slot]) -> bool {
+    let reads_none = |expr: &Option<Expr>, allowed: &[Slot]| {
+        let forbidden: Vec<Slot> = own
             .iter()
-            .flat_map(|step| step.relationship.variable.iter().chain(&step.node.variable)),
-    )
+            .copied()
+            .filter(|slot| !allowed.contains(slot))
+            .collect();
+        expr.as_ref()
+            .is_none_or(|expr| seek::independent(expr, &forbidden))
+    };
+    let step = |step: &Step| {
+        reads_none(&step.relationship.properties, &[]) && reads_none(&step.node.properties, &[])
+    };
+    search.segments.iter().all(|segment| match segment {
+        Segment::Hop(hop) => step(hop),
+        Segment::Group(group) => {
+            reads_none(&group.entry.properties, &[])
+                && group.hops.iter().all(step)
+                && reads_none(&group.exit.properties, &[])
+                && reads_none(&group.filter, &group_singletons(group))
+        }
+    })
 }
 
 #[derive(Default)]
@@ -2509,6 +2985,7 @@ impl<'a> Parts<'a> {
                         .iter()
                         .flat_map(|step| [&step.relationship.properties, &step.node.properties]),
                 )
+                .chain(part.search.iter().flat_map(|search| search_exprs(search)))
                 .flatten()
         });
         Parts {
@@ -2918,7 +3395,7 @@ fn collect_patterns_free<'a>(
         collect_pattern_free(&part.element, bound, free);
     }
     for part in patterns {
-        bound.extend(names_of(pattern_variables(&part.element)));
+        bound.extend(names_of(pattern_variables(&part.element).into_iter()));
         bound.extend(names_of(part.path_variable.iter()));
     }
 }
@@ -2993,19 +3470,37 @@ fn collect_pattern_free<'a>(
             free.push(&name.0);
         }
     }
-    let nodes = std::iter::once(&element.start.properties)
-        .chain(element.steps.iter().map(|step| &step.node.properties));
-    let relationships = element
-        .steps
-        .iter()
-        .map(|step| &step.relationship.properties);
-    for properties in nodes.chain(relationships) {
-        if let Some(ast::Properties::Map(entries)) = properties {
-            for (_, value) in entries {
-                collect_free(value, bound, free);
+    let depth = bound.len();
+    bound.extend(names_of(pattern_variables(element).into_iter()));
+    for expr in pattern_exprs(element) {
+        collect_free(expr, bound, free);
+    }
+    bound.truncate(depth);
+}
+
+fn pattern_exprs(element: &ast::PatternElement) -> Vec<&ast::Expr> {
+    fn properties(properties: &Option<ast::Properties>) -> Vec<&ast::Expr> {
+        match properties {
+            Some(ast::Properties::Map(entries)) => entries.iter().map(|(_, value)| value).collect(),
+            _ => Vec::new(),
+        }
+    }
+    let mut exprs = Vec::new();
+    exprs.extend(properties(&element.start.properties));
+    for step in &element.steps {
+        match step {
+            ast::PatternStep::Edge { relationship, node } => {
+                exprs.extend(properties(&relationship.properties));
+                exprs.extend(properties(&node.properties));
+            }
+            ast::PatternStep::Group { group, node } => {
+                exprs.extend(pattern_exprs(&group.element));
+                exprs.extend(&group.filter);
+                exprs.extend(properties(&node.properties));
             }
         }
     }
+    exprs
 }
 
 fn contains_aggregate(expr: &ast::Expr) -> bool {

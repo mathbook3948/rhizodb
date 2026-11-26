@@ -9,6 +9,18 @@
 14.6-filter-statement/Filter1.feature: [1] FILTER keeps the rows whose condition is true
 14.6-filter-statement/Filter1.feature: [2] FILTER takes an optional WHERE
 14.7-let-statement/Let1.feature: [1] LET binds a value to a new variable
+16.11-graph-pattern-quantifier/Quantifier1.feature: [10] A quantified path pattern takes no relationship of the same match twice
+16.11-graph-pattern-quantifier/Quantifier1.feature: [11] A group variable cannot be bound before the quantified path pattern
+16.11-graph-pattern-quantifier/Quantifier1.feature: [12] A quantified path pattern needs an edge
+16.11-graph-pattern-quantifier/Quantifier1.feature: [1] A quantified edge repeats between its bounds
+16.11-graph-pattern-quantifier/Quantifier1.feature: [2] A fixed quantifier repeats exactly that often
+16.11-graph-pattern-quantifier/Quantifier1.feature: [3] An asterisk allows zero repetitions and a plus sign at least one
+16.11-graph-pattern-quantifier/Quantifier1.feature: [4] A quantified path pattern binds each variable to a list of its iterations
+16.11-graph-pattern-quantifier/Quantifier1.feature: [5] A WHERE inside a quantified path pattern tests each iteration
+16.11-graph-pattern-quantifier/Quantifier1.feature: [6] A quantified path pattern sits between other edges
+16.11-graph-pattern-quantifier/Quantifier1.feature: [7] Nodes of a quantified path pattern join the nodes around it
+16.11-graph-pattern-quantifier/Quantifier1.feature: [8] An iteration takes several edges
+16.11-graph-pattern-quantifier/Quantifier1.feature: [9] A selector applies to a quantified path pattern
 16.19-offset-clause/Offset1.feature: [1] OFFSET skips the first rows of an ordered result
 16.19-offset-clause/Offset1.feature: [2] OFFSET before LIMIT pages through a result
 16.19-offset-clause/Offset1.feature: [3] OFFSET takes a parameter
@@ -16,6 +28,26 @@
 16.19-offset-clause/Offset1.feature: [5] OFFSET zero keeps every row
 16.19-offset-clause/Offset1.feature: [6] A negative OFFSET fails
 16.19-offset-clause/Offset1.feature: [7] A float OFFSET fails
+16.6-path-pattern-prefix/PathMode1.feature: [1] WALK may take an edge twice
+16.6-path-pattern-prefix/PathMode1.feature: [2] TRAIL takes no edge twice
+16.6-path-pattern-prefix/PathMode1.feature: [3] ACYCLIC visits no node twice
+16.6-path-pattern-prefix/PathMode1.feature: [4] SIMPLE visits no node twice except that a path may end where it starts
+16.6-path-pattern-prefix/PathMode1.feature: [5] TRAIL without a selector gives every trail
+16.6-path-pattern-prefix/PathMode1.feature: [6] A WALK with an unbounded quantifier needs a selector
+16.6-path-pattern-prefix/PathMode1.feature: [7] A selector without a path mode searches walks
+16.6-path-pattern-prefix/PathMode1.feature: [8] A WALK with a bounded quantifier needs no selector
+16.6-path-pattern-prefix/PathSearch1.feature: [10] An edge pattern pointing left searches against the edge direction
+16.6-path-pattern-prefix/PathSearch1.feature: [11] Selector keywords are case-insensitive and take PATH or PATHS
+16.6-path-pattern-prefix/PathSearch1.feature: [12] path_length gives the number of edges of a path
+16.6-path-pattern-prefix/PathSearch1.feature: [1] ANY SHORTEST keeps one shortest path
+16.6-path-pattern-prefix/PathSearch1.feature: [2] ALL SHORTEST keeps every path of the shortest length
+16.6-path-pattern-prefix/PathSearch1.feature: [3] SHORTEST k keeps that many paths, shortest first
+16.6-path-pattern-prefix/PathSearch1.feature: [4] SHORTEST k GROUPS keeps every path of that many shortest lengths
+16.6-path-pattern-prefix/PathSearch1.feature: [5] ANY k keeps at most that many paths
+16.6-path-pattern-prefix/PathSearch1.feature: [6] A selector chooses among the paths of each pair of end nodes
+16.6-path-pattern-prefix/PathSearch1.feature: [7] A selector chooses before the WHERE of its MATCH filters
+16.6-path-pattern-prefix/PathSearch1.feature: [8] A path of zero hops is the shortest from a node to itself under an asterisk
+16.6-path-pattern-prefix/PathSearch1.feature: [9] A selector finds the shortest closed path back to the start
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [10] An undirected edge does not match a directed edge
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [1] An edge pointing right matches outgoing edges only
 16.7-path-pattern-expression/AbbreviatedEdge1.feature: [2] An edge pointing left matches incoming edges only

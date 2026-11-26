@@ -432,7 +432,12 @@ impl Parser {
                 TokenKind::Punct(Punct::RParen) => {
                     open = open.saturating_sub(1);
                     if open == 0 {
-                        return self.relationship_starts_at(index + 1);
+                        let opens = |at: usize| {
+                            self.tokens.get(at).map(|token| &token.kind)
+                                == Some(&TokenKind::Punct(Punct::LParen))
+                        };
+                        return self.relationship_starts_at(index + 1)
+                            || (opens(index + 1) && opens(index + 2));
                     }
                 }
                 _ => {}

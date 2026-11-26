@@ -213,6 +213,13 @@ fn reaches_start(relationship: &RelationshipPattern) -> bool {
         && relationship.length.is_none_or(|hops| hops.min >= 1)
 }
 
+/// The conjuncts of `expr`, which is one conjunct unless it is an `AND`.
+pub(crate) fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    collect_conjuncts(expr, &mut out);
+    out
+}
+
 fn collect_conjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     match expr {
         Expr::Binary(BinaryOp::And, left, right) => {
@@ -249,7 +256,7 @@ fn is_point(test: &SeekTest) -> bool {
     matches!(test, SeekTest::Equal(_) | SeekTest::In(_))
 }
 
-fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
+pub(crate) fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
     let all = |items: &[Expr]| items.iter().all(|item| independent(item, bound_later));
     let maybe = |item: Option<&Expr>| item.is_none_or(|item| independent(item, bound_later));
     match expr {

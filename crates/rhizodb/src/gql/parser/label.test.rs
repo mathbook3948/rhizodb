@@ -27,7 +27,9 @@ fn node_labels(source: &str) -> String {
 fn relationship_labels(source: &str) -> String {
     let parts = patterns(source);
     parts[0].element.steps[0]
-        .relationship
+        .edge()
+        .unwrap()
+        .0
         .labels
         .as_ref()
         .map_or("_".into(), label_sexp)
@@ -95,7 +97,7 @@ fn a_variable_named_is_takes_an_is_label_expression() {
     assert_eq!(start.variable.as_ref().map(|n| n.0.as_str()), Some("is"));
     assert_eq!(node_labels("(is IS Person)"), "Person");
     let parts = patterns("()-[is IS KNOWS]->()");
-    let relationship = &parts[0].element.steps[0].relationship;
+    let relationship = &parts[0].element.steps[0].edge().unwrap().0;
     assert_eq!(
         relationship.variable.as_ref().map(|n| n.0.as_str()),
         Some("is")
@@ -111,7 +113,7 @@ fn a_label_named_is_needs_no_variable() {
     assert_eq!(parts[0].element.start.variable, None);
     assert_eq!(node_labels("(IS IS)"), "IS");
     let parts = patterns("()-[IS IS]->()");
-    assert_eq!(parts[0].element.steps[0].relationship.variable, None);
+    assert_eq!(parts[0].element.steps[0].edge().unwrap().0.variable, None);
     assert_eq!(relationship_labels("()-[IS IS]->()"), "IS");
 }
 
@@ -228,9 +230,9 @@ fn a_pattern_in_a_comprehension_filter_keeps_its_disjunction() {
     let Some(Expr::Pattern(element)) = found.filter.as_deref() else {
         panic!("expected a pattern predicate, got {found:?}");
     };
-    let labels = element.steps[0].relationship.labels.as_ref();
+    let labels = element.steps[0].edge().unwrap().0.labels.as_ref();
     assert_eq!(labels.map(label_sexp).as_deref(), Some("(| T U)"));
-    let labels = element.steps[0].node.labels.as_ref();
+    let labels = element.steps[0].edge().unwrap().1.labels.as_ref();
     assert_eq!(labels.map(label_sexp).as_deref(), Some("(| A B)"));
 }
 

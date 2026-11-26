@@ -202,6 +202,24 @@ GQL is the reference language, but the only public conformance suite is the open
 - `IS DISTINCT FROM` compares two values as `DISTINCT` does, so two nulls are not distinct, and it never gives null.
 - `normalize(text [, form])` and `text IS [form] NORMALIZED` take the form `NFC`, `NFD`, `NFKC`, or `NFKD`, as a bare word or a string, with `NFC` by default.
 - `NFC`, `NFD`, `NFKC`, and `NFKD` are read as forms only as the last argument of `normalize`, so they still work as names elsewhere.
+- A path pattern takes GQL's path search prefix: a selector `ANY SHORTEST`, `ALL SHORTEST`, `ANY [k]`, `SHORTEST k`, `SHORTEST [k] GROUP[S]`, or `ALL`, a path mode `WALK`, `TRAIL`, `SIMPLE`, or `ACYCLIC`, or both, each optionally followed by `PATH` or `PATHS`.
+- The count of a selector is an integer literal.
+- A selector chooses, among the matches of its path pattern with the same start and end node, the shortest paths it asks for, and `ANY k` takes the `k` shortest.
+- A selector chooses before the `WHERE` of its `MATCH` filters.
+- With a selector or a mode and no mode named, the path mode is `WALK`.
+- A pattern part with a quantified path pattern and no prefix keeps Cypher's rule that no two relationships of a `MATCH` are the same, and is otherwise a `TRAIL`.
+- The relationships of a pattern part with a prefix take no part in that rule.
+- An unbounded quantifier in a `WALK` without a selector is a syntax error of kind `ErrorKind::InvalidPathPattern`.
+- A quantified path pattern `(element [WHERE condition]){m,n}` takes `{m}`, `{m,}`, `{,n}`, `*`, and `+`, and so does an edge pattern, as in `-[:T]->+`.
+- A quantified edge means the same as Cypher's variable-length relationship with those bounds.
+- A quantified path pattern holds at least one edge, no variable-length relationship, and no other quantified path pattern.
+- The first node of a quantified path pattern joins the node before it, and its last node the node after it, which is anonymous where the query writes none.
+- A variable of a quantified path pattern is a singleton inside its `WHERE` and a list of its iterations' elements after it, and cannot be bound before it.
+- The property maps of a pattern part with a prefix or a quantified path pattern read no variable of that part but its start node, and a `WHERE` inside a quantified path pattern also the elements of its own iteration.
+- A selective path pattern shares only its start and end nodes with the other pattern parts of its `MATCH`.
+- A parenthesized path pattern without a quantifier, and a nested quantified path pattern, fail as unsupported.
+- Cypher's `shortestPath(pattern)` is `ANY SHORTEST` and `allShortestPaths(pattern)` is `ALL SHORTEST`, over one relationship pattern whose minimum length is 0 or 1, as a `TRAIL`.
+- The conjuncts of the `WHERE` of a `MATCH` that read the inside of a Cypher shortest path pattern hold on each path before the shortest are chosen, as in Neo4j.
 - `=~` is true when the regular expression on its right matches the whole string on its left.
 - Regular expressions follow the syntax of the Rust `regex` crate, so lookaround and backreferences are not accepted.
 - Matching takes time linear in the length of the string, whatever the pattern.

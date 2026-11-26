@@ -68,6 +68,9 @@ pub enum ErrorKind {
     RequiresDirectedRelationship,
     /// A variable-length relationship in a pattern that creates.
     CreatingVarLength,
+    /// A path pattern whose selector, path mode, or quantified path pattern the query cannot
+    /// use there, such as an unbounded quantifier that could match infinitely many walks.
+    InvalidPathPattern,
     /// A parameter is used where only a literal map is allowed.
     InvalidParameterUse,
     /// A `MERGE` pattern property evaluated to null, which can never match what the pattern creates.

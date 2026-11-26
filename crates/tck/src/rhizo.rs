@@ -231,6 +231,7 @@ fn query_error(kind: ErrorKind) -> QueryError {
         ErrorKind::NoLabelSet => ("SyntaxError", "NoLabelSet"),
         ErrorKind::RequiresDirectedRelationship => ("SyntaxError", "RequiresDirectedRelationship"),
         ErrorKind::CreatingVarLength => ("SyntaxError", "CreatingVarLength"),
+        ErrorKind::InvalidPathPattern => ("SyntaxError", "InvalidPathPattern"),
         ErrorKind::InvalidParameterUse => ("SyntaxError", "InvalidParameterUse"),
         ErrorKind::InvalidDelete => ("SyntaxError", "InvalidDelete"),
         ErrorKind::NullMergeProperty => ("SemanticError", "MergeReadOwnWrites"),

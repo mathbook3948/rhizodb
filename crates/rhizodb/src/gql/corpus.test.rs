@@ -174,8 +174,6 @@ fn deferred_cause(query: &str) -> Option<&'static str> {
         Some("MERGE clause")
     } else if has("foreach") {
         Some("FOREACH clause")
-    } else if has("shortestpath") || has("allshortestpaths") {
-        Some("shortestPath patterns")
     } else if has("load") {
         Some("LOAD CSV")
     } else {

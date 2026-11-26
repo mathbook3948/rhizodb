@@ -227,10 +227,40 @@ pub(crate) enum RemoveItem {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PatternPart {
     pub path_variable: Option<Name>,
+    /// The selector and path mode before the pattern, or the Cypher function around it.
+    pub search: Option<PathSearch>,
     pub element: PatternElement,
 }
 
-/// A node followed by zero or more relationship-and-node steps.
+/// How a path pattern chooses among its matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PathSearch {
+    pub selector: Option<PathSelector>,
+    pub mode: Option<PathMode>,
+    /// Written as Cypher's `shortestPath` or `allShortestPaths`.
+    pub cypher: bool,
+}
+
+/// GQL's path search prefixes. A count of paths or groups is at least one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathSelector {
+    All,
+    Any(u64),
+    AnyShortest,
+    AllShortest,
+    Shortest(u64),
+    ShortestGroups(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathMode {
+    Walk,
+    Trail,
+    Simple,
+    Acyclic,
+}
+
+/// A node followed by zero or more relationship-and-node or group-and-node steps.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PatternElement {
     pub start: NodePattern,
@@ -238,9 +268,36 @@ pub(crate) struct PatternElement {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PatternStep {
-    pub relationship: RelationshipPattern,
-    pub node: NodePattern,
+pub(crate) enum PatternStep {
+    Edge {
+        relationship: RelationshipPattern,
+        node: NodePattern,
+    },
+    /// A quantified path pattern, followed by the node it ends at. Where the query writes no
+    /// node there, the node is anonymous.
+    Group {
+        group: Box<QuantifiedPattern>,
+        node: NodePattern,
+    },
+}
+
+#[cfg(test)]
+impl PatternStep {
+    pub(crate) fn edge(&self) -> Option<(&RelationshipPattern, &NodePattern)> {
+        match self {
+            Self::Edge { relationship, node } => Some((relationship, node)),
+            Self::Group { .. } => None,
+        }
+    }
+}
+
+/// `(element WHERE filter){min,max}`, whose first node joins the node before it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct QuantifiedPattern {
+    pub element: PatternElement,
+    pub filter: Option<Expr>,
+    pub min: u64,
+    pub max: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -249,6 +306,16 @@ pub(crate) struct NodePattern {
     /// `None` accepts any node.
     pub labels: Option<LabelExpr>,
     pub properties: Option<Properties>,
+}
+
+impl NodePattern {
+    pub(crate) fn anonymous() -> Self {
+        Self {
+            variable: None,
+            labels: None,
+            properties: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

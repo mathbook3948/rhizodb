@@ -5,7 +5,10 @@ use crate::gql::ast::Length;
 use crate::gql::ast::Literal;
 use crate::gql::ast::Name;
 use crate::gql::ast::NodePattern;
+use crate::gql::ast::PathMode;
+use crate::gql::ast::PathSelector;
 use crate::gql::ast::PatternPart;
+use crate::gql::ast::PatternStep;
 use crate::gql::ast::Properties;
 use crate::gql::ast::RelationshipPattern;
 use crate::gql::error::SyntaxErrorKind;
@@ -46,7 +49,7 @@ fn only_part(source: &str) -> PatternPart {
 fn only_relationship(source: &str) -> RelationshipPattern {
     let mut part = only_part(source);
     assert_eq!(part.element.steps.len(), 1, "{source}");
-    part.element.steps.remove(0).relationship
+    part.element.steps.remove(0).edge().unwrap().0.clone()
 }
 
 #[test]
@@ -211,7 +214,7 @@ fn chains_keep_every_step_in_order() {
         .element
         .steps
         .iter()
-        .map(|s| s.relationship.direction)
+        .map(|s| s.edge().unwrap().0.direction)
         .collect();
     assert_eq!(
         directions,
@@ -221,7 +224,7 @@ fn chains_keep_every_step_in_order() {
         .element
         .steps
         .iter()
-        .map(|s| s.node.labels.clone())
+        .map(|s| s.edge().unwrap().1.labels.clone())
         .collect();
     assert_eq!(found, vec![labels(&["B"]), None, None]);
 }
@@ -236,11 +239,136 @@ fn comma_separated_patterns_and_named_paths() {
 }
 
 #[test]
-fn shortest_path_is_reported_as_unsupported() {
-    assert_eq!(
-        error("MATCH p = shortestPath((a)-[*]-(b)) RETURN p"),
-        (10, SyntaxErrorKind::UnsupportedFeature)
-    );
+fn path_search_prefixes_name_a_selector_and_a_mode() {
+    for (source, selector, mode) in [
+        (
+            "ANY SHORTEST (a)-->(b)",
+            Some(PathSelector::AnyShortest),
+            None,
+        ),
+        (
+            "ALL SHORTEST TRAIL (a)-->(b)",
+            Some(PathSelector::AllShortest),
+            Some(PathMode::Trail),
+        ),
+        ("ANY (a)-->(b)", Some(PathSelector::Any(1)), None),
+        (
+            "ANY 3 ACYCLIC PATHS (a)-->(b)",
+            Some(PathSelector::Any(3)),
+            Some(PathMode::Acyclic),
+        ),
+        (
+            "SHORTEST 2 (a)-->(b)",
+            Some(PathSelector::Shortest(2)),
+            None,
+        ),
+        (
+            "SHORTEST 2 SIMPLE PATH GROUPS (a)-->(b)",
+            Some(PathSelector::ShortestGroups(2)),
+            Some(PathMode::Simple),
+        ),
+        (
+            "SHORTEST GROUP (a)-->(b)",
+            Some(PathSelector::ShortestGroups(1)),
+            None,
+        ),
+        (
+            "ALL WALK (a)-->(b)",
+            Some(PathSelector::All),
+            Some(PathMode::Walk),
+        ),
+        ("TRAIL PATHS (a)-->(b)", None, Some(PathMode::Trail)),
+        (
+            "any shortest (a)-->(b)",
+            Some(PathSelector::AnyShortest),
+            None,
+        ),
+    ] {
+        let search = only_part(source).search.unwrap();
+        assert_eq!(
+            (search.selector, search.mode, search.cypher),
+            (selector, mode, false),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn cypher_shortest_path_functions_read_as_selectors() {
+    for (source, selector) in [
+        ("p = shortestPath((a)-[*]-(b))", PathSelector::AnyShortest),
+        ("allShortestPaths((a)-[*]-(b))", PathSelector::AllShortest),
+    ] {
+        let part = only_part(source);
+        let search = part.search.unwrap();
+        assert_eq!(
+            (search.selector, search.cypher),
+            (Some(selector), true),
+            "{source}"
+        );
+        assert_eq!(part.element.steps.len(), 1, "{source}");
+    }
+}
+
+#[test]
+fn quantifiers_bound_edges_and_groups() {
+    for (source, min, max) in [
+        ("(a)-[:T]->{2,5}(b)", 2, Some(5)),
+        ("(a)-[:T]->{3}(b)", 3, Some(3)),
+        ("(a)->{,4}(b)", 0, Some(4)),
+        ("(a)-->{1,}(b)", 1, None),
+        ("(a)-->+(b)", 1, None),
+        ("(a)-->*(b)", 0, None),
+    ] {
+        let length = only_relationship(source).length.unwrap();
+        assert_eq!((length.min, length.max), (Some(min), max), "{source}");
+    }
+    let part = only_part("(a)((x)-[r]->(y) WHERE r.w > 1){1,3}(b)");
+    let [PatternStep::Group { group, node }] = part.element.steps.as_slice() else {
+        panic!("expected one group, got {:?}", part.element.steps);
+    };
+    assert_eq!((group.min, group.max), (1, Some(3)));
+    assert!(group.filter.is_some());
+    assert_eq!(group.element.steps.len(), 1);
+    assert_eq!(node.variable, Some(name("b")));
+    let part = only_part("((x)-->(y))+");
+    assert_eq!(part.element.start, NodePattern::anonymous());
+    let [PatternStep::Group { node, .. }] = part.element.steps.as_slice() else {
+        panic!("expected one group, got {:?}", part.element.steps);
+    };
+    assert_eq!(*node, NodePattern::anonymous());
+}
+
+#[test]
+fn malformed_quantifiers_are_rejected() {
+    for (source, kind) in [
+        (
+            "MATCH (a)-->{3,1}(b) RETURN a",
+            SyntaxErrorKind::InvalidRelationshipPattern,
+        ),
+        (
+            "MATCH (a)-->{}(b) RETURN a",
+            SyntaxErrorKind::InvalidRelationshipPattern,
+        ),
+        (
+            "MATCH (a)-[*2]->{1,3}(b) RETURN a",
+            SyntaxErrorKind::InvalidRelationshipPattern,
+        ),
+        (
+            "MATCH (a)((x)-->(y))(b) RETURN a",
+            SyntaxErrorKind::UnsupportedFeature,
+        ),
+        (
+            "MATCH (a)((x)((u)-->(v))+(y))+(b) RETURN a",
+            SyntaxErrorKind::UnsupportedFeature,
+        ),
+        (
+            "MATCH SHORTEST (a)-->(b) RETURN a",
+            SyntaxErrorKind::UnexpectedToken,
+        ),
+    ] {
+        assert_eq!(error(source).1, kind, "{source}");
+    }
 }
 
 #[test]

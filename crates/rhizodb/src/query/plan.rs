@@ -175,6 +175,95 @@ pub(crate) struct PatternPart {
     pub(crate) steps: Vec<Step>,
     /// Ways to find the start nodes without reading every node of the label, tried in order.
     pub(crate) seeks: Vec<Seek>,
+    /// Set when the path search matches the part, which then has no `steps`.
+    pub(crate) search: Option<Box<PathSearch>>,
+}
+
+impl PatternPart {
+    /// Whether the part is a single node pattern.
+    pub(crate) fn node_only(&self) -> bool {
+        self.steps.is_empty() && self.search.is_none()
+    }
+}
+
+/// A pattern part matched path by path: one with a selector, a path mode, or a quantified
+/// path pattern.
+#[derive(Clone, Debug)]
+pub(crate) struct PathSearch {
+    pub(crate) selector: Selector,
+    pub(crate) mode: PathMode,
+    /// Whether the relationships of each path stay apart from those of the other parts of the
+    /// match, as Cypher's rule for a whole match asks.
+    pub(crate) apart: bool,
+    pub(crate) segments: Vec<Segment>,
+    /// The condition each whole path meets before the selector chooses among them.
+    pub(crate) filter: Option<Expr>,
+    /// The end node pattern as a part of its own, with the seeks that find the end nodes.
+    pub(crate) target: Option<Box<PatternPart>>,
+}
+
+impl PathSearch {
+    /// The node pattern the path ends at.
+    pub(crate) fn end(&self) -> Option<&NodePattern> {
+        self.segments.last().map(Segment::node)
+    }
+}
+
+/// Which matches of a path pattern are kept, among those with the same end nodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Selector {
+    All,
+    /// That many shortest paths.
+    Paths(u64),
+    /// Every path of that many shortest lengths.
+    Groups(u64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathMode {
+    Walk,
+    Trail,
+    Simple,
+    Acyclic,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum Segment {
+    Hop(Box<Step>),
+    Group(Box<Group>),
+}
+
+impl Segment {
+    pub(crate) fn node(&self) -> &NodePattern {
+        match self {
+            Self::Hop(step) => &step.node,
+            Self::Group(group) => &group.exit,
+        }
+    }
+}
+
+/// A quantified path pattern. Each iteration starts at a node that `entry` matches and goes
+/// through `hops`, and the node after the last iteration matches `exit`. The slots of `entry`
+/// and `hops` hold the elements of the iteration that `filter` tests.
+#[derive(Clone, Debug)]
+pub(crate) struct Group {
+    pub(crate) entry: NodePattern,
+    pub(crate) hops: Vec<Step>,
+    pub(crate) filter: Option<Expr>,
+    pub(crate) min: u64,
+    pub(crate) max: Option<u64>,
+    pub(crate) exit: NodePattern,
+    /// The list slot of each group variable, and which element of an iteration it collects.
+    pub(crate) lists: Vec<(Member, Slot)>,
+}
+
+/// An element of one iteration of a group: its first node, or the relationship or the node of
+/// one of its hops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Member {
+    Entry,
+    Relationship(usize),
+    Node(usize),
 }
 
 /// Conditions that every match puts on one value of the start node or of the first

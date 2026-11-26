@@ -10,6 +10,7 @@ mod functions;
 mod keys;
 mod matcher;
 mod parallel;
+mod paths;
 mod plan;
 mod regex;
 mod scalars;
