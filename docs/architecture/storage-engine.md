@@ -61,6 +61,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - The database file is made of 4096-byte blocks.
 - Blocks 0 and 1 of the database file are two header slots, written in turn, and the valid slot of the higher generation describes the database.
 - A header slot of a generation of the other slot's parity is invalid.
+- A header slot whose generation, LSNs, first log segment, or extent counter is 2^63 or more is invalid, so no increment of one overflows.
 - A header slot of another major engine format, a newer minor one, or with an unknown flag refuses the file instead of falling back to the other slot.
 - An extent is 1024 blocks, and extent slot n starts at block 2 + 1024 n.
 - A block reference holds the extent id in its high 44 bits and the block inside the extent in its low 20, and zero refers to nothing.
