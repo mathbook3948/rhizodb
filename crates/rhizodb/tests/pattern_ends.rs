@@ -112,3 +112,28 @@ fn a_filter_tested_while_matching_keeps_the_rows_of_the_filter_tested_after() {
     );
     assert!(rows.is_err());
 }
+
+#[test]
+fn a_query_reads_the_relationships_and_properties_it_wrote_itself() {
+    let db = graph();
+    let rows = run(
+        &db,
+        "UNWIND range(1, 4) AS i CALL (i) { MATCH (a:N {k: 1})-[:T]->(x) WITH a, i, count(x) AS n CREATE (a)-[:T]->(:N {k: 10 + i}) RETURN n } RETURN i, n ORDER BY i",
+    );
+    let counts: Vec<i64> = rows
+        .iter()
+        .map(|row| match row.as_slice() {
+            [_, Value::Integer(n)] => *n,
+            other => panic!("expected two integers, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(counts, [2, 3, 4, 5]);
+    let rows = run(
+        &db,
+        "UNWIND range(1, 4) AS i CALL (i) { MATCH (:N {k: 1})-[r:T]->(:N {k: 2}) WITH r, r.w AS w SET r.w = w + 1 RETURN w } RETURN w ORDER BY w",
+    );
+    assert_eq!(
+        rows,
+        (1..5).map(|w| vec![Value::Integer(w)]).collect::<Vec<_>>()
+    );
+}

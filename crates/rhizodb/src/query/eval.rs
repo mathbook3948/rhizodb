@@ -39,6 +39,7 @@ use super::datum;
 use super::datum::Datum;
 use super::functions;
 use super::functions::Function;
+use super::matcher::HopMemo;
 use super::parallel::Morsel;
 use super::plan::AggregateFunction;
 use super::plan::Case;
@@ -93,6 +94,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) adjacency: RefCell<AdjacencyReader>,
     /// The relationship chunks read so far.
     pub(crate) relationships: RefCell<RelationshipReader>,
+    /// The adjacency of the nodes expanded more than once.
+    pub(crate) hops: RefCell<HopMemo>,
     /// The relationship types looked up so far that have a token.
     pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
     /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
@@ -123,6 +126,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             property_indexes: RefCell::default(),
             adjacency: RefCell::default(),
             relationships: RefCell::default(),
+            hops: RefCell::default(),
             rel_type_tokens: RefCell::default(),
             morsel: None,
         }

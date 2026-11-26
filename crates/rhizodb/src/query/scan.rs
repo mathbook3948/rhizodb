@@ -122,7 +122,7 @@ enum HopValue<'q> {
 }
 
 #[derive(Default)]
-struct IdHasher(u64);
+pub(crate) struct IdHasher(u64);
 
 impl Hasher for IdHasher {
     fn finish(&self) -> u64 {
@@ -139,12 +139,16 @@ impl Hasher for IdHasher {
         self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
     }
 
+    fn write_u32(&mut self, value: u32) {
+        self.write_u64(u64::from(value));
+    }
+
     fn write_usize(&mut self, value: usize) {
         self.write_u64(value as u64);
     }
 }
 
-type ById<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
+pub(crate) type ById<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
 
 #[cfg(not(test))]
 pub(crate) fn row_at_a_time() -> bool {

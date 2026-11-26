@@ -62,6 +62,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A pattern whose start node has no ID lookup or index starts from its end node when that node is already bound or has one, so `MATCH (q:Person)-[:LIVES_IN]->(c)` after `c` is bound, or `MATCH (:Person)-[k:KNOWS]->(h:Person {id: $id})`, reads only the relationships of that node. Grouping the oldest person of each of a hundred cities this way runs 33 times as fast on the medium benchmark graph.
 - A `MATCH` filter whose every condition is a comparison, `IS NULL`, `IN` a list, or a string test on the elements its pattern binds tests each condition as soon as the elements it reads are bound, so a traversal with a filter on every hop stops a partial match at the first hop it fails. A three-hop traversal with a filter on every hop runs twice as fast.
 - A query that reads the properties of many relationships reads each stored chunk of 32 relationships from storage once rather than once per relationship, so counting the `KNOWS` relationships of the medium benchmark graph with a filter on a relationship property runs four times as fast.
+- A query that reaches a node again over the same kind of relationship, as one that closes a cycle does, reads that node's adjacency from storage at most twice, so counting every `KNOWS` triangle of the medium benchmark graph runs three times as fast.
 
 ### Fixed
 

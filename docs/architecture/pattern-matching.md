@@ -16,6 +16,8 @@ A pattern part was always matched from its first node and its `WHERE` tested onl
 - A filter is tested early only when every condition reads only elements its pattern part binds and is a comparison, `IS NULL`, `IN` a literal list, a string test, or `AND`, `OR`, `XOR`, and `NOT` of those, so no early test can hide an error another condition would raise.
 - A query reads a relationship chunk in place the first time and holds it from the second time, so a scan reads each chunk from storage once and a traversal that touches a chunk once copies nothing.
 - A query forgets the relationship chunks it holds when it stores a relationship, and when they pass a size set in code.
+- A query holds the relationships it read at a node, by direction and type, from the second time it expands that node the same way, so a traversal that reaches a node again reads its adjacency from storage at most twice.
+- A query forgets the adjacency it holds when it changes adjacency, and when it passes a size set in code.
 
 ## Open
 

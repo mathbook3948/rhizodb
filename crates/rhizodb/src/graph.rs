@@ -329,6 +329,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             relationship_writes: 0,
+            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -381,6 +382,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             relationship_writes: 0,
+            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -411,6 +413,7 @@ pub(crate) struct GraphTx<T> {
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
     relationship_writes: u64,
+    adjacency_writes: u64,
     record_buffer: Vec<u8>,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
@@ -439,6 +442,7 @@ impl<T> GraphTx<T> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             relationship_writes: 0,
+            adjacency_writes: 0,
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
@@ -534,6 +538,12 @@ impl<T: ReadTransaction> GraphTx<T> {
                 |bytes| ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
             )?
             .flatten())
+    }
+
+    /// How many times this transaction changed adjacency, so a reader that keeps what adjacency
+    /// held knows when to forget it.
+    pub(crate) fn adjacency_writes(&self) -> u64 {
+        self.adjacency_writes
     }
 
     /// The value of property `key` of relationship `id`, as
@@ -1347,6 +1357,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     }
 
     fn adjacency_edit(&mut self, id: SegmentId) -> Result<&mut SegmentEdit, GraphError> {
+        self.adjacency_writes += 1;
         match self.adjacency.entry(id) {
             btree_map::Entry::Occupied(held) => Ok(held.into_mut()),
             btree_map::Entry::Vacant(vacant) => {

@@ -28,6 +28,7 @@ use super::plan::PatternPart;
 use super::plan::PatternQuery;
 use super::plan::RelationshipPattern;
 use super::plan::Slot;
+use super::scan::ById;
 use super::seek::Sought;
 
 /// Receives each complete match. Returning `false` stops the search.
@@ -80,7 +81,7 @@ enum Frame {
     Hop {
         index: usize,
         step_index: usize,
-        adjacents: std::vec::IntoIter<Adjacent>,
+        adjacents: Adjacents,
         extended: bool,
     },
     /// One node of a variable-length walk, which began where the trail had `base` relationships.
@@ -102,7 +103,7 @@ enum WalkState {
     Arrived,
     /// The relationships that extend the walk not tried yet.
     Expanding {
-        adjacents: std::vec::IntoIter<Adjacent>,
+        adjacents: Adjacents,
         extended: bool,
     },
 }
@@ -371,10 +372,102 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(())
     }
 
-    fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Vec<Adjacent>, Error> {
+    fn expand(&self, node: NodeId, pattern: &RelationshipPattern) -> Result<Adjacents, Error> {
+        let read = self.hop_read(pattern)?;
+        let HopRead::Stored(direction, rel_type) = read else {
+            let mut found = Vec::new();
+            self.hop_into(node, pattern, read, &mut found)?;
+            return Ok(Adjacents::Owned(found.into_iter()));
+        };
+        let key = (node, direction, rel_type);
+        let Ok(mut memo) = self.hops.try_borrow_mut() else {
+            let mut found = Vec::new();
+            self.hop_into(node, pattern, read, &mut found)?;
+            return Ok(Adjacents::Owned(found.into_iter()));
+        };
+        memo.follow(self.tx.adjacency_writes());
+        match memo.held.get(&key) {
+            Some(Some(shared)) => return Ok(Adjacents::Shared(Arc::clone(shared), 0)),
+            Some(None) => {}
+            None => {
+                memo.held.insert(key, None);
+                drop(memo);
+                let mut found = Vec::new();
+                self.hop_into(node, pattern, read, &mut found)?;
+                return Ok(Adjacents::Owned(found.into_iter()));
+            }
+        }
+        drop(memo);
         let mut found = Vec::new();
-        self.hop_into(node, pattern, self.hop_read(pattern)?, &mut found)?;
-        Ok(found)
+        self.hop_into(node, pattern, read, &mut found)?;
+        let shared = Arc::new(found);
+        if let Ok(mut memo) = self.hops.try_borrow_mut() {
+            memo.hold(key, Arc::clone(&shared));
+        }
+        Ok(Adjacents::Shared(shared, 0))
+    }
+}
+
+const HELD_ADJACENTS: usize = 1 << 20;
+
+type HopKey = (
+    NodeId,
+    graph::Direction,
+    Option<Token<graph::RelationshipType>>,
+);
+
+/// The relationships a query read at nodes it expanded more than once, so a traversal that
+/// reaches a node again, as one that closes a cycle does, reads its adjacency from storage at
+/// most twice. It forgets them all once it holds `HELD_ADJACENTS`, and whenever the
+/// transaction changed adjacency since it read them.
+#[derive(Debug, Default)]
+pub(crate) struct HopMemo {
+    held: ById<HopKey, Option<Arc<Vec<Adjacent>>>>,
+    adjacents: usize,
+    writes: u64,
+}
+
+impl HopMemo {
+    fn follow(&mut self, writes: u64) {
+        if self.writes != writes {
+            self.forget();
+            self.writes = writes;
+        }
+    }
+
+    fn forget(&mut self) {
+        self.held.clear();
+        self.adjacents = 0;
+    }
+
+    fn hold(&mut self, key: HopKey, adjacents: Arc<Vec<Adjacent>>) {
+        if self.adjacents + adjacents.len() > HELD_ADJACENTS {
+            self.forget();
+        }
+        self.adjacents += adjacents.len();
+        self.held.insert(key, Some(adjacents));
+    }
+}
+
+/// The relationships at a node that a hop has yet to try.
+#[derive(Debug)]
+pub(crate) enum Adjacents {
+    Owned(std::vec::IntoIter<Adjacent>),
+    Shared(Arc<Vec<Adjacent>>, usize),
+}
+
+impl Iterator for Adjacents {
+    type Item = Adjacent;
+
+    fn next(&mut self) -> Option<Adjacent> {
+        match self {
+            Self::Owned(adjacents) => adjacents.next(),
+            Self::Shared(adjacents, at) => {
+                let adjacent = adjacents.get(*at).copied();
+                *at += 1;
+                adjacent
+            }
+        }
     }
 }
 
@@ -513,7 +606,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                                 let relationship =
                                     &self.oriented[index].steps[step_index].relationship;
                                 *state = WalkState::Expanding {
-                                    adjacents: self.env.expand(node, relationship)?.into_iter(),
+                                    adjacents: self.env.expand(node, relationship)?,
                                     extended: false,
                                 };
                             }
@@ -621,7 +714,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             None => Frame::Hop {
                 index,
                 step_index,
-                adjacents: self.env.expand(current, &step.relationship)?.into_iter(),
+                adjacents: self.env.expand(current, &step.relationship)?,
                 extended: false,
             },
             Some(hops) => Frame::Walk {
@@ -640,7 +733,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         &self,
         index: usize,
         step_index: usize,
-        adjacents: &mut std::vec::IntoIter<Adjacent>,
+        adjacents: &mut Adjacents,
         row: &mut Row,
     ) -> Result<Option<Adjacent>, Error> {
         let relationship = &self.oriented[index].steps[step_index].relationship;
@@ -676,7 +769,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         &self,
         index: usize,
         step_index: usize,
-        adjacents: &mut std::vec::IntoIter<Adjacent>,
+        adjacents: &mut Adjacents,
         row: &Row,
     ) -> Result<Option<Adjacent>, Error> {
         let relationship = &self.oriented[index].steps[step_index].relationship;
