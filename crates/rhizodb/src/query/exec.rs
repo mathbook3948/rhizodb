@@ -677,35 +677,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             emitted = true;
             emit(matched)
         };
-        let sought = found.by_id.as_deref().and_then(|by_id| {
-            let value = self.eval(&by_id.value, &row).ok()?;
-            Some((by_id, value))
-        });
-        let more = match sought {
-            Some((by_id, value)) => match (seek::id(&value), by_id.clause.patterns.as_slice()) {
-                (Some(id), [part]) => {
-                    let id = NodeId(id);
-                    set(&mut row, part.start.slot, Datum::Node(id));
-                    if part.steps.is_empty()
-                        && part.path.is_none()
-                        && part.start.labels.is_none()
-                        && part.start.properties.is_none()
-                    {
-                        let kept = self.with_labels(id, |_| ())?.is_some()
-                            && match &by_id.clause.filter {
-                                Some(filter) => self.predicate(filter, &row)?,
-                                None => true,
-                            };
-                        if kept {
-                            return counted(&row);
-                        }
-                        true
-                    } else {
-                        self.match_filtered(&by_id.clause, &row, &mut counted)?
-                    }
-                }
-                _ => true,
-            },
+        let more = match self.match_by_id(found, &mut row, &mut counted)? {
+            Some(more) => more,
             None => self.match_filtered(found, &row, &mut counted)?,
         };
         if found.optional && !emitted {
@@ -715,6 +688,44 @@ impl<T: ReadTransaction> Env<'_, T> {
             return emit(&row);
         }
         Ok(more)
+    }
+
+    /// [`Env::match_row`] through the ID lookup of `found`, or `None` when it has none or its
+    /// value fails, so the patterns of `found` match as written.
+    #[inline(never)]
+    pub(crate) fn match_by_id(
+        &self,
+        found: &MatchClause,
+        row: &mut Row,
+        emit: &mut Emit<'_>,
+    ) -> Result<Option<bool>, Error> {
+        let Some(by_id) = found.by_id.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(value) = self.eval(&by_id.value, row) else {
+            return Ok(None);
+        };
+        let (Some(id), [part]) = (seek::id(&value), by_id.clause.patterns.as_slice()) else {
+            return Ok(Some(true));
+        };
+        let id = NodeId(id);
+        set(row, part.start.slot, Datum::Node(id));
+        if part.steps.is_empty()
+            && part.path.is_none()
+            && part.start.labels.is_none()
+            && part.start.properties.is_none()
+        {
+            let kept = self.with_labels(id, |_| ())?.is_some()
+                && match &by_id.clause.filter {
+                    Some(filter) => self.predicate(filter, row)?,
+                    None => true,
+                };
+            if kept {
+                return emit(row).map(Some);
+            }
+            return Ok(Some(true));
+        }
+        self.match_filtered(&by_id.clause, row, emit).map(Some)
     }
 
     fn match_filtered(

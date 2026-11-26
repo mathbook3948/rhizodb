@@ -13,6 +13,8 @@ use super::eval::set;
 use super::functions::Function;
 use super::functions::range_items;
 use super::keys::KeySet;
+use super::plan::CallClause;
+use super::plan::CallSubquery;
 use super::plan::Clause;
 use super::plan::Expr;
 use super::plan::Items;
@@ -164,24 +166,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         rows: &[Row],
         sink: &mut dyn FnMut(Row, bool) -> Result<bool, Error>,
     ) -> Result<Streamed, Error> {
-        let single = rows.len() == 1;
-        let sure = Sure::new(self, clauses);
-        let settled = self.settled(&sure, clauses, single);
-        let exact = exact(clauses, &settled);
+        let Some((stages, exact)) = self.stages(clauses, rows.len() == 1) else {
+            return Ok(Streamed::Redo);
+        };
         let may_stop = exact.last() == Some(&true);
-        let mut stages = Vec::with_capacity(clauses.len());
-        for (at, clause) in clauses.iter().enumerate() {
-            match self.stage(&sure, clause, exact[at]) {
-                Ok(stage) => stages.push(stage),
-                Err(_) => return Ok(Streamed::Redo),
-            }
-        }
-        if stages
-            .iter()
-            .any(|stage| matches!(&stage.state, State::Plain(plain) if plain.stops))
-        {
-            self.stopping_at_limit();
-        }
         let mut sink = |row| sink(row, may_stop);
         let mut stream = Stream {
             env: self,
@@ -197,6 +185,32 @@ impl<T: ReadTransaction> Env<'_, T> {
                 _ => Ok(Streamed::Redo),
             },
         }
+    }
+
+    /// The stages of a streamed run of `clauses` and, per stage, whether an error it raises is
+    /// exact. `None` when a stage cannot start, as when its `LIMIT` fails, so the clauses run in
+    /// turn instead. Kept out of [`Env::each_row`], whose frame stays on the stack while a
+    /// subquery nested in the run's expressions runs.
+    #[inline(never)]
+    pub(crate) fn stages<'c>(
+        &self,
+        clauses: &[&'c ReadClause],
+        single: bool,
+    ) -> Option<(Vec<Stage<'c>>, Vec<bool>)> {
+        let sure = Sure::new(self, clauses);
+        let settled = self.settled(&sure, clauses, single);
+        let exact = exact(clauses, &settled);
+        let mut stages = Vec::with_capacity(clauses.len());
+        for (at, clause) in clauses.iter().enumerate() {
+            stages.push(self.stage(&sure, clause, exact[at]).ok()?);
+        }
+        if stages
+            .iter()
+            .any(|stage| matches!(&stage.state, State::Plain(plain) if plain.stops))
+        {
+            self.stopping_at_limit();
+        }
+        Some((stages, exact))
     }
 
     fn stage<'c>(
@@ -301,6 +315,19 @@ pub(crate) fn breaks(clause: &ReadClause) -> bool {
 
 impl<T: ReadTransaction> Stream<'_, '_, T> {
     fn run(&mut self, rows: &[Row]) -> Result<(), Error> {
+        if self.scan_first(rows)? {
+            return self.finish();
+        }
+        for row in rows {
+            if !self.push(0, Cow::Borrowed(row))? {
+                break;
+            }
+        }
+        self.finish()
+    }
+
+    #[inline(never)]
+    fn scan_first(&mut self, rows: &[Row]) -> Result<bool, Error> {
         if let Some(Stage {
             clause: ReadClause::Match(found),
             state: State::Match { scans: true },
@@ -312,7 +339,7 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
                 let scanned =
                     env.scan_rows(scan, found, rows, &mut |row| self.push(1, Cow::Owned(row)));
                 match scanned {
-                    Ok(Some(_)) => return self.finish(),
+                    Ok(Some(_)) => return Ok(true),
                     Ok(None) => self.stages[0].state = State::Match { scans: false },
                     Err(error) => {
                         self.fail(0);
@@ -321,12 +348,7 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
                 }
             }
         }
-        for row in rows {
-            if !self.push(0, Cow::Borrowed(row))? {
-                break;
-            }
-        }
-        self.finish()
+        Ok(false)
     }
 
     fn fail(&mut self, at: usize) {
@@ -376,87 +398,138 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
     }
 
     fn step(&mut self, at: usize, row: Cow<'_, Row>) -> Result<bool, Error> {
-        let Some(stage) = self.stages.get_mut(at) else {
+        let Some(stage) = self.stages.get(at) else {
             return (self.sink)(row.into_owned());
         };
-        let clause = stage.clause;
-        let env = self.env;
-        let scans = matches!(stage.state, State::Match { scans: true });
-        match clause {
-            ReadClause::Match(found) => {
-                if scans && let Some(scan) = env.node_scan(found)? {
-                    let mut emit = |row| self.push(at + 1, Cow::Owned(row));
-                    if let Some(more) =
-                        env.scan_rows(scan, found, std::slice::from_ref(&row), &mut emit)?
-                    {
-                        return Ok(more);
-                    }
-                    self.stages[at].state = State::Match { scans: false };
-                }
-                env.match_row(found, row.into_owned(), &mut |matched| {
-                    self.push(at + 1, Cow::Owned(matched.clone()))
-                })
-            }
-            ReadClause::Unwind { expr, slot } => {
-                if let Expr::Call(Function::Range, args) = expr {
-                    let args = args
-                        .iter()
-                        .map(|arg| env.eval(arg, &row))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for item in range_items(args, env.limits)?.into_iter().flatten() {
-                        let mut next = row.clone().into_owned();
-                        set(&mut next, *slot, Datum::Integer(item));
-                        if !self.push(at + 1, Cow::Owned(next))? {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
-                }
-                let items = match env.eval(expr, &row)? {
-                    Datum::Null => Arc::default(),
-                    Datum::List(items) => items,
-                    other => Arc::new(vec![other].into()),
-                };
-                for item in items.iter() {
-                    let mut next = row.clone().into_owned();
-                    set(&mut next, *slot, item.clone());
-                    if !self.push(at + 1, Cow::Owned(next))? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-            ReadClause::Filter(condition) => {
-                if env.predicate(condition, &row)? {
-                    return self.push(at + 1, row);
-                }
-                Ok(true)
-            }
-            ReadClause::Let(bindings) => {
-                let mut row = row.into_owned();
-                for (expr, slot) in bindings {
-                    let value = env.eval(expr, &row)?;
-                    set(&mut row, *slot, value);
-                }
-                self.push(at + 1, Cow::Owned(row))
-            }
-            ReadClause::Call(call) => env.call_row(call, row.into_owned(), &mut |next| {
-                self.push(at + 1, Cow::Owned(next))
-            }),
-            ReadClause::CallSubquery(call) => {
-                let mut out = Vec::new();
-                env.subquery_row(call, row.into_owned(), &mut out)?;
-                for next in out {
-                    if !self.push(at + 1, Cow::Owned(next))? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
+        match stage.clause {
+            ReadClause::Match(found) => self.found(at, found, row),
+            ReadClause::Unwind { expr, slot } => self.unwind(at, expr, *slot, row),
+            ReadClause::Filter(condition) => self.filter(at, condition, row),
+            ReadClause::Let(bindings) => self.bind(at, bindings, row),
+            ReadClause::Call(call) => self.call(at, call, row),
+            ReadClause::CallSubquery(call) => self.call_subquery(at, call, row),
             ReadClause::Project(projection) => self.project(at, projection, row),
         }
     }
 
+    #[inline(never)]
+    fn found(&mut self, at: usize, found: &MatchClause, row: Cow<'_, Row>) -> Result<bool, Error> {
+        if matches!(self.stages[at].state, State::Match { scans: true })
+            && let Some(more) = self.scanned(at, found, &row)?
+        {
+            return Ok(more);
+        }
+        let env = self.env;
+        env.match_row(found, row.into_owned(), &mut |matched| {
+            self.push(at + 1, Cow::Owned(matched.clone()))
+        })
+    }
+
+    #[inline(never)]
+    fn scanned(
+        &mut self,
+        at: usize,
+        found: &MatchClause,
+        row: &Row,
+    ) -> Result<Option<bool>, Error> {
+        let env = self.env;
+        if let Some(scan) = env.node_scan(found)? {
+            let mut emit = |row| self.push(at + 1, Cow::Owned(row));
+            if let Some(more) = env.scan_rows(scan, found, std::slice::from_ref(row), &mut emit)? {
+                return Ok(Some(more));
+            }
+        }
+        self.stages[at].state = State::Match { scans: false };
+        Ok(None)
+    }
+
+    #[inline(never)]
+    fn unwind(
+        &mut self,
+        at: usize,
+        expr: &Expr,
+        slot: Slot,
+        row: Cow<'_, Row>,
+    ) -> Result<bool, Error> {
+        let env = self.env;
+        if let Expr::Call(Function::Range, args) = expr {
+            let args = args
+                .iter()
+                .map(|arg| env.eval(arg, &row))
+                .collect::<Result<Vec<_>, _>>()?;
+            for item in range_items(args, env.limits)?.into_iter().flatten() {
+                let mut next = row.clone().into_owned();
+                set(&mut next, slot, Datum::Integer(item));
+                if !self.push(at + 1, Cow::Owned(next))? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        let items = match env.eval(expr, &row)? {
+            Datum::Null => Arc::default(),
+            Datum::List(items) => items,
+            other => Arc::new(vec![other].into()),
+        };
+        for item in items.iter() {
+            let mut next = row.clone().into_owned();
+            set(&mut next, slot, item.clone());
+            if !self.push(at + 1, Cow::Owned(next))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    #[inline(never)]
+    fn filter(&mut self, at: usize, condition: &Expr, row: Cow<'_, Row>) -> Result<bool, Error> {
+        if self.env.predicate(condition, &row)? {
+            return self.push(at + 1, row);
+        }
+        Ok(true)
+    }
+
+    #[inline(never)]
+    fn bind(
+        &mut self,
+        at: usize,
+        bindings: &[(Expr, Slot)],
+        row: Cow<'_, Row>,
+    ) -> Result<bool, Error> {
+        let mut row = row.into_owned();
+        for (expr, slot) in bindings {
+            let value = self.env.eval(expr, &row)?;
+            set(&mut row, *slot, value);
+        }
+        self.push(at + 1, Cow::Owned(row))
+    }
+
+    #[inline(never)]
+    fn call(&mut self, at: usize, call: &CallClause, row: Cow<'_, Row>) -> Result<bool, Error> {
+        let env = self.env;
+        env.call_row(call, row.into_owned(), &mut |next| {
+            self.push(at + 1, Cow::Owned(next))
+        })
+    }
+
+    #[inline(never)]
+    fn call_subquery(
+        &mut self,
+        at: usize,
+        call: &CallSubquery<ReadClause>,
+        row: Cow<'_, Row>,
+    ) -> Result<bool, Error> {
+        let mut out = Vec::new();
+        self.env.subquery_row(call, row.into_owned(), &mut out)?;
+        for next in out {
+            if !self.push(at + 1, Cow::Owned(next))? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    #[inline(never)]
     fn project(
         &mut self,
         at: usize,

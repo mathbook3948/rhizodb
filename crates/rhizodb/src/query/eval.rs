@@ -956,45 +956,69 @@ impl<T: ReadTransaction> Env<'_, T> {
         clauses: &[ReadClause],
         row: &Row,
     ) -> Result<(Datum, Taint), Error> {
+        let (count, kept) = self.subquery_rows(kind, clauses, row)?;
+        Ok((self.subquery_value(kind, count, kept)?, Taint::Clean))
+    }
+
+    /// How many rows the subquery `clauses` gives from `row`, with the values `kind` keeps of
+    /// them. It streams the rows where it can, and `EXISTS` stops at the first one when no
+    /// later row could fail. Each nested subquery leaves this frame on the stack, so the work
+    /// before and after the rows is kept out of it.
+    #[inline(never)]
+    pub(crate) fn subquery_rows(
+        &self,
+        kind: SubqueryKind,
+        clauses: &[ReadClause],
+        row: &Row,
+    ) -> Result<(usize, Vec<Datum>), Error> {
         let clauses: Vec<&ReadClause> = clauses.iter().collect();
         let mut count = 0usize;
         let mut kept = Vec::new();
-        let take = |kept: &mut Vec<Datum>, mut row: Row, count: usize| {
-            let slot = match kind {
-                SubqueryKind::Collect(slot) => slot,
-                SubqueryKind::Value(slot) if count == 1 => slot,
-                _ => return,
-            };
-            kept.push(
-                row.get_mut(slot)
-                    .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null)),
-            );
-        };
-        let streamed = self.streams()
+        if self.streams()
             && !clauses
                 .iter()
                 .any(|clause| matches!(clause, ReadClause::CallSubquery(call) if call.table))
-            && matches!(
-                self.each_row(
-                    &clauses,
-                    std::slice::from_ref(row),
-                    &mut |next, may_stop| {
-                        count += 1;
-                        take(&mut kept, next, count);
-                        Ok(!(may_stop && matches!(kind, SubqueryKind::Exists)))
-                    }
-                )?,
-                Streamed::Done
-            );
-        if !streamed {
-            kept.clear();
-            count = 0;
-            for next in self.in_turn(&clauses, vec![row.clone()])? {
-                count += 1;
-                take(&mut kept, next, count);
-            }
+            && let Streamed::Done = self.each_row(
+                &clauses,
+                std::slice::from_ref(row),
+                &mut |next, may_stop| {
+                    count += 1;
+                    keep(kind, &mut kept, next, count);
+                    Ok(!(may_stop && matches!(kind, SubqueryKind::Exists)))
+                },
+            )?
+        {
+            return Ok((count, kept));
         }
-        let value = match kind {
+        self.subquery_in_turn(kind, &clauses, row)
+    }
+
+    /// [`Env::subquery_rows`] with each clause applied to every row in turn.
+    #[inline(never)]
+    pub(crate) fn subquery_in_turn(
+        &self,
+        kind: SubqueryKind,
+        clauses: &[&ReadClause],
+        row: &Row,
+    ) -> Result<(usize, Vec<Datum>), Error> {
+        let mut count = 0usize;
+        let mut kept = Vec::new();
+        for next in self.in_turn(clauses, vec![row.clone()])? {
+            count += 1;
+            keep(kind, &mut kept, next, count);
+        }
+        Ok((count, kept))
+    }
+
+    /// The value of a subquery of `kind` that gave `count` rows and kept `kept` of them.
+    #[inline(never)]
+    pub(crate) fn subquery_value(
+        &self,
+        kind: SubqueryKind,
+        count: usize,
+        kept: Vec<Datum>,
+    ) -> Result<Datum, Error> {
+        Ok(match kind {
             SubqueryKind::Exists => Datum::Boolean(count > 0),
             SubqueryKind::Count => Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)),
             SubqueryKind::Collect(_) => self.limits.list(kept)?,
@@ -1004,9 +1028,8 @@ impl<T: ReadTransaction> Env<'_, T> {
                     format!("a VALUE subquery returned {count} rows"),
                 ));
             }
-            SubqueryKind::Value(_) => kept.pop().unwrap_or(Datum::Null),
-        };
-        Ok((value, Taint::Clean))
+            SubqueryKind::Value(_) => kept.into_iter().next().unwrap_or(Datum::Null),
+        })
     }
 
     fn reduce(&self, reduce: &Reduce, row: &Row) -> Result<(Datum, Taint), Error> {
@@ -1442,4 +1465,18 @@ fn float_arithmetic(op: BinaryOp, a: f64, b: f64) -> Datum {
         BinaryOp::Modulo => a % b,
         _ => a.powf(b),
     })
+}
+
+/// Keeps the value of `row` that a subquery of `kind` returns, given that `row` is its
+/// `count`th row.
+pub(crate) fn keep(kind: SubqueryKind, kept: &mut Vec<Datum>, mut row: Row, count: usize) {
+    let slot = match kind {
+        SubqueryKind::Collect(slot) => slot,
+        SubqueryKind::Value(slot) if count == 1 => slot,
+        _ => return,
+    };
+    kept.push(
+        row.get_mut(slot)
+            .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null)),
+    );
 }
