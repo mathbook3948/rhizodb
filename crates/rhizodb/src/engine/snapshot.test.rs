@@ -527,7 +527,7 @@ fn an_export_keeps_the_log_after_its_position_until_it_is_dropped() {
 #[test]
 fn an_export_keeps_its_log_past_the_peer_cap_until_its_time_limit_releases_it() {
     let options = EngineOptions {
-        pin_limit: std::time::Duration::from_millis(300),
+        pin_limit: std::time::Duration::from_secs(3600),
         ..retaining(0)
     };
     let engine = open(&SimFs::new(), SOURCE, options).unwrap();
@@ -546,7 +546,7 @@ fn an_export_keeps_its_log_past_the_peer_cap_until_its_time_limit_releases_it() 
         "the peer cap released an export"
     );
     assert!(engine.stats().unwrap().held_bytes > 0);
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    engine.advance_clock(std::time::Duration::from_secs(3601));
     for number in 201..=300 {
         small_commit(&engine, number);
     }

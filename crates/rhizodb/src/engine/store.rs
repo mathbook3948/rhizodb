@@ -252,6 +252,8 @@ struct Shared<F: FileSystem> {
     log_first: AtomicU64,
     retention: Mutex<Retention>,
     compaction_due: AtomicBool,
+    #[cfg(test)]
+    clock_ahead: Mutex<Duration>,
 }
 
 #[derive(Debug, Default)]
@@ -914,6 +916,8 @@ impl<F: FileSystem + 'static> Engine<F> {
                 ..Retention::default()
             }),
             compaction_due: AtomicBool::new(false),
+            #[cfg(test)]
+            clock_ahead: Mutex::new(Duration::ZERO),
         });
         if recovered {
             make_recovery_durable(&shared, &fs, name)?;
@@ -1220,7 +1224,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 Pin {
                     tree: Arc::clone(&durable.tree),
                     lsn: header.checkpoint_lsn,
-                    deadline: Instant::now() + shared.options.pin_limit,
+                    deadline: shared.now() + shared.options.pin_limit,
                 },
             );
             id
@@ -1233,6 +1237,12 @@ impl<F: FileSystem + 'static> Engine<F> {
             header,
             extents,
         })
+    }
+
+    #[cfg(test)]
+    /// Moves the clock that snapshot time limits read forward by `by`.
+    pub(crate) fn advance_clock(&self, by: Duration) {
+        *lock(&self.shared.clock_ahead) += by;
     }
 
     #[cfg(test)]
@@ -1303,7 +1313,7 @@ impl<F: FileSystem + 'static> Shared<F> {
 
     fn retained_from(&self, wal: &Wal<F>, needed: u64) -> u64 {
         let mut retention = lock(&self.retention);
-        retention.expire(Instant::now());
+        retention.expire(self.now());
         let first = wal.first_lsn();
         retention.peers.retain(|_, lsn| *lsn + 1 >= first);
         let pinned = retention
@@ -1335,6 +1345,16 @@ impl<F: FileSystem + 'static> Shared<F> {
             .filter(|dropped| **dropped > oldest)
             .count() as u64;
         blocks + slots * u64::from(EXTENT_BLOCKS)
+    }
+
+    #[cfg(not(test))]
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    fn now(&self) -> Instant {
+        Instant::now() + *lock(&self.clock_ahead)
     }
 
     fn retained_area(&self) -> Retained {
@@ -1637,7 +1657,7 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn oldest_tree(&self) -> u64 {
-        if lock(&self.retention).expire(Instant::now()) {
+        if lock(&self.retention).expire(self.now()) {
             self.reconsider_retention();
         }
         let mut trees = lock(&self.trees);
