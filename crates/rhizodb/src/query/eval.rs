@@ -34,8 +34,10 @@ use super::compare::Comparison;
 use super::compare::Key;
 use super::compare::compare;
 use super::compare::equals;
-use super::datum;
 use super::datum::Datum;
+use super::datum::Limits;
+use super::datum::ListBuilder;
+use super::datum::owned;
 use super::functions;
 use super::functions::Function;
 use super::parallel::Morsel;
@@ -76,6 +78,8 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) graveyard: &'a Graveyard,
     /// The regular expressions the query compiled so far.
     pub(crate) patterns: &'a Patterns,
+    /// How large a value the query builds may grow.
+    pub(crate) limits: Limits,
     /// Set when evaluation only looks for the type errors the query text fixes.
     pub(crate) check: Option<&'a Check>,
     /// The property columns read so far.
@@ -104,6 +108,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
         now: &'a Clocks,
         graveyard: &'a Graveyard,
         patterns: &'a Patterns,
+        limits: Limits,
     ) -> Self {
         Self {
             tx,
@@ -112,6 +117,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             now,
             graveyard,
             patterns,
+            limits,
             check: None,
             columns: RefCell::default(),
             keys: RefCell::default(),
@@ -414,7 +420,11 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn tracked(&self, expr: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
-        match self.eval_node(expr, row) {
+        self.tolerated(self.eval_node(expr, row))
+    }
+
+    fn tolerated(&self, result: Result<(Datum, Taint), Error>) -> Result<(Datum, Taint), Error> {
+        match result {
             Err(error) if self.check.is_some() && !error.is_type_error() => {
                 Ok((Datum::Null, Taint::Whole))
             }
@@ -584,7 +594,7 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     fn list(&self, items: &[Expr], row: &Row) -> Result<(Datum, Taint), Error> {
         let (values, taints) = self.tracked_all(items, row)?;
-        Ok((datum::list(values)?, Taint::list(taints)))
+        Ok((self.limits.list(values)?, Taint::list(taints)))
     }
 
     fn map(&self, entries: &[(String, Expr)], row: &Row) -> Result<(Datum, Taint), Error> {
@@ -599,7 +609,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             values.insert(Arc::from(key.as_str()), value);
         }
-        Ok((datum::map(values)?, Taint::map(taints)))
+        Ok((self.limits.map(values)?, Taint::map(taints)))
     }
 
     fn property_of(&self, base: &Expr, key: &str, row: &Row) -> Result<(Datum, Taint), Error> {
@@ -714,7 +724,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             (BinaryOp::RegexMatch, Datum::String(text), Datum::String(pattern)) => {
                 self.patterns.matches(text, pattern).map(Datum::Boolean)
             }
-            _ => binary(op, lhs, rhs),
+            _ => binary(self.limits, op, lhs, rhs),
         };
         settle(
             result,
@@ -822,7 +832,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         let taints = source_taint.items();
         let mut local = row.clone();
-        let mut values = Vec::new();
+        let mut values = ListBuilder::new(self.limits);
         let mut value_taints = Vec::new();
         let mut doubtful = false;
         for (item, taint) in items.into_iter().zip(taints) {
@@ -841,7 +851,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 }
             })?;
             if let Some((value, taint)) = kept {
-                values.push(value);
+                values.push(value)?;
                 if self.check.is_some() {
                     value_taints.push(taint);
                 }
@@ -852,7 +862,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         } else {
             Taint::list(value_taints)
         };
-        Ok((datum::list(values)?, taint))
+        Ok((values.finish(), taint))
     }
 
     fn quantified(&self, quantified: &Quantified, row: &Row) -> Result<(Datum, Taint), Error> {
@@ -927,7 +937,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let value = match kind {
             SubqueryKind::Exists => Datum::Boolean(!rows.is_empty()),
             SubqueryKind::Count => Datum::Integer(i64::try_from(rows.len()).unwrap_or(i64::MAX)),
-            SubqueryKind::Collect(slot) => datum::list(
+            SubqueryKind::Collect(slot) => self.limits.list(
                 rows.into_iter()
                     .map(|mut row| {
                         row.get_mut(slot)
@@ -960,14 +970,37 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(items) = list_operand(source)? else {
             return Ok((Datum::Null, Taint::Clean));
         };
+        let extension = match &reduce.body {
+            Expr::Binary(op @ (BinaryOp::Add | BinaryOp::Concat), lhs, rhs) => match **lhs {
+                Expr::Slot(slot) if slot == reduce.accumulator => Some((*op, &**rhs)),
+                _ => None,
+            },
+            _ => None,
+        };
         let mut local = row.clone();
         for (item, taint) in items.into_iter().zip(source_taint.items()) {
             set(&mut local, reduce.accumulator, accumulator);
             set(&mut local, reduce.slot, item);
-            (accumulator, accumulator_taint) =
-                self.bound(reduce.accumulator, accumulator_taint, || {
-                    self.bound(reduce.slot, taint, || self.tracked(&reduce.body, &local))
+            let Some((op, rhs)) = extension else {
+                (accumulator, accumulator_taint) =
+                    self.bound(reduce.accumulator, accumulator_taint, || {
+                        self.bound(reduce.slot, taint, || self.tracked(&reduce.body, &local))
+                    })?;
+                continue;
+            };
+            let (rhs, rhs_taint) =
+                self.bound(reduce.accumulator, accumulator_taint.clone(), || {
+                    self.bound(reduce.slot, taint, || self.tracked(rhs, &local))
                 })?;
+            let lhs = local
+                .get_mut(reduce.accumulator)
+                .map_or(Datum::Null, |value| std::mem::replace(value, Datum::Null));
+            let result = extended(self.limits, op, lhs, rhs);
+            (accumulator, accumulator_taint) = self.tolerated(settle(
+                result,
+                accumulator_taint.is_whole() || rhs_taint.is_whole(),
+                Taint::when(accumulator_taint.is_tainted() || rhs_taint.is_tainted()),
+            ))?;
         }
         Ok((accumulator, accumulator_taint))
     }
@@ -978,12 +1011,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         projection: &Expr,
         row: &Row,
     ) -> Result<(Datum, Taint), Error> {
-        let mut out = Vec::new();
+        let mut out = ListBuilder::new(self.limits);
         self.match_query(query, row, &mut |matched| {
-            out.push(self.eval(projection, matched)?);
+            out.push(self.eval(projection, matched)?)?;
             Ok(true)
         })?;
-        Ok((datum::list(out)?, Taint::Clean))
+        Ok((out.finish(), Taint::Clean))
     }
 
     fn slice_bound(
@@ -1057,7 +1090,7 @@ pub(crate) fn set(row: &mut Row, slot: Slot, value: Datum) {
 fn list_operand(value: Datum) -> Result<Option<Vec<Datum>>, Error> {
     match value {
         Datum::Null => Ok(None),
-        Datum::List(items) => Ok(Some(Arc::unwrap_or_clone(items))),
+        Datum::List(items) => Ok(Some(owned(items))),
         other => Err(type_error(format!(
             "expected a list, got a {}",
             other.type_name()
@@ -1078,10 +1111,10 @@ pub(crate) fn list_position(length: usize, index: i64) -> Option<usize> {
 fn slice(base: Datum, from: Option<&Datum>, to: Option<&Datum>) -> Result<Datum, Error> {
     let items = match base {
         Datum::Null => return Ok(Datum::Null),
-        Datum::List(items) => Arc::unwrap_or_clone(items),
+        Datum::List(items) => owned(items),
         other => return Err(type_error(format!("cannot slice a {}", other.type_name()))),
     };
-    Ok(sliced(items, from, to)?.map_or(Datum::Null, |items| Datum::List(Arc::new(items))))
+    Ok(sliced(items, from, to)?.map_or(Datum::Null, Datum::list))
 }
 
 fn sliced<T>(
@@ -1178,7 +1211,7 @@ pub(crate) fn comparison(op: ComparisonOp, left: &Datum, right: &Datum) -> Optio
     }
 }
 
-fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+fn binary(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match op {
         BinaryOp::And => Ok(from_truth(and(truth(&lhs)?, truth(&rhs)?))),
         BinaryOp::Or => Ok(from_truth(or(truth(&lhs)?, truth(&rhs)?))),
@@ -1196,16 +1229,11 @@ fn binary(op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
             }),
             _ => Datum::Null,
         }),
-        BinaryOp::Add => add(lhs, rhs),
+        BinaryOp::Add => add(limits, lhs, rhs),
         BinaryOp::Concat => match (lhs, rhs) {
             (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
-            (Datum::String(a), Datum::String(b)) => joined(a, &b),
-            (Datum::List(a), Datum::List(b)) => {
-                datum::check_list_items(a.len().saturating_add(b.len()))?;
-                let mut items = Arc::unwrap_or_clone(a);
-                items.extend(Arc::unwrap_or_clone(b));
-                datum::list(items)
-            }
+            (Datum::String(a), Datum::String(b)) => joined(limits, a, &b),
+            (lhs @ Datum::List(_), rhs @ Datum::List(_)) => extended(limits, op, lhs, rhs),
             (lhs, rhs) => Err(type_error(format!(
                 "|| cannot join a {} and a {}",
                 lhs.type_name(),
@@ -1246,39 +1274,40 @@ fn membership(needle: &Datum, haystack: Datum) -> Result<Datum, Error> {
     })
 }
 
-fn add(lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+fn add(limits: Limits, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match (lhs, rhs) {
         (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
-        (Datum::List(mut a), Datum::List(b)) => {
-            datum::check_list_items(a.len().saturating_add(b.len()))?;
-            Arc::make_mut(&mut a).extend(Arc::unwrap_or_clone(b));
-            Ok(Datum::List(a))
-        }
-        (Datum::List(mut a), b) => {
-            datum::check_list_items(a.len().saturating_add(1))?;
-            datum::check_item(&b)?;
-            Arc::make_mut(&mut a).push(b);
-            Ok(Datum::List(a))
-        }
+        (lhs @ Datum::List(_), rhs) => extended(limits, BinaryOp::Add, lhs, rhs),
         (a, Datum::List(mut b)) => {
-            datum::check_list_items(b.len().saturating_add(1))?;
-            datum::check_item(&a)?;
-            Arc::make_mut(&mut b).insert(0, a);
+            limits.prepend(a, &mut b)?;
             Ok(Datum::List(b))
         }
-        (Datum::String(a), Datum::String(b)) => joined(a, &b),
+        (Datum::String(a), Datum::String(b)) => joined(limits, a, &b),
         (Datum::String(a), b @ (Datum::Integer(_) | Datum::Float(_))) => {
-            joined(a, &number_text(&b))
+            joined(limits, a, &number_text(&b))
         }
         (a @ (Datum::Integer(_) | Datum::Float(_)), Datum::String(b)) => {
-            joined(number_text(&a), &b)
+            joined(limits, number_text(&a), &b)
         }
         (lhs, rhs) => arithmetic(BinaryOp::Add, lhs, rhs),
     }
 }
 
-fn joined(a: String, b: &str) -> Result<Datum, Error> {
-    datum::check_string_bytes(a.len().saturating_add(b.len()))?;
+fn extended(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+    let mut a = match lhs {
+        Datum::List(a) if !rhs.is_null() => a,
+        lhs => return binary(limits, op, lhs, rhs),
+    };
+    match rhs {
+        Datum::List(b) => limits.extend(&mut a, b)?,
+        b if op == BinaryOp::Add => limits.push(&mut a, b)?,
+        b => return binary(limits, op, Datum::List(a), b),
+    }
+    Ok(Datum::List(a))
+}
+
+fn joined(limits: Limits, a: String, b: &str) -> Result<Datum, Error> {
+    limits.check_bytes(a.len().saturating_add(b.len()))?;
     Ok(Datum::String(a + b))
 }
 

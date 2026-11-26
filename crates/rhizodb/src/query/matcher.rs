@@ -697,9 +697,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         let relationship = &self.patterns[index].steps[step_index].relationship;
         if !relationship.anonymous {
             let walked = &self.trails[index].relationships[base..];
-            let value = Datum::List(Arc::new(
-                walked.iter().copied().map(Datum::Relationship).collect(),
-            ));
+            let value = Datum::list(walked.iter().copied().map(Datum::Relationship).collect());
             if relationship.bound && row.get(relationship.slot) != Some(&value) {
                 return Ok(true);
             }

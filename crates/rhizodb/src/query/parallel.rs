@@ -18,6 +18,7 @@ use crate::temporal::Clocks;
 
 use super::aggregate::Groups;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::eval::Env;
 use super::eval::Row;
 use super::exec;
@@ -127,6 +128,7 @@ pub(crate) fn run_read<T: ReadTransaction>(
     program: &Program<ReadClause>,
     parameters: &[Datum],
     now: &Clocks,
+    limits: Limits,
     parallelism: Parallelism,
     workers: &Workers,
 ) -> Result<QueryResult, Error>
@@ -134,7 +136,7 @@ where
     GraphTx<T>: Sync,
 {
     if parallelism.threads < 2 || program.calls_host {
-        return exec::run_read(tx, program, parameters, now);
+        return exec::run_read(tx, program, parameters, now, limits);
     }
     let _running = workers.enter();
     exec::read_program(
@@ -142,6 +144,7 @@ where
         program,
         parameters,
         now,
+        limits,
         |env, clause, next, rows| match split(env, parallelism, workers, clause, next, &rows) {
             Some(read) => match read.run(env, parallelism) {
                 Some(done) => Ok(done),
@@ -333,7 +336,8 @@ impl<'q> Split<'q, '_> {
         let failed = AtomicBool::new(false);
         let last = AtomicUsize::new(usize::MAX);
         let counts = Mutex::new(vec![None; morsels.len()]);
-        let (tx, slots, parameters, now) = (env.tx, env.slots, env.parameters, env.now);
+        let (tx, slots, parameters, now, limits) =
+            (env.tx, env.slots, env.parameters, env.now, env.limits);
         let work = || {
             let graveyard = Graveyard::default();
             let patterns = Patterns::default();
@@ -344,7 +348,7 @@ impl<'q> Split<'q, '_> {
             };
             let worker = Env {
                 morsel: Some(&morsel),
-                ..Env::new(tx, slots, parameters, now, &graveyard, &patterns)
+                ..Env::new(tx, slots, parameters, now, &graveyard, &patterns, limits)
             };
             let mut done = Vec::new();
             while !failed.load(Ordering::Relaxed) {

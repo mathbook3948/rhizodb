@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map;
+use std::fmt;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::slice;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::error::Error;
 use crate::error::ErrorKind;
@@ -21,8 +25,8 @@ pub(crate) enum Datum {
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
-    List(Arc<Vec<Datum>>),
-    Map(Arc<BTreeMap<Arc<str>, Datum>>),
+    List(Arc<Measured<Vec<Datum>>>),
+    Map(Arc<Measured<BTreeMap<Arc<str>, Datum>>>),
     Node(NodeId),
     Relationship(RelationshipId),
     Path(PathIds),
@@ -36,7 +40,113 @@ pub(crate) struct PathIds {
     pub(crate) relationships: Vec<RelationshipId>,
 }
 
+/// A list or map with its [`Measure`], worked out the first time a query asks for it and kept
+/// until the list or map changes, so that measuring a value never walks a part of it that was
+/// measured before.
+#[derive(Clone, Default)]
+pub(crate) struct Measured<T> {
+    value: T,
+    measure: OnceLock<Measure>,
+}
+
+impl<T> Measured<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self {
+            value,
+            measure: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn into_inner(self) -> T {
+        self.value
+    }
+
+    fn known(&self) -> Option<Measure> {
+        self.measure.get().copied()
+    }
+
+    fn remember(&mut self, measure: Measure) {
+        self.measure = OnceLock::from(measure);
+    }
+}
+
+impl<T> From<T> for Measured<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+impl<T> Deref for Measured<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for Measured<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.measure.take();
+        &mut self.value
+    }
+}
+
+impl<T: PartialEq> PartialEq for Measured<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Measured<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+/// The list or map that `shared` holds, copied only when something else still holds it.
+pub(crate) fn owned<T: Clone>(shared: Arc<Measured<T>>) -> T {
+    Arc::unwrap_or_clone(shared).into_inner()
+}
+
+impl<T: IntoIterator> IntoIterator for Measured<T> {
+    type Item = T::Item;
+    type IntoIter = T::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.value.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Measured<T>
+where
+    &'a T: IntoIterator,
+{
+    type Item = <&'a T as IntoIterator>::Item;
+    type IntoIter = <&'a T as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        (&self.value).into_iter()
+    }
+}
+
+/// The size of a value and how many levels of lists and maps it nests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Measure {
+    size: Size,
+    depth: usize,
+}
+
 impl Datum {
+    /// The list of `items`, not yet measured.
+    pub(crate) fn list(items: Vec<Datum>) -> Self {
+        Datum::List(Arc::new(Measured::new(items)))
+    }
+
+    /// The map of `entries`, not yet measured.
+    pub(crate) fn map(entries: BTreeMap<Arc<str>, Datum>) -> Self {
+        Datum::Map(Arc::new(Measured::new(entries)))
+    }
+
     pub(crate) fn is_null(&self) -> bool {
         matches!(self, Datum::Null)
     }
@@ -67,9 +177,7 @@ impl From<PropertyValue> for Datum {
             PropertyValue::Float(value) => Datum::Float(value),
             PropertyValue::String(value) => Datum::String(value),
             PropertyValue::Bytes(value) => Datum::Bytes(value),
-            PropertyValue::List(items) => {
-                Datum::List(Arc::new(items.into_iter().map(Datum::from).collect()))
-            }
+            PropertyValue::List(items) => Datum::list(items.into_iter().map(Datum::from).collect()),
             PropertyValue::Temporal(value) => Datum::Temporal(value),
         }
     }
@@ -81,28 +189,284 @@ pub(crate) const MAX_NESTING: usize = 128;
 
 const SHARED_KEYS: usize = 16;
 
-pub(crate) const MAX_STRING_BYTES: usize = 1 << 28;
-
-pub(crate) const MAX_LIST_ITEMS: usize = 10_000_000;
-
-pub(crate) fn check_string_bytes(bytes: usize) -> Result<(), Error> {
-    if bytes > MAX_STRING_BYTES {
-        return Err(Error::new(
-            ErrorKind::NumberOutOfRange,
-            format!("a query cannot build a string of more than {MAX_STRING_BYTES} bytes"),
-        ));
-    }
-    Ok(())
+/// How large one value that a query builds may grow: list items and map entries, and bytes of
+/// strings and byte strings, each counted through every nested list and map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) items: usize,
+    pub(crate) bytes: usize,
 }
 
-pub(crate) fn check_list_items(items: usize) -> Result<(), Error> {
-    if items > MAX_LIST_ITEMS {
-        return Err(Error::new(
-            ErrorKind::NumberOutOfRange,
-            format!("a query cannot build a list of more than {MAX_LIST_ITEMS} items"),
-        ));
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            items: 10_000_000,
+            bytes: 1 << 28,
+        }
     }
-    Ok(())
+}
+
+/// How much of [`Limits`] a value takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Size {
+    pub(crate) items: usize,
+    pub(crate) bytes: usize,
+}
+
+impl Limits {
+    /// Fails unless a value can hold `items` list items and map entries.
+    pub(crate) fn check_items(self, items: usize) -> Result<(), Error> {
+        if items > self.items {
+            return Err(Error::new(
+                ErrorKind::NumberOutOfRange,
+                format!(
+                    "a query cannot build a value of more than {} list items and map entries",
+                    self.items
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fails unless a value can hold `bytes` bytes of strings and byte strings.
+    pub(crate) fn check_bytes(self, bytes: usize) -> Result<(), Error> {
+        if bytes > self.bytes {
+            return Err(Error::new(
+                ErrorKind::NumberOutOfRange,
+                format!(
+                    "a query cannot build a value of more than {} bytes of strings",
+                    self.bytes
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// `text` as a string, or an error when it is longer than these limits allow.
+    pub(crate) fn text(self, text: String) -> Result<Datum, Error> {
+        self.check_bytes(text.len())?;
+        Ok(Datum::String(text))
+    }
+
+    /// Fails unless `a` and `b` together fit in one value.
+    pub(crate) fn joined(self, a: Size, b: Size) -> Result<Size, Error> {
+        let size = a.plus(b);
+        self.check(size)?;
+        Ok(size)
+    }
+
+    /// Fails unless a value of `size` fits these limits.
+    pub(crate) fn check(self, size: Size) -> Result<(), Error> {
+        self.check_items(size.items)?;
+        self.check_bytes(size.bytes)
+    }
+
+    /// Adds `item` as one more item to `size`, failing when the sum passes these limits or
+    /// `item` would nest too deeply as an item of a list or a map.
+    pub(crate) fn add_item(self, size: &mut Size, item: &Datum) -> Result<(), Error> {
+        *size = self.joined(*size, item_size(measure(item, MAX_NESTING - 1)?))?;
+        Ok(())
+    }
+
+    /// Fails unless `value` fits these limits and nests no deeper than a value may.
+    pub(crate) fn check_value(self, value: &Datum) -> Result<(), Error> {
+        self.check(measure(value, MAX_NESTING)?.size)
+    }
+
+    /// The list of `items`, or an error when it would pass these limits or nest too deeply.
+    pub(crate) fn list(self, items: Vec<Datum>) -> Result<Datum, Error> {
+        let value = Datum::list(items);
+        self.check_value(&value)?;
+        Ok(value)
+    }
+
+    /// The map of `entries`, or an error when it would pass these limits or nest too deeply.
+    pub(crate) fn map(self, entries: BTreeMap<Arc<str>, Datum>) -> Result<Datum, Error> {
+        let value = Datum::map(entries);
+        self.check_value(&value)?;
+        Ok(value)
+    }
+
+    /// Appends `item` to `list`, failing before it changes `list` when the result would pass
+    /// these limits or nest too deeply. Once `list` is measured, this takes time in the size of
+    /// `item` alone, beside the copy of `list` that a shared `list` needs.
+    pub(crate) fn push(
+        self,
+        list: &mut Arc<Measured<Vec<Datum>>>,
+        item: Datum,
+    ) -> Result<(), Error> {
+        let grown = self.with_item(list, &item)?;
+        let list = Arc::make_mut(list);
+        list.push(item);
+        list.remember(grown);
+        Ok(())
+    }
+
+    /// Puts `item` first in `list`, failing before it changes `list` when the result would pass
+    /// these limits or nest too deeply.
+    pub(crate) fn prepend(
+        self,
+        item: Datum,
+        list: &mut Arc<Measured<Vec<Datum>>>,
+    ) -> Result<(), Error> {
+        let grown = self.with_item(list, &item)?;
+        let list = Arc::make_mut(list);
+        list.insert(0, item);
+        list.remember(grown);
+        Ok(())
+    }
+
+    /// Appends the items of `tail` to `list`, failing before it changes `list` when the result
+    /// would pass these limits. Once both are measured, this takes time in the length of `tail`
+    /// alone, beside the copy of `list` that a shared `list` needs.
+    pub(crate) fn extend(
+        self,
+        list: &mut Arc<Measured<Vec<Datum>>>,
+        tail: Arc<Measured<Vec<Datum>>>,
+    ) -> Result<(), Error> {
+        let mut grown = measure_list(list, MAX_NESTING)?;
+        let added = measure_list(&tail, MAX_NESTING)?;
+        grown.size = self.joined(grown.size, added.size)?;
+        grown.depth = grown.depth.max(added.depth);
+        let list = Arc::make_mut(list);
+        match Arc::try_unwrap(tail) {
+            Ok(tail) => list.extend(tail.into_inner()),
+            Err(tail) => list.extend(tail.iter().cloned()),
+        }
+        list.remember(grown);
+        Ok(())
+    }
+
+    fn with_item(self, list: &Measured<Vec<Datum>>, item: &Datum) -> Result<Measure, Error> {
+        let mut grown = measure_list(list, MAX_NESTING)?;
+        let added = measure(item, MAX_NESTING - 1)?;
+        grown.size = self.joined(grown.size, item_size(added))?;
+        grown.depth = grown.depth.max(added.depth + 1);
+        Ok(grown)
+    }
+}
+
+fn item_size(measure: Measure) -> Size {
+    Size {
+        items: measure.size.items.saturating_add(1),
+        bytes: measure.size.bytes,
+    }
+}
+
+fn measure(value: &Datum, levels: usize) -> Result<Measure, Error> {
+    let measure = match value {
+        Datum::String(text) => Measure {
+            size: Size {
+                items: 0,
+                bytes: text.len(),
+            },
+            depth: 0,
+        },
+        Datum::Bytes(bytes) => Measure {
+            size: Size {
+                items: 0,
+                bytes: bytes.len(),
+            },
+            depth: 0,
+        },
+        Datum::List(items) => measure_list(items, levels)?,
+        Datum::Map(entries) => measure_map(entries, levels)?,
+        _ => Measure::default(),
+    };
+    if measure.depth > levels {
+        return Err(nesting_too_deep());
+    }
+    Ok(measure)
+}
+
+fn measure_list(items: &Measured<Vec<Datum>>, levels: usize) -> Result<Measure, Error> {
+    if let Some(known) = items.known() {
+        return Ok(known);
+    }
+    let children = levels.checked_sub(1).ok_or_else(nesting_too_deep)?;
+    let mut total = Measure {
+        size: Size::default(),
+        depth: 1,
+    };
+    for item in items.iter() {
+        let child = measure(item, children)?;
+        total.add(item_size(child), child.depth);
+    }
+    let _ = items.measure.set(total);
+    Ok(total)
+}
+
+fn measure_map(
+    entries: &Measured<BTreeMap<Arc<str>, Datum>>,
+    levels: usize,
+) -> Result<Measure, Error> {
+    if let Some(known) = entries.known() {
+        return Ok(known);
+    }
+    let children = levels.checked_sub(1).ok_or_else(nesting_too_deep)?;
+    let mut total = Measure {
+        size: Size::default(),
+        depth: 1,
+    };
+    for (key, item) in entries.iter() {
+        let child = measure(item, children)?;
+        let mut size = item_size(child);
+        size.bytes = size.bytes.saturating_add(key.len());
+        total.add(size, child.depth);
+    }
+    let _ = entries.measure.set(total);
+    Ok(total)
+}
+
+impl Measure {
+    fn add(&mut self, size: Size, child_depth: usize) {
+        self.size = self.size.plus(size);
+        self.depth = self.depth.max(child_depth.saturating_add(1));
+    }
+}
+
+/// A list that grows one item at a time and fails as soon as it passes its [`Limits`].
+pub(crate) struct ListBuilder {
+    limits: Limits,
+    measure: Measure,
+    items: Vec<Datum>,
+}
+
+impl ListBuilder {
+    pub(crate) fn new(limits: Limits) -> Self {
+        Self {
+            limits,
+            measure: Measure {
+                size: Size::default(),
+                depth: 1,
+            },
+            items: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, item: Datum) -> Result<(), Error> {
+        let added = measure(&item, MAX_NESTING - 1)?;
+        self.limits
+            .check(self.measure.size.plus(item_size(added)))?;
+        self.measure.add(item_size(added), added.depth);
+        self.items.push(item);
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Datum {
+        let mut list = Measured::new(self.items);
+        list.remember(self.measure);
+        Datum::List(Arc::new(list))
+    }
+}
+
+impl Size {
+    fn plus(self, other: Size) -> Size {
+        Size {
+            items: self.items.saturating_add(other.items),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
 }
 
 fn nesting_too_deep() -> Error {
@@ -127,18 +491,6 @@ pub(crate) fn check_item(item: &Datum) -> Result<(), Error> {
     } else {
         Err(nesting_too_deep())
     }
-}
-
-/// The list of `items`, or an error when it would nest too deeply.
-pub(crate) fn list(items: Vec<Datum>) -> Result<Datum, Error> {
-    items.iter().try_for_each(check_item)?;
-    Ok(Datum::List(Arc::new(items)))
-}
-
-/// The map of `entries`, or an error when it would nest too deeply.
-pub(crate) fn map(entries: BTreeMap<Arc<str>, Datum>) -> Result<Datum, Error> {
-    entries.values().try_for_each(check_item)?;
-    Ok(Datum::Map(Arc::new(entries)))
 }
 
 /// What writing `value` as a property does: `None` removes the property.
@@ -262,15 +614,13 @@ fn converted(value: &Value, keys: &mut Vec<Arc<str>>) -> Datum {
         Value::String(value) => Datum::String(value.clone()),
         Value::Bytes(value) => Datum::Bytes(value.clone()),
         Value::Temporal(value) => Datum::Temporal(value.clone()),
-        Value::List(items) => Datum::List(Arc::new(
-            items.iter().map(|item| converted(item, keys)).collect(),
-        )),
+        Value::List(items) => Datum::list(items.iter().map(|item| converted(item, keys)).collect()),
         Value::Map(entries) => {
             let mut map = BTreeMap::new();
             for (key, value) in entries {
                 map.insert(shared_key(keys, key), converted(value, keys));
             }
-            Datum::Map(Arc::new(map))
+            Datum::map(map)
         }
         Value::Node(node) => Datum::Node(node.id),
         Value::Relationship(relationship) => Datum::Relationship(relationship.id),

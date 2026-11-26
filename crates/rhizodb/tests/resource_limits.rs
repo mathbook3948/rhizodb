@@ -593,6 +593,171 @@ fn strings_and_lists_a_query_builds_stop_at_their_length_limits() {
 }
 
 #[test]
+fn nested_comprehensions_and_repeated_appends_stop_at_the_default_limits() {
+    let test = "nested_comprehensions_and_repeated_appends_stop_at_the_default_limits";
+    if !isolated(test, CHILD_LIMIT) {
+        return;
+    }
+    let db = db();
+    for text in [
+        "RETURN size([x IN range(1, 100000) | range(1, 1000)])",
+        "UNWIND range(1, 100000) AS i RETURN size(collect(range(1, 1000)))",
+        "RETURN size(reduce(l = [], i IN range(1, 100000) | l + [range(1, 1000)]))",
+    ] {
+        assert_eq!(error_kind(&db, text), ErrorKind::NumberOutOfRange, "{text}");
+    }
+    assert_eq!(
+        single(
+            &db,
+            "RETURN size(reduce(l = [], i IN range(1, 1000000) | l + i))"
+        ),
+        int(1_000_000)
+    );
+    assert_eq!(
+        single(
+            &db,
+            "RETURN size(reduce(s = '', i IN range(1, 1000000) | s + 'x'))"
+        ),
+        int(1_000_000)
+    );
+}
+
+fn limited(items: usize, bytes: usize) -> Database {
+    options()
+        .max_value_items(items)
+        .max_value_bytes(bytes)
+        .in_memory()
+        .unwrap()
+}
+
+#[test]
+fn every_way_a_query_grows_a_value_stops_at_the_configured_limits() {
+    let db = limited(100, 1000);
+    run(
+        &db,
+        "INSERT (a:A), (a)-[:R]->(:B), (a)-[:R]->(:B) \
+         WITH 1 AS x UNWIND range(1, 60) AS i INSERT (:N {i: i})",
+    );
+    let text = Parameters::new()
+        .with("upper", "\u{149}".repeat(400))
+        .with("ligature", "\u{fdfa}".repeat(100))
+        .with("wide", "x".repeat(101))
+        .with(
+            "nested",
+            Value::List(vec![Value::List((1..=60).map(Value::Integer).collect()); 2]),
+        );
+    for query in [
+        "RETURN range(1, 101)",
+        "RETURN [range(1, 60), range(1, 60)]",
+        "RETURN {a: range(1, 60), b: range(1, 60)}",
+        "RETURN range(1, 60) + range(1, 60)",
+        "RETURN range(1, 60) || range(1, 60)",
+        "RETURN [range(1, 99)] + 1",
+        "RETURN 1 + [range(1, 99)]",
+        "RETURN [x IN range(1, 10) | range(1, 10)]",
+        "RETURN reduce(l = [], i IN range(1, 60) | l + [i, i])",
+        "RETURN reduce(l = [], i IN range(1, 60) | l || [i, i])",
+        "RETURN reduce(l = [], i IN range(1, 30) | l + [[i, i, i]])",
+        "RETURN reduce(l = [0], i IN range(1, 10) | l + l)",
+        "RETURN reduce(l = [0], i IN range(1, 10) | [l, l])",
+        "RETURN reduce(m = {}, i IN range(1, 10) | {a: m, b: m})",
+        "WITH range(1, 30) AS l RETURN [l, l, l, l]",
+        "UNWIND range(1, 50) AS i UNWIND range(1, 3) AS j RETURN collect(i)",
+        "UNWIND range(1, 20) AS i RETURN collect([i, i, i, i, i])",
+        "MATCH (n:N) RETURN collect([n.i, n.i])",
+        "RETURN COLLECT { UNWIND range(1, 60) AS i RETURN [i, i] }",
+        "MATCH (a:A) RETURN [(a)-[:R]->(b) | range(1, 60)]",
+        "RETURN CAST($nested AS LIST<LIST<STRING>>)",
+        "RETURN split($wide, '')",
+        "RETURN reduce(s = '', i IN range(1, 100) | s + '0123456789x')",
+        "RETURN reduce(s = '', i IN range(1, 100) | s || '0123456789x')",
+        "RETURN [x IN range(1, 51) | 'abcdefghijklmnopqrst']",
+        "UNWIND range(1, 51) AS i RETURN collect('abcdefghijklmnopqrst')",
+        "RETURN replace($wide, 'x', 'xxxxxxxxxx')",
+        "RETURN toUpper($upper)",
+        "RETURN normalize($ligature, NFKD)",
+    ] {
+        assert_eq!(
+            db.execute(query, &text).unwrap_err().kind(),
+            ErrorKind::NumberOutOfRange,
+            "{query}"
+        );
+    }
+    for (query, expected) in [
+        ("RETURN size(range(1, 100))", 100),
+        ("RETURN size([x IN range(1, 9) | range(1, 10)])", 9),
+        (
+            "RETURN size(reduce(l = [], i IN range(1, 50) | l + [i, i]))",
+            100,
+        ),
+        (
+            "UNWIND range(1, 50) AS i UNWIND range(1, 2) AS j RETURN size(collect(i))",
+            100,
+        ),
+        (
+            "MATCH (n:N) WHERE n.i <= 50 RETURN size(collect([n.i]))",
+            50,
+        ),
+        (
+            "RETURN size(reduce(s = '', i IN range(1, 100) | s + '0123456789'))",
+            1000,
+        ),
+        ("RETURN size(toUpper($wide))", 101),
+        ("RETURN size(reduce(l = [0], i IN range(1, 5) | [l, l]))", 2),
+    ] {
+        assert_eq!(
+            db.execute(query, &text).unwrap().rows(),
+            [vec![int(expected)]],
+            "{query}"
+        );
+    }
+    let short = limited(100, 10);
+    assert_eq!(single(&short, "RETURN size(keys({abcdefghij: 1}))"), int(1));
+    for query in ["RETURN {abcdefghijk: 1}", "RETURN [{abcdef: 1, ghijk: 2}]"] {
+        assert_eq!(
+            error_kind(&short, query),
+            ErrorKind::NumberOutOfRange,
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn appending_to_a_list_another_value_holds_leaves_that_value_as_it_was() {
+    let db = limited(100, 1000);
+    assert_eq!(
+        db.execute(
+            "WITH [1, 2] AS l \
+             RETURN reduce(a = l, i IN range(1, 3) | a + i) AS grown, l, l + l AS twice",
+            &Parameters::new(),
+        )
+        .unwrap()
+        .rows(),
+        [vec![
+            Value::List((1..=2).chain(1..=3).map(Value::Integer).collect()),
+            Value::List(vec![int(1), int(2)]),
+            Value::List(vec![int(1), int(2), int(1), int(2)]),
+        ]]
+    );
+    let shared = Parameters::new().with("l", Value::List((1..=40).map(Value::Integer).collect()));
+    assert_eq!(
+        db.execute(
+            "RETURN size(reduce(a = $l, i IN range(1, 10) | a + i)) AS grown, size($l + $l) AS twice",
+            &shared,
+        )
+        .unwrap()
+        .rows(),
+        [vec![int(50), int(80)]]
+    );
+    assert_eq!(
+        db.execute("RETURN $l + $l + $l", &shared)
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NumberOutOfRange
+    );
+}
+
+#[test]
 fn skip_and_limit_at_the_integer_maximum_neither_overflow_nor_allocate() {
     let db = db();
     assert_eq!(
@@ -915,6 +1080,24 @@ fn fastest(db: &Database, query: &str) -> Duration {
         })
         .min()
         .unwrap()
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn appending_to_a_list_takes_time_that_does_not_grow_with_what_its_items_hold() {
+    let db = db();
+    let appends = |inner: usize| {
+        format!(
+            "WITH range(1, {inner}) AS row WITH [x IN range(1, 200) | row] AS big \
+             UNWIND range(1, 1000) AS i RETURN count(big + i)"
+        )
+    };
+    let small = fastest(&db, &appends(50));
+    let large = fastest(&db, &appends(2_000));
+    assert!(
+        large < small * 4,
+        "{small:?} to append to lists of 200 lists of 50 but {large:?} for lists of 2000"
+    );
 }
 
 #[test]
