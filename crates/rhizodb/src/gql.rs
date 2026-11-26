@@ -11,7 +11,7 @@ mod testing;
 mod corpus_tests;
 
 /// Parses `input` as a query for the fuzzer, and returns whether it parsed.
-#[cfg(feature = "fuzzing")]
+#[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn parse_for_fuzzing(input: &str) -> bool {
     parser::parse(input).is_ok()

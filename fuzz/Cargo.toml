@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rhizodb = { path = "../crates/rhizodb", features = ["fuzzing"] }
+rhizodb = { path = "../crates/rhizodb" }
 tempfile = "3.27.0"
 
 [workspace]

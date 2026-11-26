@@ -103,7 +103,7 @@ pub(crate) enum CheckpointMode {
     /// On a thread of the engine's own, while commits go on.
     Background,
     /// On the committing thread, so a test sees the same operations every run.
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     Inline,
 }
 
@@ -585,7 +585,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             compacted_bytes: AtomicU64::new(0),
         });
         let (jobs, worker) = match options.checkpoint {
-            #[cfg(any(test, feature = "fuzzing"))]
+            #[cfg(any(test, fuzzing))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
                 let (sender, receiver) = mpsc::channel::<Task<F>>();
@@ -718,7 +718,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
-    #[cfg(any(test, feature = "fuzzing"))]
+    #[cfg(any(test, fuzzing))]
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {

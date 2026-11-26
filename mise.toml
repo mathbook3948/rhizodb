@@ -26,7 +26,8 @@ description = "Fast checks first, then lint and test"
 depends = ["check-fast"]
 run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
-  "cargo clippy --package rhizodb --features fuzzing -- -D warnings",
+  "cargo clippy --package rhizodb --target-dir target/fuzzing --config \"build.rustflags = ['--cfg', 'fuzzing']\" -- -D warnings",
+  "cargo rustdoc --package rhizodb -- -D warnings",
   "cargo test --workspace",
   "cargo run --quiet --package rhizodb --example social",
   "cargo run --quiet --package rhizodb --example search",

@@ -6,14 +6,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 documentation = "https://docs.rs/rhizodb"
 keywords = ["graph", "database", "gql", "cypher", "embedded"]
 categories = ["database-implementations", "database"]
+include = ["src/**/*", "examples/**/*", "LICENSE-*", "README.md", "Cargo.toml"]
 
-[features]
-# Exposes the decoders and the parser to the fuzz targets in `fuzz/`. Not part of the public API.
-fuzzing = []
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu"]
 
@@ -31,5 +29,5 @@ jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-
 memchr = "2.8.3"
 regex-automata = "0.4.18"
 regex-syntax = "0.8.11"
-unicode-normalization = "=0.1.26"
-unicode-segmentation = "=1.13.3"
+unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13.3"

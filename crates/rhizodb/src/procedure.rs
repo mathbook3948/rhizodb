@@ -198,12 +198,14 @@ impl Procedure {
     }
 
     /// Declares the next parameter.
+    #[must_use]
     pub fn parameter(mut self, name: impl Into<String>, accepts: ValueType) -> Self {
         self.signature.parameters.push((name.into(), accepts));
         self
     }
 
     /// Declares the next output column.
+    #[must_use]
     pub fn output(mut self, name: impl Into<String>) -> Self {
         self.signature.outputs.push(name.into());
         self
