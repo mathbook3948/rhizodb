@@ -900,12 +900,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         let mut conjuncts = Vec::new();
         if let Some(Expr::Map(entries)) = &scan.part.start.properties {
             for (at, (key, value)) in entries.iter().enumerate() {
-                if entries[at + 1..].iter().any(|(other, _)| other == key) {
-                    return Ok(None);
-                }
                 let Some(value) = compiler.value(value)? else {
                     return Ok(None);
                 };
+                if entries[at + 1..].iter().any(|(other, _)| other == key) {
+                    continue;
+                }
                 let column = Value::Column(compiler.column(key)?);
                 conjuncts.push(Pred::Compare(column, vec![(ComparisonOp::Equal, value)]));
             }
