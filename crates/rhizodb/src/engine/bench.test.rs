@@ -259,3 +259,26 @@ fn commits_for_profiling() {
     commit_small_batches(&store, keys);
     store.checkpoint().unwrap();
 }
+
+#[test]
+#[ignore = "a benchmark, run in release with --ignored --nocapture"]
+fn synced_commits_of_one_put() {
+    let directory = tempfile::tempdir().unwrap();
+    let engine = open_path(
+        &directory.path().join("graph.rhizo"),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let commits = 30_000;
+    let start = Instant::now();
+    for id in 0..commits {
+        let mut write = engine.begin_write().unwrap();
+        write.put(Table::Nodes, &key(id), &value(id)).unwrap();
+        write.commit().unwrap();
+    }
+    let elapsed = start.elapsed();
+    println!(
+        "{commits} commits of one put: {elapsed:?}, {:?} each",
+        elapsed / commits as u32
+    );
+}

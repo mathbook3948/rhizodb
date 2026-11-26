@@ -27,6 +27,8 @@ pub(crate) struct LogIdentity {
 
 const HEADER_BLOCKS: u64 = (RECORD_UNIT / WAL_BLOCK) as u64;
 
+const PREALLOCATED: u64 = (1 << 20) / WAL_BLOCK as u64;
+
 fn wal_block() -> Result<BlockSize, EngineError> {
     BlockSize::new(WAL_BLOCK).ok_or(EngineError::TooLarge)
 }
@@ -61,6 +63,7 @@ struct Segment {
     sequence: u64,
     first_lsn: u64,
     blocks: u64,
+    allocated: u64,
 }
 
 /// The write-ahead log of one database: segments of whole sector blocks, each record starting a
@@ -119,6 +122,7 @@ impl<F: FileSystem> Wal<F> {
                 sequence,
                 first_lsn: next_lsn,
                 blocks: HEADER_BLOCKS,
+                allocated: HEADER_BLOCKS,
             }],
             active,
             active_header,
@@ -259,15 +263,18 @@ impl<F: FileSystem> Wal<F> {
                 }
             }
             let used = (at / WAL_BLOCK) as u64;
+            let mut allocated = blocks;
             if last && used != blocks {
                 file.set_block_count(used)?;
                 file.sync()?;
+                allocated = used;
             }
             expected_lsn = Some(lsn);
             segments.push(Segment {
                 sequence,
                 first_lsn: segment_header.first_lsn,
                 blocks: used,
+                allocated,
             });
             active = Some((file, segment_header));
         }
@@ -304,7 +311,7 @@ impl<F: FileSystem> Wal<F> {
     pub(crate) fn size(&self) -> u64 {
         self.segments_oldest_first
             .iter()
-            .map(|segment| segment.blocks * WAL_BLOCK as u64)
+            .map(|segment| segment.allocated * WAL_BLOCK as u64)
             .sum()
     }
 
@@ -330,11 +337,23 @@ impl<F: FileSystem> Wal<F> {
         }
         seal_record(self.active_header.record_seed(), &mut record)?;
         record.resize(padded(record.len(), self.active_header.unit()), 0);
-        let at = self.active_segment()?.blocks;
+        let segment = self.active_segment()?;
+        let at = segment.blocks;
+        let end = at + (record.len() / WAL_BLOCK) as u64;
+        let mut allocated = segment.allocated;
         self.active.write(at, &record)?;
+        if end > allocated {
+            let target = self.segment_target / WAL_BLOCK as u64;
+            allocated = (allocated + PREALLOCATED).min(target).max(end);
+            let zeros = usize::try_from(allocated - end).map_err(|_| EngineError::TooLarge)?;
+            if zeros > 0 {
+                self.active.write(end, &vec![0; zeros * WAL_BLOCK])?;
+            }
+        }
         self.active.sync()?;
-        let blocks = (record.len() / WAL_BLOCK) as u64;
-        self.active_segment_mut()?.blocks += blocks;
+        let segment = self.active_segment_mut()?;
+        segment.blocks = end;
+        segment.allocated = allocated;
         self.next_lsn += 1;
         Ok(())
     }
@@ -367,6 +386,7 @@ impl<F: FileSystem> Wal<F> {
             sequence,
             first_lsn: self.next_lsn,
             blocks: HEADER_BLOCKS,
+            allocated: HEADER_BLOCKS,
         });
         Ok(())
     }

@@ -74,6 +74,7 @@ redb's B-tree and allocator set a floor under the cost of a put, the growth of t
 - Log segments are files named after the database file with `-wal-` and the segment number in 16 hex digits.
 - Log segments are made of 512-byte blocks, and the header and each record start a 4 KiB unit of their own, so an append never rewrites a page or a 4 KiB device sector that holds synced data.
 - A segment header of engine format minor 3 or later records the 4 KiB unit its records start at, and a segment of an earlier minor, whose records start at 512-byte blocks, replays and takes appends at those blocks.
+- A segment grows in steps of 1 MiB of synced zeros, up to the segment target, so an append writes into allocated blocks instead of growing the file.
 - A record's checksum is seeded with the log's salt and the segment number, so a record of an older log or of another segment never passes.
 - A record of a reserved kind, of an unknown body format, or holding the reserved patch operation refuses the log instead of being skipped.
 - Recovery cuts off an invalid tail of the last segment, removes a last segment with an invalid header as an unfinished rollover, and reports damage anywhere else in the log as corruption.
