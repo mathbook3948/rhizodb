@@ -686,24 +686,29 @@ impl Parser {
         })))
     }
 
+    fn trim_has_from(&self) -> bool {
+        let depth = self.bracket_depth();
+        (self.pos..self.tokens.len())
+            .take_while(|&at| self.bracket_depths.get(at).copied().unwrap_or(0) >= depth)
+            .any(|at| {
+                let ahead = at - self.pos;
+                self.bracket_depths.get(at) == Some(&depth)
+                    && self.keyword_at(ahead, "FROM")
+                    && !(ahead > 0 && self.keyword_at(ahead - 1, "DISTINCT"))
+            })
+    }
+
     fn trim_from(&mut self) -> ParseResult<Option<Expr>> {
-        let start = self.pos;
+        if !self.trim_has_from() {
+            return Ok(None);
+        }
         let side = ["LEADING", "TRAILING", "BOTH"]
             .into_iter()
             .find(|side| self.eat_keyword(side));
-        if side.is_some() && self.at_punct(Punct::RParen) {
-            self.pos = start;
-            return Ok(None);
-        }
         let characters = if self.at_keyword("FROM") {
             None
         } else {
-            let characters = self.expression()?;
-            if side.is_none() && !self.at_keyword("FROM") {
-                self.pos = start;
-                return Ok(None);
-            }
-            Some(characters)
+            Some(self.expression()?)
         };
         self.expect_keyword("FROM")?;
         let source = self.expression()?;

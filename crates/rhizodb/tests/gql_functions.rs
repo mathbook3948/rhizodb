@@ -60,6 +60,21 @@ fn trim_still_takes_a_variable_named_like_a_trim_keyword() {
         single(&db, "WITH ' a ' AS leading RETURN trim(leading) AS t"),
         string("a")
     );
+    assert_eq!(
+        row(
+            &db,
+            "WITH {name: ' b '} AS both, ' l' AS leading, 'x' AS from \
+             RETURN trim(both.name), trim(leading + 'x'), trim(BOTH FROM ' c '), \
+             trim(LEADING 'x' FROM 'xxd'), trim('y' FROM 'yey')"
+        ),
+        [
+            string("b"),
+            string("lx"),
+            string("c"),
+            string("d"),
+            string("e")
+        ]
+    );
 }
 
 #[test]

@@ -587,6 +587,22 @@ fn nesting_within_the_limit_still_parses() {
 }
 
 #[test]
+fn nested_trim_calls_parse_in_time_linear_in_their_depth() {
+    let depth = 50;
+    let input = format!("RETURN {}'x'{}", "trim(".repeat(depth), ")".repeat(depth));
+    let started = std::time::Instant::now();
+    assert!(parse(&input).is_ok());
+    let sided = format!(
+        "RETURN {}'x'{}",
+        "trim(LEADING 'a' FROM ".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert!(parse(&sided).is_ok());
+    assert!(parse("RETURN trim(a IS DISTINCT FROM b)").is_ok());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
 fn arbitrary_garbage_never_panics() {
     for source in [
         "\u{0}",
