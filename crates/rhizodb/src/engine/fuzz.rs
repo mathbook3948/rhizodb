@@ -11,15 +11,15 @@ use super::layout::BlockRef;
 use super::layout::WAL_BLOCK;
 use super::mem_fs::MemFs;
 use super::page::PageHeader;
+use super::snapshot::install;
+use super::snapshot::seal;
+use super::snapshot::unseal;
 use super::store::CheckpointMode;
 use super::store::Engine;
 use super::store::EngineOptions;
-use super::wal_format::Body;
-use super::wal_format::Op;
 use super::wal_format::SegmentHeader;
-use super::wal_format::batch_record;
-use super::wal_format::checkpoint_record;
 use super::wal_format::decode_record;
+use super::wal_format::encode_record;
 use super::wal_format::seal_record;
 use crate::storage::Entry;
 use crate::storage::ReadTransaction;
@@ -82,20 +82,7 @@ pub(crate) fn decode_formats(bytes: &[u8]) -> Result<(), String> {
                 seal_record(0, &mut record).map_err(|error| error.to_string())?;
             }
             if let Ok((decoded, length)) = decode_record(0, &record) {
-                let mut again = match &decoded.body {
-                    Body::Batch(ops) => batch_record(
-                        decoded.lsn,
-                        decoded.hlc,
-                        decoded.txn,
-                        ops.iter().map(Op::borrowed),
-                    )
-                    .map_err(|error| error.to_string())?,
-                    Body::Checkpoint { lsn, generation } => {
-                        checkpoint_record(decoded.lsn, decoded.hlc, *lsn, *generation)
-                    }
-                };
-                again[20..28].copy_from_slice(&decoded.term.to_le_bytes());
-                again[36..52].copy_from_slice(&decoded.txn.to_le_bytes());
+                let mut again = encode_record(&decoded).map_err(|error| error.to_string())?;
                 seal_record(0, &mut again).map_err(|error| error.to_string())?;
                 if again != record[..length] {
                     return Err(format!("record {decoded:?} encodes to other bytes"));
@@ -121,6 +108,8 @@ fn fuzz_options() -> EngineOptions {
         cache_bytes: 64 * BLOCK,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        max_retained_bytes: EngineOptions::default().max_retained_bytes,
+        pin_limit: EngineOptions::default().pin_limit,
     }
 }
 
@@ -197,6 +186,81 @@ pub(crate) fn open_damaged_file(bytes: &[u8]) -> Result<(), String> {
     file.write(0, &damaged).map_err(|error| error.to_string())?;
     drop(file);
     let Ok(engine) = Engine::open(fs, FILE, fuzz_options()) else {
+        return Ok(());
+    };
+    match everything(&engine) {
+        Ok(found) if &found != expected => {
+            Err("damage changed what reads return without an error".to_owned())
+        }
+        Ok(_) => engine.check().map(drop).or(Ok(())),
+        Err(_) => Ok(()),
+    }
+}
+
+const FILE_BLOCKS_AT: usize = 40;
+
+type Stream = (Vec<u8>, u64, Vec<(Table, Entry)>);
+
+fn build_stream() -> Result<Stream, String> {
+    let (image, expected) = image()?;
+    let fs = Arc::new(MemFs::default());
+    let size = BlockSize::new(BLOCK).ok_or("block size")?;
+    let file = fs.create(FILE, size).map_err(|error| error.to_string())?;
+    file.write(0, image).map_err(|error| error.to_string())?;
+    drop(file);
+    let engine = Engine::open(fs, FILE, fuzz_options()).map_err(|error| error.to_string())?;
+    let export = engine.export(&[]).map_err(|error| error.to_string())?;
+    let mut stream = vec![0; usize::try_from(export.len()).map_err(|error| error.to_string())?];
+    let read = export
+        .read_at(0, &mut stream)
+        .map_err(|error| error.to_string())?;
+    stream.truncate(read);
+    let logical = unseal(&stream);
+    let file_blocks = logical
+        .get(FILE_BLOCKS_AT..FILE_BLOCKS_AT + 8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u64::from_le_bytes)
+        .ok_or("the stream holds no manifest")?;
+    Ok((logical, file_blocks, expected.clone()))
+}
+
+fn stream() -> Result<&'static Stream, String> {
+    static STREAM: OnceLock<Result<Stream, String>> = OnceLock::new();
+    STREAM
+        .get_or_init(build_stream)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// Damages a snapshot stream of a database by `bytes`, read as pairs of a three-byte offset and a
+/// byte to xor there, seals its chunks again so the damage passes their checksums, and installs
+/// it. Installing may fail, but a panic, or an installed database whose entries differ from the
+/// source's without an error, is a bug. A file length the damage raised past four times the
+/// source's is left out, since memory holds the file the install writes.
+pub(crate) fn install_damaged_stream(bytes: &[u8]) -> Result<(), String> {
+    let (pristine, file_blocks, expected) = stream()?;
+    let mut damaged = pristine.clone();
+    for pair in bytes.as_chunks::<4>().0 {
+        let offset =
+            (usize::from(pair[0]) << 16 | usize::from(pair[1]) << 8 | usize::from(pair[2]))
+                % damaged.len();
+        damaged[offset] ^= pair[3];
+    }
+    let claimed = damaged
+        .get(FILE_BLOCKS_AT..FILE_BLOCKS_AT + 8)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map_or(0, u64::from_le_bytes);
+    if claimed > file_blocks.saturating_mul(4) {
+        return Ok(());
+    }
+    let sealed = seal(&damaged);
+    let Ok(engine) = install(
+        Arc::new(MemFs::default()),
+        FILE,
+        sealed.as_slice(),
+        fuzz_options(),
+        true,
+    ) else {
         return Ok(());
     };
     match everything(&engine) {

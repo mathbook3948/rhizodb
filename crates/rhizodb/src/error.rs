@@ -190,6 +190,47 @@ pub enum ErrorKind {
     /// A dump was imported into a database that holds an index or has ever held a node or a
     /// relationship.
     DatabaseNotEmpty,
+    /// A database that is not the writer was asked to write: a query that updates the graph, a
+    /// write transaction or its commit, an index change, an import, or an upgrade of a file
+    /// written in an older format. A [replica](crate::Role::Replica) changes only through its
+    /// writer's changes, and a [fenced](crate::Role::Fenced) writer takes writes again only once
+    /// the host promotes it.
+    NotWriter,
+    /// A change or a promotion carries a term lower than the highest term this database has
+    /// seen, so it comes from a writer that a later one replaced.
+    Fenced,
+    /// Two databases hold different changes at the same place of their history: a change, or
+    /// a [`Position`](crate::Position), names another writer or term than the one this database
+    /// recorded for that log sequence number. Neither side is chosen, and the host decides
+    /// which one installs a snapshot of the other.
+    Diverged,
+    /// The changes after a [`Position`](crate::Position) are no longer kept, so the database
+    /// behind it must install a snapshot instead.
+    TooFarBehind,
+    /// Changes to apply do not start right after the last change the database holds.
+    Gap,
+    /// A peer id given to [`Database::acknowledge`](crate::Database::acknowledge) or
+    /// [`Database::forget_peer`](crate::Database::forget_peer) is empty or longer than 64
+    /// bytes.
+    InvalidPeerId,
+    /// A [`Snapshot`](crate::Snapshot) was read after it outlived
+    /// [`OpenOptions::snapshot_time_limit`](crate::OpenOptions::snapshot_time_limit), when the
+    /// database had already released the pages it held. Take a new snapshot.
+    SnapshotExpired,
+    /// [`Database::acknowledge`](crate::Database::acknowledge) named a new peer when the
+    /// database already keeps the log for 32 peers. Forget a peer that is gone with
+    /// [`Database::forget_peer`](crate::Database::forget_peer), or relay through a replica.
+    TooManyPeers,
+    /// Changes were given to [`Database::apply`](crate::Database::apply) of a database that is
+    /// a writer, which takes no changes of another writer until it is demoted.
+    NotReplica,
+    /// [`Database::demote`](crate::Database::demote) waited for an open write transaction longer
+    /// than it was given. The database takes no write meanwhile, and a later demotion finishes.
+    WriterBusy,
+    /// A position or changes belong to another database than this one follows, as when a
+    /// replica is pointed at the writer of an unrelated database. Unlike
+    /// [`ErrorKind::Diverged`], installing a snapshot of the other side is not the answer.
+    DifferentDatabase,
 }
 
 impl ErrorKind {
@@ -365,6 +406,7 @@ impl From<GraphError> for Error {
             GraphError::IndexExists(_) => ErrorKind::IndexAlreadyExists,
             GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
             GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
+            GraphError::NotWriter(_) => ErrorKind::NotWriter,
         };
         Self {
             kind,

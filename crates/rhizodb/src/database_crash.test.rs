@@ -142,6 +142,8 @@ fn open(fs: &SimFs, cache_bytes: usize) -> Result<Database, Error> {
         cache_bytes,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
+        max_retained_bytes: EngineOptions::default().max_retained_bytes,
+        pin_limit: EngineOptions::default().pin_limit,
     };
     let engine = Engine::open(
         Arc::new(AnyFs::Sim(fs.clone())),
@@ -149,10 +151,10 @@ fn open(fs: &SimFs, cache_bytes: usize) -> Result<Database, Error> {
         options,
     )
     .map_err(crate::storage::StorageError::from)?;
-    Ok(Database {
-        graph: Graph::open(engine)?,
-        statements: Statements::default(),
-    })
+    Ok(Database::from_parts(
+        Graph::open(engine)?,
+        Statements::default(),
+    ))
 }
 
 fn consistent(db: &Database) -> Result<(), String> {

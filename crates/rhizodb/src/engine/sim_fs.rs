@@ -33,6 +33,7 @@ pub(crate) struct SimFile {
     state: Arc<Mutex<State>>,
     inode: usize,
     size: BlockSize,
+    handle: u64,
 }
 
 /// Which of the writes since the last sync a simulated power loss keeps.
@@ -73,6 +74,8 @@ struct State {
     operations: u64,
     fault: Option<Fault>,
     capacity: Option<u64>,
+    handles: u64,
+    locks: BTreeMap<usize, u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -118,6 +121,16 @@ fn not_found(name: &str) -> io::Error {
 }
 
 impl State {
+    fn unlocked_for(&self, inode: usize, handle: u64) -> io::Result<()> {
+        match self.locks.get(&inode) {
+            Some(holder) if *holder != handle => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "another handle holds the lock on the simulated file",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn operate(&mut self, inode: Option<usize>, sync: bool) -> io::Result<()> {
         self.operations += 1;
         let Some(fault) = &mut self.fault else {
@@ -340,11 +353,14 @@ impl SimFs {
         }
     }
 
-    fn file(&self, inode: usize, size: BlockSize) -> SimFile {
+    fn file(&self, state: &mut State, inode: usize, size: BlockSize) -> SimFile {
+        state.handles += 1;
+        let handle = state.handles;
         SimFile {
             state: Arc::clone(&self.state),
             inode,
             size,
+            handle,
         }
     }
 }
@@ -472,14 +488,14 @@ impl FileSystem for SimFs {
             name: name.to_owned(),
             inode,
         });
-        Ok(self.file(inode, size))
+        Ok(self.file(&mut state, inode, size))
     }
 
     fn open(&self, name: &str, size: BlockSize) -> io::Result<SimFile> {
         let mut state = lock(&self.state);
         state.operate(None, false)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
-        Ok(self.file(inode, size))
+        Ok(self.file(&mut state, inode, size))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -528,15 +544,26 @@ impl FileSystem for SimFs {
     }
 }
 
+impl Drop for SimFile {
+    fn drop(&mut self) {
+        let mut state = lock(&self.state);
+        if state.locks.get(&self.inode) == Some(&self.handle) {
+            state.locks.remove(&self.inode);
+        }
+    }
+}
+
 impl BlockFile for SimFile {
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
     }
 
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let start = byte_index(self.size.offset(first)?)?;
         state.fits(self.inode, start + buffer.len())?;
@@ -565,11 +592,22 @@ impl BlockFile for SimFile {
     }
 
     fn lock(&self) -> io::Result<()> {
-        Ok(())
+        let mut state = lock(&self.state);
+        match state.locks.get(&self.inode) {
+            Some(holder) if *holder != self.handle => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "another handle holds the lock on the simulated file",
+            )),
+            _ => {
+                state.locks.insert(self.inode, self.handle);
+                Ok(())
+            }
+        }
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
+        state.unlocked_for(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let length = byte_index(self.size.offset(count)?)?;
         state.fits(self.inode, length)?;

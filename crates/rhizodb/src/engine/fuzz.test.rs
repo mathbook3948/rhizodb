@@ -6,6 +6,9 @@ use crate::engine::header::FORMAT_MINOR;
 use crate::engine::layout::ExtentId;
 use crate::engine::layout::TableId;
 use crate::engine::page::PageKind;
+use crate::engine::wal_format::Op;
+use crate::engine::wal_format::batch_record;
+use crate::engine::wal_format::checkpoint_record;
 
 #[test]
 fn valid_encodings_of_every_format_round_trip() {
@@ -66,6 +69,18 @@ fn the_undamaged_file_reads_back() {
     assert_eq!(open_damaged_file(&[]), Ok(()));
 }
 
+#[test]
+fn the_undamaged_stream_installs_and_reads_back() {
+    assert_eq!(install_damaged_stream(&[]), Ok(()));
+}
+
+#[test]
+fn a_stream_whose_range_count_or_history_length_is_forged_fails_to_install() {
+    for at in 48..64 {
+        assert_eq!(install_damaged_stream(&[0, 0, at, 0xff]), Ok(()));
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(256)))]
 
@@ -73,6 +88,12 @@ proptest! {
     #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_file_never_panics_or_reads_differently(damage in vec(any::<u8>(), 4..64)) {
         prop_assert_eq!(open_damaged_file(&damage), Ok(()));
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn a_damaged_stream_never_panics_or_installs_differently(damage in vec(any::<u8>(), 4..64)) {
+        prop_assert_eq!(install_damaged_stream(&damage), Ok(()));
     }
 
     #[test]

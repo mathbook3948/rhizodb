@@ -11,7 +11,9 @@ mod gql;
 mod graph;
 mod procedure;
 mod query;
+mod replication;
 mod result;
+mod snapshot;
 mod storage;
 mod temporal;
 #[cfg(test)]
@@ -36,12 +38,20 @@ pub use procedure::Procedure;
 pub use procedure::ProcedureError;
 pub use procedure::ProcedureOutput;
 pub use procedure::ValueType;
+pub use replication::Changes;
+pub use replication::History;
+pub use replication::HistoryEntry;
+pub use replication::Lineage;
+pub use replication::Position;
+pub use replication::ReplicationFailure;
+pub use replication::Role;
 pub use result::Node;
 pub use result::Parameters;
 pub use result::Path;
 pub use result::QueryResult;
 pub use result::Relationship;
 pub use result::Value;
+pub use snapshot::Snapshot;
 pub use temporal::Date;
 pub use temporal::DateTime;
 pub use temporal::Duration;
@@ -74,4 +84,20 @@ pub fn decode_engine_formats_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
 #[doc(hidden)]
 pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
     engine::fuzz::open_damaged_file(bytes)
+}
+
+/// Damages a snapshot stream by `bytes`, seals it again, installs it, and reads every entry,
+/// for the fuzzer. Fails when the damage changed what reads return without an error.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn install_damaged_snapshot_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::install_damaged_stream(bytes)
+}
+
+/// Damages a batch of replication changes by `bytes`, reseals it, decodes it, applies it to a
+/// replica, and reads the replica, for the fuzzer. Fails when decoded changes keep other bytes.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn apply_changes_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    replication::apply_changes_for_fuzzing(bytes)
 }

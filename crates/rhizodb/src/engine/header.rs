@@ -15,7 +15,7 @@ pub(crate) const MAGIC: [u8; 8] = *b"RHIZODB\0";
 
 /// The engine format this build writes. A file of another major or a newer minor is refused.
 pub(crate) const FORMAT_MAJOR: u16 = 1;
-pub(crate) const FORMAT_MINOR: u16 = 3;
+pub(crate) const FORMAT_MINOR: u16 = 4;
 
 /// The open extents whose written lengths the header records. A checkpoint keeps one, and a file
 /// of engine format minor 1 may hold one per kind of block.
@@ -25,6 +25,54 @@ const CLEAN: u32 = 1;
 const KNOWN_FLAGS: u32 = CLEAN;
 
 const CHECKSUM_AT: usize = BLOCK - 8;
+
+const RETAINED_AT: usize = 1024;
+
+/// The most peers whose acknowledged positions a header records.
+pub(crate) const PEER_LIMIT: usize = 32;
+
+/// The log a header keeps beyond what recovery needs: the first segment kept, or zero for none,
+/// and the position each acknowledged peer holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Retained {
+    pub(crate) from: u64,
+    pub(crate) peers: Vec<(Vec<u8>, u64)>,
+}
+
+impl Retained {
+    fn encode(&self, out: &mut [u8]) {
+        let mut bytes = Vec::new();
+        put_u64(&mut bytes, self.from);
+        put_u16(&mut bytes, self.peers.len() as u16);
+        for (peer, lsn) in self.peers.iter().take(PEER_LIMIT) {
+            bytes.push(peer.len() as u8);
+            bytes.extend_from_slice(peer);
+            put_u64(&mut bytes, *lsn);
+        }
+        for (slot, byte) in out.iter_mut().zip(bytes) {
+            *slot = byte;
+        }
+    }
+
+    fn decode(area: &[u8]) -> Result<Self, EngineError> {
+        let mut reader = Reader::new(area, "the retained log of a header slot");
+        let from = reader.u64()?;
+        let count = usize::from(reader.u16()?);
+        if count > PEER_LIMIT {
+            return Err(reader.bad("peer count"));
+        }
+        let mut peers = Vec::with_capacity(count);
+        for _ in 0..count {
+            let length = usize::from(reader.u8()?);
+            let peer = reader.take(length)?.to_vec();
+            peers.push((peer, reader.u64()?));
+        }
+        if reader.rest().iter().any(|byte| *byte != 0) {
+            return Err(reader.bad("reserved area"));
+        }
+        Ok(Self { from, peers })
+    }
+}
 
 /// An extent a checkpoint appends to. Blocks past `written` hold nothing a header reaches, so a
 /// later checkpoint overwrites them.
@@ -41,6 +89,21 @@ pub(crate) struct OpenExtent {
 pub(crate) struct WalIdentity {
     pub(crate) first_segment: u64,
     pub(crate) salt: u64,
+}
+
+const REPLICA: u32 = 1;
+
+/// What replication keeps outside the log: who this file is, whether it follows a writer, the
+/// highest term it has heard of, and the chain hash of the record at the checkpoint's LSN.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Replication {
+    pub(crate) incarnation: u128,
+    pub(crate) replica: bool,
+    pub(crate) seen_term: u64,
+    pub(crate) checkpoint_chain: u64,
+    /// The id of the database whose history this file follows, or zero when it has taken none
+    /// yet and its own database id stands for it.
+    pub(crate) origin: u128,
 }
 
 /// One header slot. The valid slot with the higher generation describes the database.
@@ -62,6 +125,7 @@ pub(crate) struct Header {
     /// The LSN of the newest commit the tree holds, when a checkpoint has made only some of its
     /// stages durable, and zero otherwise. The log still replays from `checkpoint_lsn`.
     pub(crate) staged_lsn: u64,
+    pub(crate) replication: Replication,
 }
 
 impl Header {
@@ -80,10 +144,24 @@ impl Header {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
+        self.encode_with(&Retained::default())
+    }
+
+    /// The slot's bytes, with `retained` recorded beside the header.
+    pub(crate) fn encode_with(&self, retained: &Retained) -> Vec<u8> {
         let mut out = Vec::with_capacity(BLOCK);
         out.extend_from_slice(&MAGIC);
         put_u16(&mut out, FORMAT_MAJOR);
-        put_u16(&mut out, self.minor);
+        let carries_replication =
+            self.replication != Replication::default() || *retained != Retained::default();
+        put_u16(
+            &mut out,
+            if carries_replication {
+                FORMAT_MINOR
+            } else {
+                self.minor
+            },
+        );
         put_u32(&mut out, BLOCK as u32);
         put_u32(&mut out, EXTENT_BLOCKS);
         put_u32(&mut out, 0);
@@ -105,7 +183,13 @@ impl Header {
         put_u64(&mut out, self.wal.salt);
         put_u32(&mut out, if self.clean { CLEAN } else { 0 });
         put_u64(&mut out, self.staged_lsn);
+        put_u128(&mut out, self.replication.incarnation);
+        put_u32(&mut out, if self.replication.replica { REPLICA } else { 0 });
+        put_u64(&mut out, self.replication.seen_term);
+        put_u64(&mut out, self.replication.checkpoint_chain);
+        put_u128(&mut out, self.replication.origin);
         out.resize(CHECKSUM_AT, 0);
+        retained.encode(&mut out[RETAINED_AT..]);
         let sum = checksum(0, &[&out]);
         put_u64(&mut out, sum);
         out
@@ -176,7 +260,22 @@ impl Header {
             return Err(EngineError::Unsupported(format!("header flags {flags:#x}")));
         }
         let staged_lsn = reader.u64()?;
-        if reader.rest().iter().any(|byte| *byte != 0) {
+        let incarnation = reader.u128()?;
+        let replication_flags = reader.u32()?;
+        if replication_flags & !REPLICA != 0 {
+            return Err(EngineError::Unsupported(format!(
+                "replication flags {replication_flags:#x}"
+            )));
+        }
+        let replication = Replication {
+            incarnation,
+            replica: replication_flags & REPLICA != 0,
+            seen_term: reader.u64()?,
+            checkpoint_chain: reader.u64()?,
+            origin: reader.u128()?,
+        };
+        let reserved = RETAINED_AT - (CHECKSUM_AT - reader.remaining());
+        if reader.rest().iter().take(reserved).any(|byte| *byte != 0) {
             return Err(reader.bad("reserved area"));
         }
         if staged_lsn != 0 && (staged_lsn <= checkpoint_lsn || flags & CLEAN != 0) {
@@ -212,8 +311,17 @@ impl Header {
             wal,
             clean: flags & CLEAN != 0,
             staged_lsn,
+            replication,
         })
     }
+}
+
+/// The log a valid header slot keeps for peers.
+pub(crate) fn decode_retained(block: &[u8]) -> Result<Retained, EngineError> {
+    let area = block
+        .get(RETAINED_AT..CHECKSUM_AT)
+        .ok_or_else(|| EngineError::corrupt("a header slot is not one block"))?;
+    Retained::decode(area)
 }
 
 /// Decodes the slot in block `slot`, which must hold a generation of its parity.

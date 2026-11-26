@@ -53,6 +53,8 @@ tables! {
     NodeColumns,
     Adjacency,
     RelationshipChunks,
+    #[doc = "The terms of the writers a database has followed or been, with the LSN each began at, which only replication writes."]
+    ReplicationHistory,
 }
 
 impl Table {
@@ -259,6 +261,7 @@ pub(crate) struct StorageStats {
     pub(crate) wal_bytes: u64,
     pub(crate) cache_hits: u64,
     pub(crate) cache_misses: u64,
+    pub(crate) held_bytes: u64,
 }
 
 /// Upkeep of a database file that no transaction does: compaction, statistics, and a check of

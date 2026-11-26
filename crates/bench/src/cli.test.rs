@@ -17,6 +17,7 @@ fn no_arguments_give_the_defaults() {
             engines: None,
             servers: Servers::default(),
             load: Load::default(),
+            replication: false,
         })
     );
 }
@@ -38,6 +39,7 @@ fn every_flag_is_read() {
             engines: None,
             servers: Servers::default(),
             load: Load::default(),
+            replication: false,
         })
     );
 }

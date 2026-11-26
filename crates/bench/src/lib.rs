@@ -23,6 +23,7 @@ pub mod ladybug;
 pub mod measure;
 pub mod random;
 pub mod readme;
+pub mod replication;
 pub mod report;
 pub mod rhizo;
 pub mod runner;

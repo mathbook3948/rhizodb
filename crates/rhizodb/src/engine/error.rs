@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
+use super::changes::EpochId;
 use crate::error::ErrorKind;
 use crate::storage::StorageError;
 
@@ -22,6 +23,41 @@ pub(crate) enum EngineError {
     TooLarge,
     /// A failure that already crossed the storage trait, such as one a scan's visitor raised.
     Storage(StorageError),
+    /// Changes, a promotion, or a write that replication refuses.
+    Replication(Box<Refusal>),
+}
+
+/// Why replication refused something, as the kind the host branches on, a message, and the
+/// positions or LSNs behind it.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub(crate) kind: ErrorKind,
+    pub(crate) message: String,
+    pub(crate) failure: Option<Failure>,
+}
+
+/// The facts behind a refusal, for the host to act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Failure {
+    Fenced {
+        seen_term: u64,
+    },
+    Diverged {
+        database: u128,
+        local: (EpochId, u64, u64),
+        remote: (EpochId, u64, u64),
+        fork_lsn: u64,
+    },
+    TooFarBehind {
+        oldest_lsn: u64,
+    },
+    Gap {
+        expected_lsn: u64,
+    },
+    DifferentDatabase {
+        local: u128,
+        remote: u128,
+    },
 }
 
 impl EngineError {
@@ -54,6 +90,7 @@ impl fmt::Display for EngineError {
             ),
             Self::TooLarge => formatter.write_str("a key, value, or transaction is too large"),
             Self::Storage(error) => write!(formatter, "{error}"),
+            Self::Replication(refusal) => formatter.write_str(&refusal.message),
         }
     }
 }
@@ -85,7 +122,9 @@ impl From<EngineError> for StorageError {
         if let EngineError::Storage(error) = error {
             return error;
         }
-        if error.is_corrupt() {
+        if let EngineError::Replication(refusal) = &error {
+            StorageError::of_kind(refusal.kind, error)
+        } else if error.is_corrupt() {
             StorageError::corrupt(error)
         } else if matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock) {
             StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)

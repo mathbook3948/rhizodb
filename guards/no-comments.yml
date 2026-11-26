@@ -40,6 +40,7 @@ rule:
             kind: visibility_modifier
       - inside:
           kind: enum_variant_list
+          stopBy: end
       - inside:
           kind: declaration_list
           inside:
