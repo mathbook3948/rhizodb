@@ -50,6 +50,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `Database::acknowledge` keeps the write-ahead log after a peer's `Position` for that peer, and `Database::forget_peer` releases it. `OpenOptions::max_retained_bytes`, 1 GiB by default, caps the log kept for peers and snapshots, past which the peers furthest behind are released.
 - `ErrorKind::InvalidPeerId` for a peer id that is empty or longer than 64 bytes.
 - Acknowledged peers and the log kept for them survive a clean restart and a crash: the database file records each peer's position with every checkpoint, and a reopened database keeps the log segments those peers still need, so a restarted writer does not force its replicas to a new snapshot. A database keeps the log for at most 32 peers, and acknowledging another fails with the new `ErrorKind::TooManyPeers`.
+- `OpenOptions::force_install`, without which an install refuses, with `ErrorKind::Fenced`, a snapshot older in term than the database it replaces has seen. An installed database is a replica of a fresh incarnation that keeps the newest term either side has seen, so changes of a replaced writer are fenced. `Database::acknowledge` with a position of a newer term fences a writer.
 - `OpenOptions::snapshot_time_limit`, one hour by default, after which the database releases a `Snapshot` still alive and reading it fails with the new `ErrorKind::SnapshotExpired`, and `DatabaseStats::held_bytes`, the space that open snapshots and read transactions keep the file from reusing.
 
 ### Changed

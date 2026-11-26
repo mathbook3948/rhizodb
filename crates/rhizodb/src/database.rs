@@ -73,6 +73,7 @@ pub struct OpenOptions {
     replica: bool,
     parallelism: Parallelism,
     engine: EngineOptions,
+    force_install: bool,
 }
 
 impl Default for OpenOptions {
@@ -82,6 +83,7 @@ impl Default for OpenOptions {
             replica: false,
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
+            force_install: false,
         }
     }
 }
@@ -177,6 +179,16 @@ impl OpenOptions {
         self
     }
 
+    /// Whether [`OpenOptions::install_snapshot`] replaces a database that has seen a newer term
+    /// of its history than the snapshot holds, which it refuses with
+    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced) unless this is set to `true`. A snapshot
+    /// of an older term comes from a writer that a later one replaced, so a host forces it only
+    /// to roll a node back on purpose.
+    pub fn force_install(mut self, force: bool) -> Self {
+        self.force_install = force;
+        self
+    }
+
     /// How long a [`Snapshot`] may hold the pages of its checkpoint, which defaults to one hour.
     /// While a snapshot lives the file cannot reuse the space of pages that later commits
     /// rewrite, so the file grows by what they rewrite; [`DatabaseStats::held_bytes`] reports
@@ -223,10 +235,10 @@ impl OpenOptions {
         path: impl AsRef<Path>,
         input: impl Read,
     ) -> Result<Database, Error> {
-        let installed =
-            any_fs::install_path(path.as_ref(), input, self.engine).map_err(StorageError::from)?;
+        let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
+            .map_err(StorageError::from)?;
         Ok(Database::from_parts(
-            installed_graph(installed)?,
+            graph_on(installed, true)?,
             Statements::new(self.parallelism),
         ))
     }
@@ -240,13 +252,6 @@ pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>
     }
     let follows = backend.role() != Role::Writer;
     Ok(Graph::open_as(backend, follows)?)
-}
-
-fn installed_graph(backend: Backend) -> Result<Graph<Backend>, Error> {
-    backend
-        .become_installed_replica()
-        .map_err(StorageError::from)?;
-    Ok(Graph::open_as(backend, true)?)
 }
 
 fn exists(path: &Path) -> Result<bool, Error> {
@@ -555,13 +560,22 @@ impl Database {
     /// furthest behind are released and need a new snapshot. Call
     /// [`Database::forget_peer`] for a peer that is gone, so it keeps nothing.
     ///
+    /// A position of a newer term than this database has seen tells it that another writer
+    /// took over, so a writer becomes fenced, as [`Database::promote`] describes for a newer
+    /// term.
+    ///
     /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
-    /// peer id or one longer than 64 bytes.
+    /// peer id or one longer than 64 bytes, and with
+    /// [`ErrorKind::TooManyPeers`](crate::ErrorKind::TooManyPeers) for a new peer when 32 are
+    /// kept.
     pub fn acknowledge(&self, peer: &[u8], position: &Position) -> Result<(), Error> {
-        Ok(self
-            .graph
-            .storage()
-            .acknowledge(peer_id(peer)?, position.lsn())
+        let peer = peer_id(peer)?;
+        let storage = self.graph.storage();
+        storage
+            .observe_term(position.term())
+            .map_err(StorageError::from)?;
+        Ok(storage
+            .acknowledge(peer, position.lsn())
             .map_err(StorageError::from)?)
     }
 

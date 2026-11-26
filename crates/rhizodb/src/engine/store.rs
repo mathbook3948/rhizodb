@@ -288,7 +288,7 @@ pub(crate) struct Engine<F: FileSystem + 'static> {
     worker: Option<thread::JoinHandle<()>>,
 }
 
-fn read_header(file: &impl BlockFile) -> Result<(Header, Retained), EngineError> {
+pub(crate) fn read_header(file: &impl BlockFile) -> Result<(Header, Retained), EngineError> {
     if file.block_count()? < 2 {
         return Err(EngineError::corrupt(
             "the database file is shorter than its two header slots",
@@ -480,7 +480,7 @@ pub(crate) struct Loaded<B: BlockFile> {
     pages: Arc<Pages<B>>,
     header: Header,
     retained: Retained,
-    tree: Tree,
+    tree: Arc<Tree>,
     extents: ExtentTable,
     catalog: Vec<RunRef>,
 }
@@ -489,6 +489,36 @@ impl<B: BlockFile + 'static> Loaded<B> {
     /// Checks every invariant of the loaded file, as [`Engine::check`] does.
     pub(crate) fn check(&self) -> Result<CheckReport, EngineError> {
         check::check(&self.header, &self.extents, &self.catalog, &self.tree)
+    }
+
+    pub(crate) fn header(&self) -> &Header {
+        &self.header
+    }
+
+    /// The newest term the loaded tree's replication history records.
+    pub(crate) fn newest_term(&self) -> Result<u64, EngineError> {
+        let layers = Arc::new(Layers {
+            active: Arc::new(Memtable::default()),
+            frozen: None,
+            tree: Arc::clone(&self.tree),
+        });
+        Ok(replica::load_epochs(&layers)?
+            .last()
+            .map_or(0, |epoch| epoch.term))
+    }
+
+    /// Writes `header` over the loaded file's current header slot, with no log kept for peers,
+    /// and syncs it.
+    pub(crate) fn rewrite_header(&mut self, header: Header) -> Result<(), EngineError> {
+        if header.generation != self.header.generation {
+            return Err(EngineError::corrupt(
+                "a rewritten header changed its generation",
+            ));
+        }
+        self.pages.write_header(&header, &Retained::default())?;
+        self.header = header;
+        self.retained = Retained::default();
+        Ok(())
     }
 }
 
@@ -515,7 +545,7 @@ pub(crate) fn load<B: BlockFile + 'static>(
             ..ExtentTable::default()
         };
         let tree = Tree::new(header.generation, BTreeMap::new(), Arc::clone(&source));
-        (tree, extents, Vec::new())
+        (Arc::new(tree), extents, Vec::new())
     } else {
         for open in header.open.iter().filter(|open| !open.id.is_none()) {
             pages.place_extent(open.id, open.slot);
@@ -541,7 +571,7 @@ pub(crate) fn load<B: BlockFile + 'static>(
         if let Some(counts) = catalog.live_counts {
             find_live_blocks(&header, &mut extents, &counts, &runs, &tree)?;
         }
-        (tree, extents, runs)
+        (Arc::new(tree), extents, runs)
     };
     Ok(Loaded {
         pages,
@@ -646,7 +676,6 @@ impl<F: FileSystem + 'static> Engine<F> {
             extents,
             catalog,
         } = loaded;
-        let tree = Arc::new(tree);
         let layers = Arc::new(Layers {
             active: Arc::new(Memtable::default()),
             frozen: None,
@@ -2089,7 +2118,7 @@ fn stage_record(staged: &mut Staged, lsn: u64, term: u64, body: Body) -> Result<
 }
 
 #[path = "replica.rs"]
-mod replica;
+pub(crate) mod replica;
 
 pub(crate) use replica::Epoch;
 pub(crate) use replica::Role;

@@ -212,6 +212,7 @@ pub(crate) fn install_path(
     path: &Path,
     input: impl io::Read,
     options: EngineOptions,
+    force: bool,
 ) -> Result<Engine<AnyFs>, EngineError> {
     let (directory, name) = split(path)?;
     install(
@@ -219,6 +220,7 @@ pub(crate) fn install_path(
         name,
         input,
         options,
+        force,
     )
 }
 

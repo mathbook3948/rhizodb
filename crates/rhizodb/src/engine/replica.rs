@@ -207,7 +207,7 @@ pub(super) fn not_writer() -> EngineError {
     )
 }
 
-fn fenced(term: u64, seen_term: u64) -> EngineError {
+pub(crate) fn fenced(term: u64, seen_term: u64) -> EngineError {
     refuse(
         ErrorKind::Fenced,
         format!("term {term} is older than term {seen_term}, which this database has seen"),
@@ -319,18 +319,6 @@ impl<F: FileSystem + 'static> Engine<F> {
             *role = Role::Fenced;
             self.shared.accepting.store(false, Ordering::Release);
         }
-        Ok(())
-    }
-
-    /// Makes a file a snapshot was just installed into a replica with an incarnation of its
-    /// own, so it never passes as the writer the snapshot came from.
-    pub(crate) fn become_installed_replica(&self) -> Result<(), EngineError> {
-        let _writer = lock(&self.shared.writer);
-        self.write_replication(|replication| {
-            replication.replica = true;
-            replication.incarnation = super::new_incarnation();
-        })?;
-        self.set_role(Role::Replica);
         Ok(())
     }
 
