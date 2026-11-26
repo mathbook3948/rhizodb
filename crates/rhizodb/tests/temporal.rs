@@ -180,6 +180,9 @@ fn malformed_temporal_input_raises_its_own_error() {
         "RETURN duration('P1H')",
         "RETURN date('2015-01-01').hour",
         "RETURN date.truncate('hour', date('2015-01-01'))",
+        "RETURN date.truncate('millennium', date('-999999999-06-15'))",
+        "RETURN date.truncate('decade', date('-999999999-06-15'))",
+        "RETURN datetime.truncate('century', datetime('-999999999-06-15T10:00Z'))",
     ] {
         assert_eq!(
             error_kind(&db, query),

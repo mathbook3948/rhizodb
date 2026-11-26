@@ -730,7 +730,9 @@ pub(crate) fn truncated(
         return Err(invalid(format!("a {} needs a date", kind.name())));
     }
     let time = time_of(value).unwrap_or(LocalTime::MIDNIGHT);
-    let date = date.map(|date| truncate_date(date, &unit));
+    let date = date
+        .map(|date| truncate_date(date, &unit).ok_or_else(out_of_range))
+        .transpose()?;
     let time = match time_unit {
         Some(size) => LocalTime {
             nanos: time.nanos - time.nanos % size,
@@ -746,7 +748,7 @@ pub(crate) fn truncated(
     assemble(kind, &parts, frame, Rule::Truncate, now)
 }
 
-fn truncate_date(date: Date, unit: &str) -> Date {
+fn truncate_date(date: Date, unit: &str) -> Option<Date> {
     let (year, month, _) = civil_from_days(date.days);
     let days = match unit {
         "millennium" => days_from_civil(year.div_euclid(1000) * 1000, 1, 1),
@@ -759,7 +761,7 @@ fn truncate_date(date: Date, unit: &str) -> Date {
         "week" => date.days - i64::from(day_of_week(date.days)) + 1,
         _ => date.days,
     };
-    Date::from_days(days).unwrap_or(date)
+    Date::from_days(days)
 }
 
 /// The datetime in UTC `seconds` and `nanoseconds` after 1970-01-01T00:00Z.
