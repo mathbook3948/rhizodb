@@ -50,6 +50,7 @@ fn in_memory_backend() -> Result<Backend, Error> {
 #[must_use]
 pub struct OpenOptions {
     create: bool,
+    replica: bool,
     parallelism: Parallelism,
 }
 
@@ -57,6 +58,7 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             create: true,
+            replica: false,
             parallelism: Parallelism::default(),
         }
     }
@@ -73,6 +75,31 @@ impl OpenOptions {
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
     pub fn create(mut self, create: bool) -> Self {
         self.create = create;
+        self
+    }
+
+    /// Whether the database opens as a replica, which it does not unless this is set to
+    /// `true`. A replica serves reads as any database does, and refuses every local write for
+    /// the whole file with [`ErrorKind::ReplicaReadOnly`](crate::ErrorKind::ReplicaReadOnly):
+    /// queries that update the graph, write transactions, index changes, and imports. A
+    /// replica opened on a missing or empty file creates it without writing the graph's format
+    /// version, so it holds no change until it applies its writer's first one. A file written in
+    /// an older format fails to open as a replica with `ReplicaReadOnly`, since its upgrade is a
+    /// write. Data that belongs to the node itself goes in a database file of its own.
+    ///
+    /// ```
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    ///
+    /// let replica = OpenOptions::new().replica(true).in_memory()?;
+    /// assert!(replica.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+    /// let error = replica.execute("INSERT ()", &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::ReplicaReadOnly);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn replica(mut self, replica: bool) -> Self {
+        self.replica = replica;
         self
     }
 
@@ -115,7 +142,7 @@ impl OpenOptions {
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
         Ok(Database {
-            graph: Graph::open(in_memory_backend()?)?,
+            graph: Graph::open_as(in_memory_backend()?, self.replica)?,
             statements: Statements::new(self.parallelism),
         })
     }
@@ -130,7 +157,7 @@ impl OpenOptions {
             ));
         }
         Ok(Database {
-            graph: Graph::open(open_backend(path)?)?,
+            graph: Graph::open_as(open_backend(path)?, self.replica)?,
             statements: Statements::new(self.parallelism),
         })
     }

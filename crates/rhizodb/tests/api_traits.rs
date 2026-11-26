@@ -19,6 +19,7 @@ use rhizodb::NodeId;
 use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Path;
+use rhizodb::Position;
 use rhizodb::Procedure;
 use rhizodb::ProcedureOutput;
 use rhizodb::QueryResult;
@@ -43,6 +44,7 @@ fn values_and_handles_move_and_share_across_threads() {
     shared::<Database>();
     shared::<OpenOptions>();
     shared::<DatabaseStats>();
+    shared::<Position>();
     shared::<Parameters>();
     shared::<QueryResult>();
     shared::<Value>();

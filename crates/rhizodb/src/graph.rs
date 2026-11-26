@@ -9,6 +9,8 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -117,6 +119,7 @@ pub(crate) enum GraphError {
     IndexExists(String),
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
+    ReplicaReadOnly(&'static str),
 }
 
 impl fmt::Display for GraphError {
@@ -149,6 +152,7 @@ impl fmt::Display for GraphError {
             ),
             Self::InvalidIndex(reason) => write!(formatter, "invalid index: {reason}"),
             Self::InvalidQueryVector(reason) => write!(formatter, "invalid query vector: {reason}"),
+            Self::ReplicaReadOnly(what) => write!(formatter, "a replica cannot {what}"),
         }
     }
 }
@@ -193,6 +197,7 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writer: Arc<Mutex<Option<ThreadId>>>,
+    replica: AtomicBool,
     committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -231,7 +236,14 @@ impl<S: Storage> Graph<S> {
     /// definitions written before indexes could cover relationships are rewritten, and keyword
     /// indexes written before postings kept positions or built by another tokenizer are rebuilt,
     /// in the same write transaction.
+    #[cfg(test)]
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
+        Self::open_as(storage, false)
+    }
+
+    /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
+    /// and so fails instead of writing the format version or an upgrade.
+    pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
         {
             let mut tx = GraphTx::bare(storage.begin_write()?);
             let found = match tx
@@ -248,6 +260,11 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
+            if replica && upgrade && found.is_some() {
+                return Err(GraphError::ReplicaReadOnly(
+                    "upgrade a database written in an older format",
+                ));
+            }
             if let Some(found) = found
                 && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
             {
@@ -277,7 +294,13 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            if tx.adopt_current_tokenizer(stale_postings)? || upgrade {
+            let changed = tx.adopt_current_tokenizer(stale_postings)?;
+            if replica && changed && found.is_some() {
+                return Err(GraphError::ReplicaReadOnly(
+                    "rebuild keyword indexes for this build's tokenizer",
+                ));
+            }
+            if !replica && (changed || upgrade) {
                 tx.commit()?;
             }
         }
@@ -285,6 +308,7 @@ impl<S: Storage> Graph<S> {
         Ok(Self {
             storage,
             writer: Arc::default(),
+            replica: AtomicBool::new(replica),
             committed_index_definitions: Arc::new(Mutex::new(definitions)),
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
@@ -344,6 +368,9 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+        if self.replica.load(Ordering::Acquire) {
+            return Err(GraphError::ReplicaReadOnly("write to the graph"));
+        }
         let current = thread::current().id();
         if *lock(&self.writer) == Some(current) {
             return Err(GraphError::WriterOnThisThread);
