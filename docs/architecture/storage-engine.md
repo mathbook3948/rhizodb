@@ -84,6 +84,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Opening a cleanly closed database starts a log with a new salt, which a header without the clean flag records before any commit, and removes leftover segments once that header is durable.
 - Opening a database after an unclean shutdown writes every replayed commit into the file under a clean header and then starts a new log as for a cleanly closed database, so no commit rests on log records or a header that only the page cache held, and a power loss before that header is durable leaves the old log as it was.
 - That checkpoint places nothing in free blocks or free slots and cuts nothing off the file, since the header the open read may be one only the page cache held, and the older header in the other slot may still reach those blocks.
+- The open compacts the file only once the new log's header is durable, since a compaction that cannot reuse free space only grows the file.
 - A database in memory keeps its log on the in-memory file system too.
 - A read reaches its snapshot's layers newest first: the memtable commits go to, the memtable a checkpoint is writing out, and the tree of the last checkpoint.
 - The memtable keeps each key's versions tagged by LSN, and a reader sees the newest version at or below its snapshot.
@@ -171,4 +172,4 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - How a point read that overlaps a background checkpoint keeps its speed, since the checkpoint's memory traffic slows it.
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
-- How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header.
+- How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header and loses acknowledged commits without an error.

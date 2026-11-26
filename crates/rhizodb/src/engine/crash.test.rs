@@ -483,6 +483,44 @@ fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_d
 }
 
 #[test]
+fn an_unclean_open_after_most_data_was_deleted_gives_the_space_back() {
+    let options = EngineOptions {
+        memtable_limit: u64::MAX,
+        wal_limit: u64::MAX,
+        segment_target: 1 << 24,
+        reclaim_slack: 64 << 10,
+        ..options()
+    };
+    let fs = SimFs::new();
+    let engine = open(&fs, options).unwrap();
+    let load: Vec<Write> = (0..2000u16)
+        .map(|key| {
+            Write::Put(
+                Table::NodeColumns,
+                key.to_be_bytes().to_vec(),
+                vec![7; 3000],
+            )
+        })
+        .collect();
+    commit(&engine, &load).unwrap();
+    engine.checkpoint().unwrap();
+    let delete: Vec<Write> = (10..2000u16)
+        .map(|key| Write::Delete(Table::NodeColumns, key.to_be_bytes().to_vec()))
+        .collect();
+    commit(&engine, &delete).unwrap();
+    let crashed = fs.crash(Crash::DropUnsynced);
+    drop(engine);
+    let before = file_blocks(&crashed);
+    let engine = open(&crashed, options).unwrap();
+    assert_eq!(dump(&engine).len(), 10);
+    let after = file_blocks(&crashed);
+    assert!(
+        after * 10 < before,
+        "the file has {after} blocks after the open, {before} before"
+    );
+}
+
+#[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn every_failure_while_opening_leaves_the_database_whole() {
     let transactions = transactions(11, 12);

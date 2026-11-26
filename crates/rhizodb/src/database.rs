@@ -167,7 +167,8 @@ pub struct DatabaseStats {
     /// The extents inside the file that hold nothing, which later writes reuse and
     /// [`Database::compact`] cuts off when they end the file.
     pub free_extents: u64,
-    /// The bytes of the write-ahead log beside the file, which a checkpoint empties.
+    /// The bytes the write-ahead log beside the file takes on disk. A checkpoint removes the
+    /// segments it no longer needs, and the segment in use keeps up to 1 MiB allocated ahead.
     pub wal_bytes: u64,
     /// The page reads the cache served since the database was opened.
     pub cache_hits: u64,

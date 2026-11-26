@@ -511,9 +511,16 @@ fn make_recovery_durable<F: FileSystem + 'static>(
         shared.options.segment_target,
     )?;
     durable.header = header;
+    drop(durable);
     writer.last_hlc = hlc;
     shared.wal_bytes.store(wal.size(), Ordering::Relaxed);
     writer.wal = Some(wal);
+    if shared.holds_too_much_free_space() {
+        shared.compact_unless_held();
+    }
+    if shared.is_poisoned() {
+        return Err(shared.refusal());
+    }
     Ok(())
 }
 
@@ -977,7 +984,9 @@ impl<F: FileSystem + 'static> Shared<F> {
                 let trimmed = self.trim(&mut lock(&self.durable));
                 if let Err(error) = trimmed {
                     self.poison_with(&error);
-                } else if self.holds_too_much_free_space() {
+                } else if !self.keeping_free_space.load(Ordering::Acquire)
+                    && self.holds_too_much_free_space()
+                {
                     self.compact_unless_held();
                 }
             }
