@@ -13,11 +13,13 @@ A pattern part was always matched from its first node and its `WHERE` tested onl
 - A pattern part bound at its end and without any lookup at its start is written from its end when the query text is bound to a plan, and any other part keeps both forms and chooses when it runs, once it knows which indexes exist.
 - A pattern part is never written from its end when it has a path variable, a variable-length relationship, a variable it repeats, or a property map that reads a variable it binds.
 - A `MATCH` filter tests each of its conditions as soon as the elements the condition reads are bound, and the whole filter again on the complete match.
+- A pattern part that reaches an element bound before it, as one that closes a cycle does, tests its filter only on complete matches, since reaching that element already rejects most partial matches.
 - A filter is tested early only when every condition reads only elements its pattern part binds and is a comparison, `IS NULL`, `IN` a literal list, a string test, or `AND`, `OR`, `XOR`, and `NOT` of those, so no early test can hide an error another condition would raise.
 - A query reads a relationship chunk in place the first time and holds it from the second time, so a scan reads each chunk from storage once and a traversal that touches a chunk once copies nothing.
 - A query forgets the relationship chunks and the adjacency it holds when they pass a size set in code.
 - Each clause of a write query reads through holdings of its own, so nothing a query holds outlives one of its writes.
-- A query holds the relationships it read at a node, by direction and type, from the second time it expands that node the same way, so a traversal that reaches a node again reads its adjacency from storage at most twice.
+- A query holds the relationships it read at a node, by direction and type, from the second time it expands that node the same way past the start of a pattern, so a traversal that reaches a node again reads its adjacency from storage at most twice.
+- A pattern's start nodes are expanded without holding, since a query rarely starts from one node twice.
 - A query notes the nodes and chunks it read once in a fixed table of hashes, not one entry each, and notes none in its first reads, so a point query allocates nothing for them.
 - `EXISTS` and `COUNT` over a single non-optional `MATCH` count its matches without building their rows.
 - `EXISTS` stops at its first match only when every property map entry of its pattern is a literal or a parameter and its filter takes only the conditions an early test takes, so stopping hides no error.

@@ -10,11 +10,20 @@ use super::plan::Slot;
 /// 0 for the start node, then one per relationship and node in pattern order. There are none
 /// unless every conjunct reads only elements `part` binds itself and can give no error, so
 /// testing one early never hides an error another would raise. A conjunct that only the last
-/// element completes is left to the filter.
+/// element completes is left to the filter. A part that ends at or passes through an element
+/// bound before it gets none, since reaching that element already rejects most partial
+/// matches, as closing a cycle does.
 pub(crate) fn checks(part: &PatternPart, filter: Option<&Expr>) -> Vec<(usize, Expr)> {
     let Some(filter) = filter else {
         return Vec::new();
     };
+    if part
+        .steps
+        .iter()
+        .any(|step| step.node.bound || step.relationship.bound)
+    {
+        return Vec::new();
+    }
     let mut own: Vec<(Slot, usize)> = Vec::new();
     if !part.start.bound {
         own.push((part.start.slot, 0));
