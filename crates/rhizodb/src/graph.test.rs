@@ -1,9 +1,10 @@
 use super::records::Properties;
 use super::*;
-use crate::storage::redb_backend::RedbStorage;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 
-fn memory_graph() -> Graph<RedbStorage> {
-    Graph::open(RedbStorage::in_memory().unwrap()).unwrap()
+fn memory_graph() -> Graph<TestStorage> {
+    Graph::open(test_engine::in_memory()).unwrap()
 }
 
 fn node_with(labels: &[Token<Label>]) -> NodeRecord {
@@ -297,9 +298,9 @@ fn a_dropped_write_transaction_leaves_no_trace() {
 #[test]
 fn a_file_database_keeps_its_graph_across_reopen() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let (person, a, b, edge) = {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         let person: Token<Label> = write.intern_token("Person").unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
@@ -312,7 +313,7 @@ fn a_file_database_keeps_its_graph_across_reopen() {
         (person, a, b, edge)
     };
 
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.lookup_token::<Label>("Person").unwrap(), Some(person));
     assert_eq!(read.node_ids_with_label(person).unwrap(), vec![a, b]);
@@ -326,9 +327,9 @@ fn a_file_database_keeps_its_graph_across_reopen() {
 #[test]
 fn identifiers_are_not_reused_after_deletion_and_reopen() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let (last_node, last_edge) = {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
         let a = write.create_node(node_with(&[])).unwrap();
@@ -342,7 +343,7 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
         (b, edge)
     };
 
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let mut write = graph.write().unwrap();
     let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
     let fresh = write.create_node(node_with(&[])).unwrap();
@@ -355,7 +356,7 @@ fn identifiers_are_not_reused_after_deletion_and_reopen() {
 
 #[test]
 fn an_unknown_format_version_is_rejected_on_open() {
-    let storage = RedbStorage::in_memory().unwrap();
+    let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
     write
         .put(
@@ -375,10 +376,10 @@ fn an_unknown_format_version_is_rejected_on_open() {
 #[test]
 fn the_current_format_version_is_written_on_first_open_and_accepted_after() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
-    Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    Graph::open(test_engine::open(&path)).unwrap();
 
-    let storage = RedbStorage::open(&path).unwrap();
+    let storage = test_engine::open(&path);
     let stored = storage
         .begin_read()
         .unwrap()
@@ -390,7 +391,7 @@ fn the_current_format_version_is_written_on_first_open_and_accepted_after() {
 
 #[test]
 fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
-    let storage = RedbStorage::in_memory().unwrap();
+    let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
     write
         .put(
@@ -413,7 +414,7 @@ fn a_version_one_database_opens_and_is_upgraded_to_the_current_version() {
 
 #[test]
 fn a_version_six_database_reads_its_float_lists_after_the_upgrade() {
-    let storage = RedbStorage::in_memory().unwrap();
+    let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
     write
         .put(
@@ -479,7 +480,7 @@ fn a_property_after_a_list_of_single_precision_floats_reads_back() {
 
 #[test]
 fn a_newer_format_version_is_rejected_on_open() {
-    let storage = RedbStorage::in_memory().unwrap();
+    let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
     let newer = FORMAT_VERSION + 1;
     write
@@ -495,40 +496,6 @@ fn a_newer_format_version_is_rejected_on_open() {
         Graph::open(storage),
         Err(GraphError::UnsupportedFormatVersion(found)) if found == newer
     ));
-}
-
-#[test]
-fn a_database_of_format_seven_moves_its_labels_to_node_meta_and_passes_the_check() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("format-7.redb");
-    std::fs::copy(fixture, &path).unwrap();
-    let before = RedbStorage::open(&path).unwrap();
-    let read = before.begin_read().unwrap();
-    assert_eq!(
-        read.get(Table::Metadata, keys::FORMAT_VERSION_KEY).unwrap(),
-        Some(7u32.to_be_bytes().to_vec())
-    );
-    assert!(!read.scan_prefix(Table::LabelIndex, &[]).unwrap().is_empty());
-    drop(read);
-
-    let graph = Graph::open(before).unwrap();
-    let read = graph.read().unwrap();
-    assert_eq!(read.check_integrity().unwrap(), vec![]);
-    assert_eq!(
-        read.transaction
-            .scan_prefix(Table::LabelIndex, &[])
-            .unwrap(),
-        Vec::new()
-    );
-    let person = read.lookup_token::<Label>("Person").unwrap().unwrap();
-    let people = read.node_ids_with_label(person).unwrap();
-    assert_eq!(people.len(), 6);
-    assert_eq!(read.count_nodes_with_label(person).unwrap(), 6);
-    assert_eq!(people.last(), Some(&NodeId(4209)));
 }
 
 #[test]
@@ -612,10 +579,10 @@ fn a_write_transaction_that_outgrows_its_held_chunks_still_reads_and_commits_its
 #[test]
 fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     let mut expected = BTreeMap::new();
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         let types = [
             write.intern_token::<RelationshipType>("A").unwrap(),
@@ -650,7 +617,7 @@ fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() 
     }
     assert!(expected.keys().last().unwrap().0 >= 1 << 16);
     for _ in 0..2 {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let read = graph.read().unwrap();
         for (id, record) in &expected {
             assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));

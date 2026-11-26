@@ -12,9 +12,8 @@ use crate::graph::RelationshipId;
 use crate::graph::records::Properties;
 use crate::storage::Storage;
 use crate::storage::StorageError;
-use crate::storage::redb_backend::RedbRead;
-use crate::storage::redb_backend::RedbStorage;
-use crate::storage::redb_backend::RedbWrite;
+use crate::storage::test_engine;
+use crate::storage::test_engine::TestStorage;
 
 const TEXTS: [&str; 6] = [
     "graph store",
@@ -301,7 +300,7 @@ proptest! {
         steps in prop::collection::vec((op(), any::<bool>()), 0..60),
         indexed_after in 0usize..10,
     ) {
-        let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+        let graph = Graph::open(test_engine::in_memory()).unwrap();
         let names = {
             let mut write = graph.write().unwrap();
             let names = Names {
@@ -338,7 +337,7 @@ proptest! {
 
 #[test]
 fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     write
         .create_vector_index(
@@ -369,9 +368,9 @@ fn a_vector_that_changes_only_the_sign_of_a_zero_is_stored_again() {
 #[test]
 fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("stale.redb");
+    let path = directory.path().join("stale.rhizodb");
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         write
             .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
@@ -440,7 +439,7 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
         stale.commit().unwrap();
         assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
     }
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     assert_eq!(
@@ -473,9 +472,9 @@ fn store_label_only_definitions(write: &mut impl WriteTransaction) {
 #[test]
 fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("four.redb");
+    let path = directory.path().join("four.rhizodb");
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         create_indexes(&mut write);
         let label = write.intern_token("Doc").unwrap();
@@ -511,7 +510,7 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
         previous.commit().unwrap();
         assert!(graph.read().unwrap().indexes().is_err());
     }
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     let targets: Vec<Target> = read
@@ -539,9 +538,9 @@ fn opening_a_database_of_format_four_tags_each_index_as_one_over_a_label() {
 #[test]
 fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_index() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("five.redb");
+    let path = directory.path().join("five.rhizodb");
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         create_indexes(&mut write);
         let label = write.intern_token("Doc").unwrap();
@@ -564,7 +563,7 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
             .unwrap();
         previous.commit().unwrap();
     }
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let stored = graph
         .storage
         .begin_read()
@@ -591,7 +590,7 @@ fn a_database_of_format_five_opens_at_the_current_version_and_takes_a_property_i
 
 #[test]
 fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_writes() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     let label = write.intern_token("Doc").unwrap();
     let text = write.intern_token("text").unwrap();
@@ -618,7 +617,7 @@ fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_
 
 #[test]
 fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     let label = write.intern_token::<Label>("Doc").unwrap();
     let text = write.intern_token::<PropertyKey>("text").unwrap();
@@ -658,16 +657,16 @@ fn later_transactions_see_a_committed_index_and_not_a_rolled_back_one() {
 
 #[derive(Debug)]
 struct CountingStorage {
-    inner: RedbStorage,
+    inner: TestStorage,
     entry_writes: Rc<Cell<usize>>,
 }
 
-struct CountingWrite {
-    inner: RedbWrite,
+struct CountingWrite<'a> {
+    inner: <TestStorage as Storage>::Write<'a>,
     entry_writes: Rc<Cell<usize>>,
 }
 
-impl CountingWrite {
+impl CountingWrite<'_> {
     fn count(&self, table: Table) {
         if ENTRY_TABLES.contains(&table) && table != Table::KeywordPostings {
             self.entry_writes.set(self.entry_writes.get() + 1);
@@ -676,26 +675,26 @@ impl CountingWrite {
 }
 
 impl Storage for CountingStorage {
-    type Read<'a> = RedbRead;
-    type Write<'a> = CountingWrite;
+    type Read<'a> = <TestStorage as Storage>::Read<'a>;
+    type Write<'a> = CountingWrite<'a>;
 
-    fn begin_read(&self) -> Result<RedbRead, StorageError> {
+    fn begin_read(&self) -> Result<Self::Read<'_>, StorageError> {
         self.inner.begin_read()
     }
 
-    fn begin_write(&self) -> Result<CountingWrite, StorageError> {
+    fn begin_write(&self) -> Result<CountingWrite<'_>, StorageError> {
         Ok(CountingWrite {
             inner: self.inner.begin_write()?,
             entry_writes: Rc::clone(&self.entry_writes),
         })
     }
 
-    fn write_copy(snapshot: &RedbRead, path: &std::path::Path) -> Result<(), StorageError> {
-        RedbStorage::write_copy(snapshot, path)
+    fn write_copy(snapshot: &Self::Read<'_>, path: &std::path::Path) -> Result<(), StorageError> {
+        TestStorage::write_copy(snapshot, path)
     }
 }
 
-impl ReadTransaction for CountingWrite {
+impl ReadTransaction for CountingWrite<'_> {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(table, key)
     }
@@ -746,7 +745,7 @@ impl ReadTransaction for CountingWrite {
     }
 }
 
-impl WriteTransaction for CountingWrite {
+impl WriteTransaction for CountingWrite<'_> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         self.count(table);
         self.inner.put(table, key, value)
@@ -774,9 +773,9 @@ impl WriteTransaction for CountingWrite {
 #[test]
 fn opening_a_database_of_format_four_keeps_its_keyword_entries_and_moves_its_postings_to_blocks() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("four.redb");
+    let path = directory.path().join("four.rhizodb");
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         create_indexes(&mut write);
         let label = write.intern_token("Doc").unwrap();
@@ -812,7 +811,7 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries_and_moves_its_pos
     }
     let entry_writes = Rc::new(Cell::new(0));
     let graph = Graph::open(CountingStorage {
-        inner: RedbStorage::open(&path).unwrap(),
+        inner: test_engine::open(&path),
         entry_writes: Rc::clone(&entry_writes),
     })
     .unwrap();
@@ -836,9 +835,9 @@ fn opening_a_database_of_format_four_keeps_its_keyword_entries_and_moves_its_pos
 #[test]
 fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("previous.redb");
+    let path = directory.path().join("previous.rhizodb");
     {
-        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
         let mut write = graph.write().unwrap();
         write
             .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
@@ -874,7 +873,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
         previous.commit().unwrap();
         assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
     }
-    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
     let read = graph.read().unwrap();
     assert_eq!(read.check_integrity().unwrap(), vec![]);
     assert_eq!(
@@ -887,7 +886,7 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
 
 #[test]
 fn opening_records_the_current_tokenizer() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let stored = graph
         .read()
         .unwrap()
@@ -1015,7 +1014,7 @@ fn a_stored_vector_reads_only_at_its_index_dimension() {
 
 #[test]
 fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     let link = write.intern_token("LINK").unwrap();
     let other = write.intern_token("OTHER").unwrap();
@@ -1069,7 +1068,7 @@ fn creating_a_relationship_index_fills_it_from_relationships_of_its_type_alone()
 
 #[test]
 fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it() {
-    let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();
     let label = write.intern_token("Doc").unwrap();
     let link = write.intern_token("LINK").unwrap();

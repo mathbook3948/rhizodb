@@ -389,7 +389,7 @@ fn a_search_can_feed_the_rest_of_a_query() {
 #[test]
 fn indexes_survive_reopening_the_file() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         db.create_keyword_index("notes", IndexTarget::Label("Note"), &["body"])
@@ -978,7 +978,7 @@ fn a_relationship_index_and_a_node_index_may_share_a_type_name_and_label_name() 
 #[test]
 fn relationship_indexes_survive_reopening_the_file() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         db.create_keyword_index(

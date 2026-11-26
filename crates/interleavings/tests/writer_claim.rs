@@ -1,5 +1,5 @@
 //! The writer slot of `Graph::write` in `crates/rhizodb/src/graph.rs`: a thread checks the slot,
-//! takes redb's write lock, and records itself in the slot, and the write transaction gives the
+//! takes the storage write lock, and records itself in the slot, and the write transaction gives the
 //! lock back before the slot is cleared, because `GraphTx` drops its storage transaction before
 //! its `WriterClaim`.
 
@@ -9,7 +9,7 @@ use shuttle::sync::Mutex;
 use shuttle::thread;
 use shuttle::thread::ThreadId;
 
-/// redb's write lock: `begin_write` waits while a write transaction is live.
+/// The storage write lock: `begin_write` waits while a write transaction is live.
 #[derive(Default)]
 struct StorageLock {
     live: Mutex<bool>,

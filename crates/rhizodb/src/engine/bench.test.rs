@@ -8,7 +8,6 @@ use crate::storage::ReadTransaction;
 use crate::storage::Storage;
 use crate::storage::Table;
 use crate::storage::WriteTransaction;
-use crate::storage::redb_backend::RedbStorage;
 
 const KEYS: u64 = 1_000_000;
 const BATCH: u64 = 10_000;
@@ -90,53 +89,36 @@ fn workload<S: Storage + Sync>(store: &S, results: &mut Vec<(String, Duration)>)
 
 #[test]
 #[ignore = "a benchmark, run in release with --ignored --nocapture"]
-fn the_engine_against_redb_on_kv_workloads() {
-    let redb_directory = tempfile::tempdir().unwrap();
-    let engine_directory = tempfile::tempdir().unwrap();
-    let mut redb_results = Vec::new();
-    let mut engine_results = Vec::new();
-    {
-        let store = RedbStorage::open(redb_directory.path().join("graph.redb")).unwrap();
-        workload(&store, &mut redb_results);
-    }
-    let redb_size = directory_bytes(redb_directory.path());
+fn the_engine_on_kv_workloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut results = Vec::new();
     {
         let options = EngineOptions {
             cache_pages: std::env::var("BENCH_CACHE_PAGES")
                 .ok()
                 .and_then(|pages| pages.parse().ok())
                 .unwrap_or(EngineOptions::default().cache_pages),
-            reclaim_slack: EngineOptions::default().reclaim_slack,
-            stage_floor: EngineOptions::default().stage_floor,
             memtable_limit: std::env::var("BENCH_MEMTABLE")
                 .ok()
                 .and_then(|bytes| bytes.parse().ok())
                 .unwrap_or(EngineOptions::default().memtable_limit),
             ..EngineOptions::default()
         };
-        let store = open_path(&engine_directory.path().join("graph.rhizo"), options).unwrap();
-        workload(&store, &mut engine_results);
+        let store = open_path(&directory.path().join("graph.rhizo"), options).unwrap();
+        workload(&store, &mut results);
         let report = store.check().unwrap();
         eprintln!(
             "engine check: {} pages, {} live blocks",
             report.pages, report.live_blocks
         );
     }
-    let engine_size = directory_bytes(engine_directory.path());
-    eprintln!("| workload | redb | engine |");
-    eprintln!("|---|---|---|");
-    for ((label, redb), (_, engine)) in redb_results.iter().zip(&engine_results) {
-        eprintln!(
-            "| {label} | {:.3} s | {:.3} s |",
-            redb.as_secs_f64(),
-            engine.as_secs_f64()
-        );
+    let size = directory_bytes(directory.path());
+    eprintln!("| workload | engine |");
+    eprintln!("|---|---|");
+    for (label, elapsed) in &results {
+        eprintln!("| {label} | {:.3} s |", elapsed.as_secs_f64());
     }
-    eprintln!(
-        "| size at rest | {:.1} MiB | {:.1} MiB |",
-        redb_size as f64 / 1048576.0,
-        engine_size as f64 / 1048576.0
-    );
+    eprintln!("| size at rest | {:.1} MiB |", size as f64 / 1048576.0);
 }
 
 fn read_points(store: &impl Storage, keys: u64, reads: u64) {
@@ -207,16 +189,6 @@ fn point_reads_for_profiling() {
     .unwrap();
     load(&store, keys);
     store.checkpoint().unwrap();
-    profile_point_reads(&store, keys);
-}
-
-#[test]
-#[ignore = "a profiling target, run under callgrind or in release with --nocapture"]
-fn redb_point_reads_for_profiling() {
-    let directory = tempfile::tempdir().unwrap();
-    let keys = profile_keys();
-    let store = RedbStorage::open(directory.path().join("graph.redb")).unwrap();
-    load(&store, keys);
     profile_point_reads(&store, keys);
 }
 

@@ -16,7 +16,7 @@ use support::*;
 
 fn graph_file() -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     (directory, path)
 }
 
@@ -75,7 +75,7 @@ fn opening_what_is_not_a_database_file_fails_without_touching_it() {
         ErrorKind::Storage
     );
     assert_eq!(
-        Database::open(directory.path().join("missing/graph.redb"))
+        Database::open(directory.path().join("missing/graph.rhizodb"))
             .unwrap_err()
             .kind(),
         ErrorKind::Storage
@@ -401,7 +401,7 @@ fn names_in(directory: &std::path::Path) -> Vec<String> {
 fn creating_a_database_leaves_only_its_file_and_replaces_a_staging_file_an_interrupted_open_left() {
     let (directory, path) = graph_file();
     std::fs::write(
-        directory.path().join(".graph.redb.creating"),
+        directory.path().join(".graph.rhizodb.creating"),
         vec![9_u8; 5_000],
     )
     .unwrap();
@@ -409,7 +409,7 @@ fn creating_a_database_leaves_only_its_file_and_replaces_a_staging_file_an_inter
         let db = Database::open(&path).unwrap();
         run(&db, "INSERT (:A)");
     }
-    assert_eq!(names_in(directory.path()), ["graph.redb"]);
+    assert_eq!(names_in(directory.path()), ["graph.rhizodb"]);
     let db = Database::open(&path).unwrap();
     assert_eq!(single(&db, "MATCH (n:A) RETURN count(*)"), int(1));
 }
@@ -419,7 +419,7 @@ fn a_failed_creation_leaves_nothing_behind() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("missing");
     assert_eq!(
-        Database::open(missing.join("graph.redb"))
+        Database::open(missing.join("graph.rhizodb"))
             .unwrap_err()
             .kind(),
         ErrorKind::Storage
@@ -463,7 +463,7 @@ fn threads_racing_to_create_one_file_end_with_one_database_that_keeps_every_writ
                 .sum::<i64>()
         });
         assert!(written >= 1);
-        assert_eq!(names_in(directory.path()), ["graph.redb"]);
+        assert_eq!(names_in(directory.path()), ["graph.rhizodb"]);
         let db = Database::open(&path).unwrap();
         assert_eq!(single(&db, "MATCH (n:W) RETURN count(*)"), int(written));
     }

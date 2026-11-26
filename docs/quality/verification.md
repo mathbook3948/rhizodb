@@ -36,7 +36,6 @@ A database that returns wrong results or loses data after a crash is worse than 
 - Every storage backend passes one conformance suite written against the storage trait.
 - Every storage backend is checked against a model of its committed versions over random sequences of transactions, reads, and reopens.
 - The own engine's behavior under power loss and I/O errors is tested on the simulated file system.
-- The redb backend, the reference the engine is checked against, also runs on the simulated file system, with sector writes that a power loss keeps whole, since redb relies on that.
 - Whole GQL workloads with property, keyword, and vector indexes run through the `Database` API on the simulated file system, with a power loss or one failed operation at each point, and the recovered file must pass the integrity check, answer as some run of the acknowledged steps with each failed step applied or not, and take writes.
 - The own engine runs the same whole GQL workloads with checkpoint and log limits small enough that every step checkpoints and rolls its log over.
 - A full disk is simulated by a backend that refuses to grow the file, and the database must fail writes as storage errors, keep reads, and open with every acknowledged step once space returns.
@@ -56,8 +55,6 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A damaged database file must make opening or the query fail with an error, never panic or hang.
 - Every input the fuzzer found a failure with is checked in and replayed by an integration test.
 - The fuzz run fails on any panic that escapes RhizoDB, any hang, and any run out of memory.
-- The damaged file fuzz target replaces libFuzzer's abort on every panic, so a panic that the redb guard catches is not a crash.
-- A panic is injected at each backend operation of a redb commit in turn, and the reopened file must hold the state before or after the commit.
 - The writer slot and the index catalog are explored across thread interleavings with shuttle models that copy each protocol, in a crate of their own, since the library uses `std` primitives.
 - Every call a host can make wrongly, such as opening a file twice, forgetting or moving a transaction, a procedure that panics or calls back into its database, and invalid parameters or index definitions, must fail with an error kind, never panic out of RhizoDB, hang, or corrupt the file.
 - Inputs at and past each resource limit run on a 1 MiB stack, the most a query may use, in debug and release builds, and in a child process where a stack overflow would end the run, so it fails one test instead.

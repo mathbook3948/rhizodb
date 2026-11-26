@@ -11,7 +11,7 @@ use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
-use crate::storage::sim_backend;
+use crate::storage::test_engine;
 use crate::test_scale;
 
 const GROUP: u64 = meta::SLOTS as u64;
@@ -147,7 +147,7 @@ fn crash_at_every_operation(small: u64, work: Work) {
             };
             for mode in modes(seeds) {
                 let recovered = fs.crash(mode);
-                let graph = match sim_backend::storage(&recovered)
+                let graph = match test_engine::on_sim(&recovered)
                     .map_err(GraphError::from)
                     .and_then(Graph::open)
                 {

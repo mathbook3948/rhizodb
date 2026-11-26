@@ -87,10 +87,6 @@ impl FileSystem for OsFs {
         File::open(&self.directory)?.sync_all()
     }
 
-    fn path(&self, name: &str) -> Option<PathBuf> {
-        Some(self.directory.join(name))
-    }
-
     #[cfg(not(unix))]
     fn sync_names(&self) -> io::Result<()> {
         Ok(())
@@ -98,10 +94,6 @@ impl FileSystem for OsFs {
 }
 
 impl BlockFile for OsFile {
-    fn block_size(&self) -> BlockSize {
-        self.size
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.size.require_whole_blocks(buffer.len())?;
         read_exact_at(&self.file, buffer, self.size.offset(first)?)

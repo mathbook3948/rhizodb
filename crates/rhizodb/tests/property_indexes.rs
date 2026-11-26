@@ -226,7 +226,7 @@ fn a_rolled_back_transaction_leaves_the_index_unchanged() {
 #[test]
 fn creating_an_index_fills_it_and_it_survives_reopening_the_file() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("graph.redb");
+    let path = directory.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         run(

@@ -31,7 +31,6 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
-use super::convert;
 use super::error::EngineError;
 use super::extent::Blocks;
 use super::extent::ExtentTable;
@@ -453,15 +452,13 @@ fn checkpoint_worker<F: FileSystem + 'static>(
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
-    /// Opens the database file `name` on `fs`, creating it when there is none, converting it
-    /// when it holds a redb database, and replays the log of an unclean shutdown before it
-    /// returns.
+    /// Opens the database file `name` on `fs`, creating it when there is none, and replays the
+    /// log of an unclean shutdown before it returns.
     pub(crate) fn open(
         fs: Arc<F>,
         name: &str,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        convert::convert_redb(&fs, name, options)?;
         let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
         let header = read_header(&file)?;
         let pages = Arc::new(Pages::new(
@@ -742,6 +739,7 @@ impl<F: FileSystem + 'static> Engine<F> {
 
     /// Writes every commit into the database file, removes the log, and closes the database,
     /// failing unless it closed cleanly.
+    #[cfg(test)]
     pub(crate) fn close(mut self) -> Result<(), EngineError> {
         self.stop_checkpoints();
         self.shared.close();

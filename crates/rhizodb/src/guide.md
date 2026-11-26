@@ -265,14 +265,7 @@ version only adds, such as a value tag, so an older dump keeps its meaning.
 The file records a format version. Opening a file written by an older version of RhizoDB
 upgrades it in place, in one write transaction before anything else reads it, and opening one
 written by a newer version fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file
-cannot be opened by the older build again, so take a backup before upgrading the crate.
-
-A file that an earlier build stored with redb is converted when it is opened: every redb page is
-checked, every table is copied into a new file of the current format beside it, and that file
-then replaces the redb file. The redb file stays as it was until the copy is whole and synced,
-so a crash during the conversion leaves one or the other, and a damaged redb file fails with
-[`ErrorKind::CorruptData`] and is left as it was. redb can panic on some damage, and RhizoDB
-catches that panic, which needs the host built with `panic = "unwind"`, the default. Below
+cannot be opened by the older build again, so take a backup before upgrading the crate. Below
 1.0, a release that changes the API or the format raises the minor version, and the changelog
 lists the change.
 

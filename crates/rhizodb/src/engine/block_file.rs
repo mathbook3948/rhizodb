@@ -1,6 +1,5 @@
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
 
 /// The unit a storage device writes whole, and the most a torn write keeps or loses together.
 pub(crate) const SECTOR_SIZE: usize = 512;
@@ -44,8 +43,6 @@ fn invalid(message: &'static str) -> io::Error {
 
 /// A file read and written in whole blocks of one fixed size, addressed by block number.
 pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
-    fn block_size(&self) -> BlockSize;
-
     /// Fills `buffer`, which holds whole blocks, with the blocks from `first` on, and fails
     /// when one of them lies past the end.
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()>;
@@ -92,11 +89,6 @@ pub(crate) trait FileSystem: Send + Sync {
 
     /// Returns once every create, rename, and remove so far survives a power loss.
     fn sync_names(&self) -> io::Result<()>;
-
-    /// Where the operating system keeps the file `name`, for a file system over its files.
-    fn path(&self, _name: &str) -> Option<PathBuf> {
-        None
-    }
 }
 
 #[cfg(test)]

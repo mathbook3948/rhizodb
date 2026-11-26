@@ -44,7 +44,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
-- **Breaking:** `Database::open` and `Database::in_memory` store data with RhizoDB's own storage engine instead of redb, so the database file has a new format. Opening a file that an earlier build stored with redb converts it: every redb page is checked, every table is copied into a new file, and that file is renamed over the redb file, which stays untouched until the copy is whole and synced. A damaged redb file fails as corrupt data and is left as it was. A converted file cannot be opened by an earlier build.
+- **Breaking:** `Database::open` and `Database::in_memory` store every database with RhizoDB's own storage engine, and RhizoDB no longer depends on redb. A file of a pre-release build that stored its data with redb no longer opens.
 - `Value` and `Temporal` are `#[non_exhaustive]`, so a match on them needs a catch-all arm.
 - `Node` and `Relationship` keep their fields private. Read them with `id()`, `labels()`, `has_label()`, `relationship_type()` (formerly the field `rel_type`), `start()`, `end()`, `properties()`, and `property()`.
 - `Parameters` is a type of its own instead of an alias of `BTreeMap`. Build it with `new`, `insert`, `with`, `from` an array of pairs, or `collect`, and read it with `get`.
@@ -64,7 +64,6 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
-- A damaged redb file could abort the process instead of failing: a page copied over another one made redb recurse until the stack overflowed, and damage in redb's list of freed pages made a commit panic again inside a drop while unwinding. Converting a redb file now verifies every page's checksum first and fails as corrupt data.
 - A label scan in a write transaction read the label set of every node the transaction had created, so a transaction of statements that each `MATCH (n:Label)` slowed down with every node it inserted, and 16,000 such statements took five seconds. A scan now skips the groups whose label sets lack the label.
 - `SET r = {...}` and `SET r += {...}` on a relationship rewrote its whole record once per property, so replacing the properties of a relationship with thousands of them took seconds. They now write the record once.
 - `SET n:A:B:...` and `REMOVE n:A:B:...` stored a label set for every label in between, which is never deleted, so removing 3,000 labels from one node grew the file by over 100 MB. They now store only the label set the node ends with.
@@ -77,4 +76,3 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A variable-length relationship over a long path, or a pattern of many steps, no longer overflows the stack and aborts the host process, because matching keeps its search on the heap.
 - A power loss while `Database::open` created a new file could leave a file that every later open refused. The file is now written under a staging name, synced, and linked into place.
 - A thread holding a write transaction that began another write, or ran a writing query, could wait for itself forever instead of failing with `ErrorKind::WriteTransactionOnThisThread`, when another thread had committed just before it took the write lock.
-- A damaged redb file on which redb panics while it is converted fails with `ErrorKind::CorruptData` instead of ending the host process. redb's own corruption errors are reported as `CorruptData` too, instead of `ErrorKind::Storage`.

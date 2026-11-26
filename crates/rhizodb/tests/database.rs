@@ -19,7 +19,7 @@ fn database_is_shareable_across_threads() {
 #[test]
 fn committed_data_survives_reopening_the_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph.redb");
+    let path = dir.path().join("graph.rhizodb");
     {
         let db = Database::open(&path).unwrap();
         run(

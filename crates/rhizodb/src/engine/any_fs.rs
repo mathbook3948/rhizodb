@@ -1,7 +1,6 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
@@ -92,27 +91,9 @@ impl FileSystem for AnyFs {
             AnyFs::Sim(fs) => fs.sync_names(),
         }
     }
-
-    fn path(&self, name: &str) -> Option<PathBuf> {
-        match self {
-            AnyFs::Os(fs) => fs.path(name),
-            AnyFs::Memory(fs) => fs.path(name),
-            #[cfg(test)]
-            AnyFs::Sim(fs) => fs.path(name),
-        }
-    }
 }
 
 impl BlockFile for AnyFile {
-    fn block_size(&self) -> BlockSize {
-        match self {
-            AnyFile::Os(file) => file.block_size(),
-            AnyFile::Memory(file) => file.block_size(),
-            #[cfg(test)]
-            AnyFile::Sim(file) => file.block_size(),
-        }
-    }
-
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         match self {
             AnyFile::Os(file) => file.read(first, buffer),
