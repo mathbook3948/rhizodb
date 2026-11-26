@@ -289,20 +289,58 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     /// The type of a relationship, which stays readable after the query deleted it.
-    pub(crate) fn relationship_type(&self, id: RelationshipId) -> Result<String, Error> {
+    pub(crate) fn relationship_type(&self, id: RelationshipId) -> Result<Arc<str>, Error> {
         let rel_type = match self.graveyard.relationships.get(&id) {
             Some(record) => record.rel_type,
-            None => self.relationship(id)?.rel_type,
+            None => self.tx.relationship_type(id)?.ok_or_else(deleted)?,
         };
         Ok(self.tx.token_name(rel_type)?)
     }
 
-    pub(crate) fn label_names(&self, record: &NodeRecord) -> Result<Vec<String>, Error> {
-        record
-            .labels
-            .iter()
-            .map(|label| Ok(self.tx.token_name(*label)?))
+    pub(crate) fn label_names(
+        &self,
+        labels: impl IntoIterator<Item = Token<Label>>,
+    ) -> Result<Vec<String>, Error> {
+        labels
+            .into_iter()
+            .map(|label| Ok(self.tx.token_name(label)?.to_string()))
             .collect()
+    }
+
+    /// The label names of the node with ID `id`, read without its properties.
+    pub(crate) fn node_label_names(&self, id: NodeId) -> Result<Vec<String>, Error> {
+        self.with_labels(id, |labels| self.label_names(labels.iter().copied()))?
+            .ok_or_else(deleted)?
+    }
+
+    /// The property names of the node with ID `id`, ascending, read without their values.
+    pub(crate) fn node_keys(&self, id: NodeId) -> Result<Vec<Arc<str>>, Error> {
+        let keys = match (self.labels.try_borrow_mut(), self.columns.try_borrow_mut()) {
+            (Ok(mut labels), Ok(mut columns)) => {
+                self.tx.node_property_keys(&mut labels, &mut columns, id)?
+            }
+            _ => self.tx.node_property_keys(
+                &mut LabelReader::default(),
+                &mut ColumnReader::default(),
+                id,
+            )?,
+        };
+        self.key_names(&keys.ok_or_else(deleted)?)
+    }
+
+    /// The property names of the relationship with ID `id`, ascending, read without their
+    /// values.
+    pub(crate) fn relationship_keys(&self, id: RelationshipId) -> Result<Vec<Arc<str>>, Error> {
+        self.key_names(&self.tx.relationship_keys(id)?.ok_or_else(deleted)?)
+    }
+
+    fn key_names(&self, keys: &[Token<PropertyKey>]) -> Result<Vec<Arc<str>>, Error> {
+        let mut names = keys
+            .iter()
+            .map(|key| Ok(self.tx.token_name(*key)?))
+            .collect::<Result<Vec<_>, Error>>()?;
+        names.sort_unstable();
+        Ok(names)
     }
 
     pub(crate) fn property_map(
@@ -311,12 +349,7 @@ impl<T: ReadTransaction> Env<'_, T> {
     ) -> Result<BTreeMap<Arc<str>, Datum>, Error> {
         properties
             .iter()
-            .map(|(key, value)| {
-                Ok((
-                    Arc::from(self.tx.token_name(*key)?),
-                    Datum::from(value.clone()),
-                ))
-            })
+            .map(|(key, value)| Ok((self.tx.token_name(*key)?, Datum::from(value.clone()))))
             .collect()
     }
 
@@ -977,7 +1010,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             Datum::Relationship(id) => {
                 let rel_type = self.relationship_type(id)?;
                 let Ok(found) =
-                    labels.matches::<Infallible>(true, &mut |name| Ok(name == rel_type));
+                    labels.matches::<Infallible>(true, &mut |name| Ok(name == &*rel_type));
                 Ok(Datum::Boolean(found))
             }
             other => Err(type_error(format!(

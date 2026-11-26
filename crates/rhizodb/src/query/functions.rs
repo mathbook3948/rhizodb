@@ -725,7 +725,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
             Function::Labels => match first {
                 Datum::Node(id) => Ok(Datum::List(Arc::new(
-                    self.label_names(&self.node(id)?)?
+                    self.node_label_names(id)?
                         .into_iter()
                         .map(Datum::String)
                         .collect(),
@@ -733,29 +733,33 @@ impl<T: ReadTransaction> Env<'_, T> {
                 other => Err(invalid(&other)),
             },
             Function::Type => match first {
-                Datum::Relationship(id) => Ok(Datum::String(self.relationship_type(id)?)),
+                Datum::Relationship(id) => {
+                    Ok(Datum::String(self.relationship_type(id)?.to_string()))
+                }
                 other => Err(invalid(&other)),
             },
-            Function::Keys | Function::Properties => {
-                let entries = match first {
-                    Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?),
-                    Datum::Relationship(id) => {
-                        Arc::new(self.property_map(&self.relationship(id)?.properties)?)
-                    }
-                    Datum::Map(entries) => entries,
+            Function::Keys => {
+                let names = match first {
+                    Datum::Node(id) => self.node_keys(id)?,
+                    Datum::Relationship(id) => self.relationship_keys(id)?,
+                    Datum::Map(entries) => entries.keys().cloned().collect(),
                     other => return Err(invalid(&other)),
                 };
-                Ok(if function == Function::Keys {
-                    Datum::List(Arc::new(
-                        entries
-                            .keys()
-                            .map(|key| Datum::String(key.to_string()))
-                            .collect(),
-                    ))
-                } else {
-                    Datum::Map(entries)
-                })
+                Ok(Datum::List(Arc::new(
+                    names
+                        .iter()
+                        .map(|name| Datum::String(name.to_string()))
+                        .collect(),
+                )))
             }
+            Function::Properties => Ok(Datum::Map(match first {
+                Datum::Node(id) => Arc::new(self.property_map(&self.node(id)?.properties)?),
+                Datum::Relationship(id) => {
+                    Arc::new(self.property_map(&self.relationship(id)?.properties)?)
+                }
+                Datum::Map(entries) => entries,
+                other => return Err(invalid(&other)),
+            })),
             Function::Size => match first {
                 Datum::List(items) => Ok(integer(items.len())),
                 Datum::String(text) => Ok(integer(text.chars().count())),

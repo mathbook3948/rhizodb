@@ -4,6 +4,145 @@ use rhizodb::ErrorKind;
 use rhizodb::Value;
 use support::*;
 
+fn element_names(db: &rhizodb::Database) -> Vec<Vec<Value>> {
+    let mut rows = run(
+        db,
+        "MATCH (n) RETURN 'node', labels(n), keys(n), keys(properties(n)) ORDER BY id(n)",
+    );
+    rows.extend(run(
+        db,
+        "MATCH ()-[r]->() RETURN 'relationship', [type(r)], keys(r), keys(properties(r))",
+    ));
+    rows
+}
+
+fn in_tx(tx: &mut rhizodb::WriteTransaction<'_>, query: &str) -> Vec<Vec<Value>> {
+    tx.execute(query, &rhizodb::Parameters::new())
+        .unwrap()
+        .rows()
+        .to_vec()
+}
+
+#[test]
+fn names_of_a_token_a_rolled_back_transaction_created_never_reach_later_readers() {
+    let db = db();
+    let returned = "MATCH (a)-[r]->() RETURN labels(a), keys(a), type(r), keys(r)";
+    let mut ghost = db.begin_write().unwrap();
+    in_tx(
+        &mut ghost,
+        "CREATE (:Ghost {ghostKey: 1})-[:GHOST_TYPE {ghostEdge: 2}]->(:Ghost)",
+    );
+    assert_eq!(
+        in_tx(&mut ghost, returned),
+        [vec![
+            list([string("Ghost")]),
+            list([string("ghostKey")]),
+            string("GHOST_TYPE"),
+            list([string("ghostEdge")])
+        ]]
+    );
+    assert!(element_names(&db).is_empty());
+    ghost.rollback().unwrap();
+
+    run(
+        &db,
+        "CREATE (:Real {realKey: 1})-[:REAL_TYPE {realEdge: 2}]->(:Real)",
+    );
+    let real = vec![
+        list([string("Real")]),
+        list([string("realKey")]),
+        string("REAL_TYPE"),
+        list([string("realEdge")]),
+    ];
+    assert_eq!(run(&db, returned), std::slice::from_ref(&real));
+    assert_eq!(
+        element_names(&db),
+        [
+            vec![
+                string("node"),
+                list([string("Real")]),
+                list([string("realKey")]),
+                list([string("realKey")])
+            ],
+            vec![string("node"), list([string("Real")]), list([]), list([])],
+            vec![
+                string("relationship"),
+                list([string("REAL_TYPE")]),
+                list([string("realEdge")]),
+                list([string("realEdge")])
+            ],
+        ]
+    );
+    assert_eq!(single(&db, "MATCH (n:Ghost) RETURN count(n)"), int(0));
+    let mut write = db.begin_write().unwrap();
+    assert_eq!(in_tx(&mut write, returned), [real]);
+    write.rollback().unwrap();
+}
+
+#[test]
+fn labels_keys_and_type_follow_every_change_a_transaction_makes() {
+    let db = db();
+    run(
+        &db,
+        "UNWIND range(0, 299) AS i CREATE (n:N {i: i}) \
+         SET n.a = CASE WHEN i % 2 = 0 THEN i END, \
+             n.b = CASE WHEN i % 3 = 0 THEN 'text ' + toString(i) END, \
+             n.c = CASE WHEN i % 5 = 0 THEN [x IN range(1, 64) | toFloat(x)] END",
+    );
+    run(
+        &db,
+        "MATCH (a:N), (b:N) WHERE b.i = a.i + 1 AND a.i % 7 = 0 \
+         CREATE (a)-[:R {w: a.i, z: CASE WHEN a.i % 2 = 0 THEN 'z' END}]->(b)",
+    );
+    let query = "MATCH (n) RETURN keys(n) = keys(properties(n)), keys(n), labels(n) ORDER BY n.i";
+    let agreed = |rows: Vec<Vec<Value>>| {
+        for row in &rows {
+            assert_eq!(row[0], boolean(true), "{row:?}");
+        }
+        rows
+    };
+    let names = |keys: &[&str], labels: &[&str]| {
+        vec![
+            boolean(true),
+            list(keys.iter().map(|key| string(key))),
+            list(labels.iter().map(|label| string(label))),
+        ]
+    };
+    let before = agreed(run(&db, query));
+    assert_eq!(before[30], names(&["a", "b", "c", "i"], &["N"]));
+    assert_eq!(before[7], names(&["i"], &["N"]));
+
+    run(&db, "MATCH (n:N) WHERE n.i < 10 REMOVE n.a SET n.d = 1");
+    run(&db, "MATCH (n:N) WHERE n.i >= 100 REMOVE n.b SET n:M");
+    let after = agreed(run(&db, query));
+    assert_eq!(after[6], names(&["b", "d", "i"], &["N"]));
+    assert_eq!(after[150], names(&["a", "c", "i"], &["N", "M"]));
+
+    let mut tx = db.begin_write().unwrap();
+    in_tx(
+        &mut tx,
+        "MATCH (n:N) WHERE n.i = 150 REMOVE n.c, n:M SET n.e = 'new'",
+    );
+    in_tx(&mut tx, "CREATE (:Fresh {i: 1000, f: 1})");
+    in_tx(&mut tx, "MATCH ()-[r:R {w: 14}]->() REMOVE r.z SET r.y = 1");
+    let inside = agreed(in_tx(&mut tx, query));
+    assert_eq!(inside[150], names(&["a", "e", "i"], &["N"]));
+    assert_eq!(inside[300], names(&["f", "i"], &["Fresh"]));
+    assert_eq!(
+        in_tx(
+            &mut tx,
+            "MATCH ()-[r]->() WHERE r.w IN [0, 7, 14] RETURN type(r), keys(r) ORDER BY r.w"
+        ),
+        [
+            vec![string("R"), list([string("w"), string("z")])],
+            vec![string("R"), list([string("w")])],
+            vec![string("R"), list([string("w"), string("y")])],
+        ]
+    );
+    tx.rollback().unwrap();
+    assert_eq!(agreed(run(&db, query)), after);
+}
+
 fn row(db: &rhizodb::Database, query: &str) -> Vec<Value> {
     let mut rows = run(db, query);
     assert_eq!(rows.len(), 1, "{query}");

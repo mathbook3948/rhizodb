@@ -4,6 +4,11 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Changed
+
+- Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database instead of once per element, so returning many elements no longer reads storage once per label and property.
+- `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
+
 ## 0.1.0
 
 The first release: an embedded, schemaless property graph database for Rust programs, queried with GQL.
