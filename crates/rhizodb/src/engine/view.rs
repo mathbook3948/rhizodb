@@ -2,6 +2,7 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::blob::BlobRef;
+use super::cache::Access;
 use super::error::EngineError;
 use super::layout::TableId;
 use super::memtable::Bytes;
@@ -83,8 +84,8 @@ impl View {
     }
 
     /// The value stored in `blob`, a run a scan of the snapshot met.
-    pub(crate) fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
-        self.layers.tree.load_value(blob)
+    pub(crate) fn load(&self, blob: &BlobRef, access: Access) -> Result<Arc<[u8]>, EngineError> {
+        self.layers.tree.load_value(blob, access)
     }
 
     fn memtable_range(

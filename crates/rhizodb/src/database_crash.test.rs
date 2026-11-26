@@ -34,7 +34,7 @@ const WORKLOAD: &[Step] = &[
     ),
     Step::Query(
         "MATCH (a:Item), (b:Item) WHERE b.k = a.k + 1 AND a.k % 3 = $p \
-         INSERT (a)-[:NEXT {w: a.k}]->(b)",
+         INSERT (a)-[:NEXT {w: a.k, note: reduce(s = '', c IN range(1, 20) | s + 'abcdefghij')}]->(b)",
         0,
     ),
     Step::Transaction(
@@ -51,7 +51,8 @@ const WORKLOAD: &[Step] = &[
     ),
     Step::Query(
         "UNWIND range(1, 40) AS i INSERT (:Bulk {k: $p * 1000 + i, text: 'bulk ' + toString(i), \
-         blob: 'x' + toString(i * 7919) + 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'})",
+         blob: 'x' + toString(i * 7919) + 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy', \
+         long: CASE WHEN i % 8 = 0 THEN reduce(s = '', c IN range(1, 150) | s + toString(c % 10) + 'long text') END})",
         2,
     ),
     Step::DropKeywordIndex,
@@ -124,9 +125,12 @@ fn dump(db: &Database) -> Vec<String> {
         .collect()
 }
 
-fn open(fs: &SimFs) -> Result<Database, Error> {
+const FEW_PAGES: usize = 64 * crate::engine::layout::BLOCK;
+
+const VALUES: usize = 256 << 20;
+
+fn open(fs: &SimFs, cache_bytes: usize) -> Result<Database, Error> {
     use crate::engine::any_fs::AnyFs;
-    use crate::engine::layout::BLOCK;
     use crate::engine::store::CheckpointMode;
     use crate::engine::store::Engine;
     use crate::engine::store::EngineOptions;
@@ -135,7 +139,7 @@ fn open(fs: &SimFs) -> Result<Database, Error> {
         memtable_limit: 6_000,
         wal_limit: 20_000,
         checkpoint: CheckpointMode::Inline,
-        cache_bytes: 64 * BLOCK,
+        cache_bytes,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
     };
@@ -227,11 +231,13 @@ fn candidates(run: &Run) -> Vec<Vec<usize>> {
 
 fn check_recovered(
     recovered: &SimFs,
+    cache_bytes: usize,
     run: &Run,
     expected: &mut Expected,
     case: &str,
 ) -> Result<(), String> {
-    let db = open(recovered).map_err(|error| format!("{case}: reopening failed: {error}"))?;
+    let db = open(recovered, cache_bytes)
+        .map_err(|error| format!("{case}: reopening failed: {error}"))?;
     consistent(&db).map_err(|problem| format!("{case}: {problem}"))?;
     let found = dump(&db);
     let matched = candidates(run)
@@ -250,7 +256,8 @@ fn check_recovered(
     .map_err(|error| format!("{case}: the recovered database refused a write: {error}"))?;
     consistent(&db).map_err(|problem| format!("{case}: after a write, {problem}"))?;
     drop(db);
-    let reopened = open(recovered).map_err(|error| format!("{case}: second reopen: {error}"))?;
+    let reopened =
+        open(recovered, cache_bytes).map_err(|error| format!("{case}: second reopen: {error}"))?;
     let mut probes = expected.after(&matched).to_vec();
     let after = dump(&reopened);
     probes[0] = after[0].clone();
@@ -277,9 +284,9 @@ fn modes(seeds: u64, salt: u64) -> Vec<Crash> {
     modes
 }
 
-fn operations() -> (u64, u64) {
+fn operations(cache_bytes: usize) -> (u64, u64) {
     let fs = SimFs::new();
-    let db = open(&fs).unwrap();
+    let db = open(&fs, cache_bytes).unwrap();
     let opened = fs.operations();
     let run = run_workload(&db, true);
     assert_eq!(run.acknowledged.len(), WORKLOAD.len());
@@ -304,8 +311,8 @@ fn points(from: u64, total: u64, budget: u64, seed: u64) -> Vec<u64> {
     points
 }
 
-fn crash_during_workload(failure: Failure) {
-    let (opened, total) = operations();
+fn crash_during_workload(failure: Failure, cache_bytes: usize) {
+    let (opened, total) = operations(cache_bytes);
     let budget = u64::from(test_scale::cases(40));
     let seeds = u64::from(test_scale::cases(1)).min(16);
     let seed = test_scale::seed();
@@ -313,7 +320,7 @@ fn crash_during_workload(failure: Failure) {
     let mut problems = Vec::new();
     for at in points(opened, total, budget, seed) {
         let fs = SimFs::new();
-        let run = match open(&fs) {
+        let run = match open(&fs, cache_bytes) {
             Ok(db) => {
                 fs.fail_after(at - opened, failure);
                 let run = run_workload(&db, failure == Failure::FromThenOn);
@@ -328,7 +335,10 @@ fn crash_during_workload(failure: Failure) {
         };
         for mode in modes(seeds, at) {
             let case = format!("{failure:?} at operation {at} of {total}, {mode:?}");
-            if let Err(problem) = check_recovered(&fs.crash(mode), &run, &mut expected, &case) {
+            let recovered = fs.crash(mode);
+            if let Err(problem) =
+                check_recovered(&recovered, cache_bytes, &run, &mut expected, &case)
+            {
                 problems.push(problem);
             }
         }
@@ -355,17 +365,30 @@ fn the_sampled_points_reach_every_operation_across_seeds() {
 #[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_at_any_point_of_a_workload_recovers_the_acknowledged_steps() {
-    crash_during_workload(Failure::FromThenOn);
+    crash_during_workload(Failure::FromThenOn, FEW_PAGES);
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn a_power_loss_at_any_point_of_a_workload_with_values_in_the_cache_recovers_the_acknowledged_steps()
+ {
+    crash_during_workload(Failure::FromThenOn, VALUES);
 }
 
 #[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn one_failed_write_or_sync_in_a_workload_loses_only_its_own_step() {
-    crash_during_workload(Failure::Once);
+    crash_during_workload(Failure::Once, FEW_PAGES);
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn one_failed_write_or_sync_in_a_workload_with_values_in_the_cache_loses_only_its_own_step() {
+    crash_during_workload(Failure::Once, VALUES);
 }
 
 fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
-    let db = open(fs).map_err(|error| format!("reopening failed: {error}"))?;
+    let db = open(fs, FEW_PAGES).map_err(|error| format!("reopening failed: {error}"))?;
     consistent(&db)?;
     let count = |db: &Database| {
         db.execute("MATCH (n) RETURN count(*)", &Parameters::new())
@@ -378,7 +401,7 @@ fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
     db.execute("INSERT (:First)", &Parameters::new())
         .map_err(|error| format!("the recovered database refused a write: {error}"))?;
     drop(db);
-    let db = open(fs).map_err(|error| format!("second reopen: {error}"))?;
+    let db = open(fs, FEW_PAGES).map_err(|error| format!("second reopen: {error}"))?;
     if count(&db)? != [vec![Value::Integer(1)]] {
         return Err("the first write did not last".to_owned());
     }
@@ -388,14 +411,14 @@ fn opens_empty_and_writable(fs: &SimFs) -> Result<(), String> {
 #[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole_empty_one() {
-    let (opened, _) = operations();
+    let (opened, _) = operations(FEW_PAGES);
     let seeds = u64::from(test_scale::cases(2)).min(16);
     let mut problems = Vec::new();
     for failure in [Failure::FromThenOn, Failure::Once] {
         for at in 0..opened {
             let fs = SimFs::new();
             fs.fail_after(at, failure);
-            let first = open(&fs).map(drop);
+            let first = open(&fs, FEW_PAGES).map(drop);
             if failure == Failure::FromThenOn {
                 assert!(first.is_err(), "opening survived a failure at {at}");
             }
@@ -414,7 +437,7 @@ fn a_power_loss_or_failure_while_a_new_file_is_created_leaves_no_file_or_a_whole
 #[test]
 fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns() {
     let fs = SimFs::new();
-    let db = open(&fs).unwrap();
+    let db = open(&fs, FEW_PAGES).unwrap();
     for step in &WORKLOAD[..4] {
         apply(&db, *step).unwrap();
     }
@@ -456,7 +479,7 @@ fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns(
     assert_eq!(dump(&db)[2..], before[2..]);
     drop(db);
     fs.set_capacity(Some(used));
-    match open(&fs) {
+    match open(&fs, FEW_PAGES) {
         Ok(db) => {
             assert_eq!(dump(&db)[2..], before[2..]);
             assert_eq!(consistent(&db), Ok(()));
@@ -464,7 +487,7 @@ fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns(
         Err(error) => assert_eq!(error.kind(), ErrorKind::Storage, "{error}"),
     }
     fs.set_capacity(None);
-    let db = open(&fs).unwrap();
+    let db = open(&fs, FEW_PAGES).unwrap();
     assert_eq!(
         db.execute("MATCH (n:Fill) RETURN count(*)", &Parameters::new())
             .unwrap()
@@ -477,7 +500,7 @@ fn a_full_disk_fails_writes_cleanly_keeps_reads_and_recovers_once_space_returns(
     drop(db);
     for mode in modes(2, 7) {
         let recovered = fs.crash(mode);
-        let db = open(&recovered).unwrap();
+        let db = open(&recovered, FEW_PAGES).unwrap();
         assert_eq!(consistent(&db), Ok(()), "{mode:?}");
         assert_eq!(dump(&db), live, "{mode:?}");
         assert_eq!(

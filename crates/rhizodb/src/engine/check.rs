@@ -6,6 +6,7 @@ use super::blob::BlobRef;
 use super::blob::Role;
 use super::blob::RunRef;
 use super::blob::decode_run;
+use super::cache::Access;
 use super::catalog::Root;
 use super::error::EngineError;
 use super::extent::Blocks;
@@ -188,7 +189,7 @@ impl Checker<'_> {
         high: Option<&[u8]>,
         entries: &mut u64,
     ) -> Result<(), EngineError> {
-        let cached = fetch(self.source, table, page, level)?;
+        let cached = fetch(self.source, table, page, level, Access::Point)?;
         if cached.header.lsn > self.header.tree_lsn()
             || cached.header.generation > self.header.generation
         {
