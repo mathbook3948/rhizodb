@@ -118,6 +118,12 @@ Every failure is an [`Error`], and [`Error::kind`] gives its [`ErrorKind`]. Bran
 never on the message, which may change. `ErrorKind` is `#[non_exhaustive]`, so a match on it
 needs a catch-all arm.
 
+Every method that reads or writes the database can fail with [`ErrorKind::Storage`] or
+[`ErrorKind::CorruptData`], described below, and every call that creates data, such as a writing
+query, an index creation, or an import, can fail with [`ErrorKind::IdSpaceExhausted`]. A method's
+own docs leave these out and name only the kinds it adds, and a method whose docs name none fails
+only with these.
+
 Most kinds are decided by the query and the data, and running the same query on the same data
 fails the same way, so retrying does not help. These are the syntax and binding errors, type
 errors, value errors such as [`ErrorKind::IntegerOverflow`], and misuse such as
@@ -289,8 +295,8 @@ copying its file.
 
 Writes go to new places in the file, never over the data they replace, and the space they free
 is reused by later checkpoints. When the file holds more than twice its live data and another
-76 MiB, a checkpoint also compacts it: it moves the live data to the start of the file and
-shortens the file. Reads and writes go on meanwhile, and a writer waits only when its commits
+4 MiB, a checkpoint, or closing the database, also compacts it: it moves the live data to the
+start of the file and shortens the file. Reads and writes go on meanwhile, and a writer waits only when its commits
 outrun the compaction. [`Database::compact`] compacts at once, [`Database::stats`] reports the
 file's size, its live bytes, and its log's size, and [`Database::check`] reads every page and
 fails with [`ErrorKind::CorruptData`] on the first that does not hold.

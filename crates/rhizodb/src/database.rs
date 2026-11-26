@@ -143,6 +143,10 @@ impl OpenOptions {
     }
 
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
+    ///
+    /// Fails with [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound) when
+    /// [`OpenOptions::create`] is `false` and there is no file at `path`, and with the kinds
+    /// [`Database::open`] lists.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
         let path = path.as_ref();
         if !self.create && !exists(path)? {
@@ -203,8 +207,13 @@ pub struct Database {
 impl Database {
     /// Opens the database file at `path`, creating it when it does not exist.
     ///
-    /// A damaged file fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on
-    /// open or on the operation that reads the damage, since every page carries a checksum.
+    /// Fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen) when another
+    /// `Database`, in this process or another, holds the file, and with
+    /// [`ErrorKind::UnsupportedFormatVersion`](crate::ErrorKind::UnsupportedFormatVersion) when
+    /// the file records a format version newer than this build reads. A damaged file fails with
+    /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
+    /// reads the damage, since every page carries a checksum.
     ///
     /// A file that an earlier build of RhizoDB stored with redb is converted on open: its tables
     /// are copied into a new file of the current format, which then replaces it. The old
@@ -241,7 +250,8 @@ impl Database {
         &self.graph
     }
 
-    /// Creates a database that lives in memory and is gone when dropped.
+    /// Creates a database that lives in memory and is gone when dropped. It adds no
+    /// [`ErrorKind`]s of its own to the ones every call can fail with.
     ///
     /// ```
     /// let db = rhizodb::Database::in_memory()?;
@@ -257,9 +267,12 @@ impl Database {
     ///
     /// A query without updating clauses reads a snapshot. A query with updating clauses commits
     /// when it succeeds and leaves no trace when it fails. It waits for an open write
-    /// transaction on another thread, and fails with
+    /// transaction on another thread.
+    ///
+    /// Fails with the kind that names what is wrong with the query, such as a syntax, binding,
+    /// type, or value error, and with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
-    /// when the calling thread holds one.
+    /// when a query with updating clauses runs on a thread that holds a write transaction.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -281,7 +294,8 @@ impl Database {
     }
 
     /// Begins a read transaction, which sees the graph as it was committed at this moment for as
-    /// long as it lives. Read transactions run alongside each other and alongside a writer.
+    /// long as it lives. Read transactions run alongside each other and alongside a writer. It
+    /// adds no [`ErrorKind`]s of its own to the ones every call can fail with.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -300,10 +314,12 @@ impl Database {
     }
 
     /// Begins a write transaction. Only one is open at a time, so this waits until any open write
-    /// transaction ends, including the one a writing [`Database::execute`] call opens. On the
-    /// thread that already holds the open write transaction it fails with
+    /// transaction ends, including the one a writing [`Database::execute`] call opens.
+    ///
+    /// Fails with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
-    /// instead of waiting for itself.
+    /// on the thread that already holds the open write transaction, instead of waiting for
+    /// itself.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -333,9 +349,9 @@ impl Database {
     /// copy. A crash can leave the staging file behind, and removing it is safe. An in-memory
     /// database backs up to a file the same way.
     ///
-    /// It fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when
-    /// a file or directory already exists at `path`, which is never replaced, and with
-    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage) when writing the copy fails.
+    /// Fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when a
+    /// file or directory already exists at `path`, which is never replaced. A `path` that names
+    /// no file fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage).
     ///
     /// ```
     /// use rhizodb::Database;
@@ -369,9 +385,9 @@ impl Database {
     /// and each temporal value with its offset or zone. The crate's guide describes the format
     /// and how its versions stay compatible.
     ///
-    /// It fails with [`ErrorKind::Io`](crate::ErrorKind::Io) when writing to `out` fails, and
-    /// `out` may then hold part of a dump, which [`Database::import`] refuses because its end
-    /// line is missing.
+    /// Fails with [`ErrorKind::Io`](crate::ErrorKind::Io) when writing to `out` fails, and `out`
+    /// may then hold part of a dump, which [`Database::import`] refuses because its end line is
+    /// missing.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -397,8 +413,7 @@ impl Database {
     }
 
     /// Reads a dump that [`Database::export`] wrote into this database, which must be new: it
-    /// must hold no index and never have held a node or a relationship, or the import fails with
-    /// [`ErrorKind::DatabaseNotEmpty`](crate::ErrorKind::DatabaseNotEmpty).
+    /// must hold no index and never have held a node or a relationship.
     ///
     /// Nodes and relationships keep their IDs, and the next IDs are those of the exported
     /// database, so an ID deleted before the export is not given again. Indexes are created
@@ -409,11 +424,14 @@ impl Database {
     /// batches before the failure committed. Import into a new file and delete it when the
     /// import fails, rather than into a database other code uses.
     ///
-    /// It fails with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump) for a malformed
-    /// or truncated dump, with
+    /// Fails with [`ErrorKind::DatabaseNotEmpty`](crate::ErrorKind::DatabaseNotEmpty) when the
+    /// database is not new, with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump) for a
+    /// malformed or truncated dump, with
     /// [`ErrorKind::UnsupportedDumpVersion`](crate::ErrorKind::UnsupportedDumpVersion) for one
-    /// written in a newer format version, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when
-    /// reading `input` fails.
+    /// written in a newer format version, with [`ErrorKind::Io`](crate::ErrorKind::Io) when
+    /// reading `input` fails, and with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     ///
     /// ```
     /// use std::io::BufReader;
@@ -446,7 +464,8 @@ impl Database {
     /// already started keep the procedures they began with.
     ///
     /// Fails with [`ErrorKind::ReservedProcedureName`](crate::ErrorKind::ReservedProcedureName)
-    /// for a name in the `db` namespace, which the built-in procedures reserve.
+    /// for a name in the `db` namespace, which the built-in procedures reserve, and with no other
+    /// kind, since it touches no data.
     pub fn register_procedure(&self, procedure: Procedure) -> Result<(), Error> {
         let name = &procedure.signature.name;
         if query::is_reserved(name) {
@@ -498,11 +517,13 @@ impl Database {
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     ///
-    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// Creating an index that exists with the same definition changes nothing. Fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
-    /// another definition holds the name, and with
+    /// another definition holds the name, with
     /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
-    /// empty name or no properties.
+    /// empty name or no properties, and with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     pub fn create_keyword_index(
         &self,
         name: &str,
@@ -530,11 +551,13 @@ impl Database {
     /// its own outside the database and reads the elements it returns by ID, for example with
     /// `MATCH (n) WHERE id(n) IN $ids` or `MATCH ()-[r]->() WHERE id(r) IN $ids`.
     ///
-    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// Creating an index that exists with the same definition changes nothing. Fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
-    /// another definition holds the name, and with
+    /// another definition holds the name, with
     /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
-    /// empty name or a dimension of zero.
+    /// empty name or a dimension of zero or above `u32::MAX`, and with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -599,11 +622,13 @@ impl Database {
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     ///
-    /// Creating an index that exists with the same definition changes nothing. It fails with
+    /// Creating an index that exists with the same definition changes nothing. Fails with
     /// [`ErrorKind::IndexAlreadyExists`](crate::ErrorKind::IndexAlreadyExists) when an index of
-    /// another definition holds the name, and with
+    /// another definition holds the name, with
     /// [`ErrorKind::InvalidIndexDefinition`](crate::ErrorKind::InvalidIndexDefinition) for an
-    /// empty name.
+    /// empty name, and with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     pub fn create_property_index(
         &self,
         name: &str,
@@ -619,13 +644,18 @@ impl Database {
     /// little of the file as it needs, and shortens the file to fit. Reads go on while it runs,
     /// and writing transactions wait for it.
     ///
-    /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
-    /// write transaction.
+    /// Fails with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     pub fn compact(&self) -> Result<(), Error> {
         Ok(self.graph.maintain(Maintenance::compact)??)
     }
 
     /// The size of the database on disk and how well its cache serves reads.
+    ///
+    /// Fails with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     pub fn stats(&self) -> Result<DatabaseStats, Error> {
         let stats = self.graph.maintain(Maintenance::stats)??;
         Ok(DatabaseStats {
@@ -640,18 +670,23 @@ impl Database {
     }
 
     /// Reads every page that the database file's last checkpoint reaches and checks its
-    /// checksum, its key order, and every count the file records, and fails with
-    /// [`ErrorKind::CorruptData`] on the first that does not hold. Commits since that checkpoint
+    /// checksum, its key order, and every count the file records. Commits since that checkpoint
     /// are checked as they are read back from the log.
     ///
-    /// Fails with [`ErrorKind::WriteTransactionOnThisThread`] when the calling thread holds a
-    /// write transaction.
+    /// Fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) on the first page or
+    /// count that does not hold, and with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     pub fn check(&self) -> Result<(), Error> {
         Ok(self.graph.maintain(Maintenance::check)??)
     }
 
     /// Drops the index `name` and all its entries in one write transaction. Returns whether an
-    /// index of that name existed.
+    /// index of that name existed, so a missing index is not an error.
+    ///
+    /// Fails with
+    /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
+    /// when the calling thread holds a write transaction.
     ///
     /// ```
     /// use rhizodb::Database;

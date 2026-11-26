@@ -86,6 +86,33 @@ fn compacting_gives_back_the_space_of_deleted_values_and_keeps_every_node() {
 }
 
 #[test]
+fn closing_after_deleting_nearly_everything_gives_the_space_back_and_keeps_the_rest() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.db");
+    {
+        let db = Database::open(&path).unwrap();
+        fill_with_long_values(&db);
+    }
+    let loaded = std::fs::metadata(&path).unwrap().len();
+    {
+        let db = Database::open(&path).unwrap();
+        run(&db, "MATCH (n:Doc) WHERE n.i % 100 <> 0 DETACH DELETE n");
+    }
+    let closed = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        closed * 4 < loaded,
+        "the file kept {closed} of {loaded} bytes after the deletes"
+    );
+    let db = Database::open(&path).unwrap();
+    db.check().unwrap();
+    assert_eq!(count(&db), Value::Integer(40));
+    assert_eq!(
+        single(&db, "MATCH (n:Doc {i: 300}) RETURN size(n.body)"),
+        Value::Integer(3003)
+    );
+}
+
+#[test]
 fn stats_count_the_log_and_the_cache() {
     let directory = tempfile::tempdir().unwrap();
     let db = Database::open(directory.path().join("graph.db")).unwrap();
