@@ -928,3 +928,170 @@ pub(crate) fn store_as_format_seven(write: &mut impl WriteTransaction) {
         .delete(Table::Metadata, keys::NEXT_LABEL_SET_KEY)
         .unwrap();
 }
+
+#[derive(Debug, Default)]
+struct Gate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    opened: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[derive(Debug)]
+struct GatedStorage {
+    inner: RedbStorage,
+    gate: Arc<Gate>,
+}
+
+struct GatedWrite {
+    inner: crate::storage::redb_backend::RedbWrite,
+    gate: Arc<Gate>,
+}
+
+impl Storage for GatedStorage {
+    type Read<'a> = crate::storage::redb_backend::RedbRead;
+    type Write<'a> = GatedWrite;
+
+    fn begin_read(&self) -> Result<Self::Read<'_>, StorageError> {
+        self.inner.begin_read()
+    }
+
+    fn begin_write(&self) -> Result<GatedWrite, StorageError> {
+        Ok(GatedWrite {
+            inner: self.inner.begin_write()?,
+            gate: Arc::clone(&self.gate),
+        })
+    }
+
+    fn write_copy(snapshot: &Self::Read<'_>, path: &std::path::Path) -> Result<(), StorageError> {
+        RedbStorage::write_copy(snapshot, path)
+    }
+}
+
+impl ReadTransaction for GatedWrite {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_prefix(table, prefix)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        self.inner.scan_range(table, start, end)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, visit)
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, visit)
+    }
+}
+
+impl WriteTransaction for GatedWrite {
+    fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+        self.inner.put(table, key, value)
+    }
+
+    fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete(table, key)
+    }
+
+    fn delete_range(&mut self, table: Table, start: &[u8], end: &[u8]) -> Result<(), StorageError> {
+        self.inner.delete_range(table, start, end)
+    }
+
+    fn commit(self) -> Result<(), StorageError> {
+        if self
+            .gate
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Some(entered) = lock(&self.gate.entered).take() {
+                entered.send(()).unwrap();
+            }
+            if let Some(opened) = lock(&self.gate.opened).take() {
+                opened.recv().unwrap();
+            }
+        }
+        self.inner.commit()
+    }
+
+    fn rollback(self) -> Result<(), StorageError> {
+        self.inner.rollback()
+    }
+}
+
+#[test]
+fn a_read_begins_while_a_commit_that_creates_an_index_is_writing() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: RedbStorage::in_memory().unwrap(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let (enter, entered) = std::sync::mpsc::channel();
+    let (open, opened) = std::sync::mpsc::channel();
+    *lock(&gate.entered) = Some(enter);
+    *lock(&gate.opened) = Some(opened);
+    gate.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut write = graph.write().unwrap();
+            write
+                .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+                .unwrap();
+            write.commit().unwrap();
+        });
+        entered.recv().unwrap();
+        let (begun, began) = std::sync::mpsc::channel();
+        let shared = &graph;
+        let reader = scope.spawn(move || {
+            let read = shared.read().unwrap();
+            begun
+                .send((
+                    read.indexes().unwrap().len(),
+                    read.index_definitions().unwrap().len(),
+                ))
+                .unwrap();
+        });
+        let seen = began.recv_timeout(std::time::Duration::from_secs(5));
+        open.send(()).unwrap();
+        writer.join().unwrap();
+        reader.join().unwrap();
+        assert_eq!(seen, Ok((0, 0)), "a read waited for the commit");
+    });
+    let read = graph.read().unwrap();
+    assert_eq!(read.indexes().unwrap().len(), 1);
+    assert_eq!(read.index_definitions().unwrap().len(), 1);
+}

@@ -10,6 +10,8 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::thread::ThreadId;
 
@@ -194,7 +196,7 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writers: Arc<Writers>,
-    committed_index_definitions: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
     committed_column_deltas: Arc<ColumnDeltas>,
@@ -286,7 +288,11 @@ impl<S: Storage> Graph<S> {
         Ok(Self {
             storage,
             writers: Arc::default(),
-            committed_index_definitions: Arc::new(Mutex::new(definitions)),
+            committed_index_definitions: Arc::new(CommittedCatalog {
+                definitions: Mutex::new(definitions),
+                changes: AtomicU64::new(0),
+                publishing: Mutex::new(()),
+            }),
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
             committed_column_deltas: Arc::default(),
@@ -305,12 +311,20 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
-        let catalog = lock(&self.committed_index_definitions);
+        let committed = &self.committed_index_definitions;
+        let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
+        let definitions = Arc::clone(&lock(&committed.definitions));
+        let index_definitions =
+            if before.is_multiple_of(2) && committed.changes.load(Ordering::SeqCst) == before {
+                OnceLock::from(definitions)
+            } else {
+                OnceLock::new()
+            };
         Ok(GraphTx {
             transaction,
             _writer: None,
-            index_definitions: OnceLock::from(Arc::clone(&catalog)),
+            index_definitions,
             catalog: None,
             tokens: Arc::clone(&self.committed_tokens),
             reads_committed_tokens: true,
@@ -389,14 +403,19 @@ impl<S: Storage> Graph<S> {
             drop(slot);
             transaction.rollback()?;
         };
-        let definitions = Arc::clone(&lock(&self.committed_index_definitions));
+        let committed = &self.committed_index_definitions;
+        let index_definitions = if committed.changes.load(Ordering::SeqCst).is_multiple_of(2) {
+            OnceLock::from(Arc::clone(&lock(&committed.definitions)))
+        } else {
+            OnceLock::new()
+        };
         Ok(GraphTx {
             transaction,
             _writer: Some(WriterClaim {
                 writers: Arc::clone(&self.writers),
                 owner: current,
             }),
-            index_definitions: OnceLock::from(definitions),
+            index_definitions,
             catalog: Some(Catalog {
                 shared: Arc::clone(&self.committed_index_definitions),
                 changed: false,
@@ -481,8 +500,15 @@ impl<T> GraphTx<T> {
 
 #[derive(Debug)]
 struct Catalog {
-    shared: Arc<Mutex<Arc<[Vec<u8>]>>>,
+    shared: Arc<CommittedCatalog>,
     changed: bool,
+}
+
+#[derive(Debug)]
+struct CommittedCatalog {
+    definitions: Mutex<Arc<[Vec<u8>]>>,
+    changes: AtomicU64,
+    publishing: Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -1228,9 +1254,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             }) => Some((shared, self.index_definitions()?)),
             _ => None,
         };
-        let mut current = definitions
-            .as_ref()
-            .map(|(shared, definitions)| (lock(shared), definitions));
+        let publishing = definitions.as_ref().map(|(shared, _)| {
+            let publishing = lock(&shared.publishing);
+            shared.changes.fetch_add(1, Ordering::SeqCst);
+            publishing
+        });
         let mut counts = self.column_deltas.as_ref().map(|shared| lock(shared));
         let committed = self.transaction.commit();
         if let Some(counts) = &mut counts {
@@ -1240,11 +1268,14 @@ impl<T: WriteTransaction> GraphTx<T> {
                 counts.clear();
             }
         }
-        committed?;
-        if let Some((current, definitions)) = &mut current {
-            **current = Arc::clone(definitions);
+        if let Some((shared, definitions)) = definitions {
+            if committed.is_ok() {
+                *lock(&shared.definitions) = definitions;
+            }
+            shared.changes.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(())
+        drop(publishing);
+        Ok(committed?)
     }
 
     pub(crate) fn rollback(self) -> Result<(), GraphError> {
