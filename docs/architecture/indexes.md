@@ -67,7 +67,7 @@ A host that keeps people, places, and tasks for years must find them by words, b
 - Each posting keeps the positions of its term in the element.
 - Each indexed element keeps the terms it was indexed under.
 - Removing an element from a keyword index deletes the terms it kept, without tokenizing again.
-- The database records which tokenizer built its keyword indexes, as the tokenizer's version and its terms and their positions for a fixed probe text that exercises the Unicode tables it depends on.
+- The database records which tokenizer built its keyword indexes, as the tokenizer's version, the Unicode version of each table it reads, and its terms and their positions for a fixed probe text that exercises those tables.
 - Opening a database recorded with another tokenizer rebuilds every keyword index in the opening write transaction.
 - That rebuild records the current tokenizer.
 - Changing what the tokenizer produces on purpose raises its version.

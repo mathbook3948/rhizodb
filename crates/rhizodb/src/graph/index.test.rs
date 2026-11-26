@@ -886,6 +886,57 @@ fn opening_a_database_of_format_three_rebuilds_its_keyword_indexes() {
 }
 
 #[test]
+fn opening_a_database_recorded_under_older_unicode_tables_records_the_current_tokenizer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unicode.redb");
+    let mut older = tokenize::unicode_versions();
+    older[0].0 -= 1;
+    {
+        let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("current terms".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write
+            .transaction
+            .put(
+                Table::Metadata,
+                keys::TOKENIZER_KEY,
+                &tokenize::fingerprint_of(&older),
+            )
+            .unwrap();
+        write.commit().unwrap();
+        assert!(!graph.read().unwrap().check_integrity().unwrap().is_empty());
+    }
+    let graph = Graph::open(RedbStorage::open(&path).unwrap()).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.transaction
+            .get(Table::Metadata, keys::TOKENIZER_KEY)
+            .unwrap(),
+        Some(tokenize::fingerprint())
+    );
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "current", 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn opening_records_the_current_tokenizer() {
     let graph = Graph::open(RedbStorage::in_memory().unwrap()).unwrap();
     let stored = graph

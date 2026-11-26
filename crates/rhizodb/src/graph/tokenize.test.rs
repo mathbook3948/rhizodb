@@ -575,3 +575,14 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn another_unicode_version_of_any_table_gives_another_fingerprint() {
+    let current = unicode_versions();
+    assert_eq!(fingerprint(), fingerprint_of(&current));
+    for table in 0..current.len() {
+        let mut older = current;
+        older[table].1 = older[table].1.wrapping_sub(1);
+        assert_ne!(fingerprint_of(&older), fingerprint(), "table {table}");
+    }
+}

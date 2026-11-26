@@ -20,12 +20,39 @@ const PROBE: &str = concat!(
     "가\u{301} 한\u{200d}국 x \u{e31}ก \u{301}abc Ver\u{ad}si\u{2060}cherung צה\"ל",
 );
 
-/// The tokenizer's version and its terms and their positions for a fixed probe text. The probe
-/// exercises the Unicode tables the tokenizer depends on, including recently assigned and still
-/// unassigned code points, so a change to those tables that touches the probe changes the
-/// fingerprint even when the version does not.
+/// The Unicode versions of the tables the tokenizer reads: the standard library's character
+/// properties and case mapping, word and grapheme segmentation, and normalization.
+pub(crate) fn unicode_versions() -> [(u64, u64, u64); 3] {
+    let (major, minor, update) = char::UNICODE_VERSION;
+    let (normalization_major, normalization_minor, normalization_update) =
+        unicode_normalization::UNICODE_VERSION;
+    [
+        (u64::from(major), u64::from(minor), u64::from(update)),
+        unicode_segmentation::UNICODE_VERSION,
+        (
+            u64::from(normalization_major),
+            u64::from(normalization_minor),
+            u64::from(normalization_update),
+        ),
+    ]
+}
+
+/// The tokenizer's fingerprint under the tables of this build, as [`fingerprint_of`] gives it.
 pub(crate) fn fingerprint() -> Vec<u8> {
+    fingerprint_of(&unicode_versions())
+}
+
+/// The tokenizer's version, the Unicode version of each table in `unicode`, and its terms and
+/// their positions for a fixed probe text. Any new Unicode version changes the fingerprint, and
+/// the probe, which exercises recently assigned and still unassigned code points, also catches
+/// a change of the tables within one version.
+pub(crate) fn fingerprint_of(unicode: &[(u64, u64, u64)]) -> Vec<u8> {
     let mut out = VERSION.to_be_bytes().to_vec();
+    for (major, minor, update) in unicode {
+        for part in [major, minor, update] {
+            out.extend_from_slice(&part.to_be_bytes());
+        }
+    }
     for purpose in [Purpose::Document, Purpose::Query] {
         for term in terms(PROBE, purpose) {
             out.extend_from_slice(term.text.as_bytes());
