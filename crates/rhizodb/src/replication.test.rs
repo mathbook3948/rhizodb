@@ -308,6 +308,30 @@ mod crash {
     }
 
     #[test]
+    fn a_log_kept_through_a_recovery_outlives_a_header_write_and_a_second_crash() {
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        writer.promote(1, b"w").unwrap();
+        for k in 0..10 {
+            insert(&writer, k);
+        }
+        let fs = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&fs, false);
+        writer.promote(1, b"w").unwrap();
+        insert(&writer, 10);
+        let ahead = Position::new(2, b"x", writer.position().lsn()).unwrap();
+        let _ = writer.changes_since(&ahead, 1 << 20);
+        assert_eq!(writer.role(), crate::replication::Role::Fenced);
+        let fs = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&fs, false);
+        let fresh = open_on(&SimFs::new(), true);
+        assert_eq!(sync(&writer, &fresh).unwrap(), writer.position());
+        assert_eq!(export(&fresh), export(&writer));
+    }
+
+    #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);
         old.promote(5, b"a").unwrap();

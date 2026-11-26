@@ -47,7 +47,7 @@ A replica starts from a copy of the database file and then follows the log from 
 - Acknowledgements reach the file with the next header a checkpoint or a clean open or close writes, never with a sync of their own.
 - A header records at most 32 peers, and acknowledging another one fails.
 - A clean close keeps the segments peers still need, and a clean open keeps them before the new log it starts.
-- Once recovery's checkpoint is durable, the new log keeps the segments recovery read before it and the header records them as kept, so replicas still read those changes after a crash, and a second crash, until the next checkpoint releases what no peer needs.
+- Once recovery's checkpoint is durable, the new log keeps the segments recovery read before it, and every header written until the next checkpoint records them as kept, so replicas still read those changes after a crash, and a second crash, until that checkpoint releases what no peer needs.
 - A kept segment keeps the salt of the log that wrote it, and a reader seeds each record with the salt in its own segment's header.
 - Recovery does not replay kept segments before the checkpoint's log, and removes a missing or damaged one with every segment before it, so damage there only shortens what peers can read.
 - A snapshot's header and an installed image record no peers and no kept log, so an install leaves none of the old database's log to serve.

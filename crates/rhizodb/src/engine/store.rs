@@ -1340,11 +1340,12 @@ impl<F: FileSystem + 'static> Shared<F> {
             .iter()
             .map(|(peer, lsn)| (peer.clone(), *lsn))
             .collect();
+        let first = self.log_first.load(Ordering::Relaxed);
         Retained {
-            from: if peers.is_empty() {
+            from: if peers.is_empty() && first >= self.needed.load(Ordering::Relaxed) {
                 0
             } else {
-                self.log_first.load(Ordering::Relaxed)
+                first
             },
             peers,
         }
