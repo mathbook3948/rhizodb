@@ -534,7 +534,7 @@ fn a_replica_refuses_the_changes_of_an_unrelated_database() {
 }
 
 #[test]
-fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_followed() {
+fn a_file_of_an_older_format_opens_as_a_writer_whose_first_snapshot_a_replica_installs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.rhizodb");
     std::fs::copy(
@@ -542,7 +542,6 @@ fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_follow
         &path,
     )
     .unwrap();
-    drop(Database::open(&path).unwrap());
     let writer = Database::open(&path).unwrap();
     assert_eq!(writer.role(), Role::Writer);
     assert!(writer.history().entries().is_empty());

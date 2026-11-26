@@ -1116,7 +1116,6 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
-    #[cfg(any(test, fuzzing))]
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
@@ -1983,6 +1982,10 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
         path: &std::path::Path,
     ) -> Result<(), StorageError> {
         super::any_fs::write_copy(snapshot, path)
+    }
+
+    fn checkpoint(&self) -> Result<(), StorageError> {
+        Ok(Engine::checkpoint(self)?)
     }
 }
 

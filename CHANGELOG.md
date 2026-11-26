@@ -21,6 +21,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- Opening a database of an older graph format or tokenizer as its writer checkpoints the upgrade once, so a snapshot taken right after it installs on a replica instead of failing with `NotWriter`. Opening a database of the current format checkpoints nothing.
 - A file records engine format minor 4, which adds the replication history, the role, and the log kept for peers, once this build opens it, so builds before it refuse it with `UnsupportedFormatVersion`.
 - A `MATCH` pattern starts at a later node that an earlier clause binds, or that an ID lookup or a property index serves, instead of reading every node at its left end and checking the far end of each walk, so `MATCH (x:Person {id: $id}) MATCH (a)-[:FOLLOWS]->(x)` and `MATCH (a)-[:KNOWS]->(b:Person {id: $x})` with an index on `Person.id` read only the relationships of the found node. A later lookup is used only when it finds fewer nodes than the leftmost start. The rows are the same, though rows without `ORDER BY` may come in another order, and since a property map is evaluated only for the elements the walk reaches, a moved start can change whether a query raises a value error such as division by zero.
 - Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database (once per transaction inside a write transaction) instead of once per element, so returning many elements no longer reads storage once per label and property.

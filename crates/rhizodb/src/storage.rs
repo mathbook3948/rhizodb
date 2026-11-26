@@ -140,6 +140,11 @@ pub(crate) trait Storage {
     fn write_copy(snapshot: &Self::Read<'_>, path: &Path) -> Result<(), StorageError>
     where
         Self: Sized;
+
+    /// Writes every commit so far into the database file, so a snapshot taken next holds them.
+    fn checkpoint(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 const COPY_BATCH_BYTES: usize = 64 << 20;

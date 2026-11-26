@@ -923,3 +923,44 @@ fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
     write.commit().unwrap();
     assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
 }
+
+#[test]
+fn opening_a_database_of_an_older_format_as_its_writer_checkpoints_the_upgrade() {
+    let storage = test_engine::in_memory();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &OLDEST_FORMAT_VERSION.to_be_bytes(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+    let before = storage.header();
+    let graph = Graph::open(storage).unwrap();
+    let after = graph.storage.header();
+    assert!(after.generation > before.generation);
+    assert!(after.checkpoint_lsn > before.checkpoint_lsn);
+    let checkpointed = graph.storage.export(&[]).unwrap();
+    let stored = GraphTx::bare(graph.storage.begin_read().unwrap())
+        .transaction
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(FORMAT_VERSION.to_be_bytes().to_vec()));
+    assert_eq!(checkpointed.position(), after.checkpoint_lsn);
+}
+
+#[test]
+fn opening_a_new_or_current_database_checkpoints_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    let storage = test_engine::open(&path);
+    let before = storage.header();
+    let graph = Graph::open(storage).unwrap();
+    assert_eq!(graph.storage.header().generation, before.generation);
+    drop(graph);
+    let storage = test_engine::open(&path);
+    let before = storage.header();
+    let graph = Graph::open(storage).unwrap();
+    assert_eq!(graph.storage.header().generation, before.generation);
+}
