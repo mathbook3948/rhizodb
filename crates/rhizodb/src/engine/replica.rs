@@ -15,6 +15,7 @@ use super::stage_record;
 use crate::engine::block_file::BlockFile;
 use crate::engine::block_file::BlockSize;
 use crate::engine::block_file::FileSystem;
+use crate::engine::cache::Access;
 use crate::engine::changes::ChangeRecord;
 use crate::engine::changes::Decoded;
 use crate::engine::changes::EpochId;
@@ -127,7 +128,7 @@ pub(crate) fn epochs_in(view: &View) -> Result<Vec<Epoch>, EngineError> {
         &mut |key, value| {
             let epoch = match value {
                 CellValue::Inline(value) => decode_epoch(key, value),
-                CellValue::External(blob) => decode_epoch(key, &view.load(&blob)?),
+                CellValue::External(blob) => decode_epoch(key, &view.load(&blob, Access::Point)?),
             }
             .map_err(StorageError::from)?;
             if epochs

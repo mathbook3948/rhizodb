@@ -144,6 +144,29 @@ fn options() -> EngineOptions {
     }
 }
 
+fn caching_values() -> EngineOptions {
+    EngineOptions {
+        cache_bytes: 256 << 20,
+        ..options()
+    }
+}
+
+macro_rules! with_each_cache {
+    ($scenario:ident: $few_pages:ident, $values:ident) => {
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn $few_pages() {
+            $scenario(options());
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn $values() {
+            $scenario(caching_values());
+        }
+    };
+}
+
 fn crashes(seeds: u64) -> Vec<Crash> {
     let mut crashes = vec![Crash::DropUnsynced, Crash::KeepUnsynced];
     for seed in 0..seeds {
@@ -177,23 +200,31 @@ fn run_until_failure(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -> Run
     }
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_keeps_each_acknowledged_commit() {
-    fail_each_operation_then_lose_power(options(), 8);
+with_each_cache!(
+    fail_each_operation_then_lose_power:
+    every_failure_then_power_loss_keeps_each_acknowledged_commit,
+    every_failure_then_power_loss_with_values_in_the_cache_keeps_each_acknowledged_commit
+);
+
+with_each_cache!(
+    fail_each_operation_then_lose_power_checkpointing_every_commit:
+    every_failure_then_power_loss_keeps_each_commit_checkpointed_at_once,
+    every_failure_then_power_loss_with_values_in_the_cache_keeps_each_commit_checkpointed_at_once
+);
+
+fn fail_each_operation_then_lose_power(options: EngineOptions) {
+    fail_each_operation_then_lose_power_from(options, 8);
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_keeps_each_commit_checkpointed_at_once() {
+fn fail_each_operation_then_lose_power_checkpointing_every_commit(options: EngineOptions) {
     let every_commit = EngineOptions {
         memtable_limit: 0,
-        ..options()
+        ..options
     };
-    fail_each_operation_then_lose_power(every_commit, 20);
+    fail_each_operation_then_lose_power_from(every_commit, 20);
 }
 
-fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generation: u64) {
+fn fail_each_operation_then_lose_power_from(options: EngineOptions, minimum_generation: u64) {
     let transactions = transactions(7, 24);
     let states = states(&transactions);
     let total = {
@@ -239,6 +270,11 @@ fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generatio
             let extra = &transactions[recovered % transactions.len()];
             commit(&engine, extra).unwrap();
             let expected = applied(&states[recovered], extra);
+            assert_eq!(
+                dump(&engine),
+                expected,
+                "fail at {fail_at}, {crash:?}, live"
+            );
             drop(engine);
             let reopened = open(&crashed.crash(Crash::DropUnsynced), options).unwrap();
             assert_eq!(dump(&reopened), expected, "fail at {fail_at}, {crash:?}");
@@ -248,17 +284,21 @@ fn fail_each_operation_then_lose_power(options: EngineOptions, minimum_generatio
     assert!(outcomes[0] > 0 && outcomes[1] > 0, "{outcomes:?}");
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn a_reopen_after_any_failure_keeps_each_later_acknowledged_commit_through_a_power_loss() {
+with_each_cache!(
+    reopen_after_each_failure_then_lose_power:
+    a_reopen_after_any_failure_keeps_each_later_acknowledged_commit_through_a_power_loss,
+    a_reopen_after_any_failure_with_values_in_the_cache_keeps_each_later_acknowledged_commit_through_a_power_loss
+);
+
+fn reopen_after_each_failure_then_lose_power(chosen: EngineOptions) {
     for every_commit in [false, true] {
         let options = EngineOptions {
             memtable_limit: if every_commit {
                 0
             } else {
-                options().memtable_limit
+                chosen.memtable_limit
             },
-            ..options()
+            ..chosen
         };
         let transactions = transactions(13, 10);
         let total = {
@@ -414,9 +454,13 @@ fn every_failure_then_power_loss_while_reopening_after_a_failed_log_sync_keeps_t
     }
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_database_whole() {
+with_each_cache!(
+    lose_power_while_reopening_after_a_failed_stage:
+    a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_database_whole,
+    a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn lose_power_while_reopening_after_a_failed_stage(chosen: EngineOptions) {
     let load: Vec<Write> = (0..60u8)
         .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
         .collect();
@@ -426,7 +470,7 @@ fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_d
     let expected = states(&[load.clone(), rewrite.clone()])[2].clone();
     let prepared = || {
         let fs = SimFs::new();
-        let engine = open(&fs, by_hand()).unwrap();
+        let engine = open(&fs, by_hand(chosen)).unwrap();
         commit(&engine, &load).unwrap();
         engine.checkpoint().unwrap();
         commit(&engine, &rewrite).unwrap();
@@ -447,7 +491,7 @@ fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_d
         for reopen_fail_at in 0.. {
             let copy = base.fork();
             copy.fail_sync_after(reopen_fail_at, Failure::FromThenOn);
-            let opened = open(&copy, by_hand());
+            let opened = open(&copy, by_hand(chosen));
             let reopened = opened.is_ok();
             let images: Vec<(Crash, SimFs)> = crashes(2)
                 .into_iter()
@@ -459,7 +503,7 @@ fn a_power_loss_while_reopening_after_a_failed_stage_of_a_checkpoint_keeps_the_d
                     torn_last_durable_header += 1;
                     continue;
                 }
-                let engine = open(&image, by_hand()).unwrap_or_else(|error| {
+                let engine = open(&image, by_hand(chosen)).unwrap_or_else(|error| {
                     panic!("fail at {fail_at} then {reopen_fail_at}, {crash:?}: {error}")
                 });
                 engine.check().unwrap_or_else(|error| {
@@ -653,13 +697,17 @@ fn state_after(count: u64) -> State {
     state
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_commit() {
+with_each_cache!(
+    lose_power_during_background_checkpoints:
+    a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_commit,
+    a_power_loss_at_any_moment_of_background_checkpoints_with_values_in_the_cache_keeps_each_acknowledged_commit
+);
+
+fn lose_power_during_background_checkpoints(chosen: EngineOptions) {
     let background = EngineOptions {
         checkpoint: CheckpointMode::Background,
         memtable_limit: 4_000,
-        ..options()
+        ..chosen
     };
     let commits = u64::from(test_scale::cases(400)).min(4000);
     let fs = SimFs::new();
@@ -705,7 +753,7 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
     let states: Vec<State> = (0..=commits + 1).map(state_after).collect();
     let mut checked = 0;
     for (crashed, before, after, crash) in snapshots {
-        let engine = open(&crashed, options())
+        let engine = open(&crashed, chosen)
             .unwrap_or_else(|error| panic!("{crash:?} after {before}: {error}"));
         engine
             .check()
@@ -729,13 +777,17 @@ fn a_power_loss_at_any_moment_of_background_checkpoints_keeps_each_acknowledged_
     assert!(checked >= 20, "only {checked} power losses were checked");
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
+with_each_cache!(
+    fail_and_lose_power_while_compacting:
+    every_failure_then_power_loss_while_compacting_keeps_the_database_whole,
+    every_failure_then_power_loss_while_compacting_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn fail_and_lose_power_while_compacting(chosen: EngineOptions) {
     let transactions = transactions(13, 30);
     let states = states(&transactions);
     let fs = SimFs::new();
-    let engine = open(&fs, options()).unwrap();
+    let engine = open(&fs, chosen).unwrap();
     for writes in &transactions {
         commit(&engine, writes).unwrap();
     }
@@ -744,7 +796,7 @@ fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
     let base = crashed;
     let total = {
         let copy = base.crash(Crash::DropUnsynced);
-        let engine = open(&copy, options()).unwrap();
+        let engine = open(&copy, chosen).unwrap();
         let before = copy.operations();
         engine.compact().unwrap();
         let used = copy.operations() - before;
@@ -754,12 +806,12 @@ fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
     assert!(total > 20, "compacting ran only {total} operations");
     for fail_at in 0..=total {
         let copy = base.crash(Crash::DropUnsynced);
-        let engine = open(&copy, options()).unwrap();
+        let engine = open(&copy, chosen).unwrap();
         copy.fail_after(fail_at, Failure::FromThenOn);
         let _ = engine.compact();
         drop(engine);
         for crash in crashes(2) {
-            let reopened = open(&copy.crash(crash), options())
+            let reopened = open(&copy.crash(crash), chosen)
                 .unwrap_or_else(|error| panic!("fail at {fail_at}, {crash:?}: {error}"));
             reopened.check().unwrap_or_else(|error| {
                 panic!("check after fail at {fail_at}, {crash:?}: {error}")
@@ -773,12 +825,12 @@ fn every_failure_then_power_loss_while_compacting_keeps_the_database_whole() {
     }
 }
 
-fn by_hand() -> EngineOptions {
+fn by_hand(base: EngineOptions) -> EngineOptions {
     EngineOptions {
         memtable_limit: u64::MAX,
         wal_limit: u64::MAX,
         reclaim_slack: u64::MAX,
-        ..options()
+        ..base
     }
 }
 
@@ -869,13 +921,17 @@ fn commit_then_checkpoint(engine: &Engine<SimFs>, transactions: &[Vec<Write>]) -
     (run.acknowledged, run.in_flight)
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the_database_whole() {
+with_each_cache!(
+    fail_and_lose_power_while_a_checkpoint_fills_freed_blocks:
+    every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the_database_whole,
+    every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn fail_and_lose_power_while_a_checkpoint_fills_freed_blocks(chosen: EngineOptions) {
     let transactions = transactions(17, 40);
     let states = states(&transactions);
     let base = SimFs::new();
-    let engine = open(&base, by_hand()).unwrap();
+    let engine = open(&base, by_hand(chosen)).unwrap();
     for chunk in transactions[..30].chunks(5) {
         for writes in chunk {
             commit(&engine, writes).unwrap();
@@ -898,14 +954,18 @@ fn every_failure_then_power_loss_while_a_checkpoint_fills_freed_blocks_keeps_the
     assert!(filled, "the checkpoint placed nothing in a freed block");
     assert_eq!(dump(&engine), states[40]);
     drop(engine);
-    fail_each_operation_of(&crashed, by_hand(), 2, &states, 30, &|engine| {
+    fail_each_operation_of(&crashed, by_hand(chosen), 2, &states, 30, &|engine| {
         commit_then_checkpoint(engine, rest)
     });
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the_database_whole() {
+with_each_cache!(
+    fail_and_lose_power_while_a_checkpoint_cuts_the_free_tail:
+    every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the_database_whole,
+    every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn fail_and_lose_power_while_a_checkpoint_cuts_the_free_tail(chosen: EngineOptions) {
     let big = |index: usize| {
         (0..2u8)
             .map(|key| {
@@ -927,7 +987,7 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
     let base = SimFs::new();
     let unstaged = EngineOptions {
         stage_floor: u64::MAX,
-        ..by_hand()
+        ..by_hand(chosen)
     };
     let engine = open(&base, unstaged).unwrap();
     for writes in &transactions[..6] {
@@ -955,9 +1015,13 @@ fn every_failure_then_power_loss_while_a_checkpoint_cuts_the_free_tail_keeps_the
     fail_each_operation_of(&crashed, unstaged, 0, &states, 6, &cut);
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_database_whole() {
+with_each_cache!(
+    fail_and_lose_power_between_the_stages_of_a_checkpoint:
+    every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_database_whole,
+    every_failure_then_power_loss_between_the_stages_of_a_checkpoint_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn fail_and_lose_power_between_the_stages_of_a_checkpoint(chosen: EngineOptions) {
     let load: Vec<Write> = (0..60u8)
         .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
         .collect();
@@ -974,7 +1038,7 @@ fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_da
     let transactions = vec![load, rewrite];
     let states = states(&transactions);
     let base = SimFs::new();
-    let engine = open(&base, by_hand()).unwrap();
+    let engine = open(&base, by_hand(chosen)).unwrap();
     commit(&engine, &transactions[0]).unwrap();
     engine.checkpoint().unwrap();
     let crashed = base.crash(Crash::DropUnsynced);
@@ -986,15 +1050,19 @@ fn every_failure_then_power_loss_between_the_stages_of_a_checkpoint_keeps_the_da
     );
     assert_eq!(dump(&engine), states[2]);
     drop(engine);
-    let staged = fail_each_operation_of(&crashed, by_hand(), 2, &states, 1, &|engine| {
+    let staged = fail_each_operation_of(&crashed, by_hand(chosen), 2, &states, 1, &|engine| {
         commit_then_checkpoint(engine, &transactions[1..])
     });
     assert!(staged > 0, "no power loss came back to a staged header");
 }
 
-#[test]
-#[ignore = "left out of mise run check, run by mise run random"]
-fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole() {
+with_each_cache!(
+    fail_and_lose_power_while_a_close_compacts:
+    every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole,
+    every_failure_then_power_loss_while_a_close_compacts_with_values_in_the_cache_keeps_the_database_whole
+);
+
+fn fail_and_lose_power_while_a_close_compacts(chosen: EngineOptions) {
     let load: Vec<Write> = (0..25u8)
         .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 200_000]))
         .collect();
@@ -1004,7 +1072,7 @@ fn every_failure_then_power_loss_while_a_close_compacts_keeps_the_database_whole
     let compacting = EngineOptions {
         reclaim_slack: 0,
         stage_floor: u64::MAX,
-        ..by_hand()
+        ..by_hand(chosen)
     };
     let base = SimFs::new();
     let engine = open(&base, compacting).unwrap();
