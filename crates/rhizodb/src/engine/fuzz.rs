@@ -14,13 +14,9 @@ use super::page::PageHeader;
 use super::store::CheckpointMode;
 use super::store::Engine;
 use super::store::EngineOptions;
-use super::wal_format::Body;
-use super::wal_format::Op;
 use super::wal_format::SegmentHeader;
-use super::wal_format::batch_record;
-use super::wal_format::checkpoint_record;
-use super::wal_format::config_record;
 use super::wal_format::decode_record;
+use super::wal_format::encode_record;
 use super::wal_format::seal_record;
 use crate::storage::Entry;
 use crate::storage::ReadTransaction;
@@ -83,24 +79,7 @@ pub(crate) fn decode_formats(bytes: &[u8]) -> Result<(), String> {
                 seal_record(0, &mut record).map_err(|error| error.to_string())?;
             }
             if let Ok((decoded, length)) = decode_record(0, &record) {
-                let mut again = match &decoded.body {
-                    Body::Batch(ops) => batch_record(
-                        decoded.lsn,
-                        decoded.hlc,
-                        decoded.txn,
-                        ops.iter().map(Op::borrowed),
-                    )
-                    .map_err(|error| error.to_string())?,
-                    Body::Checkpoint { lsn, generation } => {
-                        checkpoint_record(decoded.lsn, decoded.hlc, *lsn, *generation)
-                    }
-                    Body::Config { writer_id } => {
-                        config_record(decoded.lsn, decoded.term, decoded.hlc, writer_id)
-                            .map_err(|error| error.to_string())?
-                    }
-                };
-                again[20..28].copy_from_slice(&decoded.term.to_le_bytes());
-                again[36..52].copy_from_slice(&decoded.txn.to_le_bytes());
+                let mut again = encode_record(&decoded).map_err(|error| error.to_string())?;
                 seal_record(0, &mut again).map_err(|error| error.to_string())?;
                 if again != record[..length] {
                     return Err(format!("record {decoded:?} encodes to other bytes"));

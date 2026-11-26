@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::engine::Role;
 use crate::engine::any_fs;
 use crate::engine::any_fs::AnyFs;
 use crate::engine::store::Engine;
@@ -81,22 +82,28 @@ impl OpenOptions {
 
     /// Whether the database opens as a replica, which it does not unless this is set to
     /// `true`. A replica serves reads as any database does, and refuses every local write for
-    /// the whole file with [`ErrorKind::ReplicaReadOnly`](crate::ErrorKind::ReplicaReadOnly):
-    /// queries that update the graph, write transactions, index changes, and imports. A
-    /// replica opened on a missing or empty file creates it without writing the graph's format
-    /// version, so it holds no change until it applies its writer's first one. A file written in
-    /// an older format fails to open as a replica with `ReplicaReadOnly`, since its upgrade is a
-    /// write. Data that belongs to the node itself goes in a database file of its own.
+    /// the whole file with [`ErrorKind::NotWriter`](crate::ErrorKind::NotWriter): queries that
+    /// update the graph, write transactions, index changes, and imports.
+    ///
+    /// A file remembers its [role](crate::Role), so this setting matters only for a file that
+    /// holds no change yet, which becomes a replica and stays one, without writing the graph's
+    /// format version, until it applies its writer's first change. A file that already holds a
+    /// writer's changes fails to open with [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica)
+    /// unless that writer was demoted, and a file written in an older format fails to open as a
+    /// replica with `NotWriter`, since its upgrade is a write. Data that belongs to the node
+    /// itself goes in a database file of its own.
     ///
     /// ```
     /// use rhizodb::ErrorKind;
     /// use rhizodb::OpenOptions;
     /// use rhizodb::Parameters;
+    /// use rhizodb::Role;
     ///
     /// let replica = OpenOptions::new().replica(true).in_memory()?;
+    /// assert_eq!(replica.role(), Role::Replica);
     /// assert!(replica.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
     /// let error = replica.execute("INSERT ()", &Parameters::new()).unwrap_err();
-    /// assert_eq!(error.kind(), ErrorKind::ReplicaReadOnly);
+    /// assert_eq!(error.kind(), ErrorKind::NotWriter);
     /// # Ok::<(), rhizodb::Error>(())
     /// ```
     pub fn replica(mut self, replica: bool) -> Self {
@@ -143,7 +150,7 @@ impl OpenOptions {
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
         Ok(Database::from_parts(
-            Graph::open_as(in_memory_backend()?, self.replica)?,
+            graph_on(in_memory_backend()?, self.replica)?,
             Statements::new(self.parallelism),
         ))
     }
@@ -162,10 +169,20 @@ impl OpenOptions {
             ));
         }
         Ok(Database::from_parts(
-            Graph::open_as(open_backend(path)?, self.replica)?,
+            graph_on(open_backend(path)?, self.replica)?,
             Statements::new(self.parallelism),
         ))
     }
+}
+
+/// The graph over `backend`, which becomes a replica first when `replica` asks for one. A file
+/// that is not the writer opens without writing.
+pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>, Error> {
+    if replica {
+        backend.declare_replica().map_err(StorageError::from)?;
+    }
+    let follows = backend.role() != Role::Writer;
+    Ok(Graph::open_as(backend, follows)?)
 }
 
 fn exists(path: &Path) -> Result<bool, Error> {

@@ -38,6 +38,7 @@ use super::extent::ExtentTable;
 use super::header;
 use super::header::FORMAT_MINOR;
 use super::header::Header;
+use super::header::Replication;
 use super::header::WalIdentity;
 use super::layout::BLOCK;
 use super::layout::EXTENT_BLOCKS;
@@ -62,6 +63,9 @@ use super::wal::Wal;
 use super::wal::segment_files;
 use super::wal::segment_name;
 use super::wal_format::Body;
+use super::wal_format::Step;
+use super::wal_format::chain_after;
+use super::wal_format::encode_record;
 use super::wal_format::term_batch_record;
 use crate::storage::Entry;
 use crate::storage::Maintenance;
@@ -170,6 +174,7 @@ fn hybrid_clock_after(last: u64) -> u64 {
 #[derive(Debug)]
 struct Published {
     view: View,
+    chain: u64,
     readers: BTreeMap<u64, usize>,
 }
 
@@ -179,6 +184,7 @@ struct Writer<F: FileSystem> {
     last_lsn: u64,
     last_hlc: u64,
     term: u64,
+    chain: u64,
 }
 
 #[derive(Debug)]
@@ -194,6 +200,7 @@ struct Job {
     frozen: Arc<Memtable>,
     lsn: u64,
     hlc: u64,
+    chain: u64,
     first_segment: u64,
 }
 
@@ -209,6 +216,8 @@ struct Shared<F: FileSystem> {
     fs: Arc<F>,
     name: String,
     epochs: Mutex<Vec<Epoch>>,
+    accepting: AtomicBool,
+    role: Mutex<Role>,
     pages: Arc<Pages<F::File>>,
     published: Mutex<Published>,
     writer: Mutex<Writer<F>>,
@@ -257,6 +266,10 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
         generation: 1,
         next_extent: ExtentId(1),
         clean: true,
+        replication: Replication {
+            incarnation: new_incarnation(),
+            ..Replication::default()
+        },
         ..Header::default()
     };
     file.set_block_count(0)?;
@@ -264,6 +277,12 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
     file.write(header.slot(), &header.encode())?;
     file.sync()?;
     Ok(())
+}
+
+/// A random id for a new database file or a newly installed copy, which tells the writer that
+/// began a term from a copy of it.
+pub(crate) fn new_incarnation() -> u128 {
+    (u128::from(random_u64()) << 64) | u128::from(random_u64())
 }
 
 pub(crate) fn staging_name(name: &str) -> String {
@@ -398,19 +417,35 @@ fn find_live_blocks(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Replayed {
+    lsn: u64,
+    hlc: u64,
+    chain: u64,
+}
+
 fn replay_into(
     layers: &Arc<Layers>,
-    last_lsn: &mut u64,
-    last_hlc: &mut u64,
+    replayed: &mut Replayed,
     record: super::wal_format::Record,
 ) -> Result<(), EngineError> {
-    let mut staged = Staged::new(View::new(*last_lsn, Arc::clone(layers)));
+    if record.prev.is_some_and(|prev| prev != replayed.chain) {
+        return Err(EngineError::corrupt(format!(
+            "the log record at LSN {} does not follow the record before it",
+            record.lsn
+        )));
+    }
+    let chain = chain_after(replayed.chain, &encode_record(&record)?);
+    let mut staged = Staged::new(View::new(replayed.lsn, Arc::clone(layers)));
     stage_record(&mut staged, record.lsn, record.term, record.body)?;
     layers
         .active
         .apply(record.lsn, staged.into_changes(), record.lsn);
-    *last_lsn = record.lsn;
-    *last_hlc = (*last_hlc).max(record.hlc);
+    *replayed = Replayed {
+        lsn: record.lsn,
+        hlc: replayed.hlc.max(record.hlc),
+        chain,
+    };
     Ok(())
 }
 
@@ -515,8 +550,11 @@ impl<F: FileSystem + 'static> Engine<F> {
             frozen: None,
             tree: Arc::clone(&tree),
         });
-        let mut last_lsn = header.checkpoint_lsn;
-        let mut last_hlc = header.checkpoint_hlc;
+        let mut replayed = Replayed {
+            lsn: header.checkpoint_lsn,
+            hlc: header.checkpoint_hlc,
+            chain: header.replication.checkpoint_chain,
+        };
         let (wal, header) = if header.clean {
             for sequence in segment_files(&*fs, name)? {
                 fs.remove(&segment_name(name, sequence))?;
@@ -527,14 +565,14 @@ impl<F: FileSystem + 'static> Engine<F> {
                 salt: random_u64(),
             };
             let sequence = header.wal.first_segment + 1;
-            last_hlc = hybrid_clock_after(last_hlc);
+            replayed.hlc = hybrid_clock_after(replayed.hlc);
             let wal = Wal::create(
                 Arc::clone(&fs),
                 name,
                 identity,
                 sequence,
-                last_lsn + 1,
-                last_hlc,
+                replayed.lsn + 1,
+                replayed.hlc,
                 options.segment_target,
             )?;
             let header = Header {
@@ -544,6 +582,13 @@ impl<F: FileSystem + 'static> Engine<F> {
                     salt: identity.salt,
                 },
                 clean: false,
+                replication: Replication {
+                    incarnation: match header.replication.incarnation {
+                        0 => new_incarnation(),
+                        incarnation => incarnation,
+                    },
+                    ..header.replication
+                },
                 ..header
             };
             pages.write_header(&header)?;
@@ -554,20 +599,43 @@ impl<F: FileSystem + 'static> Engine<F> {
                 name,
                 &header,
                 options.segment_target,
-                |record| replay_into(&layers, &mut last_lsn, &mut last_hlc, record),
+                |record| replay_into(&layers, &mut replayed, record),
             )?;
+            let header = if header.replication.incarnation == 0 {
+                let header = Header {
+                    generation: header.generation + 1,
+                    replication: Replication {
+                        incarnation: new_incarnation(),
+                        ..header.replication
+                    },
+                    ..header
+                };
+                pages.write_header(&header)?;
+                header
+            } else {
+                header
+            };
             (wal, header)
         };
+        let Replayed {
+            lsn: last_lsn,
+            hlc: last_hlc,
+            chain,
+        } = replayed;
         let epochs = replica::load_epochs(&layers)?;
         let term = epochs.last().map_or(0, |epoch| epoch.term);
+        let role = replica::role_at_open(&header, &epochs);
         let shared = Arc::new(Shared {
             options,
             fs: Arc::clone(&fs),
             name: name.to_owned(),
             epochs: Mutex::new(epochs),
+            accepting: AtomicBool::new(role == Role::Writer),
+            role: Mutex::new(role),
             pages,
             published: Mutex::new(Published {
                 view: View::new(last_lsn, layers),
+                chain,
                 readers: BTreeMap::new(),
             }),
             wal_bytes: AtomicU64::new(wal.size()),
@@ -576,6 +644,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 last_lsn,
                 last_hlc,
                 term,
+                chain,
             }),
             trees: Mutex::new(vec![Arc::downgrade(&tree)]),
             durable: Mutex::new(Durable {
@@ -634,6 +703,9 @@ impl<F: FileSystem + 'static> Engine<F> {
         if shared.is_poisoned() {
             return Err(shared.refusal());
         }
+        if !shared.accepting.load(Ordering::Acquire) {
+            return Err(replica::not_writer());
+        }
         if staged.ops.is_empty() {
             return Ok(());
         }
@@ -645,6 +717,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             writer.term,
             hlc,
             u128::from(lsn),
+            writer.chain,
             staged.ops.iter().map(StagedOp::borrowed),
         )?;
         self.append(writer, record, lsn, hlc)?;
@@ -659,11 +732,13 @@ impl<F: FileSystem + 'static> Engine<F> {
         lsn: u64,
         hlc: u64,
     ) -> Result<(), EngineError> {
+        let chain = chain_after(writer.chain, &record);
         let wal = writer.wal.as_mut().ok_or(EngineError::Poisoned)?;
         if let Err(error) = wal.append(record, hlc) {
             self.shared.poison_with(&error);
             return Err(error);
         }
+        writer.chain = chain;
         writer.last_lsn = lsn;
         writer.last_hlc = writer.last_hlc.max(hlc);
         Ok(())
@@ -685,7 +760,11 @@ impl<F: FileSystem + 'static> Engine<F> {
             .collect();
         layers.active.apply(lsn, changes, horizon);
         layers.active.bury(lsn, graves);
-        lock(&shared.published).view.snapshot = lsn;
+        {
+            let mut published = lock(&shared.published);
+            published.view.snapshot = lsn;
+            published.chain = writer.chain;
+        }
         let wal_size = writer.wal.as_ref().map_or(0, Wal::size);
         shared.wal_bytes.store(wal_size, Ordering::Relaxed);
         let memtable = layers.active.bytes();
@@ -894,6 +973,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             frozen,
             lsn: writer.last_lsn,
             hlc: writer.last_hlc,
+            chain: writer.chain,
             first_segment: wal.first_needed(writer.last_lsn),
         })
     }
@@ -966,6 +1046,10 @@ impl<F: FileSystem + 'static> Shared<F> {
                 },
                 clean,
                 staged_lsn: 0,
+                replication: Replication {
+                    checkpoint_chain: job.chain,
+                    ..durable.header.replication
+                },
                 ..durable.header
             };
             self.pages.write_header(&header)?;
@@ -1064,6 +1148,10 @@ impl<F: FileSystem + 'static> Shared<F> {
                     },
                     clean,
                     staged_lsn: 0,
+                    replication: Replication {
+                        checkpoint_chain: job.chain,
+                        ..previous.replication
+                    },
                     ..previous
                 },
             }
@@ -1195,6 +1283,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                 frozen: Arc::new(Memtable::default()),
                 lsn,
                 hlc: durable.header.checkpoint_hlc,
+                chain: durable.header.replication.checkpoint_chain,
                 first_segment: durable.header.wal.first_segment,
             };
             let tree = self.install(
@@ -1615,9 +1704,45 @@ fn stage_record(staged: &mut Staged, lsn: u64, term: u64, body: Body) -> Result<
                 staged.replay(op)?;
             }
         }
-        Body::Config { writer_id } => {
-            let (key, value) = replica::history_entry(term, &writer_id, lsn);
-            staged.put(TableId::of(Table::ReplicationHistory), &key, &value);
+        Body::Config {
+            writer_id,
+            incarnation,
+            step,
+        } => {
+            let table = TableId::of(Table::ReplicationHistory);
+            let key = term.to_be_bytes();
+            let epoch = match step {
+                Step::Begin => Epoch {
+                    term,
+                    writer_id,
+                    start_lsn: lsn,
+                    incarnation,
+                    ended_lsn: 0,
+                },
+                Step::StepDown => {
+                    let held = staged
+                        .get_with(table, &key, |value| replica::decode_epoch(&key, value))?
+                        .transpose()?;
+                    match held {
+                        Some(epoch)
+                            if epoch.writer_id == writer_id
+                                && (epoch.ended_lsn == 0 || epoch.ended_lsn == lsn) =>
+                        {
+                            Epoch {
+                                ended_lsn: lsn,
+                                ..epoch
+                            }
+                        }
+                        _ => {
+                            return Err(EngineError::corrupt(
+                                "a writer stepped down from a term it does not hold",
+                            ));
+                        }
+                    }
+                }
+            };
+            let (key, value) = replica::history_entry(&epoch);
+            staged.put(table, &key, &value);
         }
         Body::Checkpoint { .. } => {}
     }
@@ -1628,7 +1753,9 @@ fn stage_record(staged: &mut Staged, lsn: u64, term: u64, body: Body) -> Result<
 mod replica;
 
 pub(crate) use replica::Epoch;
+pub(crate) use replica::Role;
 pub(crate) use replica::epoch_at;
+pub(crate) use replica::fork_lsn;
 
 #[cfg(test)]
 #[path = "store.test.rs"]

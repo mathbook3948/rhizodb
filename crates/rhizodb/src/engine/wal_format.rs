@@ -22,8 +22,11 @@ pub(crate) const RECORD_LIMIT: usize = 1 << 30;
 const SEGMENT_CHECKSUM_AT: usize = WAL_BLOCK - 8;
 
 const BATCH_FORMAT: u8 = 1;
+const CHAINED_BATCH_FORMAT: u8 = 2;
 const CHECKPOINT_FORMAT: u8 = 1;
-const CONFIG_FORMAT: u8 = 1;
+const CONFIG_FORMAT: u8 = 2;
+const BEGIN: u8 = 1;
+const STEP_DOWN: u8 = 2;
 
 /// The first block of every segment, which names the database and log it belongs to, so a segment
 /// can be shipped to another node and replayed there on its own.
@@ -140,8 +143,20 @@ pub(crate) enum Body {
     Batch(Vec<Op>),
     /// A checkpoint at `lsn` reached the database file in header generation `generation`.
     Checkpoint { lsn: u64, generation: u64 },
-    /// A writer of id `writer_id` begins the record's term with this record.
-    Config { writer_id: Vec<u8> },
+    /// The writer `writer_id` of incarnation `incarnation` begins the record's term, or steps
+    /// down from it.
+    Config {
+        writer_id: Vec<u8>,
+        incarnation: u128,
+        step: Step,
+    },
+}
+
+/// What a configuration record does to its term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    Begin,
+    StepDown,
 }
 
 /// The kinds of record. Kinds this build reserves but cannot apply refuse the segment, since
@@ -201,7 +216,16 @@ pub(crate) struct Record {
     pub(crate) term: u64,
     pub(crate) hlc: u64,
     pub(crate) txn: u128,
+    /// The chain hash of the record before, which records of older formats do not carry.
+    pub(crate) prev: Option<u64>,
     pub(crate) body: Body,
+}
+
+/// The chain hash of the record `record` that follows a record of chain hash `prev`, taken over
+/// every byte after the record's length and checksum, so it is the same in every log that holds
+/// the record.
+pub(crate) fn chain_after(prev: u64, record: &[u8]) -> u64 {
+    checksum(prev, &[record.get(12..).unwrap_or_default()])
 }
 
 /// Appends one operation to a batch body under construction.
@@ -248,7 +272,6 @@ pub(crate) enum OpRef<'a> {
 }
 
 impl Op {
-    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn borrowed(&self) -> OpRef<'_> {
         match self {
             Op::Put { table, key, value } => OpRef::Put {
@@ -300,25 +323,36 @@ pub(crate) fn seal_record(seed: u64, record: &mut [u8]) -> Result<(), EngineErro
 }
 
 /// A batch record of `ops`, to be sealed by the segment it lands in.
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(test)]
 pub(crate) fn batch_record<'a>(
     lsn: u64,
     hlc: u64,
     txn: u128,
     ops: impl ExactSizeIterator<Item = OpRef<'a>>,
 ) -> Result<Vec<u8>, EngineError> {
-    term_batch_record(lsn, 0, hlc, txn, ops)
+    let record = record_prefix(lsn, 0, hlc, txn, Kind::Batch, BATCH_FORMAT);
+    batch_body(record, ops)
 }
 
-/// A batch record of `ops` that a writer of `term` committed.
+/// A batch record of `ops` that a writer of `term` committed after the record of chain hash
+/// `prev`.
 pub(crate) fn term_batch_record<'a>(
     lsn: u64,
     term: u64,
     hlc: u64,
     txn: u128,
+    prev: u64,
     ops: impl ExactSizeIterator<Item = OpRef<'a>>,
 ) -> Result<Vec<u8>, EngineError> {
-    let mut record = record_prefix(lsn, term, hlc, txn, Kind::Batch, BATCH_FORMAT);
+    let mut record = record_prefix(lsn, term, hlc, txn, Kind::Batch, CHAINED_BATCH_FORMAT);
+    put_u64(&mut record, prev);
+    batch_body(record, ops)
+}
+
+fn batch_body<'a>(
+    mut record: Vec<u8>,
+    ops: impl ExactSizeIterator<Item = OpRef<'a>>,
+) -> Result<Vec<u8>, EngineError> {
     put_u32(
         &mut record,
         u32::try_from(ops.len()).map_err(|_| EngineError::TooLarge)?,
@@ -332,19 +366,84 @@ pub(crate) fn term_batch_record<'a>(
     Ok(record)
 }
 
-/// A configuration record that begins `term` under the writer `writer_id`.
+/// A configuration record of `term` under the writer `writer_id` of incarnation `incarnation`,
+/// after the record of chain hash `prev`.
 pub(crate) fn config_record(
     lsn: u64,
     term: u64,
     hlc: u64,
-    writer_id: &[u8],
+    prev: u64,
+    config: (&[u8], u128, Step),
 ) -> Result<Vec<u8>, EngineError> {
+    let (writer_id, incarnation, step) = config;
     let mut record = record_prefix(lsn, term, hlc, u128::from(lsn), Kind::Config, CONFIG_FORMAT);
+    put_u64(&mut record, prev);
+    record.push(match step {
+        Step::Begin => BEGIN,
+        Step::StepDown => STEP_DOWN,
+    });
+    put_u128(&mut record, incarnation);
     put_bytes(&mut record, writer_id)?;
     Ok(record)
 }
 
-#[cfg(any(test, feature = "fuzzing"))]
+/// The bytes of `record` before sealing, the same bytes it was decoded from.
+pub(crate) fn encode_record(record: &Record) -> Result<Vec<u8>, EngineError> {
+    match (&record.body, record.prev) {
+        (Body::Batch(ops), Some(prev)) => term_batch_record(
+            record.lsn,
+            record.term,
+            record.hlc,
+            record.txn,
+            prev,
+            ops.iter().map(Op::borrowed),
+        ),
+        (Body::Batch(ops), None) => batch_body(
+            record_prefix(
+                record.lsn,
+                record.term,
+                record.hlc,
+                record.txn,
+                Kind::Batch,
+                BATCH_FORMAT,
+            ),
+            ops.iter().map(Op::borrowed),
+        ),
+        (
+            Body::Config {
+                writer_id,
+                incarnation,
+                step,
+            },
+            prev,
+        ) => {
+            let mut encoded = config_record(
+                record.lsn,
+                record.term,
+                record.hlc,
+                prev.unwrap_or_default(),
+                (writer_id, *incarnation, *step),
+            )?;
+            encoded[36..52].copy_from_slice(&record.txn.to_le_bytes());
+            Ok(encoded)
+        }
+        (Body::Checkpoint { lsn, generation }, _) => {
+            let mut encoded = record_prefix(
+                record.lsn,
+                record.term,
+                record.hlc,
+                record.txn,
+                Kind::Checkpoint,
+                CHECKPOINT_FORMAT,
+            );
+            put_u64(&mut encoded, *lsn);
+            put_u64(&mut encoded, *generation);
+            Ok(encoded)
+        }
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn checkpoint_record(
     lsn: u64,
     hlc: u64,
@@ -422,15 +521,30 @@ fn decode_checked(mut reader: Reader<'_>) -> Result<Record, EngineError> {
     let format = reader.u8()?;
     let kind = Kind::from_code(code)
         .ok_or_else(|| EngineError::Unsupported(format!("log record kind {code}")))?;
+    let mut prev = None;
     let body = match (kind, format) {
         (Kind::Batch, BATCH_FORMAT) => Body::Batch(decode_batch(&mut reader)?),
+        (Kind::Batch, CHAINED_BATCH_FORMAT) => {
+            prev = Some(reader.u64()?);
+            Body::Batch(decode_batch(&mut reader)?)
+        }
         (Kind::Checkpoint, CHECKPOINT_FORMAT) => Body::Checkpoint {
             lsn: reader.u64()?,
             generation: reader.u64()?,
         },
-        (Kind::Config, CONFIG_FORMAT) => Body::Config {
-            writer_id: reader.bytes()?.to_vec(),
-        },
+        (Kind::Config, CONFIG_FORMAT) => {
+            prev = Some(reader.u64()?);
+            let step = match reader.u8()? {
+                BEGIN => Step::Begin,
+                STEP_DOWN => Step::StepDown,
+                _ => return Err(reader.bad("configuration step")),
+            };
+            Body::Config {
+                step,
+                incarnation: reader.u128()?,
+                writer_id: reader.bytes()?.to_vec(),
+            }
+        }
         (kind, format) => {
             return Err(EngineError::Unsupported(format!(
                 "log record kind {kind:?} in body format {format}"
@@ -446,6 +560,7 @@ fn decode_checked(mut reader: Reader<'_>) -> Result<Record, EngineError> {
         term,
         hlc,
         txn,
+        prev,
         body,
     })
 }

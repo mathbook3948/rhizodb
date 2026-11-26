@@ -192,13 +192,12 @@ pub enum ErrorKind {
     /// A dump was imported into a database that holds an index or has ever held a node or a
     /// relationship.
     DatabaseNotEmpty,
-    /// A database opened as a replica, with [`OpenOptions::replica`], was asked to write: a
-    /// query that updates the graph, a write transaction, an index change, an import, or an
-    /// upgrade of a file written in an older format. A replica changes only through the
-    /// changes of its writer.
-    ///
-    /// [`OpenOptions::replica`]: crate::OpenOptions::replica
-    ReplicaReadOnly,
+    /// A database that is not the writer was asked to write: a query that updates the graph, a
+    /// write transaction or its commit, an index change, an import, or an upgrade of a file
+    /// written in an older format. A [replica](crate::Role::Replica) changes only through its
+    /// writer's changes, and a [fenced](crate::Role::Fenced) writer takes writes again only once
+    /// the host promotes it.
+    NotWriter,
     /// A change or a promotion carries a term lower than the highest term this database has
     /// seen, so it comes from a writer that a later one replaced.
     Fenced,
@@ -215,6 +214,9 @@ pub enum ErrorKind {
     /// Changes were given to [`Database::apply`](crate::Database::apply) of a database that is
     /// a writer, which takes no changes of another writer until it is demoted.
     NotReplica,
+    /// [`Database::demote`](crate::Database::demote) waited for an open write transaction longer
+    /// than it was given. The database takes no write meanwhile, and a later demotion finishes.
+    WriterBusy,
 }
 
 impl ErrorKind {
@@ -390,7 +392,7 @@ impl From<GraphError> for Error {
             GraphError::IndexExists(_) => ErrorKind::IndexAlreadyExists,
             GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
             GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
-            GraphError::ReplicaReadOnly(_) => ErrorKind::ReplicaReadOnly,
+            GraphError::NotWriter(_) => ErrorKind::NotWriter,
         };
         Self {
             kind,

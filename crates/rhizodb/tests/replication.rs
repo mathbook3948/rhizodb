@@ -1,9 +1,15 @@
 use rhizodb::Database;
 use rhizodb::ErrorKind;
+use rhizodb::History;
 use rhizodb::IndexTarget;
+use rhizodb::Lineage;
 use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Position;
+use rhizodb::ReplicationFailure;
+use rhizodb::Role;
+
+const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn replica_at(path: &std::path::Path) -> Database {
     OpenOptions::new().replica(true).open(path).unwrap()
@@ -18,7 +24,14 @@ fn a_replica_refuses_every_local_write_and_serves_reads() {
         .execute("INSERT (:A {v: 1})", &Parameters::new())
         .unwrap();
     drop(writer);
-    let replica = replica_at(&path);
+    let error = OpenOptions::new().replica(true).open(&path).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NotReplica);
+    let writer = Database::open(&path).unwrap();
+    assert_eq!(writer.role(), Role::Writer);
+    writer.demote(WAIT).unwrap();
+    drop(writer);
+    let replica = Database::open(&path).unwrap();
+    assert_eq!(replica.role(), Role::Replica);
     let rows = replica
         .execute("MATCH (n:A) RETURN n.v", &Parameters::new())
         .unwrap();
@@ -35,27 +48,48 @@ fn a_replica_refuses_every_local_write_and_serves_reads() {
         replica.import(&b""[..]).unwrap_err(),
     ];
     for error in refusals {
-        assert_eq!(error.kind(), ErrorKind::ReplicaReadOnly, "{error}");
+        assert_eq!(error.kind(), ErrorKind::NotWriter, "{error}");
     }
     replica.begin_read().unwrap();
     replica.check().unwrap();
 }
 
 #[test]
-fn a_replica_creates_a_missing_file_that_a_writer_then_opens() {
+fn a_file_remembers_its_role_across_reopens() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.rhizodb");
     let replica = replica_at(&path);
     replica.check().unwrap();
+    assert_eq!(replica.position(), Position::start());
     drop(replica);
+    let reopened = Database::open(&path).unwrap();
+    assert_eq!(reopened.role(), Role::Replica);
+    assert_eq!(
+        reopened
+            .execute("INSERT (:A)", &Parameters::new())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotWriter
+    );
+    reopened.promote(1, b"me").unwrap();
+    reopened.execute("INSERT (:A)", &Parameters::new()).unwrap();
+    drop(reopened);
     let writer = Database::open(&path).unwrap();
-    writer.execute("INSERT (:A)", &Parameters::new()).unwrap();
-    drop(writer);
-    let replica = replica_at(&path);
-    let rows = replica
-        .execute("MATCH (n:A) RETURN count(n)", &Parameters::new())
+    assert_eq!(writer.role(), Role::Fenced);
+    assert_eq!(
+        writer
+            .execute("INSERT (:B)", &Parameters::new())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotWriter
+    );
+    writer.promote(1, b"me").unwrap();
+    assert_eq!(writer.role(), Role::Writer);
+    writer.execute("INSERT (:B)", &Parameters::new()).unwrap();
+    let rows = writer
+        .execute("MATCH (n) RETURN count(n)", &Parameters::new())
         .unwrap();
-    assert_eq!(rows.rows(), [vec![rhizodb::Value::Integer(1)]]);
+    assert_eq!(rows.rows(), [vec![rhizodb::Value::Integer(2)]]);
 }
 
 fn sync(from: &Database, to: &Database) -> rhizodb::Position {
@@ -123,12 +157,12 @@ fn a_planned_handover_loses_no_write_and_fences_the_old_writer() {
     let b = in_memory_replica();
     sync(&a, &b);
     a.execute("INSERT (:Late)", &Parameters::new()).unwrap();
-    let last = a.demote().unwrap();
+    let last = a.demote(WAIT).unwrap();
     assert_eq!(
         a.execute("INSERT ()", &Parameters::new())
             .unwrap_err()
             .kind(),
-        ErrorKind::ReplicaReadOnly
+        ErrorKind::NotWriter
     );
     assert_eq!(sync(&a, &b), last);
     b.promote(2, b"b").unwrap();
@@ -169,7 +203,7 @@ fn changes_of_a_stale_writer_are_fenced() {
     let b = in_memory_replica();
     sync(&a, &b);
     b.promote(2, b"b").unwrap();
-    b.demote().unwrap();
+    b.demote(WAIT).unwrap();
     a.execute("INSERT (:Stale)", &Parameters::new()).unwrap();
     let stale = a.changes_since(&Position::start(), 1 << 20).unwrap();
     assert_eq!(b.apply(&stale).unwrap_err().kind(), ErrorKind::Fenced);
@@ -265,4 +299,204 @@ fn a_replica_on_disk_keeps_its_position_and_history_across_a_reopen() {
     let reopened = Database::open(&path).unwrap();
     assert_eq!(reopened.position().term(), 4);
     assert_eq!(reopened.position().writer_id(), b"next");
+}
+
+#[test]
+fn refusals_carry_the_positions_and_lsns_behind_them() {
+    let a = Database::in_memory().unwrap();
+    a.promote(1, b"a").unwrap();
+    a.execute("INSERT (:One)", &Parameters::new()).unwrap();
+    let held = a.position();
+    a.execute("INSERT (:Two)", &Parameters::new()).unwrap();
+    let fresh = in_memory_replica();
+    let error = fresh
+        .apply(&a.changes_since(&held, 1 << 20).unwrap())
+        .unwrap_err();
+    assert!(matches!(
+        error.replication_failure(),
+        Some(ReplicationFailure::Gap {
+            expected_lsn: 1,
+            ..
+        })
+    ));
+    let b = in_memory_replica();
+    sync(&a, &b);
+    b.promote(2, b"b").unwrap();
+    let error = b.promote(1, b"x").unwrap_err();
+    assert!(matches!(
+        error.replication_failure(),
+        Some(ReplicationFailure::Fenced { seen_term: 2, .. })
+    ));
+    b.execute("INSERT (:Three)", &Parameters::new()).unwrap();
+    a.execute("INSERT (:Stale)", &Parameters::new()).unwrap();
+    let error = b.changes_since(&a.position(), 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Diverged);
+    let Some(ReplicationFailure::Diverged {
+        local,
+        remote,
+        fork_lsn,
+        ..
+    }) = error.replication_failure()
+    else {
+        panic!("{error}");
+    };
+    assert_eq!((local, remote), (b.position(), a.position()));
+    assert_eq!(fork_lsn, b.history().entries()[1].start_lsn());
+    let _ = a.changes_since(&b.position(), 1 << 20);
+    assert_eq!(
+        a.execute("INSERT ()", &Parameters::new())
+            .unwrap_err()
+            .kind(),
+        ErrorKind::NotWriter
+    );
+    assert_eq!(a.role(), Role::Fenced);
+}
+
+#[test]
+fn lineages_compare_by_history_and_position() {
+    let a = Database::in_memory().unwrap();
+    a.promote(1, b"a").unwrap();
+    a.execute("INSERT (:One)", &Parameters::new()).unwrap();
+    let b = in_memory_replica();
+    sync(&a, &b);
+    let history = |db: &Database| History::from_bytes(&db.history().to_bytes()).unwrap();
+    assert_eq!(
+        b.compare_lineage(&history(&a), &a.position()),
+        Lineage::Same
+    );
+    a.execute("INSERT (:Two)", &Parameters::new()).unwrap();
+    assert_eq!(
+        b.compare_lineage(&history(&a), &a.position()),
+        Lineage::Behind
+    );
+    assert_eq!(
+        a.compare_lineage(&history(&b), &b.position()),
+        Lineage::Ahead
+    );
+    b.promote(2, b"b").unwrap();
+    let fork = b.position().lsn();
+    assert!(matches!(
+        b.compare_lineage(&history(&a), &a.position()),
+        Lineage::Diverged { fork_lsn, .. } if fork_lsn == fork
+    ));
+}
+
+#[test]
+fn a_transaction_larger_than_the_limit_travels_whole() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"w").unwrap();
+    let big = Parameters::from([(
+        "text".to_owned(),
+        rhizodb::Value::String("x".repeat(3 << 20)),
+    )]);
+    writer
+        .execute(
+            "UNWIND range(1, 4) AS i INSERT (:Big {i: i, text: $text})",
+            &big,
+        )
+        .unwrap();
+    let replica = in_memory_replica();
+    let mut calls = 0;
+    loop {
+        let changes = writer.changes_since(&replica.position(), 1024).unwrap();
+        if changes.is_empty() {
+            break;
+        }
+        assert!(changes.len() == 1 || changes.as_bytes().len() < 4096);
+        replica.apply(&changes).unwrap();
+        calls += 1;
+    }
+    assert!(calls >= 3);
+    assert_eq!(dump(&replica), dump(&writer));
+}
+
+#[test]
+fn demotion_refuses_the_open_transaction_and_waits_for_it_to_end() {
+    let writer = std::sync::Arc::new(Database::in_memory().unwrap());
+    writer.promote(1, b"w").unwrap();
+    let (began, wait_for_began) = std::sync::mpsc::channel();
+    let (finish, wait_for_finish) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Arc::clone(&writer);
+    let thread = std::thread::spawn(move || {
+        let mut tx = held.begin_write().unwrap();
+        tx.execute("INSERT (:InFlight)", &Parameters::new())
+            .unwrap();
+        began.send(()).unwrap();
+        wait_for_finish.recv().unwrap();
+        tx.commit().unwrap_err().kind()
+    });
+    wait_for_began.recv().unwrap();
+    let error = writer
+        .demote(std::time::Duration::from_millis(20))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::WriterBusy);
+    assert_eq!(writer.role(), Role::Fenced);
+    finish.send(()).unwrap();
+    assert_eq!(thread.join().unwrap(), ErrorKind::NotWriter);
+    let last = writer.demote(WAIT).unwrap();
+    assert_eq!(writer.role(), Role::Replica);
+    let rows = writer
+        .execute("MATCH (n:InFlight) RETURN count(n)", &Parameters::new())
+        .unwrap();
+    assert_eq!(rows.rows(), [vec![rhizodb::Value::Integer(0)]]);
+    let next = in_memory_replica();
+    assert_eq!(sync(&writer, &next), last);
+    next.promote(2, b"next").unwrap();
+}
+
+#[test]
+fn reads_run_while_a_replica_applies_index_creations_and_drops() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"w").unwrap();
+    writer
+        .execute(
+            "UNWIND range(1, 200) AS i INSERT (:Doc {i: i, text: 'word ' + toString(i)})",
+            &Parameters::new(),
+        )
+        .unwrap();
+    let replica = std::sync::Arc::new(in_memory_replica());
+    sync(&writer, &replica);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let replica = std::sync::Arc::clone(&replica);
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut reads = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for query in [
+                        "CALL db.index.keyword.queryNodes('docs', 'word', 5) YIELD node RETURN count(node)",
+                        "MATCH (d:Doc) WHERE d.i = 7 RETURN d.i",
+                    ] {
+                        match replica.execute(query, &Parameters::new()) {
+                            Ok(_) => reads += 1,
+                            Err(error) => {
+                                assert_eq!(error.kind(), ErrorKind::IndexNotFound, "{error}")
+                            }
+                        }
+                    }
+                }
+                reads
+            })
+        })
+        .collect();
+    for _ in 0..20 {
+        writer
+            .create_keyword_index("docs", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        writer
+            .create_property_index("by_i", IndexTarget::Label("Doc"), "i")
+            .unwrap();
+        sync(&writer, &replica);
+        writer.drop_index("docs").unwrap();
+        writer.drop_index("by_i").unwrap();
+        sync(&writer, &replica);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reads: usize = readers
+        .into_iter()
+        .map(|reader| reader.join().unwrap())
+        .sum();
+    assert!(reads > 0);
+    assert_eq!(dump(&replica), dump(&writer));
 }
