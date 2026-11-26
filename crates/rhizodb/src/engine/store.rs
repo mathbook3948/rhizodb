@@ -130,8 +130,8 @@ pub(crate) struct EngineOptions {
     /// The log size that starts a checkpoint.
     pub(crate) wal_limit: u64,
     pub(crate) checkpoint: CheckpointMode,
-    /// The pages the block cache holds.
-    pub(crate) cache_pages: usize,
+    /// The bytes of pages and values the block cache holds.
+    pub(crate) cache_bytes: usize,
     /// The bytes of free space the file may hold beyond twice its live data and one extent
     /// before a checkpoint compacts it.
     pub(crate) reclaim_slack: u64,
@@ -151,7 +151,7 @@ impl Default for EngineOptions {
             memtable_limit: 64 << 20,
             wal_limit: 256 << 20,
             checkpoint: CheckpointMode::Background,
-            cache_pages: (1 << 30) / BLOCK,
+            cache_bytes: 1 << 30,
             reclaim_slack: 0,
             stage_floor: 256,
             max_retained_bytes: 1 << 30,
@@ -535,7 +535,7 @@ pub(crate) fn load<B: BlockFile + 'static>(
     let pages = Arc::new(Pages::new(
         file,
         page_seed(header.database_id),
-        options.cache_pages,
+        options.cache_bytes,
     ));
     let source: Arc<dyn PageSource> = Arc::clone(&pages) as Arc<dyn PageSource>;
     let (tree, extents, catalog) = if header.catalog.is_null() {
@@ -2000,7 +2000,7 @@ trait Reads {
         visit: Visit<'_, E>,
     ) -> Result<(), E>;
 
-    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError>;
+    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError>;
 }
 
 impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
@@ -2023,7 +2023,7 @@ impl<F: FileSystem + 'static> Reads for EngineRead<'_, F> {
         self.view.scan(table, start, end, visit)
     }
 
-    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
         self.view.load(blob)
     }
 }
@@ -2048,7 +2048,7 @@ impl<F: FileSystem + 'static> Reads for EngineWrite<'_, F> {
         self.staged.scan(table, start, end, visit)
     }
 
-    fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+    fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
         self.staged.view.load(blob)
     }
 }

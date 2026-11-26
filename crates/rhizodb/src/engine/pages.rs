@@ -30,6 +30,9 @@ pub(crate) trait PageSource: Send + Sync + fmt::Debug {
 
     fn run_bytes(&self, run: RunRef) -> Result<Vec<u8>, EngineError>;
 
+    /// The value `blob` points to, read as [`load_blob`] reads it, or from the cache.
+    fn value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError>;
+
     fn seed(&self) -> u64;
 }
 
@@ -81,12 +84,12 @@ pub(crate) struct Pages<B: BlockFile> {
 }
 
 impl<B: BlockFile> Pages<B> {
-    pub(crate) fn new(file: B, seed: u64, cache_pages: usize) -> Self {
+    pub(crate) fn new(file: B, seed: u64, cache_bytes: usize) -> Self {
         Self {
             file,
             seed,
             slots: RwLock::default(),
-            cache: Cache::new(cache_pages),
+            cache: Cache::new(cache_bytes),
         }
     }
 
@@ -120,7 +123,8 @@ impl<B: BlockFile> Pages<B> {
         physical_block(slot, at.block())
     }
 
-    /// Writes the blocks of a page or run that starts at `at`.
+    /// Writes the blocks of a page or run that starts at `at`, and removes what the cache held
+    /// for each of them.
     pub(crate) fn write(&self, at: BlockRef, bytes: &[u8]) -> Result<(), EngineError> {
         let blocks = u32::try_from(bytes.len() / BLOCK).map_err(|_| EngineError::TooLarge)?;
         let first = self.physical(at, blocks)?;
@@ -207,6 +211,15 @@ impl<B: BlockFile> PageSource for Pages<B> {
         let first = self.physical(run.at, run.blocks)?;
         let mut bytes = vec![0; run.blocks as usize * BLOCK];
         self.file.read(first, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn value(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
+        if let Some(bytes) = self.cache.value(blob) {
+            return Ok(bytes);
+        }
+        let bytes: Arc<[u8]> = load_blob(self, blob, Role::Value)?.into();
+        self.cache.insert_value(*blob, Arc::clone(&bytes));
         Ok(bytes)
     }
 

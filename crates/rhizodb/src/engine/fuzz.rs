@@ -102,7 +102,7 @@ fn fuzz_options() -> EngineOptions {
         memtable_limit: u64::MAX,
         wal_limit: u64::MAX,
         checkpoint: CheckpointMode::Inline,
-        cache_pages: 64,
+        cache_bytes: 64 * BLOCK,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
         max_retained_bytes: EngineOptions::default().max_retained_bytes,

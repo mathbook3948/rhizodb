@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::engine::block_file::BlockFile;
 use crate::engine::block_file::FileSystem;
 use crate::engine::extent::Blocks;
+use crate::engine::layout::BLOCK;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
@@ -135,7 +136,7 @@ fn options() -> EngineOptions {
         memtable_limit: 6_000,
         wal_limit: 20_000,
         checkpoint: CheckpointMode::Inline,
-        cache_pages: 64,
+        cache_bytes: 64 * BLOCK,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
         max_retained_bytes: EngineOptions::default().max_retained_bytes,

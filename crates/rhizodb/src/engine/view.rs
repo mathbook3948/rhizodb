@@ -83,7 +83,7 @@ impl View {
     }
 
     /// The value stored in `blob`, a run a scan of the snapshot met.
-    pub(crate) fn load(&self, blob: &BlobRef) -> Result<Vec<u8>, EngineError> {
+    pub(crate) fn load(&self, blob: &BlobRef) -> Result<Arc<[u8]>, EngineError> {
         self.layers.tree.load_value(blob)
     }
 

@@ -49,7 +49,7 @@ fn options() -> EngineOptions {
         memtable_limit: 1 << 30,
         wal_limit: 1 << 40,
         checkpoint: CheckpointMode::Inline,
-        cache_pages: 256,
+        cache_bytes: 256 * crate::engine::layout::BLOCK,
         reclaim_slack: 1 << 20,
         stage_floor: 8,
         ..EngineOptions::default()

@@ -128,7 +128,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The catalog goes only to an open extent, in a free range or at its end, so its first run always lies in an open extent the header names.
 - A checkpoint seals the open extent and opens one in the lowest free slot when that slot lies below it, so the slots above it can empty and be cut off the file.
 - A checkpoint with no commits to write still writes a new catalog when that moves the open extent down, and a clean close runs one more such checkpoint, so a file that has emptied its last extents shrinks before it closes.
-- Writing a block removes the page the block cache held for it, so a reused block never reads back its old page.
+- Writing a block removes the page or value the block cache held for it, so a reused block never reads back its old page or value.
 - A compaction places nothing in free ranges, so its first copy empties every old extent and its second fills the lowest free slots.
 - Opening a file of engine format minor 1, whose catalog counts each extent's live blocks without naming them, finds them by walking every tree, and the first checkpoint stores them.
 - A checkpoint drops every sealed extent left with no live block from the extent table, and its slot becomes free.
@@ -157,6 +157,9 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A failed checkpoint poisons the engine and leaves the frozen memtable serving reads, and later writes fail as corrupt data when the checkpoint failed on damaged data.
 - A commit publishes only its LSN, and only a freeze under the writer lock replaces the memtable that commits go to.
 - The block cache is a sharded CLOCK of checked pages keyed by block reference, and the engine maps no file into memory.
+- The block cache also holds each long value a read loaded from its runs, whole and checked, under its first run's block, and serves it only to a cell whose pointer matches the one it was loaded for, so reading the value again reads no file and checks no checksum.
+- Pages and values share one budget of the block cache in bytes, a value counting its length, and a value longer than a quarter of a shard's budget is not kept, so one large value never empties a shard.
+- `check` and the copies of `compact` read values from the file without the cache, so a check reads what the file holds and a compaction does not push hot pages out.
 - Each tree pins the root page of every table it holds and, once read, each page a root points to, so no read takes the block cache or a reference count for the top two levels.
 - Each memtable keeps a blocked Bloom filter of its keys, so a read of a key the memtable lacks takes neither its lock nor its search.
 - The memtable orders keys by their first 16 bytes held beside the key, so most comparisons read no key bytes.

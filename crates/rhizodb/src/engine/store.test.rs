@@ -18,7 +18,7 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         memtable_limit: 2048,
         wal_limit: 16_384,
         checkpoint,
-        cache_pages: 32,
+        cache_bytes: 32 * BLOCK,
         reclaim_slack: 64 << 10,
         stage_floor: 8,
         max_retained_bytes: EngineOptions::default().max_retained_bytes,
@@ -95,6 +95,14 @@ proptest! {
     #[ignore = "left out of mise run check, run by mise run random"]
     fn the_engine_checkpointing_inline_matches_the_versioned_model(ops in model::ops()) {
         model::check(&mut on_sim_fs(tiny(CheckpointMode::Inline))(), &ops)?;
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn the_engine_checkpointing_inline_with_values_in_its_cache_matches_the_versioned_model(
+        ops in model::ops(),
+    ) {
+        model::check(&mut on_sim_fs(caching_values(CheckpointMode::Inline))(), &ops)?;
     }
 
     #[test]
@@ -1327,5 +1335,101 @@ fn a_checkpoint_does_not_wait_for_a_check_that_is_reading_the_file() {
     assert!(waited.is_ok(), "the checkpoint waited for the check");
     checkpointing.join().unwrap().unwrap();
     assert!(checking.join().unwrap().unwrap() > 0);
+    engine.check().unwrap();
+}
+
+fn caching_values(checkpoint: CheckpointMode) -> EngineOptions {
+    EngineOptions {
+        cache_bytes: 16 << 20,
+        ..tiny(checkpoint)
+    }
+}
+
+#[test]
+fn reading_long_values_again_reads_them_from_the_cache() {
+    let options = EngineOptions {
+        cache_bytes: 16 << 20,
+        ..manual(CheckpointMode::Inline)
+    };
+    let fs = SimFs::new();
+    let engine = Engine::open(Arc::new(fs.clone()), NAME, options).unwrap();
+    let mut write = engine.begin_write().unwrap();
+    for item in 0..50u32 {
+        write
+            .put(Table::Nodes, &item.to_be_bytes(), &vec![item as u8; 3000])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    engine.checkpoint().unwrap();
+    let read_all = || {
+        let read = engine.begin_read().unwrap();
+        for item in 0..50u32 {
+            let value = read.get(Table::Nodes, &item.to_be_bytes()).unwrap();
+            assert_eq!(value, Some(vec![item as u8; 3000]));
+        }
+        let mut seen = 0;
+        read.visit_prefix(Table::Nodes, &[], |_, value| {
+            assert_eq!(value.len(), 3000);
+            seen += 1;
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+        assert_eq!(seen, 50);
+    };
+    read_all();
+    let before = fs.operations();
+    read_all();
+    assert_eq!(
+        fs.operations(),
+        before,
+        "a second read of the same values read the file"
+    );
+}
+
+#[test]
+fn cached_long_values_follow_overwrites_through_block_reuse_compaction_and_a_crash() {
+    let fs = SimFs::new();
+    let engine = Engine::open(
+        Arc::new(fs.clone()),
+        NAME,
+        caching_values(CheckpointMode::Inline),
+    )
+    .unwrap();
+    let mut model = std::collections::BTreeMap::new();
+    for round in 0..60u32 {
+        let mut write = engine.begin_write().unwrap();
+        for item in 0..40u32 {
+            let key = (item * 13 + round * 7) % 120;
+            let length = [1500, 3000, 9000][((item + round) % 3) as usize];
+            let value = vec![(round * 3 + item) as u8; length];
+            write.put(Table::Nodes, &key.to_be_bytes(), &value).unwrap();
+            model.insert(key.to_be_bytes().to_vec(), value);
+        }
+        write.commit().unwrap();
+        if round % 10 == 9 {
+            engine.compact().unwrap();
+        }
+        let read = engine.begin_read().unwrap();
+        for (key, value) in &model {
+            assert_eq!(
+                read.get(Table::Nodes, key).unwrap().as_ref(),
+                Some(value),
+                "round {round}"
+            );
+        }
+    }
+    let expected: Vec<Entry> = model.into_iter().collect();
+    assert_eq!(everything(&engine).unwrap(), expected);
+    engine.check().unwrap();
+    let crashed = fs.crash(Crash::DropUnsynced);
+    drop(engine);
+    let engine = Engine::open(
+        Arc::new(crashed),
+        NAME,
+        caching_values(CheckpointMode::Inline),
+    )
+    .unwrap();
+    assert_eq!(everything(&engine).unwrap(), expected);
+    assert_eq!(everything(&engine).unwrap(), expected);
     engine.check().unwrap();
 }

@@ -74,7 +74,7 @@ mod crash {
             memtable_limit: 4_000,
             wal_limit: 12_000,
             checkpoint: CheckpointMode::Inline,
-            cache_pages: 64,
+            cache_bytes: 64 * crate::engine::layout::BLOCK,
             reclaim_slack: 64 << 10,
             stage_floor: 8,
             ..EngineOptions::default()
