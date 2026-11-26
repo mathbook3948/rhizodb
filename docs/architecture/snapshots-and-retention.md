@@ -13,6 +13,7 @@ A replica starts from a copy of the database file and then follows the log from 
 - A snapshot never forces a checkpoint, so taking one does not stall the writer.
 - A snapshot pins only a whole checkpoint, never a stage of one, since a stage's tree holds part of the commits after the checkpoint's LSN.
 - A snapshot's pin lasts at most `snapshot_time_limit`, one hour by default, after which the engine drops its tree and reading it fails as expired, so a forgotten snapshot cannot stop the file from reusing space forever.
+- A time limit past what the clock can reach never expires the pin.
 - A read of a snapshot holds the pinned tree for as long as it reads, so a pin that expires meanwhile frees no block the read is copying.
 - `DatabaseStats::held_bytes` reports the space that readers and snapshots keep the file from reusing.
 - A snapshot copies only the blocks the checkpoint's extent table marks live, and the receiver's file holds zeros elsewhere.
@@ -24,6 +25,8 @@ A replica starts from a copy of the database file and then follows the log from 
 - The stream is read at any offset and gives the same bytes every time, so a cut transfer resumes from the offset it reached.
 - The manifest records the stream's length, the position, the history the layers above carry, the file's length, the live block ranges, and the header.
 - An unknown snapshot format version refuses the stream.
+- Install grows what it reads from the stream only as the stream delivers it, so a forged length or range count fails as corrupt data without first reserving memory for it.
+- A snapshot carries at most 1 MiB of history, and export and install both refuse more.
 - Installing writes the stream into the file's creation staging name under its lock, syncs it, checks every page with `check`, renames it over the database file, and opens it.
 - Installing locks an existing database file first, so it fails while another open holds that file.
 - Until the rename, the existing database and its log stay as they were, so a crash or a failure leaves the old database or none.

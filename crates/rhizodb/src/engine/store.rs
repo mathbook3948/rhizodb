@@ -267,7 +267,7 @@ struct Retention {
 struct Pin {
     tree: Arc<Tree>,
     lsn: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl Retention {
@@ -281,7 +281,8 @@ impl Retention {
 
     fn expire(&mut self, now: Instant) -> bool {
         let before = self.pins.len();
-        self.pins.retain(|_, pin| pin.deadline > now);
+        self.pins
+            .retain(|_, pin| pin.deadline.is_none_or(|deadline| deadline > now));
         self.pins.len() != before
     }
 }
@@ -1224,7 +1225,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 Pin {
                     tree: Arc::clone(&durable.tree),
                     lsn: header.checkpoint_lsn,
-                    deadline: shared.now() + shared.options.pin_limit,
+                    deadline: shared.now().checked_add(shared.options.pin_limit),
                 },
             );
             id

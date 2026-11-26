@@ -42,6 +42,8 @@ const WRITE_BLOCKS: usize = 256;
 /// The payload bytes of every chunk but the last.
 pub(crate) const CHUNK: usize = 1 << 20;
 
+const HISTORY_LIMIT: usize = 1 << 20;
+
 fn frame_seed(nonce: u64, index: u64) -> u64 {
     nonce ^ FRAME_SEED ^ index.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
@@ -123,7 +125,10 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
         put_u64(&mut manifest, file_blocks);
         put_u32(
             &mut manifest,
-            u32::try_from(history.len()).map_err(|_| EngineError::TooLarge)?,
+            u32::try_from(history.len())
+                .ok()
+                .filter(|length| *length as usize <= HISTORY_LIMIT)
+                .ok_or(EngineError::TooLarge)?,
         );
         manifest.extend_from_slice(history);
         put_u64(&mut manifest, ranges.len() as u64);
@@ -227,6 +232,34 @@ impl<'a, F: FileSystem + 'static> Export<'a, F> {
     }
 }
 
+/// Splits a whole stream into its logical bytes, the payload of every chunk without its
+/// checksum, checking none of the checksums.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn unseal(stream: &[u8]) -> Vec<u8> {
+    stream
+        .chunks(CHUNK + SUM)
+        .flat_map(|frame| &frame[..frame.len().saturating_sub(SUM)])
+        .copied()
+        .collect()
+}
+
+/// Splits `logical` into chunks and seals each with the checksum the nonce in its prefix seeds,
+/// as an export does.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn seal(logical: &[u8]) -> Vec<u8> {
+    let nonce = logical
+        .get(8..16)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map_or(0, u64::from_le_bytes);
+    let mut stream = Vec::with_capacity(logical.len() + logical.len() / CHUNK * SUM + SUM);
+    for (index, payload) in (0u64..).zip(logical.chunks(CHUNK)) {
+        stream.extend_from_slice(payload);
+        let sum = checksum(frame_seed(nonce, index), &[payload]);
+        stream.extend_from_slice(&sum.to_le_bytes());
+    }
+    stream
+}
+
 impl<F: FileSystem + 'static> Engine<F> {
     /// Pins the last durable checkpoint and writes it out as a snapshot that carries `history`.
     pub(crate) fn export(&self, history: &[u8]) -> Result<Export<'_, F>, EngineError> {
@@ -324,8 +357,12 @@ impl<R: Read> Frames<R> {
     }
 
     fn take(&mut self, length: usize) -> Result<Vec<u8>, EngineError> {
-        let mut bytes = vec![0; length];
-        self.read_exact(&mut bytes)?;
+        let mut bytes = Vec::with_capacity(length.min(CHUNK));
+        while bytes.len() < length {
+            let start = bytes.len();
+            bytes.resize(start + (length - start).min(CHUNK), 0);
+            self.read_exact(&mut bytes[start..])?;
+        }
         Ok(bytes)
     }
 
@@ -359,6 +396,11 @@ fn read_manifest<R: Read>(frames: &mut Frames<R>) -> Result<Manifest, EngineErro
             .try_into()
             .map_err(|_| EngineError::corrupt("the snapshot manifest is truncated"))?,
     );
+    if history_length as usize > HISTORY_LIMIT {
+        return Err(EngineError::corrupt(
+            "the snapshot carries a history longer than any export writes",
+        ));
+    }
     let history = frames.take(history_length as usize)?;
     let count = u64::from_le_bytes(
         frames
@@ -366,12 +408,16 @@ fn read_manifest<R: Read>(frames: &mut Frames<R>) -> Result<Manifest, EngineErro
             .try_into()
             .map_err(|_| EngineError::corrupt("the snapshot manifest is truncated"))?,
     );
-    if count > frames.logical / BLOCK as u64 {
+    if count > frames.logical / BLOCK as u64 || count > file_blocks {
         return Err(EngineError::corrupt(
             "the snapshot names more ranges than it holds blocks",
         ));
     }
-    let listed = frames.take(to_usize(count)? * 16)?;
+    let listed = frames.take(
+        to_usize(count)?
+            .checked_mul(16)
+            .ok_or(EngineError::TooLarge)?,
+    )?;
     let mut reader = Reader::new(&listed, "the snapshot ranges");
     let mut ranges = Vec::with_capacity(to_usize(count)?);
     let mut end = 2;

@@ -64,6 +64,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "snapshot_install"
+path = "fuzz_targets/snapshot_install.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dump_import"
 path = "fuzz_targets/dump_import.rs"
 test = false
