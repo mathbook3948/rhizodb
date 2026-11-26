@@ -1617,7 +1617,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                     relationship: id,
                     other,
                 },
-            );
+            )?;
         }
         self.reindex(id.0, None, Some(Element::Relationship(record)))?;
         Ok(id)

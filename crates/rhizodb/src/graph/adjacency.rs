@@ -1,6 +1,3 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-
 use crate::value::DecodeError;
 
 use super::GraphError;
@@ -885,11 +882,31 @@ pub(crate) struct SegmentEdit {
     parts: Vec<Held>,
     part_at: Vec<u8>,
     span: usize,
-    changes: BTreeMap<usize, Change>,
-    stored_deltas: BTreeSet<usize>,
-    touched: BTreeSet<usize>,
-    stored_slots: BTreeMap<usize, Vec<Edge>>,
+    changes: [Option<Change>; SEGMENT_SLOTS],
+    stored_deltas: Positions,
+    touched: Positions,
+    stored_slots: [Option<Vec<Edge>>; SEGMENT_SLOTS],
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Positions(u16);
+
+impl Positions {
+    fn insert(&mut self, position: usize) {
+        self.0 |= 1 << position;
+    }
+
+    fn contains(self, position: usize) -> bool {
+        self.0 >> position & 1 == 1
+    }
+
+    fn iter(self) -> impl Iterator<Item = usize> {
+        (0..SEGMENT_SLOTS).filter(move |position| self.contains(*position))
+    }
+}
+
+const POSITION_OUTSIDE: GraphError =
+    GraphError::Corrupt("an adjacency position lies outside its segment");
 
 /// What commit writes for one edited segment: the entries to store and the keys to delete.
 #[derive(Debug, Default)]
@@ -918,7 +935,7 @@ impl SegmentEdit {
                             "an adjacency delta sorts after its segment",
                         ));
                     }
-                    edit.changes.insert(position, Change::parse(key, value)?);
+                    *edit.change_slot(position)? = Some(Change::parse(key, value)?);
                     edit.stored_deltas.insert(position);
                 }
                 Entry::Part { span, index } => {
@@ -933,13 +950,25 @@ impl SegmentEdit {
                 }
             }
         }
-        if edit.parts.is_empty() && !edit.changes.is_empty() {
+        if edit.parts.is_empty() && edit.changed().next().is_some() {
             return Err(DELTA_WITHOUT_PARTS);
         }
-        for position in edit.changes.keys() {
-            edit.visit(*position, &mut |_| {})?;
+        for position in edit.changed() {
+            edit.visit(position, &mut |_| {})?;
         }
         Ok(edit)
+    }
+
+    fn change_slot(&mut self, position: usize) -> Result<&mut Option<Change>, GraphError> {
+        self.changes.get_mut(position).ok_or(POSITION_OUTSIDE)
+    }
+
+    fn change(&self, position: usize) -> Option<&Change> {
+        self.changes.get(position).and_then(Option::as_ref)
+    }
+
+    fn changed(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..SEGMENT_SLOTS).filter(|position| self.change(*position).is_some())
     }
 
     fn part_of(&self, position: usize) -> Option<&Held> {
@@ -949,14 +978,25 @@ impl SegmentEdit {
     }
 
     fn stored_cached(&mut self, position: usize) -> Result<&[Edge], GraphError> {
-        if !self.stored_slots.contains_key(&position) {
+        if self
+            .stored_slots
+            .get(position)
+            .ok_or(POSITION_OUTSIDE)?
+            .is_none()
+        {
             let edges = match self.part_of(position) {
                 Some((key, bytes)) => PartRef::trusted(key, bytes)?.slot(position)?,
                 None => Vec::new(),
             };
-            self.stored_slots.insert(position, edges);
+            if let Some(slot) = self.stored_slots.get_mut(position) {
+                *slot = Some(edges);
+            }
         }
-        Ok(self.stored_slots.get(&position).map_or(&[], Vec::as_slice))
+        Ok(self
+            .stored_slots
+            .get(position)
+            .and_then(Option::as_deref)
+            .unwrap_or_default())
     }
 
     /// Calls `emit` with each relationship of `position` as the transaction sees it, ascending
@@ -966,8 +1006,8 @@ impl SegmentEdit {
         position: usize,
         emit: &mut impl FnMut(Edge),
     ) -> Result<(), GraphError> {
-        let mut amended = Amended::new(self.changes.get(&position));
-        if let Some(edges) = self.stored_slots.get(&position) {
+        let mut amended = Amended::new(self.change(position));
+        if let Some(edges) = self.stored_slots.get(position).and_then(Option::as_ref) {
             for edge in edges {
                 amended.stored(*edge, emit)?;
             }
@@ -978,11 +1018,12 @@ impl SegmentEdit {
         amended.finish(emit)
     }
 
-    pub(crate) fn add(&mut self, position: usize, edge: Edge) {
-        self.touched.insert(position);
-        let added = &mut self.changes.entry(position).or_default().added;
+    pub(crate) fn add(&mut self, position: usize, edge: Edge) -> Result<(), GraphError> {
+        let added = &mut self.change_slot(position)?.get_or_insert_default().added;
         let at = added.partition_point(|held| held.relationship < edge.relationship);
         added.insert(at, edge);
+        self.touched.insert(position);
+        Ok(())
     }
 
     /// Drops relationship `relationship` from `position`, which must hold it.
@@ -991,8 +1032,9 @@ impl SegmentEdit {
         position: usize,
         relationship: RelationshipId,
     ) -> Result<(), GraphError> {
+        self.change_slot(position)?;
         self.touched.insert(position);
-        if let Some(change) = self.changes.get_mut(&position)
+        if let Some(Some(change)) = self.changes.get_mut(position)
             && let Ok(at) = change
                 .added
                 .binary_search_by_key(&relationship, |edge| edge.relationship)
@@ -1004,7 +1046,7 @@ impl SegmentEdit {
             .stored_cached(position)?
             .binary_search_by_key(&relationship, |edge| edge.relationship)
             .is_ok();
-        let removed = &mut self.changes.entry(position).or_default().removed;
+        let removed = &mut self.change_slot(position)?.get_or_insert_default().removed;
         match removed.binary_search(&relationship) {
             Err(at) if stored => {
                 removed.insert(at, relationship);
@@ -1020,7 +1062,7 @@ impl SegmentEdit {
     /// Every slot of the segment as the transaction sees it, for the positions that have
     /// relationships.
     pub(crate) fn slots(&self) -> Result<Slots, GraphError> {
-        let mut positions: Vec<usize> = self.changes.keys().copied().collect();
+        let mut positions: Vec<usize> = self.changed().collect();
         for (key, bytes) in &self.parts {
             positions.extend(PartRef::trusted(key, bytes)?.held());
         }
@@ -1038,13 +1080,18 @@ impl SegmentEdit {
     }
 
     fn may_be_emptied(&self) -> Result<bool, GraphError> {
-        if self.changes.values().any(|change| !change.added.is_empty()) {
+        if self
+            .changes
+            .iter()
+            .flatten()
+            .any(|change| !change.added.is_empty())
+        {
             return Ok(false);
         }
         for (key, bytes) in &self.parts {
             if PartRef::trusted(key, bytes)?
                 .held()
-                .any(|position| !self.changes.contains_key(&position))
+                .any(|position| self.change(position).is_none())
             {
                 return Ok(false);
             }
@@ -1059,13 +1106,14 @@ impl SegmentEdit {
     pub(crate) fn flush(self, id: &SegmentId) -> Result<Flush, GraphError> {
         let deltas = self
             .changes
-            .values()
+            .iter()
+            .flatten()
             .filter(|change| !change.is_empty())
             .count();
         let oversized = self
             .touched
             .iter()
-            .filter_map(|position| self.changes.get(position))
+            .filter_map(|position| self.change(position))
             .any(|change| change.encoded_len() > DELTA_BYTES);
         let rewrite = self.parts.is_empty() || deltas > MAX_DELTAS || oversized;
         if rewrite || self.may_be_emptied()? {
@@ -1075,9 +1123,9 @@ impl SegmentEdit {
             }
         }
         let mut flush = Flush::default();
-        for position in &self.touched {
-            let key = id.delta_key(*position);
-            match self.changes.get(position) {
+        for position in self.touched.iter() {
+            let key = id.delta_key(position);
+            match self.change(position) {
                 Some(change) if !change.is_empty() => {
                     flush.put.push((key.to_vec(), change.encode(&key)));
                 }
@@ -1089,7 +1137,7 @@ impl SegmentEdit {
     }
 
     fn lay_out_again(&self, id: &SegmentId) -> Result<Vec<Stored>, GraphError> {
-        let mut positions: Vec<usize> = self.changes.keys().copied().collect();
+        let mut positions: Vec<usize> = self.changed().collect();
         for (key, bytes) in &self.parts {
             positions.extend(PartRef::trusted(key, bytes)?.held());
         }
@@ -1098,7 +1146,7 @@ impl SegmentEdit {
         let mut changed = Vec::new();
         for position in positions
             .iter()
-            .filter(|position| self.changes.contains_key(position))
+            .filter(|position| self.change(**position).is_some())
         {
             let mut edges = Vec::new();
             self.visit(*position, &mut |edge| edges.push(edge))?;
@@ -1125,8 +1173,8 @@ impl SegmentEdit {
 
     fn replace(&self, id: &SegmentId, parts: Vec<Stored>) -> Flush {
         let mut flush = Flush::default();
-        for position in &self.stored_deltas {
-            flush.delete.push(id.delta_key(*position).to_vec());
+        for position in self.stored_deltas.iter() {
+            flush.delete.push(id.delta_key(position).to_vec());
         }
         for (key, _) in &self.parts {
             if !parts.iter().any(|(new, _)| new.as_slice() == key.as_ref()) {

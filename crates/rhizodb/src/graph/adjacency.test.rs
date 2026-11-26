@@ -463,7 +463,7 @@ fn seen(edit: &SegmentEdit, position: usize) -> Vec<Edge> {
 fn a_commit_to_a_segment_without_parts_writes_parts() {
     let mut stored = BTreeMap::new();
     let mut edit = load(&stored);
-    edit.add(3, edge(1, 2));
+    edit.add(3, edge(1, 2)).unwrap();
     assert!(apply(&mut stored, edit));
     assert_eq!(read_slot(&stored, 3).unwrap(), vec![edge(1, 2)]);
     assert!(
@@ -478,12 +478,12 @@ fn small_commits_write_deltas_until_the_segment_would_keep_too_many() {
     let mut stored = store(encode(&[(0, vec![edge(0, 0)])]));
     for position in 1..=MAX_DELTAS {
         let mut edit = load(&stored);
-        edit.add(position, edge(position as u64, 1));
+        edit.add(position, edge(position as u64, 1)).unwrap();
         assert!(!apply(&mut stored, edit), "commit {position} rewrote");
     }
     assert_eq!(stored.len(), 1 + MAX_DELTAS);
     let mut edit = load(&stored);
-    edit.add(MAX_DELTAS + 1, edge(100, 1));
+    edit.add(MAX_DELTAS + 1, edge(100, 1)).unwrap();
     assert!(apply(&mut stored, edit));
     assert_eq!(stored.len(), 1);
     for position in 0..=MAX_DELTAS {
@@ -499,7 +499,7 @@ fn a_delta_that_grows_past_its_bound_folds_into_the_parts() {
     for _ in 0..200 {
         let mut edit = load(&stored);
         for _ in 0..5 {
-            edit.add(9, edge(next, next * 1_000_003));
+            edit.add(9, edge(next, next * 1_000_003)).unwrap();
             next += 1;
         }
         if apply(&mut stored, edit) {
@@ -521,7 +521,7 @@ fn undoing_a_change_in_a_later_commit_deletes_its_delta() {
     let mut stored = store(encode(&[(0, vec![edge(0, 0), edge(1, 0)])]));
     let mut edit = load(&stored);
     edit.remove(0, RelationshipId(1)).unwrap();
-    edit.add(0, edge(2, 5));
+    edit.add(0, edge(2, 5)).unwrap();
     assert!(!apply(&mut stored, edit));
     assert_eq!(stored.len(), 2);
     let mut edit = load(&stored);
@@ -601,7 +601,7 @@ fn check_against_model(ops: &[Op], bulk: usize) -> Result<(), TestCaseError> {
             Op::Add(at, other) => {
                 let added = edge(next, *other);
                 next += 1 + next % 3;
-                edit.add(*at, added);
+                edit.add(*at, added).unwrap();
                 model.entry(*at).or_default().push(added);
             }
             Op::Remove(at, pick) => {
@@ -730,7 +730,7 @@ fn a_fold_beside_a_hub_writes_only_the_parts_that_change() {
     let hub_part = stored.get(&hub_key).cloned().unwrap();
     let mut edit = load(&stored);
     for at in 1..=MAX_DELTAS + 1 {
-        edit.add(at, edge(100_000 + at as u64, 2));
+        edit.add(at, edge(100_000 + at as u64, 2)).unwrap();
     }
     let flush = edit.flush(&ID).unwrap();
     assert!(flush.put.iter().all(|(key, _)| *key != hub_key));
