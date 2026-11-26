@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 use std::sync::Arc;
@@ -8,6 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+use super::blob::BlobRef;
+use super::layout::BLOCK;
 use super::layout::BlockRef;
 use super::page::PageHeader;
 
@@ -23,9 +26,26 @@ pub(crate) type CachedPage = Arc<CheckedPage>;
 
 const SHARDS: usize = 64;
 
+const CLOCK_SLACK: usize = 64;
+
+#[derive(Debug)]
+enum Cached {
+    Page(CachedPage),
+    Value(BlobRef, Arc<[u8]>),
+}
+
+impl Cached {
+    fn weight(&self) -> usize {
+        match self {
+            Cached::Page(_) => BLOCK,
+            Cached::Value(_, bytes) => bytes.len(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Entry {
-    page: CachedPage,
+    cached: Cached,
     used: AtomicBool,
 }
 
@@ -57,12 +77,14 @@ struct Shard {
     entries: HashMap<BlockRef, Entry, BuildHasherDefault<BlockHasher>>,
     clock: Vec<BlockRef>,
     hand: usize,
+    bytes: usize,
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
-/// A sharded CLOCK cache of checked pages keyed by block reference. A block takes a new page
-/// only once no tree reaches its old one, and writing it removes the old page.
+/// A sharded CLOCK cache of checked pages and values keyed by block reference, which holds
+/// about its budget in bytes. A block takes a new page only once no tree reaches its old one,
+/// and writing it removes what the cache held for it.
 #[derive(Debug)]
 pub(crate) struct Cache {
     shards: Vec<RwLock<Shard>>,
@@ -70,11 +92,11 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
-    /// A cache holding about `pages` pages.
-    pub(crate) fn new(pages: usize) -> Self {
+    /// A cache holding about `bytes` bytes of pages and values.
+    pub(crate) fn new(bytes: usize) -> Self {
         Self {
             shards: (0..SHARDS).map(|_| RwLock::default()).collect(),
-            per_shard: pages.div_ceil(SHARDS).max(1),
+            per_shard: bytes.div_ceil(SHARDS).max(BLOCK),
         }
     }
 
@@ -83,12 +105,16 @@ impl Cache {
         &self.shards[mixed as usize % SHARDS]
     }
 
-    pub(crate) fn get(&self, at: BlockRef) -> Option<CachedPage> {
+    fn find<T>(&self, at: BlockRef, take: impl FnOnce(&Cached) -> Option<T>) -> Option<T> {
         let shard = self
             .shard(at)
             .read()
             .unwrap_or_else(PoisonError::into_inner);
-        let Some(entry) = shard.entries.get(&at) else {
+        let Some((entry, found)) = shard
+            .entries
+            .get(&at)
+            .and_then(|entry| Some((entry, take(&entry.cached)?)))
+        else {
             shard.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         };
@@ -96,11 +122,38 @@ impl Cache {
         if !entry.used.load(Ordering::Relaxed) {
             entry.used.store(true, Ordering::Relaxed);
         }
-        Some(Arc::clone(&entry.page))
+        Some(found)
+    }
+
+    pub(crate) fn get(&self, at: BlockRef) -> Option<CachedPage> {
+        self.find(at, |cached| match cached {
+            Cached::Page(page) => Some(Arc::clone(page)),
+            Cached::Value(..) => None,
+        })
+    }
+
+    /// The value `blob` points to, when the cache holds it.
+    pub(crate) fn value(&self, blob: &BlobRef) -> Option<Arc<[u8]>> {
+        self.find(blob.first.at, |cached| match cached {
+            Cached::Value(held, bytes) if held == blob => Some(Arc::clone(bytes)),
+            _ => None,
+        })
     }
 
     pub(crate) fn insert(&self, at: BlockRef, page: CachedPage) {
-        let per_shard = self.per_shard;
+        self.hold(at, Cached::Page(page));
+    }
+
+    /// Keeps the value `blob` points to, unless it would take more than a quarter of its
+    /// shard, so one large value never empties a shard.
+    pub(crate) fn insert_value(&self, blob: BlobRef, bytes: Arc<[u8]>) {
+        if bytes.len() <= self.per_shard / 4 {
+            self.hold(blob.first.at, Cached::Value(blob, bytes));
+        }
+    }
+
+    fn hold(&self, at: BlockRef, cached: Cached) {
+        let weight = cached.weight();
         let mut shard = self
             .shard(at)
             .write()
@@ -109,18 +162,17 @@ impl Cache {
         if shard.entries.contains_key(&at) {
             return;
         }
-        let entry = Entry {
-            page,
-            used: AtomicBool::new(false),
-        };
-        if shard.clock.len() < per_shard {
-            shard.clock.push(at);
-            shard.entries.insert(at, entry);
-            return;
+        if shard.clock.len() >= 2 * shard.entries.len() + CLOCK_SLACK {
+            let entries = &shard.entries;
+            let mut seen: HashSet<BlockRef, BuildHasherDefault<BlockHasher>> =
+                HashSet::with_capacity_and_hasher(entries.len(), BuildHasherDefault::default());
+            shard
+                .clock
+                .retain(|held| entries.contains_key(held) && seen.insert(*held));
+            shard.hand = 0;
         }
-        loop {
-            let hand = shard.hand;
-            shard.hand = (hand + 1) % shard.clock.len();
+        while shard.bytes + weight > self.per_shard && !shard.clock.is_empty() {
+            let hand = shard.hand % shard.clock.len();
             let held = shard.clock[hand];
             if let Some(used) = shard
                 .entries
@@ -129,17 +181,29 @@ impl Cache {
                 && *used
             {
                 *used = false;
+                shard.hand = hand + 1;
                 continue;
             }
-            shard.entries.remove(&held);
-            shard.clock[hand] = at;
-            shard.entries.insert(at, entry);
-            return;
+            if let Some(entry) = shard.entries.remove(&held) {
+                shard.bytes -= entry.cached.weight();
+            }
+            shard.clock.swap_remove(hand);
+            shard.hand = hand;
         }
+        shard.bytes += weight;
+        shard.clock.push(at);
+        shard.entries.insert(
+            at,
+            Entry {
+                cached,
+                used: AtomicBool::new(false),
+            },
+        );
     }
 
-    /// Forgets the page held for `at`, whose block is being written again. Its place on the
-    /// clock stays until the hand reaches it.
+    /// Forgets what the cache held for `at`, whose block is being written again. Its place on
+    /// the clock stays until the hand reaches it or the clock is pruned, which happens once
+    /// such places outnumber the entries.
     pub(crate) fn remove(&self, at: BlockRef) {
         let shard = self.shard(at);
         if !shard
@@ -150,14 +214,14 @@ impl Cache {
         {
             return;
         }
-        shard
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entries
-            .remove(&at);
+        let mut shard = shard.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = shard.entries.remove(&at) {
+            shard.bytes -= entry.cached.weight();
+        }
     }
 
-    /// The lookups that found their page and those that did not, since the cache was made.
+    /// The lookups that found their page or value and those that did not, since the cache was
+    /// made.
     pub(crate) fn hits_and_misses(&self) -> (u64, u64) {
         self.shards.iter().fold((0, 0), |(hits, misses), shard| {
             let shard = shard.read().unwrap_or_else(PoisonError::into_inner);
@@ -166,6 +230,30 @@ impl Cache {
                 misses + shard.misses.load(Ordering::Relaxed),
             )
         })
+    }
+
+    /// The bytes of the pages and values the cache holds.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.read().unwrap_or_else(PoisonError::into_inner).bytes)
+            .sum()
+    }
+
+    /// The places on the shards' clocks, those of removed entries included.
+    #[cfg(test)]
+    pub(crate) fn places(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clock
+                    .len()
+            })
+            .sum()
     }
 
     #[cfg(test)]

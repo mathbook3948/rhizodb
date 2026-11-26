@@ -147,7 +147,7 @@ impl Store {
 fn loaded(tree: &Tree, value: CellValue<'_>) -> Vec<u8> {
     match value {
         CellValue::Inline(value) => value.to_vec(),
-        CellValue::External(blob) => tree.load_value(&blob).unwrap(),
+        CellValue::External(blob) => tree.load_value(&blob).unwrap().to_vec(),
     }
 }
 
