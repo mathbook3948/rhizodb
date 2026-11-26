@@ -2,6 +2,7 @@ mod commits;
 mod docs;
 mod forbidden_chars;
 mod hooks;
+mod readme;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,8 +20,11 @@ fn main() -> ExitCode {
         "docs" => docs::check(&workspace_root),
         "docs-write" => docs::write(&workspace_root),
         "hooks" => hooks::check(&workspace_root),
+        "readme" => readme::check(&workspace_root),
         _ => {
-            eprintln!("usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks>");
+            eprintln!(
+                "usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks|readme>"
+            );
             return ExitCode::from(2);
         }
     };
