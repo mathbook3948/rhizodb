@@ -6,6 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Added
 
+- `Error::byte_offset` gives the byte offset in the query text where the parser noticed a syntax error, so a host can underline the bad spot. It is `Some` exactly when `Error::kind` is `ErrorKind::Syntax`.
 - Embedded property graph storage in one database file of RhizoDB's own storage engine, beside a write-ahead log that a clean close empties, with a versioned on-disk format that upgrades older databases on open. Every page carries a checksum, so damage fails as corrupt data where it is read.
 - Node labels kept as interned label sets in one node meta chunk per 4096 node IDs, so label tests read no node record and `MATCH (n:Label) RETURN count(*)` reads one chunk per 4096 nodes.
 - `count(n)` and counts of `MATCH (n)` without a label read the node meta counts as `MATCH (n:Label) RETURN count(*)` does, and a commit that changes a few nodes of a row group writes a small delta per node instead of the group's whole chunk.
