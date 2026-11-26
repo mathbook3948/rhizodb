@@ -144,6 +144,8 @@ GQL is the reference language, but the only public conformance suite is the open
 - An argument of `range()` that is not an integer fails with its own error kind, under the same early type-error rule.
 - Every other function argument of the wrong type, including a non-integer one where only an integer fits, fails as an ordinary argument type error.
 - `sum`, `avg`, `stDev`, `stDevP`, and the percentile aggregates take numbers only.
+- `min` and `max` skip nulls and compare values of every type in the `ORDER BY` order, keeping one value per group as rows arrive.
+- Of equivalent values such as `1` and `1.0`, `min` returns the first, `max` the last, and `max(DISTINCT ...)` the first, since `DISTINCT` drops each value equivalent to an earlier one.
 - An aggregate argument cannot call `rand()`.
 - A percentile aggregate over a group with no rows is null and does not evaluate its percentile.
 - A null percentile makes a percentile aggregate null.

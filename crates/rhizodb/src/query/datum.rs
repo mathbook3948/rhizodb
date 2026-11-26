@@ -261,13 +261,6 @@ impl Limits {
         self.check_bytes(size.bytes)
     }
 
-    /// Adds `item` as one more item to `size`, failing when the sum passes these limits or
-    /// `item` would nest too deeply as an item of a list or a map.
-    pub(crate) fn add_item(self, size: &mut Size, item: &Datum) -> Result<(), Error> {
-        *size = self.joined(*size, item_size(measure(item, MAX_NESTING - 1)?))?;
-        Ok(())
-    }
-
     /// Fails unless `value` fits these limits and nests no deeper than a value may.
     pub(crate) fn check_value(self, value: &Datum) -> Result<(), Error> {
         self.check(measure(value, MAX_NESTING)?.size)
@@ -451,6 +444,24 @@ impl ListBuilder {
         self.measure.add(item_size(added), added.depth);
         self.items.push(item);
         Ok(())
+    }
+
+    /// Appends the items of `other`, failing before it changes this list when the result would
+    /// pass its limits. Both lists are measured already, so this takes no time per item.
+    pub(crate) fn append(&mut self, mut other: ListBuilder) -> Result<(), Error> {
+        self.measure.size = self.limits.joined(self.measure.size, other.measure.size)?;
+        self.measure.depth = self.measure.depth.max(other.measure.depth);
+        if self.items.is_empty() {
+            self.items = other.items;
+        } else {
+            self.items.append(&mut other.items);
+        }
+        Ok(())
+    }
+
+    /// The items so far, in the order they were pushed.
+    pub(crate) fn into_items(self) -> Vec<Datum> {
+        self.items
     }
 
     pub(crate) fn finish(self) -> Datum {
