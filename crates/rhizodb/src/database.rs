@@ -518,10 +518,11 @@ impl Database {
     /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
     /// peer id or one longer than 64 bytes.
     pub fn acknowledge(&self, peer: &[u8], position: &Position) -> Result<(), Error> {
-        self.graph
+        Ok(self
+            .graph
             .storage()
-            .acknowledge(peer_id(peer)?, position.lsn());
-        Ok(())
+            .acknowledge(peer_id(peer)?, position.lsn())
+            .map_err(StorageError::from)?)
     }
 
     /// Stops keeping the write-ahead log for the peer named `peer`, and returns whether it kept

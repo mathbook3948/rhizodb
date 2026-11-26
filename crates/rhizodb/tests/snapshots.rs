@@ -155,4 +155,12 @@ fn a_peer_id_holds_one_to_sixty_four_bytes() {
             ErrorKind::InvalidPeerId
         );
     }
+    for peer in 0..31u8 {
+        db.acknowledge(&[peer], &Position::start()).unwrap();
+    }
+    let error = db.acknowledge(b"one more", &Position::start()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::TooManyPeers);
+    db.acknowledge(&[5], &Position::start()).unwrap();
+    assert!(db.forget_peer(&[5]).unwrap());
+    db.acknowledge(b"one more", &Position::start()).unwrap();
 }

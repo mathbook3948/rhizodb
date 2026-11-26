@@ -307,3 +307,24 @@ proptest! {
         let _ = Header::decode(&block);
     }
 }
+
+#[test]
+fn the_log_kept_for_peers_round_trips_beside_the_header_and_reads_as_none_in_older_slots() {
+    let retained = Retained {
+        from: 42,
+        peers: (0..PEER_LIMIT)
+            .map(|index| (vec![index as u8; 64], index as u64 * 1000))
+            .collect(),
+    };
+    let block = sample().encode_with(&retained);
+    assert_eq!(block.len(), BLOCK);
+    assert_eq!(Header::decode(&block).unwrap(), sample());
+    assert_eq!(decode_retained(&block).unwrap(), retained);
+    assert_eq!(
+        decode_retained(&sample().encode()).unwrap(),
+        Retained::default()
+    );
+    let mut damaged = block.clone();
+    damaged[RETAINED_AT + 9] = 200;
+    assert!(decode_retained(&resealed(damaged)).is_err());
+}

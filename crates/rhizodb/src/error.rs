@@ -220,6 +220,10 @@ pub enum ErrorKind {
     /// [`OpenOptions::snapshot_time_limit`](crate::OpenOptions::snapshot_time_limit), when the
     /// database had already released the pages it held. Take a new snapshot.
     SnapshotExpired,
+    /// [`Database::acknowledge`](crate::Database::acknowledge) named a new peer when the
+    /// database already keeps the log for 32 peers. Forget a peer that is gone with
+    /// [`Database::forget_peer`](crate::Database::forget_peer), or relay through a replica.
+    TooManyPeers,
 }
 
 impl ErrorKind {

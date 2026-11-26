@@ -61,7 +61,7 @@ fn record(lsn: u64) -> Vec<u8> {
 
 fn lsns(fs: &SimFs, header: &Header) -> Result<(Wal<SimFs>, Vec<u64>), EngineError> {
     let mut seen = Vec::new();
-    let wal = Wal::recover(Arc::new(fs.clone()), BASE, header, TARGET, |record| {
+    let wal = Wal::recover(Arc::new(fs.clone()), BASE, header, 0, TARGET, |record| {
         let Body::Batch(ops) = &record.body else {
             panic!("unexpected {record:?}");
         };
@@ -83,7 +83,17 @@ fn lsns(fs: &SimFs, header: &Header) -> Result<(Wal<SimFs>, Vec<u64>), EngineErr
 }
 
 fn fresh(fs: &SimFs) -> Wal<SimFs> {
-    Wal::create(Arc::new(fs.clone()), BASE, identity(), 1, 1, 0, TARGET).unwrap()
+    Wal::create(
+        Arc::new(fs.clone()),
+        BASE,
+        identity(),
+        1,
+        1,
+        0,
+        TARGET,
+        Vec::new(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -167,6 +177,7 @@ fn a_record_larger_than_a_segment_gets_one_of_its_own() {
         Arc::new(fs.crash(Crash::DropUnsynced)),
         BASE,
         &header(0, 1),
+        0,
         TARGET,
         |_| {
             count += 1;
@@ -292,7 +303,17 @@ fn a_log_that_ends_before_the_checkpoint_is_corruption() {
 #[test]
 fn a_first_segment_that_starts_after_the_checkpoint_is_corruption() {
     let fs = SimFs::new();
-    let mut wal = Wal::create(Arc::new(fs.clone()), BASE, identity(), 1, 8, 0, TARGET).unwrap();
+    let mut wal = Wal::create(
+        Arc::new(fs.clone()),
+        BASE,
+        identity(),
+        1,
+        8,
+        0,
+        TARGET,
+        Vec::new(),
+    )
+    .unwrap();
     wal.append(record(8), 0).unwrap();
     assert!(lsns(&fs, &header(3, 1)).err().unwrap().is_corrupt());
     assert_eq!(lsns(&fs, &header(7, 1)).unwrap().1, [8]);
@@ -361,7 +382,7 @@ fn stale_segments_below_the_first_needed_are_removed() {
 fn removing_the_whole_log_leaves_no_segment() {
     let fs = filled(40);
     let (wal, _) = lsns(&fs, &header(0, 1)).unwrap();
-    wal.remove_all().unwrap();
+    wal.close_keeping(u64::MAX).unwrap();
     assert!(segment_files(&fs, BASE).unwrap().is_empty());
     assert!(
         segment_files(&fs.crash(Crash::DropUnsynced), BASE)

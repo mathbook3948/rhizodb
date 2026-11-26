@@ -36,8 +36,15 @@ A replica starts from a copy of the database file and then follows the log from 
 - A snapshot in progress keeps the log after its position regardless of `max_retained_bytes`, and only its time limit bounds it, so a slow transfer does not arrive too far behind.
 - `max_retained_bytes` defaults to 1 GiB.
 - A checkpoint starts on the log written since the last checkpoint, not on the segments kept for pins.
-- Pins live in memory, so a reopened database keeps only the log its recovery needs.
+- Each header records the acknowledged position of every peer and the first log segment kept for them, so a restart or a crash keeps following peers without a new snapshot.
+- Acknowledgements reach the file with the next header a checkpoint or a clean open or close writes, never with a sync of their own.
+- A header records at most 32 peers, and acknowledging another one fails.
+- A clean close keeps the segments peers still need, and a clean open keeps them before the new log it starts.
+- A kept segment keeps the salt of the log that wrote it, and a reader seeds each record with the salt in its own segment's header.
+- Recovery does not replay kept segments before the checkpoint's log, and removes a missing or damaged one with every segment before it, so damage there only shortens what peers can read.
+- A snapshot's header and an installed image record no peers and no kept log, so an install leaves none of the old database's log to serve.
+- Snapshot pins live in memory and end with the database that holds them.
 
 ## Open
 
-- Whether pins and the segments they keep survive a clean close, so a peer behind a restarted writer can follow it without a new snapshot.
+None

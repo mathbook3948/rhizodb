@@ -6,14 +6,21 @@ use std::sync::Arc;
 use super::CHUNK;
 use super::Export;
 use super::install;
+use crate::engine::block_file::BlockFile;
 use crate::engine::block_file::FileSystem;
 use crate::engine::error::EngineError;
+use crate::engine::layout::WAL_BLOCK;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
 use crate::engine::store::CheckpointMode;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
+use crate::engine::wal::segment_files;
+use crate::engine::wal::segment_name;
+use crate::engine::wal_format::SegmentHeader;
+use crate::engine::wal_format::decode_record;
+use crate::engine::wal_format::padded;
 use crate::error::ErrorKind;
 use crate::storage::Maintenance;
 use crate::storage::ReadTransaction;
@@ -438,7 +445,7 @@ fn an_acknowledged_peer_keeps_the_log_after_its_position_and_releases_it_as_it_m
         small_commit(&engine, number);
         small_commit(&unpinned, number);
     }
-    engine.acknowledge(b"peer", 5);
+    engine.acknowledge(b"peer", 5).unwrap();
     for number in 6..=300 {
         small_commit(&engine, number);
         small_commit(&unpinned, number);
@@ -448,7 +455,7 @@ fn an_acknowledged_peer_keeps_the_log_after_its_position_and_releases_it_as_it_m
         );
     }
     assert!(unpinned.log_start() > 200, "the log of no peer was kept");
-    engine.acknowledge(b"peer", 250);
+    engine.acknowledge(b"peer", 250).unwrap();
     small_commit(&engine, 301);
     let start = engine.log_start();
     assert!((200..=251).contains(&start), "the log starts at {start}");
@@ -466,13 +473,13 @@ fn the_cap_releases_a_peer_that_falls_too_far_behind_and_bounds_the_log() {
     let options = retaining(cap);
     let engine = open(&SimFs::new(), SOURCE, options).unwrap();
     small_commit(&engine, 1);
-    engine.acknowledge(b"slow", 1);
-    engine.acknowledge(b"fast", 1);
+    engine.acknowledge(b"slow", 1).unwrap();
+    engine.acknowledge(b"fast", 1).unwrap();
     let bound = cap + options.wal_limit + 4 * options.segment_target + 8192;
     for number in 2..=600 {
         small_commit(&engine, number);
         if number % 10 == 0 {
-            engine.acknowledge(b"fast", number);
+            engine.acknowledge(b"fast", number).unwrap();
         }
         let log = engine.stats().unwrap().wal_bytes;
         assert!(log <= bound, "commit {number} left {log} bytes of log");
@@ -482,7 +489,7 @@ fn the_cap_releases_a_peer_that_falls_too_far_behind_and_bounds_the_log() {
         engine.log_start() <= 591,
         "the cap released the peer within it"
     );
-    engine.acknowledge(b"slow", 600);
+    engine.acknowledge(b"slow", 600).unwrap();
     small_commit(&engine, 601);
     assert!(engine.log_start() <= 601);
 }
@@ -548,7 +555,7 @@ fn a_log_kept_for_a_peer_past_the_checkpoint_limit_starts_no_extra_checkpoints()
     };
     let engine = open(&SimFs::new(), SOURCE, options).unwrap();
     small_commit(&engine, 1);
-    engine.acknowledge(b"lagging", 1);
+    engine.acknowledge(b"lagging", 1).unwrap();
     let before = engine.header().generation;
     for number in 2..=600 {
         small_commit(&engine, number);
@@ -615,4 +622,160 @@ fn a_snapshot_taken_during_staged_checkpoints_and_compaction_holds_the_state_at_
         checked.len() >= 3,
         "only positions {checked:?} were checked"
     );
+}
+
+fn segment_log(fs: &SimFs, name: &str) -> Vec<(u128, u64)> {
+    let block = crate::engine::block_file::BlockSize::new(WAL_BLOCK).unwrap();
+    let mut records = Vec::new();
+    for sequence in segment_files(fs, name).unwrap() {
+        let file = fs.open(&segment_name(name, sequence), block).unwrap();
+        let mut bytes = vec![0; file.block_count().unwrap() as usize * WAL_BLOCK];
+        file.read(0, &mut bytes).unwrap();
+        let Ok(header) = SegmentHeader::decode(&bytes[..WAL_BLOCK]) else {
+            continue;
+        };
+        let mut at = WAL_BLOCK;
+        while let Ok((record, length)) = decode_record(header.record_seed(), &bytes[at..]) {
+            records.push((header.database_id, record.lsn));
+            at += padded(length);
+        }
+    }
+    records
+}
+
+fn readable_from(fs: &SimFs, name: &str) -> u64 {
+    let records = segment_log(fs, name);
+    let lsns: Vec<u64> = records.iter().map(|(_, lsn)| *lsn).collect();
+    for pair in lsns.windows(2) {
+        assert_eq!(
+            pair[0] + 1,
+            pair[1],
+            "the kept log skips from {} to {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    lsns.first().copied().unwrap_or(u64::MAX)
+}
+
+#[test]
+fn a_peer_and_the_log_kept_for_it_survive_a_clean_restart_and_a_crash() {
+    let fs = SimFs::new();
+    let engine = open(&fs, SOURCE, retaining(u64::MAX)).unwrap();
+    for number in 1..=5 {
+        small_commit(&engine, number);
+    }
+    engine.acknowledge(b"peer", 5).unwrap();
+    for number in 6..=300 {
+        small_commit(&engine, number);
+    }
+    drop(engine);
+    assert!(
+        readable_from(&fs, SOURCE) <= 6,
+        "a clean close dropped the peer's log"
+    );
+    let engine = open(&fs, SOURCE, retaining(u64::MAX)).unwrap();
+    assert!(
+        engine.log_start() <= 6,
+        "a clean open dropped the peer's log"
+    );
+    for number in 301..=400 {
+        small_commit(&engine, number);
+    }
+    assert!(readable_from(&fs, SOURCE) <= 6);
+    engine.acknowledge(b"peer", 350).unwrap();
+    for number in 401..=450 {
+        small_commit(&engine, number);
+    }
+    let crashed = fs.crash(Crash::DropUnsynced);
+    drop(engine);
+    let engine = open(&crashed, SOURCE, retaining(u64::MAX)).unwrap();
+    let start = engine.log_start();
+    assert!(
+        start <= 351,
+        "a crash dropped the peer's log, which starts at {start}"
+    );
+    assert!(readable_from(&crashed, SOURCE) <= 351);
+    assert!(
+        engine.forget(b"peer"),
+        "the peer was not kept across the crash"
+    );
+    for number in 451..=600 {
+        small_commit(&engine, number);
+    }
+    assert!(engine.log_start() > 450, "a forgotten peer kept the log");
+    drop(engine);
+    assert!(readable_from(&crashed, SOURCE) > 450);
+}
+
+#[test]
+fn damage_in_the_log_kept_only_for_peers_shortens_it_and_opens() {
+    let fs = SimFs::new();
+    let engine = open(&fs, SOURCE, retaining(u64::MAX)).unwrap();
+    small_commit(&engine, 1);
+    engine.acknowledge(b"peer", 1).unwrap();
+    for number in 2..=300 {
+        small_commit(&engine, number);
+    }
+    drop(engine);
+    let sequences = segment_files(&fs, SOURCE).unwrap();
+    let damaged = sequences[sequences.len() / 3];
+    let block = crate::engine::block_file::BlockSize::new(WAL_BLOCK).unwrap();
+    fs.open(&segment_name(SOURCE, damaged), block)
+        .unwrap()
+        .write(0, &[0x5a; WAL_BLOCK])
+        .unwrap();
+    let engine = open(&fs, SOURCE, retaining(u64::MAX)).unwrap();
+    let start = engine.log_start();
+    assert!(start > 2, "the damaged segment was kept");
+    assert_eq!(readable_from(&fs, SOURCE), start);
+    assert!(
+        segment_files(&fs, SOURCE)
+            .unwrap()
+            .iter()
+            .all(|sequence| *sequence > damaged)
+    );
+    small_commit(&engine, 301);
+    assert_eq!(dump(&engine).len(), 50);
+}
+
+#[test]
+fn an_install_over_a_database_with_a_kept_log_leaves_none_of_it_to_serve() {
+    let (_fs, source, expected) = loaded_source(3, 20);
+    let bytes = read_all(&source.export(&[]).unwrap(), 1 << 16);
+    let base = SimFs::new();
+    let old = open(&base, TARGET, retaining(u64::MAX)).unwrap();
+    small_commit(&old, 1);
+    old.acknowledge(b"peer", 1).unwrap();
+    for number in 2..=200 {
+        small_commit(&old, number);
+    }
+    let old_state = dump(&old);
+    drop(old);
+    assert!(!segment_log(&base, TARGET).is_empty());
+    let total = {
+        let copy = base.crash(Crash::DropUnsynced);
+        let before = copy.operations();
+        drop(install_bytes(&copy, &bytes).unwrap());
+        copy.operations() - before
+    };
+    for fail_at in 0..=total {
+        let copy = base.crash(Crash::DropUnsynced);
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        let _ = install_bytes(&copy, &bytes);
+        let crashed = copy.crash(Crash::DropUnsynced);
+        let reopened = open(&crashed, TARGET, options()).unwrap();
+        let found = dump(&reopened);
+        if found == expected {
+            let id = reopened.header().database_id;
+            assert!(
+                segment_log(&crashed, TARGET)
+                    .iter()
+                    .all(|(owner, _)| *owner == id),
+                "fail at {fail_at}: the old database's log is still there to serve"
+            );
+        } else {
+            assert_eq!(found, old_state, "fail at {fail_at}");
+        }
+    }
 }

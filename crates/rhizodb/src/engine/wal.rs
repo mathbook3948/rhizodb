@@ -52,11 +52,87 @@ pub(crate) fn segment_files<F: FileSystem>(fs: &F, base: &str) -> io::Result<Vec
     Ok(sequences)
 }
 
+/// A segment of the log: its number, the LSN of its first record, and its length.
 #[derive(Debug)]
-struct Segment {
+pub(crate) struct Segment {
     sequence: u64,
     first_lsn: u64,
     blocks: u64,
+}
+
+impl Segment {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+}
+
+/// The segments from `from` up to, but not including, `until` that the log kept for peers
+/// before the segments recovery needs, which start at LSN `next_lsn`, oldest first. Their records
+/// are not replayed, so they are only checked to form a chain of this database's segments, and
+/// a segment that is missing or damaged is removed with every segment before it, which only
+/// shortens the log peers can read. Segments before `from` are removed.
+pub(crate) fn retained_segments<F: FileSystem>(
+    fs: &F,
+    base: &str,
+    identity: LogIdentity,
+    from: u64,
+    until: u64,
+    mut next_lsn: u64,
+) -> Result<Vec<Segment>, EngineError> {
+    let sequences: Vec<u64> = segment_files(fs, base)?
+        .into_iter()
+        .filter(|sequence| *sequence < until)
+        .collect();
+    let mut kept = Vec::new();
+    let mut expected = until;
+    let mut broken = false;
+    for sequence in sequences.iter().rev().copied() {
+        if !broken && sequence >= from && sequence + 1 == expected {
+            match retained_segment(fs, base, identity, sequence, next_lsn) {
+                Some(segment) => {
+                    next_lsn = segment.first_lsn;
+                    expected = sequence;
+                    kept.push(segment);
+                    continue;
+                }
+                None => broken = true,
+            }
+        } else {
+            broken = true;
+        }
+        fs.remove(&segment_name(base, sequence))?;
+    }
+    if sequences.len() != kept.len() {
+        fs.sync_names()?;
+    }
+    kept.reverse();
+    Ok(kept)
+}
+
+fn retained_segment<F: FileSystem>(
+    fs: &F,
+    base: &str,
+    identity: LogIdentity,
+    sequence: u64,
+    next_lsn: u64,
+) -> Option<Segment> {
+    let file = fs
+        .open(&segment_name(base, sequence), wal_block().ok()?)
+        .ok()?;
+    let blocks = file.block_count().ok()?;
+    let mut first = vec![0; WAL_BLOCK];
+    file.read(0, &mut first).ok()?;
+    let header = SegmentHeader::decode(&first).ok()?;
+    let belongs = header.database_id == identity.database_id
+        && header.shard_id == identity.shard_id
+        && header.sequence == sequence
+        && header.first_lsn <= next_lsn
+        && blocks > 0;
+    belongs.then_some(Segment {
+        sequence,
+        first_lsn: header.first_lsn,
+        blocks,
+    })
 }
 
 /// The write-ahead log of one database: segments of whole sector blocks, each record starting a
@@ -97,6 +173,10 @@ pub(crate) struct Wal<F: FileSystem> {
 impl<F: FileSystem> Wal<F> {
     /// Starts a new log whose first segment is `sequence` and whose first record will be
     /// `next_lsn`. The segment is durable, name included, when this returns.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a log's identity, start, and the segments kept before it are all set at once"
+    )]
     pub(crate) fn create(
         fs: Arc<F>,
         base: &str,
@@ -105,18 +185,21 @@ impl<F: FileSystem> Wal<F> {
         next_lsn: u64,
         hlc: u64,
         segment_target: u64,
+        retained: Vec<Segment>,
     ) -> Result<Self, EngineError> {
         let (active, active_header) = new_segment(&*fs, base, identity, sequence, next_lsn, hlc)?;
+        let mut segments = retained;
+        segments.push(Segment {
+            sequence,
+            first_lsn: next_lsn,
+            blocks: 1,
+        });
         Ok(Self {
             fs,
             base: base.to_owned(),
             identity,
             segment_target,
-            segments_oldest_first: vec![Segment {
-                sequence,
-                first_lsn: next_lsn,
-                blocks: 1,
-            }],
+            segments_oldest_first: segments,
             active,
             active_header,
             next_lsn,
@@ -130,6 +213,7 @@ impl<F: FileSystem> Wal<F> {
         fs: Arc<F>,
         base: &str,
         header: &Header,
+        retain_from: u64,
         segment_target: u64,
         mut replay: impl FnMut(Record) -> Result<(), EngineError>,
     ) -> Result<Self, EngineError> {
@@ -139,10 +223,11 @@ impl<F: FileSystem> Wal<F> {
             salt: header.wal.salt,
         };
         let mut sequences = segment_files(&*fs, base)?;
-        for stale in sequences
-            .iter()
-            .filter(|seq| **seq < header.wal.first_segment)
-        {
+        let kept_from = match retain_from {
+            0 => header.wal.first_segment,
+            from => from.min(header.wal.first_segment),
+        };
+        for stale in sequences.iter().filter(|seq| **seq < kept_from) {
             fs.remove(&segment_name(base, *stale))?;
         }
         sequences.retain(|seq| *seq >= header.wal.first_segment);
@@ -273,6 +358,19 @@ impl<F: FileSystem> Wal<F> {
         let Some((active, active_header)) = active else {
             return Err(EngineError::WalMissing);
         };
+        if kept_from < header.wal.first_segment {
+            let start = segments.first().map_or(after, |segment| segment.first_lsn);
+            let mut retained = retained_segments(
+                &*fs,
+                base,
+                identity,
+                kept_from,
+                header.wal.first_segment,
+                start,
+            )?;
+            retained.append(&mut segments);
+            segments = retained;
+        }
         Ok(Self {
             fs,
             base: base.to_owned(),
@@ -416,8 +514,9 @@ impl<F: FileSystem> Wal<F> {
         }
     }
 
-    /// Removes every segment, after a clean close made the log unneeded.
-    pub(crate) fn remove_all(self) -> Result<(), EngineError> {
+    /// Removes every segment before `keep`, after a clean close made them unneeded, and keeps the
+    /// rest for peers.
+    pub(crate) fn close_keeping(self, keep: u64) -> Result<(), EngineError> {
         let Self {
             fs,
             base,
@@ -426,11 +525,25 @@ impl<F: FileSystem> Wal<F> {
             ..
         } = self;
         drop(active);
-        for segment in segments {
+        for segment in segments.iter().filter(|segment| segment.sequence < keep) {
             fs.remove(&segment_name(&base, segment.sequence))?;
         }
         fs.sync_names()?;
         Ok(())
+    }
+
+    /// The number of the oldest segment the log holds.
+    pub(crate) fn first_sequence(&self) -> u64 {
+        self.segments_oldest_first
+            .first()
+            .map_or(0, |segment| segment.sequence)
+    }
+
+    /// The number of the segment records are appended to.
+    pub(crate) fn last_sequence(&self) -> u64 {
+        self.segments_oldest_first
+            .last()
+            .map_or(0, |segment| segment.sequence)
     }
 }
 
