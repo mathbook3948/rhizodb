@@ -5,6 +5,7 @@ use std::time::Duration;
 use rhizodb::Database;
 use rhizodb::ErrorKind;
 use rhizodb::IndexTarget;
+use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Procedure;
 use rhizodb::SyntaxErrorKind;
@@ -719,6 +720,49 @@ fn every_way_a_query_grows_a_value_stops_at_the_configured_limits() {
             ErrorKind::NumberOutOfRange,
             "{query}"
         );
+    }
+}
+
+#[test]
+fn collect_stops_at_the_limits_on_one_thread_and_split_across_four() {
+    let serial = OpenOptions::new().threads(1);
+    let split = OpenOptions::new().threads(4).parallel_threshold(2);
+    for options in [serial, split] {
+        let db = options
+            .max_value_items(50)
+            .max_value_bytes(100)
+            .in_memory()
+            .unwrap();
+        run(
+            &db,
+            "UNWIND range(0, 1) AS j UNWIND range(1, 30) AS k WITH j * 30 + k AS i \
+             INSERT (:N {i: i, s: toString(i % 10)})",
+        );
+        for query in [
+            "MATCH (n:N) RETURN collect(n.i)",
+            "MATCH (n:N) RETURN collect(DISTINCT n.i)",
+            "MATCH (n:N) WHERE n.i <= 30 RETURN collect([n.i])",
+            "MATCH (n:N) RETURN collect(n.s + n.s)",
+            "MATCH (n:N) WHERE n.i <= 25 WITH collect(n.i) AS l RETURN l + l + 1",
+        ] {
+            assert_eq!(
+                error_kind(&db, query),
+                ErrorKind::NumberOutOfRange,
+                "{query}"
+            );
+        }
+        for (query, expected) in [
+            ("MATCH (n:N) RETURN size(collect(DISTINCT n.i % 50))", 50),
+            ("MATCH (n:N) WHERE n.i <= 50 RETURN size(collect(n.i))", 50),
+            ("MATCH (n:N) RETURN size(collect(DISTINCT n.s + n.s))", 10),
+            (
+                "MATCH (n:N) WHERE n.i <= 25 WITH collect(n.i) AS l RETURN size(l + l)",
+                50,
+            ),
+            ("MATCH (n:N) RETURN size(max(n.s + n.s + n.s))", 3),
+        ] {
+            assert_eq!(single(&db, query), int(expected), "{query}");
+        }
     }
 }
 

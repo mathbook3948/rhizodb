@@ -10,7 +10,7 @@ use crate::storage::ReadTransaction;
 use super::compare::order;
 use super::datum::Datum;
 use super::datum::Limits;
-use super::datum::Size;
+use super::datum::ListBuilder;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
@@ -62,12 +62,12 @@ pub(crate) struct Groups<'p> {
     limits: Limits,
 }
 
-#[derive(Default)]
 struct Accumulator {
     rows: usize,
     counted: usize,
     values: Vec<Datum>,
-    collected: Size,
+    best: Option<Datum>,
+    list: ListBuilder,
     total: Total,
     seen: Seen,
     percentile: Option<Datum>,
@@ -152,7 +152,7 @@ impl<'p> Groups<'p> {
                 for ((aggregate, _), (mine, theirs)) in
                     self.aggregates.iter().zip(mine.iter_mut().zip(theirs))
                 {
-                    mine.merge(aggregate, theirs, self.limits)?;
+                    mine.merge(aggregate, theirs)?;
                 }
             }
         }
@@ -193,16 +193,19 @@ impl<'p> Groups<'p> {
             Some(position) => position,
             None => {
                 let position = self.groups.len();
-                let accumulators = self
-                    .aggregates
-                    .iter()
-                    .map(|_| Accumulator::default())
-                    .collect();
+                let accumulators = self.accumulators();
                 self.index.insert(values.clone(), position);
                 self.groups.push((values, accumulators));
                 position
             }
         }
+    }
+
+    fn accumulators(&self) -> Vec<Accumulator> {
+        self.aggregates
+            .iter()
+            .map(|_| Accumulator::new(self.limits))
+            .collect()
     }
 
     /// Adds one row to the group at `position`, which [`Groups::group`] gave, with the argument
@@ -216,7 +219,7 @@ impl<'p> Groups<'p> {
             for (index, ((aggregate, _), accumulator)) in
                 self.aggregates.iter().zip(accumulators).enumerate()
             {
-                accumulator.add(aggregate, index, self.partial, self.limits, &mut eval)?;
+                accumulator.add(aggregate, index, self.partial, &mut eval)?;
             }
         }
         Ok(())
@@ -227,11 +230,7 @@ impl<'p> Groups<'p> {
     /// need not be read.
     pub(crate) fn count_rows(&mut self, rows: usize) {
         if self.groups.is_empty() {
-            let accumulators = self
-                .aggregates
-                .iter()
-                .map(|_| Accumulator::default())
-                .collect();
+            let accumulators = self.accumulators();
             self.groups.push((Vec::new(), accumulators));
         }
         for (_, accumulators) in &mut self.groups {
@@ -250,11 +249,7 @@ impl<'p> Groups<'p> {
         finals: &[(Expr, Slot)],
     ) -> Result<Vec<Row>, Error> {
         if self.keys.is_empty() && self.groups.is_empty() {
-            let accumulators = self
-                .aggregates
-                .iter()
-                .map(|_| Accumulator::default())
-                .collect();
+            let accumulators = self.accumulators();
             self.groups.push((Vec::new(), accumulators));
         }
         let mut out = Vec::with_capacity(self.groups.len());
@@ -308,12 +303,24 @@ impl<T: ReadTransaction> Env<'_, T> {
 }
 
 impl Accumulator {
+    fn new(limits: Limits) -> Self {
+        Self {
+            rows: 0,
+            counted: 0,
+            values: Vec::new(),
+            best: None,
+            list: ListBuilder::new(limits),
+            total: Total::default(),
+            seen: Seen::default(),
+            percentile: None,
+        }
+    }
+
     fn add(
         &mut self,
         aggregate: &Aggregate,
         index: usize,
         partial: bool,
-        limits: Limits,
         eval: &mut impl FnMut(Part, &Expr) -> Result<Datum, Error>,
     ) -> Result<(), Error> {
         self.rows += 1;
@@ -324,18 +331,19 @@ impl Accumulator {
         let value = eval(Part::Argument(index), argument)?;
         if !value.is_null() {
             function.admit(&value)?;
-            if !aggregate.distinct || self.seen.insert(&value) {
-                match function {
-                    AggregateFunction::Count if partial && aggregate.distinct => {
-                        self.values.push(value);
-                    }
-                    AggregateFunction::Count => self.counted += 1,
-                    AggregateFunction::Sum | AggregateFunction::Avg if partial => {
-                        self.values.push(value);
-                    }
-                    AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
-                    _ => self.keep(function, value, limits)?,
+            match function {
+                AggregateFunction::Min | AggregateFunction::Max => self.offer(aggregate, value),
+                _ if aggregate.distinct && !self.seen.insert(&value) => {}
+                AggregateFunction::Count if partial && aggregate.distinct => {
+                    self.values.push(value);
                 }
+                AggregateFunction::Count => self.counted += 1,
+                AggregateFunction::Sum | AggregateFunction::Avg if partial => {
+                    self.values.push(value);
+                }
+                AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
+                AggregateFunction::Collect => self.list.push(value)?,
+                _ => self.values.push(value),
             }
         }
         if let Some(extra) = &aggregate.extra
@@ -365,36 +373,42 @@ impl Accumulator {
         }
     }
 
-    fn keep(
-        &mut self,
-        function: AggregateFunction,
-        value: Datum,
-        limits: Limits,
-    ) -> Result<(), Error> {
-        if function == AggregateFunction::Collect {
-            limits.add_item(&mut self.collected, &value)?;
+    fn offer(&mut self, aggregate: &Aggregate, value: Datum) {
+        let beats = |best: &Datum| match (aggregate.function, order(best, &value)) {
+            (AggregateFunction::Min, Ordering::Greater) => true,
+            (AggregateFunction::Max, Ordering::Less) => true,
+            (AggregateFunction::Max, Ordering::Equal) => !aggregate.distinct,
+            _ => false,
+        };
+        if self.best.as_ref().is_none_or(beats) {
+            self.best = Some(value);
         }
-        self.values.push(value);
-        Ok(())
     }
 
-    fn merge(
-        &mut self,
-        aggregate: &Aggregate,
-        other: Accumulator,
-        limits: Limits,
-    ) -> Result<(), Error> {
+    fn merge(&mut self, aggregate: &Aggregate, other: Accumulator) -> Result<(), Error> {
         self.rows += other.rows;
         self.counted += other.counted;
         if let Some(percentile) = other.percentile {
             self.same_percentile(percentile)?;
+        }
+        if let Some(best) = other.best {
+            self.offer(aggregate, best);
+        }
+        if aggregate.distinct {
+            for value in other.list.into_items() {
+                if self.seen.insert(&value) {
+                    self.list.push(value)?;
+                }
+            }
+        } else {
+            self.list.append(other.list)?;
         }
         for value in other.values {
             if !aggregate.distinct || self.seen.insert(&value) {
                 match aggregate.function {
                     AggregateFunction::Count => self.counted += 1,
                     AggregateFunction::Sum | AggregateFunction::Avg => self.total.add(&value)?,
-                    _ => self.keep(aggregate.function, value, limits)?,
+                    _ => self.values.push(value),
                 }
             }
         }
@@ -411,9 +425,8 @@ impl Accumulator {
                 };
                 Ok(Datum::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
             }
-            AggregateFunction::Collect => Ok(Datum::list(values)),
-            AggregateFunction::Min => Ok(values.into_iter().min_by(order).unwrap_or(Datum::Null)),
-            AggregateFunction::Max => Ok(values.into_iter().max_by(order).unwrap_or(Datum::Null)),
+            AggregateFunction::Collect => Ok(self.list.finish()),
+            AggregateFunction::Min | AggregateFunction::Max => Ok(self.best.unwrap_or(Datum::Null)),
             AggregateFunction::Sum => self.total.sum(),
             AggregateFunction::Avg => Ok(self.total.average()),
             AggregateFunction::StDev | AggregateFunction::StDevP => {
@@ -512,15 +525,15 @@ fn percentile_of(
     if numbers.is_empty() {
         return Ok(Datum::Null);
     }
-    numbers.sort_by(f64::total_cmp);
-    let mut sorted = values;
-    sorted.sort_by(order);
     let last = numbers.len() - 1;
     if function == AggregateFunction::PercentileDisc {
+        let mut sorted = values;
+        sorted.sort_by(order);
         let position = (percentile * numbers.len() as f64).ceil() as usize;
         let index = position.saturating_sub(1).min(last);
         return Ok(sorted.swap_remove(index));
     }
+    numbers.sort_by(f64::total_cmp);
     let exact = percentile * last as f64;
     let lower = exact.floor() as usize;
     let upper = exact.ceil() as usize;
