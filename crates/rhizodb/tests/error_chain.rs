@@ -148,6 +148,9 @@ fn a_backup_into_a_missing_directory_leaves_the_io_error_to_its_source() {
     assert_eq!(io_source(&error).kind(), io::ErrorKind::NotFound);
 }
 
+// Windows resolves `missing\..` lexically to the existing directory, so the
+// path names a directory there, not a path without a file name.
+#[cfg(unix)]
 #[test]
 fn a_backup_path_that_names_no_file_leaves_the_io_error_to_its_source() {
     let directory = tempfile::tempdir().unwrap();
@@ -162,6 +165,9 @@ fn a_backup_path_that_names_no_file_leaves_the_io_error_to_its_source() {
     assert_eq!(io_source(&error).kind(), io::ErrorKind::InvalidInput);
 }
 
+// Windows reports a file used as a directory as a missing path, so the open
+// fails with `DatabaseNotFound` there instead of an I/O error.
+#[cfg(unix)]
 #[test]
 fn a_path_that_cannot_be_checked_states_its_cause_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -175,6 +181,19 @@ fn a_path_that_cannot_be_checked_states_its_cause_once() {
     let messages = chain(&error);
     assert_eq!(messages.len(), 2, "{messages:?}");
     assert_eq!(io_source(&error).kind(), io::ErrorKind::NotADirectory);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_used_as_a_directory_is_a_missing_database_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    let error = rhizodb::OpenOptions::new()
+        .create(false)
+        .open(file.join("graph.rhizodb"))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DatabaseNotFound);
 }
 
 #[test]
