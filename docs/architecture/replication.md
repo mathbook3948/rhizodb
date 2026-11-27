@@ -38,6 +38,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `OpenOptions::replica` makes a file that holds no change a replica and refuses a file that holds a writer's changes with `NotReplica`.
 - Every local write of a database that is not the writer fails with `NotWriter`, checked again inside the commit under the writer lock.
 - A file that needs an upgrade fails to open as anything but a writer, since the upgrade is a write.
+- A writer that opens a file of an older graph format or tokenizer checkpoints once after it commits the upgrade, so a snapshot taken right after holds the format a replica opens, and opening a file of the current format, a new file, or a replica checkpoints nothing.
 - Data that belongs to one node lives in a database file of its own, beside its replica.
 - `changes_since` reads whole records from the log segments on disk after the asker's position, seeding each record with its own segment's salt, and holds no writer lock.
 - `changes_since` stops before a record that would pass its byte limit, except that it always returns one whole record when there is any.
@@ -76,4 +77,3 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 
 - How a replica or a fenced writer of a newer build follows a writer that has not upgraded the graph's format yet, since opening it as anything but a writer refuses the upgrade with `NotWriter`.
 - How a writer fenced by an unplanned failover rejoins without a snapshot when it holds every change the new writer began from, since its step down at the next LSN conflicts with the new writer's first record there.
-- How a snapshot taken between an upgrade and the writer's next checkpoint, which holds the older graph format a replica cannot upgrade, becomes installable without waiting for that checkpoint.
