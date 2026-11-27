@@ -161,7 +161,8 @@ pub enum ErrorKind {
     /// Stored data does not decode, breaks an invariant, or makes the storage engine fail.
     CorruptData,
     /// The database was written in a format version this build cannot read, of the graph layer
-    /// or of the storage engine.
+    /// or of the storage engine, or [`Database::apply`](crate::Database::apply) refused a change
+    /// that records a graph format newer than this build reads.
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
@@ -196,9 +197,11 @@ pub enum ErrorKind {
     /// [fenced](crate::Role::Fenced) writer takes writes again only once the host promotes it.
     NotWriter,
     /// A database that is not the writer holds a graph format or keyword index tokenizer older
-    /// than this build's, which only its writer can upgrade, so it serves no read or write of
-    /// the graph yet. It still applies and serves changes, and it serves reads again once it
-    /// applies its writer's upgrade, or once the host promotes it, which upgrades it.
+    /// than this build's, which only its writer can upgrade, so it serves no read of the graph
+    /// yet, and refuses writes with [`ErrorKind::NotWriter`] as any database that is not the
+    /// writer does. It still applies and serves changes, takes snapshots and backups, and runs
+    /// [`Database::check`](crate::Database::check), and it serves reads again once it applies
+    /// its writer's upgrade, or once the host promotes it, which upgrades it.
     FormatUpgradePending,
     /// A change or a promotion carries a term lower than the highest term this database has
     /// seen, so it comes from a writer that a later one replaced.

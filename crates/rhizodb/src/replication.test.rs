@@ -1052,6 +1052,80 @@ mod crash {
         }
 
         #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn no_read_begins_over_an_older_format_that_an_apply_is_about_to_publish() {
+            let older = OLDER.to_be_bytes().to_vec();
+            let mut hits = 0;
+            for _ in 0..3000 {
+                let writer = open_on(&SimFs::new(), false);
+                writer.promote(1, b"w").unwrap();
+                insert(&writer, 1);
+                store(&writer, b"format_version", &older);
+                insert(&writer, 2);
+                let replica = open_on(&SimFs::new(), true);
+                let done = std::sync::atomic::AtomicBool::new(false);
+                std::thread::scope(|scope| {
+                    let reader = scope.spawn(|| {
+                        let mut seen = 0;
+                        while !done.load(std::sync::atomic::Ordering::Acquire) {
+                            if let Ok(read) = replica.graph.read()
+                                && read.stored_format_version().as_deref() == Some(older.as_slice())
+                            {
+                                seen += 1;
+                            }
+                        }
+                        seen
+                    });
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                    sync(&writer, &replica).unwrap();
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                    hits += reader.join().unwrap();
+                });
+            }
+            assert_eq!(hits, 0, "reads began over the older format");
+        }
+
+        #[test]
+        fn a_promoted_file_that_waited_keeps_its_property_index_whole_for_new_writes() {
+            let writer_fs = SimFs::new();
+            let replica_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_property_index("by_k", IndexTarget::Label("N"), "k")
+                .unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            sync(&writer, &replica).unwrap();
+            drop(writer);
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 2);
+            integrity(&writer);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            insert(&writer, 3);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            assert_eq!(export(&replica), export(&writer));
+        }
+
+        #[test]
+        fn a_new_replica_that_receives_another_tokenizer_waits_without_a_restart() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("tokenizer"), "{error}");
+        }
+
+        #[test]
         fn a_replica_of_an_older_tokenizer_waits_for_the_rebuilt_keyword_indexes() {
             let (writer_fs, replica_fs) = older_pair(true);
             let replica = open_on(&replica_fs, false);
