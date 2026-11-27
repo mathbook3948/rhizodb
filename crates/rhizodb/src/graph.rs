@@ -471,7 +471,15 @@ impl<S: Storage> Graph<S> {
                         .ok_or(GraphError::Corrupt(
                             "an upgrade's progress names no planned step",
                         ))?;
-                    (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec()))
+                    let unknown_to_target = plan.iter().position(|planned| {
+                        UPGRADE_STEPS
+                            .iter()
+                            .any(|(below, step)| step == planned && *below > target)
+                    });
+                    match unknown_to_target {
+                        Some(first) if first < index => (first, None),
+                        _ => (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec())),
+                    }
                 }
                 _ => (0, None),
             };

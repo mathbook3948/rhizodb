@@ -765,32 +765,44 @@ fn a_database_of_format_fourteen_seals_every_relationship_chunk_with_its_checksu
 
 #[test]
 fn an_upgrade_from_format_fourteen_refuses_to_seal_a_damaged_chunk() {
-    let storage = test_engine::in_memory();
-    let graph = Graph::open(storage).unwrap();
-    let mut write = graph.write().unwrap();
-    let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
-    let node = write.create_node(node_with(&[])).unwrap();
-    write
-        .create_relationship(&relationship(knows, node, node))
-        .unwrap();
-    write.commit().unwrap();
-    let mut previous = graph.storage.begin_write().unwrap();
-    store_as_format_fourteen(&mut previous);
-    let (key, mut value) = previous
-        .scan_prefix(Table::RelationshipChunks, &[])
-        .unwrap()
-        .remove(0);
-    value.push(0);
-    previous
-        .put(Table::RelationshipChunks, &key, &value)
-        .unwrap();
-    previous.commit().unwrap();
-    let Graph { storage, .. } = graph;
+    let unframed = |value: &[u8], _: &[u8]| {
+        let mut value = value.to_vec();
+        value.push(0);
+        value
+    };
+    let undecodable = |_: &[u8], key: &[u8]| {
+        let record = [0xff; 3];
+        assert!(RelationshipRecord::decode(&record).is_err());
+        let mut edit = ChunkEdit::default();
+        edit.set(0, Some(&record));
+        relationships::unsealed(&edit.encode(key).unwrap())
+    };
+    for damage in [unframed as fn(&[u8], &[u8]) -> Vec<u8>, undecodable] {
+        let graph = memory_graph();
+        let mut write = graph.write().unwrap();
+        let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
+        let node = write.create_node(node_with(&[])).unwrap();
+        write
+            .create_relationship(&relationship(knows, node, node))
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_fourteen(&mut previous);
+        let (key, value) = previous
+            .scan_prefix(Table::RelationshipChunks, &[])
+            .unwrap()
+            .remove(0);
+        previous
+            .put(Table::RelationshipChunks, &key, &damage(&value, &key))
+            .unwrap();
+        previous.commit().unwrap();
+        let Graph { storage, .. } = graph;
 
-    assert!(matches!(
-        Graph::open(storage),
-        Err(GraphError::Decode(_) | GraphError::Corrupt(_))
-    ));
+        assert!(matches!(
+            Graph::open(storage),
+            Err(GraphError::Decode(_) | GraphError::Corrupt(_))
+        ));
+    }
 }
 
 /// Rewrites a database of the current format in the layout of format 14, whose relationship
@@ -1202,6 +1214,54 @@ fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
     assert!(read_only().is_ok());
     rewrite(keys::TOKENIZER_KEY, b"another tokenizer");
     assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+}
+
+#[test]
+fn an_upgrade_an_older_build_began_runs_the_steps_that_build_lacked_before_resuming() {
+    for (from, step) in [
+        (14, UpgradeStep::Tokenizer),
+        (13, UpgradeStep::Tokenizer),
+        (13, UpgradeStep::PostingBlocks),
+    ] {
+        let graph = memory_graph();
+        let mut write = graph.write().unwrap();
+        let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
+        let node = write.create_node(node_with(&[])).unwrap();
+        let mut record = relationship(knows, node, node);
+        let key: Token<PropertyKey> = write.intern_token("k").unwrap();
+        record.properties.insert(key, PropertyValue::Integer(7));
+        let id = write.create_relationship(&record).unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_fourteen(&mut previous);
+        previous
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &(from | UPGRADING).to_be_bytes(),
+            )
+            .unwrap();
+        let mut progress = 14u32.to_be_bytes().to_vec();
+        progress.push(step.code());
+        previous
+            .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)
+            .unwrap();
+        previous
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+            .unwrap();
+        previous.commit().unwrap();
+        let Graph { storage, .. } = graph;
+
+        let graph = Graph::open(storage).unwrap();
+        let read = graph.read().unwrap();
+        assert_eq!(
+            read.relationship(id).unwrap().as_ref(),
+            Some(&record),
+            "from {from}, resumed at {step:?}"
+        );
+        assert_eq!(read.check_integrity().unwrap(), vec![]);
+        graph.check_relationship_chunks().unwrap();
+    }
 }
 
 #[test]

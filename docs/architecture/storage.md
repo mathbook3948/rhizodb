@@ -19,6 +19,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - Opening a database written in an older format version as its writer upgrades it before anything else reads it, in a sequence of steps that each run in commits of bounded size, so a file of any size upgrades within bounded memory and log records.
 - Each commit of an upgrade records the format version it upgrades to, the step, and the cursor it reached, so an upgrade cut off by a crash resumes there at the next open.
 - A build refuses as a newer format an upgrade that records a newer target than its own, and resumes one of an older target with its own plan, since a step keeps its code and its cursor's meaning in every build.
+- Resuming an upgrade of an older target starts at the first step that target lacked when that step comes before the one recorded, since every step can restart from its beginning.
 - A step charges its budget with the bytes each element stages, its index rows and the growth of the posting blocks it holds, so a commit stays near its budget however many terms a text holds.
 - While an upgrade is under way the format version holds a mark of the version it started from, which no build reads as a graph, so no build ever reads a graph half moved to a newer layout.
 - The last commit of an upgrade removes its progress and records the current format version and tokenizer.
