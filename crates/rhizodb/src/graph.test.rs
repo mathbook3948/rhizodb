@@ -925,6 +925,39 @@ fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
 }
 
 #[test]
+fn labels_that_change_nothing_on_a_committed_node_read_its_node_meta_once() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: test_engine::in_memory(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("A").unwrap();
+    let other = write.intern_token("B").unwrap();
+    let node = write
+        .create_node(NodeRecord {
+            labels: BTreeSet::from([label]),
+            properties: Properties::new(),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    gate.node_chunk_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..100 {
+        write.add_labels(node, &[label]).unwrap();
+        write.remove_labels(node, &[other]).unwrap();
+    }
+    let reads = gate
+        .node_chunk_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads <= 4, "{reads} node meta reads");
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
 fn opening_a_database_of_an_older_format_as_its_writer_checkpoints_the_upgrade() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
@@ -963,4 +996,31 @@ fn opening_a_new_or_current_database_checkpoints_nothing() {
     let before = storage.header();
     let graph = Graph::open(storage).unwrap();
     assert_eq!(graph.storage.header().generation, before.generation);
+}
+
+#[test]
+fn opening_a_database_of_another_tokenizer_as_its_writer_checkpoints_the_rebuilt_indexes() {
+    let storage = test_engine::in_memory();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &FORMAT_VERSION.to_be_bytes(),
+        )
+        .unwrap();
+    write
+        .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+        .unwrap();
+    write.commit().unwrap();
+    let before = storage.header();
+    let graph = Graph::open(storage).unwrap();
+    let after = graph.storage.header();
+    assert!(after.generation > before.generation);
+    assert!(after.checkpoint_lsn > before.checkpoint_lsn);
+    let stored = GraphTx::bare(graph.storage.begin_read().unwrap())
+        .transaction
+        .get(Table::Metadata, keys::TOKENIZER_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(tokenize::fingerprint()));
 }
