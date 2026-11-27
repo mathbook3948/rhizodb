@@ -4,6 +4,12 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Breaking changes
+
+- Files move to engine format 1.4, which adds the replication history, the role, and the log kept for peers. The first open by this release records minor 4, even an open that only reads, and 0.1.x then refuses the file with `UnsupportedFormatVersion`. Back up the file with 0.1.x before upgrading. The dump format stays at version 1, so `Database::import` of 0.1.x reads a dump that this release exports.
+- A query that builds a value of more than 10,000,000 list items and map entries or 256 MiB of strings now fails with `ErrorKind::NumberOutOfRange`, as the entry under Fixed describes. `OpenOptions::max_value_items` and `OpenOptions::max_value_bytes` raise the limits.
+- No public item is removed or changed. The new `ErrorKind` variants need no change to a host's `match`, since `ErrorKind` is `#[non_exhaustive]`.
+
 ### Added
 
 - Embedded replication. `Database::changes_since` returns the whole transactions after another database's `Database::position` as `Changes`, which travel as checksummed bytes and `Database::apply` logs on a replica, and replicas relay changes to further replicas. A `Position` holds a term, a writer id, an LSN, a chain hash over the history, and the id of the database the history belongs to, so two histories that reuse a term are told apart and a replica never follows an unrelated database.
@@ -21,7 +27,9 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
-- A file records engine format minor 4, which adds the replication history, the role, and the log kept for peers, once this build opens it, so builds before it refuse it with `UnsupportedFormatVersion`.
+- An `Error` no longer repeats a cause in both its message and its `source`, so reporters that walk the chain print each cause once. A storage or graph failure has no `source` and its message holds the whole account, and a failed procedure body, a failed dump read or write, or an unreadable path keeps its error as the `source`, with a message that names only this failure, such as "procedure `x` failed".
+- A writer that lost its lease to a failover rejoins as a replica without a snapshot when it holds no change the new writer lacks: once it has heard of the new term, from `Database::changes_since` or `Database::acknowledge` with the new writer's position, `Database::demote` records no step down and the file opens as a replica, and one that holds changes the new writer lacks still fails with `ErrorKind::Diverged`. A replica that heard of a term before receiving its first change applies that change.
+- Opening a database of an older graph format or tokenizer as its writer checkpoints the upgrade once, so a snapshot taken right after it installs on a replica instead of failing with `NotWriter`. Opening a database of the current format checkpoints nothing.
 - A `MATCH` pattern starts at a later node that an earlier clause binds, or that an ID lookup or a property index serves, instead of reading every node at its left end and checking the far end of each walk, so `MATCH (x:Person {id: $id}) MATCH (a)-[:FOLLOWS]->(x)` and `MATCH (a)-[:KNOWS]->(b:Person {id: $x})` with an index on `Person.id` read only the relationships of the found node. A later lookup is used only when it finds fewer nodes than the leftmost start. The rows are the same, though rows without `ORDER BY` may come in another order, and since a property map is evaluated only for the elements the walk reaches, a moved start can change whether a query raises a value error such as division by zero.
 - Returning a node or a relationship reads each label, relationship type, and property key name from storage once per database (once per transaction inside a write transaction) instead of once per element, so returning many elements no longer reads storage once per label and property.
 - `labels(n)`, `keys(n)`, `keys(r)`, and `type(r)` no longer decode the element's property values, so they cost the same on elements with large text or vector properties as on small ones.
@@ -34,12 +42,19 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - A streamed query no longer sets up its plan of clauses from scratch on every run and on every outer row of an `EXISTS` or `COUNT` subquery: what each variable holds is decided once per query plan, so point queries such as `MATCH (n) WHERE id(n) = 5 RETURN n.id LIMIT 1` and correlated subqueries cost less.
 - `ORDER BY ... LIMIT k`, with or without `SKIP`, keeps only the `SKIP` plus `LIMIT` rows that rank first as rows arrive instead of holding and sorting every row, so `UNWIND range(1, 1000000) AS i RETURN i ORDER BY -i LIMIT 10` uses memory for 10 rows. The rows, their order among ties, and the errors are unchanged.
 - A `LIMIT` also stops early past arithmetic that cannot fail, such as `i % 2` where `UNWIND range(...)` or `count()` gives `i`, or arithmetic on floats. Integer `+`, `-`, `*`, and negation of a variable, and division by anything but a literal or parameter other than zero, still keep it reading, since they can fail on a later row.
+- A commit that range-deletes keys already in the database file no longer looks each of them up in the file again before it becomes visible, while it holds the writer lock.
+- A quoted phrase in a keyword search decodes the postings of only its rarest word in full, and of its other words only in the blocks of 128 element IDs where the rarest word occurs, so `"zebra the"` no longer reads every posting of `the`. Adding a label a node already has, or removing one it lacks, no longer checks the node's stored labels again at every call in a write transaction.
 
 ### Fixed
 
+- `Database::backup_to` on a file system that cannot hard-link now fails with `ErrorKind::Storage` instead of renaming the copy into place, since that rename replaced a file another process created at the target after the existence check.
 - An aggregate after `UNWIND`, `CALL`, or `WITH`, as in `UNWIND range(1, 10000000) AS i RETURN count(*)`, held every input row before it grouped them and could use gigabytes of memory. It now keeps one state per group as rows arrive, and `UNWIND range(...)` gives its integers one at a time instead of building the list.
 - A short query could still abort the host process by multiplying values that each stayed under the length caps, as in `[x IN range(1, 10000000) | range(1, 10000000)]`, `collect(range(1, 1000))` over many rows, or a `reduce` that appends a new list at every step. List comprehensions, pattern comprehensions, `COLLECT` subqueries, `collect()`, list and map literals, `CAST`, `split()`, `toUpper()`, `toLower()`, and `normalize()` now fail with `ErrorKind::NumberOutOfRange` once their value passes the limits, and the limits count the items and strings of nested lists and maps too.
 - A `reduce` that appends to its accumulator, as in `reduce(l = [], i IN range(1, 1000000) | l + i)` or the same with strings, copied the accumulator at every step and took time quadratic in its length. It now grows the accumulator in place.
+
+### Known limitations
+
+- The limitation of 0.1.0 still holds: an open that reads a header only the operating system's page cache held writes its clean header into the slot of the one durable header, and a power loss that tears that write loses acknowledged commits without an error.
 
 ## 0.1.0
 

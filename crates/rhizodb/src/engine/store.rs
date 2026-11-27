@@ -750,7 +750,7 @@ fn make_recovery_durable<F: FileSystem + 'static>(
         &durable.header,
         &Retained {
             from: recovered_from,
-            peers: shared.retained_area().peers,
+            peers: shared.retained_area(&durable.header).peers,
         },
         writer.last_lsn,
         hlc,
@@ -975,6 +975,13 @@ impl<F: FileSystem + 'static> Engine<F> {
             .sum()
     }
 
+    /// How many point lookups have read the tree the published view reads.
+    #[cfg(test)]
+    pub(crate) fn tree_lookups(&self) -> u64 {
+        let layers = Arc::clone(&lock(&self.shared.published).view.layers);
+        layers.tree.lookups.load(Ordering::Relaxed)
+    }
+
     fn deregister(&self, snapshot: u64) {
         let mut published = lock(&self.shared.published);
         if let Some(count) = published.readers.get_mut(&snapshot) {
@@ -1039,12 +1046,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
+        let graves = staged.graves(&layers);
         let changes: Vec<(TableId, Bytes, Slot)> = staged.into_changes().collect();
-        let graves: Vec<(TableId, Bytes)> = changes
-            .iter()
-            .filter(|(table, key, slot)| slot.is_none() && !layers.below_may_hold(*table, key))
-            .map(|(table, key, _)| (*table, Arc::clone(key)))
-            .collect();
         layers.active.apply(lsn, changes, horizon);
         layers.active.bury(lsn, graves);
         {
@@ -1114,6 +1117,24 @@ impl<F: FileSystem + 'static> Engine<F> {
                 self.shared.drop_segments(writer);
             }
         }
+    }
+
+    /// Writes every commit so far into the database file and keeps the log, which the next
+    /// checkpoint releases as any checkpoint does.
+    pub(crate) fn checkpoint_keeping_log(&self) -> Result<(), EngineError> {
+        let mut writer = lock(&self.shared.writer);
+        self.shared.wait_for_checkpoint();
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        if let Some(job) = self.shared.freeze(&mut writer) {
+            self.shared.run_checkpoint(job, false);
+        }
+        lock(&self.shared.droppable).take();
+        if self.shared.is_poisoned() {
+            return Err(self.shared.refusal());
+        }
+        Ok(())
     }
 
     #[cfg(any(test, fuzzing))]
@@ -1391,7 +1412,7 @@ impl<F: FileSystem + 'static> Shared<F> {
         Instant::now() + *lock(&self.clock_ahead)
     }
 
-    fn retained_area(&self) -> Retained {
+    fn retained_area(&self, header: &Header) -> Retained {
         let peers: Vec<(Vec<u8>, u64)> = lock(&self.retention)
             .peers
             .iter()
@@ -1399,7 +1420,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             .collect();
         let first = self.log_first.load(Ordering::Relaxed);
         Retained {
-            from: if peers.is_empty() && first >= self.needed.load(Ordering::Relaxed) {
+            from: if peers.is_empty() && first >= header.wal.first_segment {
                 0
             } else {
                 first
@@ -1552,7 +1573,8 @@ impl<F: FileSystem + 'static> Shared<F> {
                 },
                 ..durable.header
             };
-            self.pages.write_header(&header, &self.retained_area())?;
+            self.pages
+                .write_header(&header, &self.retained_area(&header))?;
             durable.header = header;
             return Ok(Arc::clone(&durable.tree));
         }
@@ -1656,7 +1678,8 @@ impl<F: FileSystem + 'static> Shared<F> {
                 },
             }
         };
-        self.pages.write_header(&header, &self.retained_area())?;
+        self.pages
+            .write_header(&header, &self.retained_area(&header))?;
         let tree = Arc::new(Tree::new(
             generation,
             roots,
@@ -1983,6 +2006,10 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
         path: &std::path::Path,
     ) -> Result<(), StorageError> {
         super::any_fs::write_copy(snapshot, path)
+    }
+
+    fn checkpoint(&self) -> Result<(), StorageError> {
+        Ok(Engine::checkpoint_keeping_log(self)?)
     }
 }
 

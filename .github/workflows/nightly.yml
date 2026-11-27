@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
+
 jobs:
   storage:
     strategy:
@@ -15,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 300 || 120 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -23,16 +26,16 @@ jobs:
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
       - shell: bash
-        run: mise run storage-deep 2>&1 | tee storage-deep.log
+        run: mise run storage-deep 2>&1 | tee deep.log
       - shell: bash
-        run: mise run random-deep 2>&1 | tee random-deep.log
-      - if: failure()
+        run: mise run random-deep 2>&1 | tee deep.log
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: log-storage-${{ matrix.os }}
-          path: "*-deep.log"
+          path: deep.log
           if-no-files-found: ignore
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: proptest-regressions-${{ matrix.os }}
@@ -53,7 +56,7 @@ jobs:
         run: mise run soak 2>&1 | tee soak.log
         env:
           RHIZODB_SOAK_SECS: "1200"
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: log-soak
@@ -70,7 +73,7 @@ jobs:
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - shell: bash
         run: cargo deny check advisories 2>&1 | tee advisories.log
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: log-advisories
@@ -87,13 +90,13 @@ jobs:
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - shell: bash
         run: sh fuzz/run.sh 600 2>&1 | tee fuzz.log
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: log-fuzz
           path: fuzz.log
           if-no-files-found: ignore
-      - if: failure()
+      - if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: fuzz-artifacts
@@ -101,7 +104,7 @@ jobs:
 
   report:
     needs: [storage, soak, advisories, fuzz]
-    if: failure() && github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     permissions:
       contents: read
       issues: write

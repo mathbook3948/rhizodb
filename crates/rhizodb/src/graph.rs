@@ -260,7 +260,7 @@ impl<S: Storage> Graph<S> {
     /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
     /// and so fails instead of writing the format version or an upgrade.
     pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
-        {
+        let rewrote = {
             let mut tx = GraphTx::bare(storage.begin_write()?);
             let found = match tx
                 .transaction
@@ -305,6 +305,10 @@ impl<S: Storage> Graph<S> {
             if !replica && (changed || upgrade) {
                 tx.commit()?;
             }
+            !replica && found.is_some() && (changed || upgrade)
+        };
+        if rewrote {
+            storage.checkpoint()?;
         }
         let definitions = GraphTx::bare(storage.begin_read()?).index_definitions()?;
         Ok(Self {
@@ -2012,7 +2016,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         labels: &[Token<Label>],
         add: bool,
     ) -> Result<(), GraphError> {
-        let current = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let current = self.read_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
         let changed: BTreeSet<Token<Label>> = labels
             .iter()
             .copied()

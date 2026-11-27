@@ -534,7 +534,7 @@ fn a_replica_refuses_the_changes_of_an_unrelated_database() {
 }
 
 #[test]
-fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_followed() {
+fn a_file_of_an_older_format_opens_as_a_writer_whose_first_snapshot_a_replica_installs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.rhizodb");
     std::fs::copy(
@@ -542,7 +542,6 @@ fn a_file_of_an_engine_format_before_replication_opens_as_a_writer_and_is_follow
         &path,
     )
     .unwrap();
-    drop(Database::open(&path).unwrap());
     let writer = Database::open(&path).unwrap();
     assert_eq!(writer.role(), Role::Writer);
     assert!(writer.history().entries().is_empty());
@@ -604,4 +603,87 @@ fn a_demotion_that_may_wait_longer_than_the_clock_reaches_finishes() {
     writer.promote(1, b"w").unwrap();
     writer.demote(std::time::Duration::MAX).unwrap();
     assert_eq!(writer.role(), Role::Replica);
+}
+
+fn insert(db: &Database, k: i64) {
+    db.execute(
+        "INSERT (:N {k: $k})",
+        &Parameters::from([("k".to_owned(), rhizodb::Value::Integer(k))]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_caught_up_writer_fenced_by_a_failover_rejoins_as_a_replica_without_a_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.rhizodb");
+    let old = Database::open(&path).unwrap();
+    old.promote(1, b"a").unwrap();
+    for k in 0..10 {
+        insert(&old, k);
+    }
+    let next = in_memory_replica();
+    sync(&old, &next);
+    next.promote(2, b"b").unwrap();
+    insert(&next, 10);
+    old.acknowledge(b"b", &next.position()).unwrap();
+    assert_eq!(old.role(), Role::Fenced);
+    old.demote(WAIT).unwrap();
+    assert_eq!(old.role(), Role::Replica);
+    assert_eq!(
+        old.compare_lineage(&next.history(), &next.position()),
+        Lineage::Behind
+    );
+    assert_eq!(sync(&next, &old), next.position());
+    assert_eq!(dump(&old), dump(&next));
+    drop(old);
+    let old = Database::open(&path).unwrap();
+    assert_eq!(old.role(), Role::Replica);
+    insert(&next, 11);
+    assert_eq!(sync(&next, &old), next.position());
+    assert_eq!(dump(&old), dump(&next));
+    let error = old.promote(1, b"a").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Fenced);
+    old.promote(3, b"a").unwrap();
+    insert(&old, 12);
+    drop(old);
+    assert_eq!(Database::open(&path).unwrap().role(), Role::Fenced);
+}
+
+#[test]
+fn a_writer_fenced_by_a_failover_with_changes_the_new_writer_lacks_still_diverges() {
+    let old = Database::in_memory().unwrap();
+    old.promote(1, b"a").unwrap();
+    insert(&old, 0);
+    let next = in_memory_replica();
+    sync(&old, &next);
+    insert(&old, 1);
+    next.promote(2, b"b").unwrap();
+    insert(&next, 2);
+    old.acknowledge(b"b", &next.position()).unwrap();
+    old.demote(WAIT).unwrap();
+    assert_eq!(old.role(), Role::Replica);
+    assert!(matches!(
+        old.compare_lineage(&next.history(), &next.position()),
+        Lineage::Diverged { .. }
+    ));
+    let error = next.changes_since(&old.position(), 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Diverged);
+    let changes = next.changes_since(&Position::start(), 1 << 20).unwrap();
+    let error = old.apply(&changes).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Diverged);
+}
+
+#[test]
+fn a_replica_that_heard_of_a_term_applies_the_first_change_of_that_term() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"a").unwrap();
+    insert(&writer, 0);
+    let next = in_memory_replica();
+    let replica = in_memory_replica();
+    sync(&writer, &next);
+    sync(&writer, &replica);
+    next.promote(2, b"b").unwrap();
+    replica.acknowledge(b"b", &next.position()).unwrap();
+    assert_eq!(sync(&next, &replica), next.position());
 }

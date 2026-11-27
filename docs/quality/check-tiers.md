@@ -16,10 +16,14 @@ The randomized, crash, and stress tests took most of the time of the check that 
 - The child process entry points of the kill tests are ignored too, and they do nothing without the environment variable their parent sets.
 - Every push to `main` runs `mise run random` on Linux, macOS, and Windows.
 - The nightly workflow runs the ignored storage and integration tests at a hundred times the cases, beside the soak, advisory, and fuzz jobs.
+- A workflow installs its tools only in its mise setup step, and its `mise run` steps never install one.
 - A failed run of the random or nightly workflow on `main` opens an issue labelled `bug` for each failing test, or comments on the open issue of the same title, with the seed it ran and a link to the run.
 - An issue title names the test binary with the test, and more than five failing tests in one run share one issue whose title names no count.
 - A test binary that exits without naming a failed test, as a crash or abort does, gets an issue of its own, and a failed job whose log names no test binary at all opens an issue for the job.
 - An issue body is cut to fit GitHub's limit, and it says how much output it left out.
+- A nightly job that times out or is cancelled counts as failed, so its log is uploaded and reported as a failed job's is.
+- A nightly storage job uploads only the log of the step that failed or was cut off, so a step that passed never opens an issue.
+- The nightly storage job on Windows gets a longer timeout than on Linux and macOS, sized to how much slower its runners run the deep tests, and runs the same case counts.
 - A failure found on `main` is fixed in a new pull request.
 - Nothing is published unless a `v*` tag is pushed, and a release runs `mise run random` before it publishes.
 

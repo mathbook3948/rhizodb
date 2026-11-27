@@ -27,9 +27,11 @@ pub(crate) fn write<S: Storage>(storage: &S, path: &Path) -> Result<(), StorageE
         .begin_read()
         .and_then(|snapshot| S::write_copy(&snapshot, &staging));
     let published = copied.and_then(|()| {
-        publish(&staging, path).map_err(|error| match error.kind() {
-            io::ErrorKind::AlreadyExists => target_exists(path),
-            _ => StorageError::new(error),
+        publish(&staging, path, |from, to| fs::hard_link(from, to)).map_err(|error| {
+            match error.kind() {
+                io::ErrorKind::AlreadyExists => target_exists(path),
+                _ => StorageError::new(error),
+            }
         })
     });
     if published.is_err() {
@@ -77,19 +79,23 @@ fn staging_path(path: &Path) -> io::Result<PathBuf> {
     Ok(path.with_file_name(staged))
 }
 
-fn publish(staging: &Path, path: &Path) -> io::Result<()> {
+fn publish(
+    staging: &Path,
+    path: &Path,
+    link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     fs::OpenOptions::new()
         .write(true)
         .open(staging)?
         .sync_all()?;
-    match fs::hard_link(staging, path) {
-        Ok(()) => fs::remove_file(staging)?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(already_exists(path));
-        }
-        Err(_) if !exists(path)? => fs::rename(staging, path)?,
-        Err(_) => return Err(already_exists(path)),
-    }
+    link(staging, path).map_err(|error| match error.kind() {
+        io::ErrorKind::AlreadyExists => already_exists(path),
+        kind => io::Error::new(
+            kind,
+            format!("cannot hard-link the backup to {}: {error}", path.display()),
+        ),
+    })?;
+    fs::remove_file(staging)?;
     sync_directory(path)
 }
 
@@ -106,3 +112,7 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 fn sync_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "backup.test.rs"]
+mod tests;

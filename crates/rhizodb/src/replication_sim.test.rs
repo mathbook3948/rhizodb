@@ -475,6 +475,12 @@ impl Sim {
         let Some(stale) = self.stale.take() else {
             return;
         };
+        if self.rng.chance(50) {
+            self.steps.push(format!("tell stale {stale} the new term"));
+            self.count("step aside");
+            let newest = self.nodes[self.holder].db.position();
+            drop(self.nodes[stale].db.changes_since(&newest, 1));
+        }
         self.steps.push(format!("demote stale {stale}"));
         self.nodes[stale]
             .db

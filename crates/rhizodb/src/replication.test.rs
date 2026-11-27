@@ -62,6 +62,7 @@ mod crash {
     use crate::graph::IndexTarget;
     use crate::query::Statements;
     use crate::replication::Changes;
+    use crate::replication::Role;
     use crate::result::Parameters;
     use crate::result::Value;
     use crate::test_scale;
@@ -475,6 +476,47 @@ mod crash {
     }
 
     #[test]
+    fn a_checkpoint_that_keeps_the_log_and_a_crash_leave_every_change_readable() {
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        writer.promote(1, b"w").unwrap();
+        for k in 0..20 {
+            insert(&writer, k);
+        }
+        writer.graph.storage().checkpoint_keeping_log().unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&crashed, false);
+        let fresh = open_on(&SimFs::new(), true);
+        assert_eq!(sync(&writer, &fresh).unwrap(), writer.position());
+        assert_eq!(export(&fresh), export(&writer));
+    }
+
+    #[test]
+    fn the_checkpoint_of_an_upgrade_keeps_the_log_for_replicas_behind_it() {
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        for k in 0..20 {
+            insert(&writer, k);
+        }
+        let mut write = writer.graph.storage().begin_write().unwrap();
+        write
+            .put(Table::Metadata, b"format_version", &13u32.to_be_bytes())
+            .unwrap();
+        write.commit().unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&crashed, false);
+        assert_eq!(writer.role(), crate::replication::Role::Writer);
+        let fresh = open_on(&SimFs::new(), true);
+        assert_eq!(sync(&writer, &fresh).unwrap(), writer.position());
+        assert_eq!(export(&fresh), export(&writer));
+    }
+
+    #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);
         old.promote(5, b"a").unwrap();
@@ -529,6 +571,79 @@ mod crash {
         sync(&copy, &behind).unwrap();
         let error = sync(&writer, &behind).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Diverged);
+    }
+
+    fn rejoin(old: &Database, next: &Database) -> Result<(), crate::Error> {
+        old.acknowledge(b"next", &next.position())?;
+        old.demote(std::time::Duration::from_secs(1))?;
+        sync(next, old)?;
+        old.promote(3, b"old").map(|_| ())
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn a_crash_at_any_write_of_a_rejoin_leaves_a_writer_that_rejoins_or_has_rejoined() {
+        let base = SimFs::new();
+        let old = open_on(&base, false);
+        old.promote(1, b"old").unwrap();
+        for k in 0..5 {
+            insert(&old, k);
+        }
+        let next = open_on(&SimFs::new(), true);
+        sync(&old, &next).unwrap();
+        drop(old);
+        next.promote(2, b"next").unwrap();
+        for k in 5..8 {
+            insert(&next, k);
+        }
+        let probe = base.crash(Crash::KeepUnsynced);
+        let old = open_on(&probe, false);
+        let before = probe.operations();
+        rejoin(&old, &next).unwrap();
+        let operations = probe.operations() - before;
+        drop(old);
+        for failing in 0..operations {
+            for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                let fs = base.crash(Crash::KeepUnsynced);
+                let old = open_on(&fs, false);
+                fs.fail_after(failing, Failure::FromThenOn);
+                drop(rejoin(&old, &next));
+                let recovered = fs.crash(crash);
+                drop(old);
+                let old = open_on(&recovered, false);
+                let newest = old.history().entries().last().map(|entry| entry.term());
+                let role = old.role();
+                match newest {
+                    Some(1) => assert!(
+                        matches!(role, Role::Fenced | Role::Replica),
+                        "{role:?} at {failing}"
+                    ),
+                    Some(2) => assert_eq!(role, Role::Replica, "{failing}"),
+                    Some(3) => assert_eq!(role, Role::Fenced, "{failing}"),
+                    other => panic!("{other:?} at {failing}"),
+                }
+                if newest != Some(3) {
+                    if role == Role::Fenced {
+                        old.acknowledge(b"next", &next.position()).unwrap();
+                        old.demote(std::time::Duration::from_secs(1)).unwrap();
+                    }
+                    assert_eq!(sync(&next, &old).unwrap(), next.position(), "{failing}");
+                    assert_eq!(export(&old), export(&next), "{failing}");
+                }
+                old.promote(3, b"old").unwrap();
+                assert_eq!(old.role(), Role::Writer, "{failing}");
+                insert(&old, 9);
+                integrity(&old);
+                let terms: Vec<u64> = old
+                    .history()
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.term())
+                    .collect();
+                assert_eq!(terms, [1, 2, 3], "{failing}");
+                assert!(old.position().lsn() > next.position().lsn(), "{failing}");
+            }
+        }
     }
 
     #[test]

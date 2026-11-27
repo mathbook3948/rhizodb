@@ -839,17 +839,26 @@ fn writes_after_creating_or_dropping_an_index_in_the_same_transaction_follow_it(
 struct CountingStorage {
     inner: TestStorage,
     entry_writes: Rc<Cell<usize>>,
+    posting_bytes: Rc<Cell<usize>>,
 }
 
 struct CountingWrite<'a> {
     inner: <TestStorage as Storage>::Write<'a>,
     entry_writes: Rc<Cell<usize>>,
+    posting_bytes: Rc<Cell<usize>>,
 }
 
 impl CountingWrite<'_> {
     fn count(&self, table: Table) {
         if ENTRY_TABLES.contains(&table) && table != Table::KeywordPostings {
             self.entry_writes.set(self.entry_writes.get() + 1);
+        }
+    }
+
+    fn read(&self, table: Table, value: &[u8]) {
+        if table == Table::KeywordPostings {
+            self.posting_bytes
+                .set(self.posting_bytes.get() + value.len());
         }
     }
 }
@@ -866,6 +875,7 @@ impl Storage for CountingStorage {
         Ok(CountingWrite {
             inner: self.inner.begin_write()?,
             entry_writes: Rc::clone(&self.entry_writes),
+            posting_bytes: Rc::clone(&self.posting_bytes),
         })
     }
 
@@ -902,16 +912,22 @@ impl ReadTransaction for CountingWrite<'_> {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> Result<R, E>,
     ) -> Result<Option<R>, E> {
-        self.inner.get_with(table, key, read)
+        self.inner.get_with(table, key, |value| {
+            self.read(table, value);
+            read(value)
+        })
     }
 
     fn visit_prefix<E: From<StorageError>>(
         &self,
         table: Table,
         prefix: &[u8],
-        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        self.inner.visit_prefix(table, prefix, visit)
+        self.inner.visit_prefix(table, prefix, |key, value| {
+            self.read(table, value);
+            visit(key, value)
+        })
     }
 
     fn visit_range<E: From<StorageError>>(
@@ -919,9 +935,31 @@ impl ReadTransaction for CountingWrite<'_> {
         table: Table,
         start: &[u8],
         end: &[u8],
-        visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
-        self.inner.visit_range(table, start, end, visit)
+        self.inner.visit_range(table, start, end, |key, value| {
+            self.read(table, value);
+            visit(key, value)
+        })
+    }
+
+    fn visit_prefix_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        visit: impl FnMut(&[u8], crate::storage::Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix_peek(table, prefix, visit)
+    }
+
+    fn visit_range_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        visit: impl FnMut(&[u8], crate::storage::Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range_peek(table, start, end, visit)
     }
 }
 
@@ -957,6 +995,7 @@ fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
     let graph = Graph::open(CountingStorage {
         inner: test_engine::open(directory.path().join("drop.rhizodb")),
         entry_writes: Rc::clone(&entry_writes),
+        posting_bytes: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
@@ -1066,6 +1105,59 @@ fn dropping_the_index_of_the_largest_id_deletes_its_entries() {
             );
         }
     }
+}
+
+#[test]
+fn a_phrase_reads_a_common_word_only_where_its_rarest_word_occurs() {
+    let posting_bytes = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: test_engine::in_memory(),
+        entry_writes: Rc::default(),
+        posting_bytes: Rc::clone(&posting_bytes),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let mut zebras = Vec::new();
+    for i in 0..2000 {
+        let zebra = i % 1000 == 999;
+        let words = if zebra {
+            "a zebra the end"
+        } else {
+            "the cat on the mat"
+        };
+        let node = write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(text, PropertyValue::String(words.to_owned()))]),
+            })
+            .unwrap();
+        if zebra {
+            zebras.push(node.0);
+        }
+    }
+    write.commit().unwrap();
+    let search = |query: &str| {
+        let write = graph.write().unwrap();
+        posting_bytes.set(0);
+        let mut found: Vec<u64> = write
+            .keyword_search("words", ElementKind::Node, query, 10_000)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        found.sort_unstable();
+        (found, posting_bytes.get())
+    };
+    let (_, common) = search("the");
+    let (found, phrase) = search("\"zebra the\"");
+    assert_eq!(found, zebras);
+    assert!(
+        phrase * 4 < common,
+        "the phrase read {phrase} posting bytes, the common word alone {common}"
+    );
 }
 
 #[test]
@@ -1216,4 +1308,90 @@ fn a_capped_seek_counts_the_writes_its_transaction_has_not_committed() {
     assert_eq!(within(all.len()), Some(all.clone()));
     assert_eq!(within(all.len() - 1), None);
     assert_eq!(within(usize::MAX), Some(all));
+}
+
+fn create_sentence(
+    write: &mut GraphTx<impl WriteTransaction>,
+    names: &Names,
+    gap: usize,
+    picks: &[usize],
+) -> u64 {
+    for _ in 0..gap {
+        write.create_node(NodeRecord::default()).unwrap();
+    }
+    let words = ["red", "green", "blue"];
+    let text = picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>();
+    write
+        .create_node(NodeRecord {
+            labels: [names.label].into(),
+            properties: Properties::from([(names.text, PropertyValue::String(text.join(" ")))]),
+        })
+        .unwrap()
+        .0
+}
+
+fn phrase_hits(read: &GraphTx<impl ReadTransaction>, phrase: &[usize]) -> BTreeSet<u64> {
+    let words = ["red", "green", "blue"];
+    let text = phrase.iter().map(|pick| words[*pick]).collect::<Vec<_>>();
+    read.keyword_search(
+        "words",
+        ElementKind::Node,
+        &format!("\"{}\"", text.join(" ")),
+        usize::MAX,
+    )
+    .unwrap()
+    .into_iter()
+    .map(|(id, _)| id)
+    .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn a_phrase_finds_exactly_the_nodes_that_hold_it_before_and_after_commit(
+        committed in prop::collection::vec((0usize..160, prop::collection::vec(0usize..3, 0..6)), 0..8),
+        written in prop::collection::vec((0usize..160, prop::collection::vec(0usize..3, 0..6)), 0..8),
+        deleted in prop::collection::vec(any::<prop::sample::Index>(), 0..4),
+        phrase in prop::collection::vec(0usize..3, 1..4),
+    ) {
+        let graph = Graph::open(test_engine::in_memory()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let names = Names {
+            label: write.intern_token("Doc").unwrap(),
+            link: write.intern_token("LINK").unwrap(),
+            other: write.intern_token("OTHER").unwrap(),
+            text: write.intern_token("text").unwrap(),
+            tags: write.intern_token("tags").unwrap(),
+            at: write.intern_token("at").unwrap(),
+        };
+        let mut sentences = BTreeMap::new();
+        for (gap, picks) in &committed {
+            sentences.insert(create_sentence(&mut write, &names, *gap, picks), picks.clone());
+        }
+        write.commit().unwrap();
+        let mut write = graph.write().unwrap();
+        for (gap, picks) in &written {
+            sentences.insert(create_sentence(&mut write, &names, *gap, picks), picks.clone());
+        }
+        let ids: Vec<u64> = sentences.keys().copied().collect();
+        for index in &deleted {
+            if !ids.is_empty() {
+                let id = ids[index.index(ids.len())];
+                if sentences.remove(&id).is_some() {
+                    write.delete_node(NodeId(id)).unwrap();
+                }
+            }
+        }
+        let expected: BTreeSet<u64> = sentences
+            .iter()
+            .filter(|(_, picks)| picks.windows(phrase.len()).any(|window| window == phrase))
+            .map(|(id, _)| *id)
+            .collect();
+        prop_assert_eq!(phrase_hits(&write, &phrase), expected.clone());
+        write.commit().unwrap();
+        prop_assert_eq!(phrase_hits(&graph.read().unwrap(), &phrase), expected);
+    }
 }
