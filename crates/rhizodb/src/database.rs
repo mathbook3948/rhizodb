@@ -932,18 +932,20 @@ impl Database {
 
     /// Reads every page that the database file's last checkpoint reaches and checks its
     /// checksum, its key order, and every count the file records. Commits since that checkpoint
-    /// are checked as they are read back from the log.
+    /// are checked as they are read back from the log. Then it checks every committed
+    /// relationship record against the checksum of the chunk that stores it.
     ///
-    /// Fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) on the first page or
-    /// count that does not hold, and with
+    /// Fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) on the first page,
+    /// count, or chunk that does not hold, and with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// when the calling thread holds a write transaction.
     ///
-    /// It reads only what the storage engine records, never the graph's own structures, so it
-    /// also checks a database that waits for its writer's upgrade, as
-    /// [`ErrorKind::FormatUpgradePending`](crate::ErrorKind::FormatUpgradePending) describes.
+    /// It also checks a database that waits for its writer's upgrade, as
+    /// [`ErrorKind::FormatUpgradePending`](crate::ErrorKind::FormatUpgradePending) describes,
+    /// whose relationship chunks it skips, since an older format stored them without checksums.
     pub fn check(&self) -> Result<(), Error> {
-        Ok(self.graph.maintain(Maintenance::check)??)
+        self.graph.maintain(Maintenance::check)??;
+        Ok(self.graph.check_relationship_chunks()?)
     }
 
     /// Drops the index `name` and all its entries in one write transaction. Returns whether an

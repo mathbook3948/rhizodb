@@ -619,18 +619,19 @@ impl<T: ReadTransaction> GraphTx<T> {
                     continue;
                 }
             };
-            let decoded: Result<Vec<_>, GraphError> = ChunkRef::parse(&value).and_then(|stored| {
-                stored
-                    .entries()
-                    .map(|entry| {
-                        let (slot, record) = entry?;
-                        Ok((
-                            relationships::relationship_at(chunk, slot),
-                            RelationshipRecord::decode(record)?,
-                        ))
-                    })
-                    .collect()
-            });
+            let decoded: Result<Vec<_>, GraphError> =
+                ChunkRef::parse(&key, &value).and_then(|stored| {
+                    stored
+                        .entries()
+                        .map(|entry| {
+                            let (slot, record) = entry?;
+                            Ok((
+                                relationships::relationship_at(chunk, slot),
+                                RelationshipRecord::decode(record)?,
+                            ))
+                        })
+                        .collect()
+                });
             match decoded {
                 Ok(records) => relationships.extend(records),
                 Err(_) => violations.push(IntegrityViolation::Undecodable {

@@ -4,6 +4,10 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Breaking changes
+
+- The graph format is now 15, whose relationship chunks carry a checksum. Opening a database of format 11 to 14 as its writer rewrites every relationship chunk with its checksum in the upgrade's write transaction, after which builds before this one refuse the file with `ErrorKind::UnsupportedFormatVersion`. A replica of this build waits for that upgrade with `ErrorKind::FormatUpgradePending`.
+
 ### Added
 
 - Embedded replication. `Database::changes_since` returns the whole transactions after another database's `Database::position` as `Changes`, which travel as checksummed bytes and `Database::apply` logs on a replica, and replicas relay changes to further replicas. A `Position` holds a term, a writer id, an LSN, a chain hash over the history, and the id of the database the history belongs to, so two histories that reuse a term are told apart and a replica never follows an unrelated database.
@@ -38,6 +42,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- A damaged relationship chunk read as data: a changed byte inside one could return other property values or relationships without an error. Each chunk now carries a CRC-32 of its key and contents, so reading, changing, or `Database::check` on a damaged chunk fails with `ErrorKind::CorruptData`.
 - An aggregate after `UNWIND`, `CALL`, or `WITH`, as in `UNWIND range(1, 10000000) AS i RETURN count(*)`, held every input row before it grouped them and could use gigabytes of memory. It now keeps one state per group as rows arrive, and `UNWIND range(...)` gives its integers one at a time instead of building the list.
 - A short query could still abort the host process by multiplying values that each stayed under the length caps, as in `[x IN range(1, 10000000) | range(1, 10000000)]`, `collect(range(1, 1000))` over many rows, or a `reduce` that appends a new list at every step. List comprehensions, pattern comprehensions, `COLLECT` subqueries, `collect()`, list and map literals, `CAST`, `split()`, `toUpper()`, `toLower()`, and `normalize()` now fail with `ErrorKind::NumberOutOfRange` once their value passes the limits, and the limits count the items and strings of nested lists and maps too.
 - A `reduce` that appends to its accumulator, as in `reduce(l = [], i IN range(1, 1000000) | l + i)` or the same with strings, copied the accumulator at every step and took time quadratic in its length. It now grows the accumulator in place.

@@ -587,73 +587,182 @@ fn a_write_transaction_that_outgrows_its_held_chunks_still_reads_and_commits_its
     assert_eq!(read.check_integrity().unwrap(), vec![]);
 }
 
+fn many_relationships(graph: &Graph<TestStorage>) -> BTreeMap<RelationshipId, RelationshipRecord> {
+    let mut expected = BTreeMap::new();
+    let mut write = graph.write().unwrap();
+    let types = [
+        write.intern_token::<RelationshipType>("A").unwrap(),
+        write.intern_token::<RelationshipType>("B").unwrap(),
+    ];
+    let key = write.intern_token::<PropertyKey>("k").unwrap();
+    let nodes: Vec<NodeId> = (0..300)
+        .map(|_| write.create_node(node_with(&[])).unwrap())
+        .collect();
+    for index in 0..70_000usize {
+        let mut record = relationship(
+            types[index % 2],
+            nodes[index % nodes.len()],
+            nodes[index * 7 % nodes.len()],
+        );
+        if index % 5 != 0 {
+            record
+                .properties
+                .insert(key, PropertyValue::Integer(index as i64));
+        }
+        let id = write.create_relationship(&record).unwrap();
+        if index % 9 == 4 || (40..90).contains(&index) {
+            write.delete_relationship(id).unwrap();
+        } else {
+            expected.insert(id, record);
+        }
+    }
+    write.commit().unwrap();
+    assert!(expected.keys().last().unwrap().0 >= 1 << 16);
+    expected
+}
+
+fn assert_holds_relationships(
+    graph: &Graph<TestStorage>,
+    expected: &BTreeMap<RelationshipId, RelationshipRecord>,
+) {
+    let read = graph.read().unwrap();
+    for (id, record) in expected {
+        assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
+    }
+    let mut count = 0;
+    read.visit_relationship_records(|_, _| {
+        count += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(count, expected.len());
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    graph.check_relationship_chunks().unwrap();
+}
+
 #[test]
 fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.rhizodb");
-    let mut expected = BTreeMap::new();
-    {
+    let expected = {
         let graph = Graph::open(test_engine::open(&path)).unwrap();
-        let mut write = graph.write().unwrap();
-        let types = [
-            write.intern_token::<RelationshipType>("A").unwrap(),
-            write.intern_token::<RelationshipType>("B").unwrap(),
-        ];
-        let key = write.intern_token::<PropertyKey>("k").unwrap();
-        let nodes: Vec<NodeId> = (0..300)
-            .map(|_| write.create_node(node_with(&[])).unwrap())
-            .collect();
-        for index in 0..70_000usize {
-            let mut record = relationship(
-                types[index % 2],
-                nodes[index % nodes.len()],
-                nodes[index * 7 % nodes.len()],
-            );
-            if index % 5 != 0 {
-                record
-                    .properties
-                    .insert(key, PropertyValue::Integer(index as i64));
-            }
-            let id = write.create_relationship(&record).unwrap();
-            if index % 9 == 4 || (40..90).contains(&index) {
-                write.delete_relationship(id).unwrap();
-            } else {
-                expected.insert(id, record);
-            }
-        }
-        write.commit().unwrap();
+        let expected = many_relationships(&graph);
         let mut previous = graph.storage.begin_write().unwrap();
         store_as_format_eleven(&mut previous);
         previous.commit().unwrap();
-    }
-    assert!(expected.keys().last().unwrap().0 >= 1 << 16);
+        expected
+    };
     for _ in 0..2 {
         let graph = Graph::open(test_engine::open(&path)).unwrap();
-        let read = graph.read().unwrap();
-        for (id, record) in &expected {
-            assert_eq!(read.relationship(*id).unwrap().as_ref(), Some(record));
-        }
-        let mut count = 0;
-        read.visit_relationship_records(|_, _| {
-            count += 1;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(count, expected.len());
+        assert_holds_relationships(&graph, &expected);
         assert_eq!(
-            read.transaction
+            graph
+                .read()
+                .unwrap()
+                .transaction
                 .scan_prefix(Table::Relationships, &[])
                 .unwrap(),
             vec![]
         );
-        assert_eq!(read.check_integrity().unwrap(), vec![]);
     }
+}
+
+#[test]
+fn a_database_of_format_fourteen_seals_every_relationship_chunk_with_its_checksum() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    let expected = {
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
+        let expected = many_relationships(&graph);
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_fourteen(&mut previous);
+        previous.commit().unwrap();
+        expected
+    };
+    let unsealed = test_engine::open(&path)
+        .begin_read()
+        .unwrap()
+        .scan_prefix(Table::RelationshipChunks, &[])
+        .unwrap();
+    assert!(unsealed.len() > 2048);
+    assert!(
+        unsealed
+            .iter()
+            .all(|(key, value)| ChunkRef::parse(key, value).is_err())
+    );
+    for _ in 0..2 {
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
+        assert_holds_relationships(&graph, &expected);
+        let sealed = graph
+            .read()
+            .unwrap()
+            .transaction
+            .scan_prefix(Table::RelationshipChunks, &[])
+            .unwrap();
+        assert_eq!(sealed.len(), unsealed.len());
+        for ((key, value), (unsealed_key, unsealed_value)) in sealed.iter().zip(&unsealed) {
+            assert_eq!(key, unsealed_key);
+            assert_eq!(relationships::unsealed(value), *unsealed_value);
+        }
+    }
+}
+
+#[test]
+fn an_upgrade_from_format_fourteen_refuses_to_seal_a_damaged_chunk() {
+    let storage = test_engine::in_memory();
+    let graph = Graph::open(storage).unwrap();
+    let mut write = graph.write().unwrap();
+    let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
+    let node = write.create_node(node_with(&[])).unwrap();
+    write
+        .create_relationship(&relationship(knows, node, node))
+        .unwrap();
+    write.commit().unwrap();
+    let mut previous = graph.storage.begin_write().unwrap();
+    store_as_format_fourteen(&mut previous);
+    let (key, mut value) = previous
+        .scan_prefix(Table::RelationshipChunks, &[])
+        .unwrap()
+        .remove(0);
+    value.push(0);
+    previous
+        .put(Table::RelationshipChunks, &key, &value)
+        .unwrap();
+    previous.commit().unwrap();
+    let Graph { storage, .. } = graph;
+
+    assert!(matches!(
+        Graph::open(storage),
+        Err(GraphError::Decode(_) | GraphError::Corrupt(_))
+    ));
+}
+
+/// Rewrites a database of the current format in the layout of format 14, whose relationship
+/// chunks carried no checksum, so a test can open it as an older version.
+pub(crate) fn store_as_format_fourteen(write: &mut impl WriteTransaction) {
+    for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
+        write
+            .put(
+                Table::RelationshipChunks,
+                &key,
+                &relationships::unsealed(&value),
+            )
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &14u32.to_be_bytes(),
+        )
+        .unwrap();
 }
 
 /// Rewrites a database of the current format in the layout of format 13, which kept each
 /// element's posting of a term as its own entry under the element's ID, so a test can open it as
 /// an older version.
 pub(crate) fn store_as_format_thirteen(write: &mut impl WriteTransaction) {
+    store_as_format_fourteen(write);
     let blocks = write.scan_prefix(Table::KeywordPostings, &[]).unwrap();
     for (key, _) in &blocks {
         write.delete(Table::KeywordPostings, key).unwrap();
@@ -689,10 +798,9 @@ pub(crate) fn store_as_format_thirteen(write: &mut impl WriteTransaction) {
 /// Rewrites a database of the current format in the layout of format 11, which kept each
 /// relationship record as its own entry under its ID, so a test can open it as an older version.
 pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
-    store_as_format_thirteen(write);
     for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
         let chunk = relationships::parse_key(&key).unwrap();
-        for entry in ChunkRef::parse(&value).unwrap().entries() {
+        for entry in ChunkRef::parse(&key, &value).unwrap().entries() {
             let (slot, record) = entry.unwrap();
             let id = relationships::relationship_at(chunk, slot);
             write
@@ -701,6 +809,7 @@ pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
         }
         write.delete(Table::RelationshipChunks, &key).unwrap();
     }
+    store_as_format_thirteen(write);
     write
         .put(
             Table::Metadata,
