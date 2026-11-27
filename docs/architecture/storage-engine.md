@@ -15,6 +15,10 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
 - An open that finds the lock held tries again for half a second before it fails, since a child process the host spawns shares the lock until it starts its program.
 - On a file system without locks the engine opens a database unlocked.
+- An open that asks for multi-process access replaces the exclusive lock with the session locks that `multi-process.md` decides.
+- In such a session a checkpoint reuses no block that a tree in any process reaches, as `multi-process.md` decides.
+- In such a session the process that writes a header removes the log segments it released, as `multi-process.md` decides.
+- In such a session only the last process to close checkpoints the whole log and removes its segments, as `multi-process.md` decides.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.
@@ -182,4 +186,3 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
 - How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header and loses acknowledged commits without an error.
-- Which decisions above change once several processes share a file, since a session replaces the exclusive lock and its side file carries the oldest tree, the end of the log, and the blocks a checkpoint reused, as `multi-process.md` decides for phases 3 and 4.
