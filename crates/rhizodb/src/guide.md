@@ -342,11 +342,14 @@ replica.execute("INSERT (:Order {id: 2})", &Parameters::new())?;
 
 # Upgrades
 
-The file records a format version. Opening a file written by an older version of RhizoDB
-upgrades it in place, in one write transaction before anything else reads it, and opening one
+The file records a format version. Opening a file written by an older version of RhizoDB as
+its writer upgrades it in place before anything else reads it, in commits of bounded size that
+resume where they stopped after a crash. A read-only open upgrades nothing, so it fails with
+[`ErrorKind::ReadOnly`] on such a file, and a replica waits with
+[`ErrorKind::FormatUpgradePending`] until its writer's upgrade reaches it. Opening a file
 written by a newer version, or by a pre-release build in a format older than any this build
-upgrades, fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file
-cannot be opened by the older build again, so take a backup before upgrading the crate. Below
+upgrades, fails with [`ErrorKind::UnsupportedFormatVersion`]. An upgraded file cannot be
+opened by the older build again, so take a backup before upgrading the crate. Below
 1.0, a release that changes the API or the format raises the minor version, and the changelog
 lists the change.
 

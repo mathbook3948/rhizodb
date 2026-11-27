@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "interleavings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "shuttle",
 ]
@@ -678,7 +678,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rhizodb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32fast",
  "jiff",
@@ -871,7 +871,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libtest-mimic",
  "rhizodb",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "zerocopy"
