@@ -540,6 +540,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
+    #[inline(never)]
     fn typed(&self, operand: &Expr, types: &TypeExpr, row: &Row) -> Result<(Datum, Taint), Error> {
         let (value, taint) = self.tracked(operand, row)?;
         Ok((
@@ -548,6 +549,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         ))
     }
 
+    #[inline(never)]
     fn cast_value(
         &self,
         operand: &Expr,
@@ -559,6 +561,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         settle(self.cast(value, target), doubtful, Taint::when(doubtful))
     }
 
+    #[inline(never)]
     fn distinct(&self, a: &Expr, b: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         let (a, a_taint) = self.tracked(a, row)?;
         let (b, b_taint) = self.tracked(b, row)?;
@@ -568,6 +571,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         ))
     }
 
+    #[inline(never)]
     fn truth(
         &self,
         operand: &Expr,
@@ -587,6 +591,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         settle(result, doubtful, Taint::when(doubtful))
     }
 
+    #[inline(never)]
     fn normalized(
         &self,
         operand: &Expr,
@@ -606,11 +611,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         settle(result, doubtful, Taint::when(doubtful))
     }
 
+    #[inline(never)]
     fn list(&self, items: &[Expr], row: &Row) -> Result<(Datum, Taint), Error> {
         let (values, taints) = self.tracked_all(items, row)?;
         Ok((self.limits.list(values)?, Taint::list(taints)))
     }
 
+    #[inline(never)]
     fn map(&self, entries: &[(String, Expr)], row: &Row) -> Result<(Datum, Taint), Error> {
         let mut values = BTreeMap::new();
         let mut taints = BTreeMap::new();
@@ -626,6 +633,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((self.limits.map(values)?, Taint::map(taints)))
     }
 
+    #[inline(never)]
     fn property_of(&self, base: &Expr, key: &str, row: &Row) -> Result<(Datum, Taint), Error> {
         if let Expr::Slot(slot) = base {
             let taint = self.slot_taint(*slot);
@@ -643,6 +651,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn indexed(&self, base: &Expr, index: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         if let Expr::Parameter(at) = base {
             let base = self.parameters.get(*at).unwrap_or(&Datum::Null);
@@ -668,6 +677,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn sliced_value(
         &self,
         base: &Expr,
@@ -692,6 +702,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         settle(slice(base, from.as_ref(), to.as_ref()), doubtful, taint)
     }
 
+    #[inline(never)]
     fn labels_test(
         &self,
         operand: &Expr,
@@ -706,6 +717,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn not(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         let (operand, taint) = self.tracked(operand, row)?;
         settle(
@@ -715,16 +727,19 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn negated(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         let (operand, taint) = self.tracked(operand, row)?;
         settle(negate(operand), taint.is_whole(), taint.flatten())
     }
 
+    #[inline(never)]
     fn plus(&self, operand: &Expr, row: &Row) -> Result<(Datum, Taint), Error> {
         let (operand, taint) = self.tracked(operand, row)?;
         settle(unary_plus(operand), taint.is_whole(), taint.flatten())
     }
 
+    #[inline(never)]
     fn binary(
         &self,
         op: BinaryOp,
@@ -747,6 +762,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn comparison(
         &self,
         first: &Expr,
@@ -765,6 +781,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((from_truth(result), Taint::when(tainted)))
     }
 
+    #[inline(never)]
     fn is_null(&self, operand: &Expr, negated: bool, row: &Row) -> Result<(Datum, Taint), Error> {
         let (operand, taint) = self.tracked(operand, row)?;
         Ok((
@@ -773,6 +790,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         ))
     }
 
+    #[inline(never)]
     fn called(
         &self,
         function: Function,
@@ -796,6 +814,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         self.tolerated(settle(checked, doubtful, taint)).map(drop)
     }
 
+    #[inline(never)]
     fn admitted(
         &self,
         function: AggregateFunction,
@@ -811,6 +830,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         )
     }
 
+    #[inline(never)]
     fn case(&self, case: &Case, row: &Row) -> Result<(Datum, Taint), Error> {
         let scrutinee = case
             .scrutinee
@@ -844,6 +864,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
+    #[inline(never)]
     fn comprehension(
         &self,
         comprehension: &ListComprehension,
@@ -891,6 +912,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((values.finish(), taint))
     }
 
+    #[inline(never)]
     fn quantified(&self, quantified: &Quantified, row: &Row) -> Result<(Datum, Taint), Error> {
         let (source, source_taint) = self.tracked(&quantified.source, row)?;
         if source_taint.is_whole() {
@@ -932,6 +954,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((result, Taint::when(doubtful)))
     }
 
+    #[inline(never)]
     fn exists(&self, query: &PatternQuery, row: &Row) -> Result<(Datum, Taint), Error> {
         let mut found = false;
         self.match_query(query, row, &mut |_| {
@@ -941,6 +964,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((Datum::Boolean(found), Taint::Clean))
     }
 
+    #[inline(never)]
     fn count_matches(&self, query: &PatternQuery, row: &Row) -> Result<(Datum, Taint), Error> {
         let mut found = 0i64;
         self.match_query(query, row, &mut |_| {
@@ -950,6 +974,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((Datum::Integer(found), Taint::Clean))
     }
 
+    #[inline(never)]
     fn subquery(
         &self,
         kind: SubqueryKind,
@@ -1032,6 +1057,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         })
     }
 
+    #[inline(never)]
     fn reduce(&self, reduce: &Reduce, row: &Row) -> Result<(Datum, Taint), Error> {
         let (mut accumulator, mut accumulator_taint) = self.tracked(&reduce.init, row)?;
         let (source, source_taint) = self.tracked(&reduce.source, row)?;
@@ -1076,6 +1102,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((accumulator, accumulator_taint))
     }
 
+    #[inline(never)]
     fn pattern_comprehension(
         &self,
         query: &PatternQuery,
