@@ -183,9 +183,11 @@ impl OpenOptions {
     /// holds no change yet, which becomes a replica and stays one, without writing the graph's
     /// format version, until it applies its writer's first change. A file that already holds a
     /// writer's changes fails to open with [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica)
-    /// unless that writer was demoted, and a file written in an older format fails to open as a
-    /// replica with `NotWriter`, since its upgrade is a write. Data that belongs to the node
-    /// itself goes in a database file of its own.
+    /// unless that writer was demoted, and a file written in an older format opens as a replica
+    /// that waits for its writer's upgrade, refusing graph reads with
+    /// [`ErrorKind::FormatUpgradePending`](crate::ErrorKind::FormatUpgradePending) until it
+    /// applies that upgrade, since the upgrade is a write. Data that belongs to the node itself
+    /// goes in a database file of its own.
     ///
     /// ```
     /// use rhizodb::ErrorKind;
@@ -1046,6 +1048,10 @@ impl Database {
     /// count that does not hold, and with
     /// [`ErrorKind::WriteTransactionOnThisThread`](crate::ErrorKind::WriteTransactionOnThisThread)
     /// when the calling thread holds a write transaction.
+    ///
+    /// It reads only what the storage engine records, never the graph's own structures, so it
+    /// also checks a database that waits for its writer's upgrade, as
+    /// [`ErrorKind::FormatUpgradePending`](crate::ErrorKind::FormatUpgradePending) describes.
     pub fn check(&self) -> Result<(), Error> {
         Ok(self.graph.maintain(Maintenance::check)??)
     }

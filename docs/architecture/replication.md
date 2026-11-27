@@ -38,7 +38,16 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - A replica opened on a missing or empty file writes nothing and stays a replica, so it holds no change until it applies its writer's first one.
 - `OpenOptions::replica` makes a file that holds no change a replica and refuses a file that holds a writer's changes with `NotReplica`.
 - Every local write of a database that is not the writer fails with `NotWriter`, checked again inside the commit under the writer lock.
-- A file that needs an upgrade fails to open as anything but a writer, since the upgrade is a write.
+- A file of an older graph format or tokenizer that opens as anything but its writer opens with its upgrade pending, since the upgrade is a write only the writer makes.
+- A file with its upgrade pending refuses graph reads with `FormatUpgradePending`, naming the stored format and this build's, so a host routes reads elsewhere, and writes with `NotWriter` as any file that is not the writer does, and it still applies, serves, and relays changes, reports its position and history, takes and installs snapshots, backs up, and runs the engine's check.
+- An `apply` that publishes an older format marks the graph pending and then counts one more wait, both before it publishes, so a read checks that the graph is ready before and after it begins its snapshot.
+- A read loads the wait count before its first check, so a read that loads it after a wait began finds the graph pending, and one that loads it before finds it changed once its snapshot holds the older format.
+- A read that saw the wait count change while it began checks the format and tokenizer of its own snapshot and refuses with `FormatUpgradePending` if they are older, since the wait may have ended between its snapshot and its second check.
+- After each `apply` a file with its upgrade pending reads the format and tokenizer again, and once its writer's upgrade arrived it reloads the index definitions before it serves any read, so no reader sees the graph between the old and the new format.
+- A writer's upgrade writes the format version in the same commit as the last step of its migration, or after it, so a replica sees the new version only over a fully migrated graph, and an upgrade split into several commits keeps the version for its last one.
+- `promote` of a file with its upgrade pending runs the upgrade as the new writer, checkpoints it, and serves reads after, and the upgrade reaches its replicas as changes.
+- A rolling upgrade restarts the replicas on the new build first, which wait for the upgrade without serving reads, hands writing over to one of them, whose promotion upgrades the graph, and restarts the old writer last, which rejoins as a replica.
+- A snapshot of a file with its upgrade pending holds the older format, which an installer of the new build opens with its upgrade pending and one of the old build reads as it is.
 - A database opened read-only refuses `apply`, `promote`, `demote`, `acknowledge`, and `forget_peer` with `ReadOnly`, and keeps no term a peer's position carries, so `changes_since` serves it as it serves any database.
 - A writer that opens a file of an older graph format or tokenizer checkpoints once after it commits the upgrade, so a snapshot taken right after holds the format a replica opens, and opening a file of the current format, a new file, or a replica checkpoints nothing.
 - Data that belongs to one node lives in a database file of its own, beside its replica.
@@ -61,6 +70,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `apply` fails with `Fenced` for a record of a term lower than the highest the replica has seen, and with `Diverged` for another writer in the newest term or for different changes where the replica holds some.
 - `apply` takes the first record of a term equal to the highest term the replica has heard of, since a file hears of a term from a peer before it receives that term's first record, and refuses one of a term no higher than its newest term.
 - A failed `apply` keeps every record before the one it refused.
+- `apply` refuses with `UnsupportedFormatVersion` the record that writes a graph format newer than this build reads, after it applies the records before it, so a replica of an older build never logs a format it would misread.
 - `apply` on a writer or a fenced writer fails with `NotReplica`.
 - `promote` with a term higher than every term seen writes a configuration record and makes the database the writer.
 - `promote` with the newest term and writer id writes nothing and makes the file that began that term the writer again, and fails with `Diverged` on a copy of that file or after a step down.
@@ -71,7 +81,8 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - A `demote` of a writer that has heard of a term above its own writes no step down, since a step down at the next LSN would conflict with the new writer's first record there, and instead marks the header so the file opens as a replica.
 - A host passes the new writer's position to `changes_since` or `acknowledge` before it demotes a writer that lost its lease without a handover, so the old writer has heard of the new term, and `acknowledge` also keeps the log for that position as a peer's.
 - An old writer that stepped aside holds a prefix of the new writer's history exactly when the new writer holds the same term, writer id, and chain hash at the old writer's last LSN, which `apply` and `changes_since` already compare, so a caught-up old writer applies the new writer's changes and one with changes the new writer never received fails with `Diverged`.
-- `promote` clears the mark of a file that stepped aside once its configuration record is durable, and the mark counts only while the file has heard of a term above its newest one, so a crash between the two leaves a fenced writer that the same promotion finishes.
+- An old writer rejoins without a snapshot only when the highest term it heard of is the first term after its own, since one that heard of a later term refuses the first records of the term between as `Fenced` and needs a snapshot.
+- `promote` clears the mark of a file that stepped aside once its configuration record is durable, and the mark counts only while the file has heard of a term above its newest one, so a crash between the two leaves a fenced writer that the same promotion finishes, until the file hears of a higher term, after which it opens as a replica, as a writer that stepped aside does.
 - A `demote` that runs out of time fails with `WriterBusy` and leaves the database fenced, and a later `demote` finishes it.
 - `compare_lineage` finds the first LSN where two histories differ, comparing each term's writer id, first LSN, and the incarnation that began it, and tells whether this database is the same as, behind, ahead of, or diverged from another one.
 - Errors of the replication kinds carry the positions and LSNs behind them, which `Error::replication_failure` returns.
@@ -82,4 +93,4 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 
 ## Open
 
-- How a replica or a fenced writer of a newer build follows a writer that has not upgraded the graph's format yet, since opening it as anything but a writer refuses the upgrade with `NotWriter`.
+None

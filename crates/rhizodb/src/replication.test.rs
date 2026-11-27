@@ -523,6 +523,85 @@ mod crash {
         assert_eq!(export(&fresh), export(&writer));
     }
 
+    fn stepped_aside_writer() -> (SimFs, Database, Database) {
+        let fs = SimFs::new();
+        let old = open_on(&fs, false);
+        old.promote(1, b"old").unwrap();
+        insert(&old, 1);
+        let next = open_on(&SimFs::new(), true);
+        sync(&old, &next).unwrap();
+        next.promote(2, b"next").unwrap();
+        insert(&next, 2);
+        old.acknowledge(b"next", &next.position()).unwrap();
+        old.demote(std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(old.role(), Role::Replica);
+        (fs, old, next)
+    }
+
+    fn heard_of(term: u64) -> Position {
+        let other = open_on(&SimFs::new(), false);
+        other.promote(term, b"later").unwrap();
+        other.position()
+    }
+
+    #[test]
+    fn a_writer_that_stepped_aside_reopens_as_a_replica_before_it_applies_anything() {
+        let (fs, old, _next) = stepped_aside_writer();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(old);
+        let reopened = open_on(&crashed, false);
+        assert_eq!(reopened.role(), Role::Replica);
+        assert_eq!(reopened.history().entries().last().unwrap().term(), 1);
+    }
+
+    #[test]
+    fn a_promotion_of_a_writer_that_stepped_aside_clears_its_mark_for_good() {
+        let (fs, old, next) = stepped_aside_writer();
+        sync(&next, &old).unwrap();
+        old.promote(3, b"old").unwrap();
+        old.acknowledge(b"later", &heard_of(4)).unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(old);
+        assert_eq!(open_on(&crashed, false).role(), Role::Fenced);
+    }
+
+    #[test]
+    fn a_promotion_cut_off_before_it_clears_the_mark_leaves_a_fenced_writer_it_finishes() {
+        let (base, old, next) = stepped_aside_writer();
+        sync(&next, &old).unwrap();
+        drop(old);
+        let probe = base.crash(Crash::KeepUnsynced);
+        let old = open_on(&probe, false);
+        let before = probe.operations();
+        old.promote(3, b"old").unwrap();
+        let operations = probe.operations() - before;
+        drop(old);
+        let mut cut_off = 0;
+        for failing in 0..operations {
+            let fs = base.crash(Crash::KeepUnsynced);
+            let old = open_on(&fs, false);
+            fs.fail_after(failing, Failure::FromThenOn);
+            drop(old.promote(3, b"old"));
+            let recovered = fs.crash(Crash::DropUnsynced);
+            drop(old);
+            let old = open_on(&recovered, false);
+            let began = old.history().entries().last().unwrap().term() == 3;
+            let marked = old.graph.storage().header().replication.replica;
+            if !(began && marked) {
+                continue;
+            }
+            cut_off += 1;
+            assert_eq!(old.role(), Role::Fenced, "{failing}");
+            old.promote(3, b"old").unwrap();
+            assert_eq!(old.role(), Role::Writer, "{failing}");
+            old.acknowledge(b"later", &heard_of(4)).unwrap();
+            let crashed = recovered.crash(Crash::KeepUnsynced);
+            drop(old);
+            assert_eq!(open_on(&crashed, false).role(), Role::Fenced, "{failing}");
+        }
+        assert!(cut_off > 0);
+    }
+
     #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);
@@ -578,6 +657,35 @@ mod crash {
         sync(&copy, &behind).unwrap();
         let error = sync(&writer, &behind).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Diverged);
+    }
+
+    #[test]
+    fn a_replica_refuses_a_graph_format_newer_than_it_reads_and_keeps_the_changes_before_it() {
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+        let writer = open_on(&SimFs::new(), false);
+        writer.promote(1, b"w").unwrap();
+        insert(&writer, 1);
+        let replica = open_on(&SimFs::new(), true);
+        sync(&writer, &replica).unwrap();
+        insert(&writer, 2);
+        let before_newer = writer.position();
+        let mut write = writer.graph.storage().begin_write().unwrap();
+        write
+            .put(Table::Metadata, b"format_version", &99u32.to_be_bytes())
+            .unwrap();
+        write.commit().unwrap();
+        insert(&writer, 3);
+        let changes = writer.changes_since(&replica.position(), 1 << 20).unwrap();
+        let error = replica.apply(&changes).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnsupportedFormatVersion);
+        assert_eq!(replica.position(), before_newer);
+        let rows = replica
+            .execute("MATCH (n:N) RETURN count(n)", &Parameters::new())
+            .unwrap();
+        assert_eq!(rows.rows(), [vec![Value::Integer(2)]]);
+        integrity(&replica);
     }
 
     fn rejoin(old: &Database, next: &Database) -> Result<(), crate::Error> {
@@ -701,6 +809,496 @@ mod crash {
                 db.promote(term + 1, b"w").unwrap();
                 insert(&db, 9);
                 integrity(&db);
+            }
+        }
+    }
+
+    mod pending {
+        use super::*;
+        use crate::engine::layout::TableId;
+        use crate::engine::wal_format::Body;
+        use crate::engine::wal_format::Op;
+        use crate::storage::ReadTransaction;
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+
+        const OLDER: u32 = 13;
+
+        fn store(db: &Database, key: &[u8], value: &[u8]) {
+            let mut write = db.graph.storage().begin_write().unwrap();
+            write.put(Table::Metadata, key, value).unwrap();
+            write.commit().unwrap();
+        }
+
+        fn stored(db: &Database, key: &[u8]) -> Option<Vec<u8>> {
+            db.graph
+                .storage()
+                .begin_read()
+                .unwrap()
+                .get(Table::Metadata, key)
+                .unwrap()
+        }
+
+        fn count(db: &Database) -> Result<Vec<Vec<Value>>, crate::Error> {
+            db.execute("MATCH (n:N) RETURN count(n)", &Parameters::new())
+                .map(|result| result.rows().to_vec())
+        }
+
+        fn search(db: &Database) -> Vec<Vec<Value>> {
+            db.execute(
+            "CALL db.index.keyword.queryNodes('text', 'river', 100) YIELD node RETURN id(node) ORDER BY id(node)",
+            &Parameters::new(),
+        )
+        .unwrap()
+        .rows()
+        .to_vec()
+        }
+
+        fn older_pair(keyword: bool) -> (SimFs, SimFs) {
+            let writer_fs = SimFs::new();
+            let replica_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            if keyword {
+                writer
+                    .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                    .unwrap();
+            }
+            for k in 0..6 {
+                writer
+                    .execute(
+                        "INSERT (:N {k: $k, text: 'a river runs'})",
+                        &Parameters::from([("k".to_owned(), Value::Integer(k))]),
+                    )
+                    .unwrap();
+            }
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            if keyword {
+                store(&writer, b"tokenizer", b"another tokenizer");
+            } else {
+                store(&writer, b"format_version", &OLDER.to_be_bytes());
+            }
+            sync(&writer, &replica).unwrap();
+            (writer_fs, replica_fs)
+        }
+
+        #[test]
+        fn a_replica_of_an_older_format_waits_for_its_writers_upgrade_and_then_serves_reads() {
+            let (writer_fs, replica_fs) = older_pair(false);
+            let replica = open_on(&replica_fs, false);
+            assert_eq!(replica.role(), Role::Replica);
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("format 13"), "{error}");
+            replica.check().unwrap();
+            assert_eq!(replica.history().entries().len(), 1);
+            let writer = open_on(&writer_fs, false);
+            assert_eq!(writer.role(), Role::Fenced);
+            assert_eq!(
+                count(&writer).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            let before = replica.position();
+            writer.promote(1, b"w").unwrap();
+            assert_eq!(count(&writer).unwrap(), [vec![Value::Integer(6)]]);
+            let upgrade = writer.changes_since(&before, 1 << 20).unwrap();
+            let version_puts: Vec<usize> = upgrade
+            .decoded
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, change)| match &change.record.body {
+                Body::Batch(ops) => ops.iter().any(|op| {
+                    matches!(op, Op::Put { table, key, .. }
+                        if *table == TableId::of(Table::Metadata) && key.as_slice() == b"format_version")
+                }),
+                _ => false,
+            })
+            .map(|(index, _)| index)
+            .collect();
+            assert_eq!(version_puts, [upgrade.decoded.records.len() - 1]);
+            insert(&writer, 7);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(7)]]);
+            assert_eq!(export(&replica), export(&writer));
+            integrity(&replica);
+        }
+
+        #[test]
+        fn a_new_replica_that_follows_a_writer_of_an_older_format_waits_without_a_restart() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            insert(&writer, 2);
+            let replica = open_on(&SimFs::new(), true);
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(0)]]);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            insert(&writer, 3);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            sync(&writer, &replica).unwrap();
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
+        }
+
+        fn apply_through(writer: &Database, replica: &Database, lsn: u64) {
+            while replica.position().lsn() < lsn {
+                let changes = writer.changes_since(&replica.position(), 1).unwrap();
+                replica.apply(&changes).unwrap();
+            }
+        }
+
+        const READER: u8 = 0;
+        const APPLIER: u8 = 1;
+        const DONE: u8 = u8::MAX;
+
+        type Event = (u8, u8);
+
+        struct Pauses {
+            roles: std::sync::Mutex<HashMap<std::thread::ThreadId, u8>>,
+            events: std::sync::Mutex<std::sync::mpsc::Sender<Event>>,
+            resumes: HashMap<u8, std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        }
+
+        fn pause(
+            db: &Database,
+        ) -> (
+            Arc<Pauses>,
+            std::sync::mpsc::Receiver<Event>,
+            HashMap<u8, std::sync::mpsc::Sender<()>>,
+        ) {
+            let (events, at) = std::sync::mpsc::channel();
+            let mut resumes = HashMap::new();
+            let mut resume = HashMap::new();
+            for role in [READER, APPLIER] {
+                let (send, receive) = std::sync::mpsc::channel();
+                resume.insert(role, send);
+                resumes.insert(role, std::sync::Mutex::new(receive));
+            }
+            let pauses = Arc::new(Pauses {
+                roles: std::sync::Mutex::new(HashMap::new()),
+                events: std::sync::Mutex::new(events),
+                resumes,
+            });
+            let hooked = Arc::clone(&pauses);
+            db.graph.hook_reads(Arc::new(move |point| {
+                let role = hooked
+                    .roles
+                    .lock()
+                    .unwrap()
+                    .get(&std::thread::current().id())
+                    .copied();
+                if let Some(role) = role {
+                    hooked.events.lock().unwrap().send((role, point)).unwrap();
+                    hooked.resumes[&role].lock().unwrap().recv().unwrap();
+                }
+            }));
+            (pauses, at, resume)
+        }
+
+        fn as_role(pauses: &Pauses, role: u8) {
+            pauses
+                .roles
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().id(), role);
+        }
+
+        fn finish(pauses: &Pauses, role: u8) {
+            pauses.events.lock().unwrap().send((role, DONE)).unwrap();
+        }
+
+        #[test]
+        fn a_read_that_begins_while_an_apply_marks_the_graph_pending_refuses_the_older_snapshot() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            let (pauses, at, resume) = pause(&replica);
+            let timeout = std::time::Duration::from_secs(10);
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let applier = scope.spawn(|| {
+                    as_role(&pauses, APPLIER);
+                    apply_through(&writer, &replica, older_at);
+                    finish(&pauses, APPLIER);
+                });
+                assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, 2));
+                let reader = scope.spawn(|| {
+                    as_role(&pauses, READER);
+                    let read = replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind());
+                    finish(&pauses, READER);
+                    read
+                });
+                match at.recv_timeout(timeout).unwrap() {
+                    (READER, 0) => {
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, 1));
+                        sync(&writer, &replica).unwrap();
+                        assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, DONE));
+                    }
+                    event => {
+                        assert_eq!(event, (READER, DONE));
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                    }
+                }
+                applier.join().unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began between the two steps of a wait and served format 13"
+                );
+            });
+        }
+
+        #[test]
+        fn a_read_that_spans_a_wait_and_its_end_refuses_the_older_snapshot_it_began() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            let reader_thread = Arc::new(std::sync::Mutex::new(None));
+            let (reached, at) = std::sync::mpsc::channel::<u8>();
+            let (resume, resumed) = std::sync::mpsc::channel::<()>();
+            let hook_state = (
+                Arc::clone(&reader_thread),
+                std::sync::Mutex::new(reached),
+                std::sync::Mutex::new(resumed),
+            );
+            replica.graph.hook_reads(Arc::new(move |point| {
+                let (thread, reached, resumed) = &hook_state;
+                if *thread.lock().unwrap() == Some(std::thread::current().id()) {
+                    reached.lock().unwrap().send(point).unwrap();
+                    resumed.lock().unwrap().recv().unwrap();
+                }
+            }));
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let reader = scope.spawn(|| {
+                    *reader_thread.lock().unwrap() = Some(std::thread::current().id());
+                    replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind())
+                });
+                assert_eq!(at.recv().unwrap(), 0);
+                apply_through(&writer, &replica, older_at);
+                resume.send(()).unwrap();
+                assert_eq!(at.recv().unwrap(), 1);
+                sync(&writer, &replica).unwrap();
+                assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                resume.send(()).unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began over format 13 and served it once the wait ended"
+                );
+            });
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn no_read_begins_over_an_older_format_that_an_apply_is_about_to_publish() {
+            let older = OLDER.to_be_bytes().to_vec();
+            let mut hits = 0;
+            for _ in 0..3000 {
+                let writer = open_on(&SimFs::new(), false);
+                writer.promote(1, b"w").unwrap();
+                insert(&writer, 1);
+                store(&writer, b"format_version", &older);
+                insert(&writer, 2);
+                let replica = open_on(&SimFs::new(), true);
+                let done = std::sync::atomic::AtomicBool::new(false);
+                std::thread::scope(|scope| {
+                    let reader = scope.spawn(|| {
+                        let mut seen = 0;
+                        while !done.load(std::sync::atomic::Ordering::Acquire) {
+                            if let Ok(read) = replica.graph.read()
+                                && read.stored_format_version().as_deref() == Some(older.as_slice())
+                            {
+                                seen += 1;
+                            }
+                        }
+                        seen
+                    });
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                    sync(&writer, &replica).unwrap();
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                    hits += reader.join().unwrap();
+                });
+            }
+            assert_eq!(hits, 0, "reads began over the older format");
+        }
+
+        #[test]
+        fn a_promoted_file_that_waited_keeps_its_property_index_whole_for_new_writes() {
+            let writer_fs = SimFs::new();
+            let replica_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_property_index("by_k", IndexTarget::Label("N"), "k")
+                .unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            sync(&writer, &replica).unwrap();
+            drop(writer);
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 2);
+            integrity(&writer);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            insert(&writer, 3);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            assert_eq!(export(&replica), export(&writer));
+        }
+
+        #[test]
+        fn a_new_replica_that_receives_another_tokenizer_waits_without_a_restart() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("tokenizer"), "{error}");
+        }
+
+        #[test]
+        fn a_replica_of_an_older_tokenizer_waits_for_the_rebuilt_keyword_indexes() {
+            let (writer_fs, replica_fs) = older_pair(true);
+            let replica = open_on(&replica_fs, false);
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("tokenizer"), "{error}");
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            sync(&writer, &replica).unwrap();
+            assert_eq!(search(&replica), search(&writer));
+            assert_eq!(search(&replica).len(), 6);
+            assert_eq!(
+                stored(&replica, b"tokenizer"),
+                stored(&writer, b"tokenizer")
+            );
+            integrity(&replica);
+        }
+
+        #[test]
+        fn a_snapshot_of_a_replica_waiting_for_an_upgrade_installs_waiting_and_holds_the_older_format()
+         {
+            let (_writer_fs, replica_fs) = older_pair(false);
+            let replica = open_on(&replica_fs, false);
+            let bytes = snapshot_bytes(&replica);
+            let installed = install_on(&SimFs::new(), &bytes).unwrap();
+            assert_eq!(
+                count(&installed).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            assert_eq!(
+                stored(&installed, b"format_version"),
+                Some(OLDER.to_be_bytes().to_vec())
+            );
+            installed.check().unwrap();
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn a_crash_at_any_write_of_the_apply_that_ends_the_wait_leaves_it_waiting_or_ended() {
+            let (writer_fs, replica_fs) = older_pair(true);
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 8);
+            let probe = replica_fs.crash(Crash::KeepUnsynced);
+            let replica = open_on(&probe, false);
+            let before = probe.operations();
+            sync(&writer, &replica).unwrap();
+            let operations = probe.operations() - before;
+            drop(replica);
+            for failing in 0..operations {
+                for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                    let fs = replica_fs.crash(Crash::KeepUnsynced);
+                    let replica = open_on(&fs, false);
+                    fs.fail_after(failing, Failure::FromThenOn);
+                    drop(sync(&writer, &replica));
+                    let recovered = fs.crash(crash);
+                    drop(replica);
+                    let replica = open_on(&recovered, false);
+                    match count(&replica) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending, "{failing}")
+                        }
+                    }
+                    sync(&writer, &replica).unwrap();
+                    assert_eq!(search(&replica), search(&writer), "{failing}");
+                    assert_eq!(export(&replica), export(&writer), "{failing}");
+                    integrity(&replica);
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn a_crash_at_any_write_of_a_promotion_that_upgrades_leaves_a_writer_that_finishes_it() {
+            let (writer_fs, _replica_fs) = older_pair(true);
+            let probe = writer_fs.crash(Crash::KeepUnsynced);
+            let writer = open_on(&probe, false);
+            let before = probe.operations();
+            writer.promote(1, b"w").unwrap();
+            let operations = probe.operations() - before;
+            let expected = search(&writer);
+            drop(writer);
+            for failing in 0..operations {
+                for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                    let fs = writer_fs.crash(Crash::KeepUnsynced);
+                    let writer = open_on(&fs, false);
+                    fs.fail_after(failing, Failure::FromThenOn);
+                    drop(writer.promote(1, b"w"));
+                    let recovered = fs.crash(crash);
+                    drop(writer);
+                    let writer = open_on(&recovered, false);
+                    assert_eq!(writer.role(), Role::Fenced, "{failing}");
+                    writer.promote(1, b"w").unwrap();
+                    assert_eq!(search(&writer), expected, "{failing}");
+                    insert(&writer, 9);
+                    integrity(&writer);
+                }
             }
         }
     }

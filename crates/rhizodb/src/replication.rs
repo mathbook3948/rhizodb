@@ -12,8 +12,13 @@ use crate::engine::epoch_at;
 use crate::engine::error::EngineError;
 use crate::engine::error::Failure;
 use crate::engine::layout::TableId;
+use crate::engine::wal_format::Body;
+use crate::engine::wal_format::Op;
 use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::GraphError;
+use crate::graph::newer_format_put;
+use crate::graph::older_format_put;
 use crate::storage::StorageError;
 use crate::storage::Table;
 
@@ -675,14 +680,29 @@ impl Database {
     /// It fails with [`ErrorKind::NotReplica`] on a writer or a fenced writer, with
     /// [`ErrorKind::Gap`] when the changes start after the last change held, with
     /// [`ErrorKind::Fenced`] when they come from a term older than the newest this database has
-    /// seen, and with [`ErrorKind::Diverged`] when this database holds other changes in their
-    /// place. A failure leaves every change before it applied.
+    /// seen, with [`ErrorKind::Diverged`] when this database holds other changes in their
+    /// place, and with [`ErrorKind::UnsupportedFormatVersion`] at a change that records a graph
+    /// format newer than this build reads. A failure leaves every change before it applied.
     pub fn apply(&self, changes: &Changes) -> Result<Position, Error> {
         let _roles = self.roles();
-        let indexes = changes.decoded.touches(TableId::of(Table::Indexes));
+        let unreadable = first_metadata_put(&changes.decoded, newer_format_put);
+        let readable = match unreadable {
+            Some((index, _)) => &Decoded {
+                records: changes.decoded.records[..index].to_vec(),
+                ..changes.decoded.clone()
+            },
+            None => &changes.decoded,
+        };
+        if let Some(found) = first_metadata_put(readable, older_format_put) {
+            self.graph.wait_for_upgrade(found.1);
+        }
+        let indexes = readable.touches(TableId::of(Table::Indexes));
         self.graph
-            .apply_outside(indexes, |engine| engine.apply_changes(&changes.decoded))?
+            .apply_outside(indexes, |engine| engine.apply_changes(readable))?
             .map_err(engine_error)?;
+        if let Some((_, version)) = unreadable {
+            return Err(Error::from(GraphError::UnsupportedFormatVersion(version)));
+        }
         Ok(self.position())
     }
 
@@ -711,6 +731,7 @@ impl Database {
             .maintain(|engine| engine.promote(term, writer_id))?
             .map_err(engine_error)?;
         self.graph.set_replica(false);
+        self.graph.finish_pending_upgrade(true)?;
         self.graph.record_format_if_missing()?;
         Ok(self.position())
     }
@@ -843,6 +864,27 @@ pub(crate) fn check_epoch(term: u64, writer_id: &[u8]) -> Result<(), Error> {
             ),
         ))
     }
+}
+
+fn first_metadata_put(
+    decoded: &Decoded,
+    matches: fn(&[u8], &[u8]) -> Option<u32>,
+) -> Option<(usize, u32)> {
+    let metadata = TableId::of(Table::Metadata);
+    decoded
+        .records
+        .iter()
+        .enumerate()
+        .find_map(|(index, change)| match &change.record.body {
+            Body::Batch(ops) => ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::Put { table, key, value } if *table == metadata => matches(key, value),
+                    _ => None,
+                })
+                .map(|version| (index, version)),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
