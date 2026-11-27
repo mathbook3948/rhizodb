@@ -469,3 +469,104 @@ fn an_order_by_with_a_limit_raises_an_error_of_its_last_row() {
         assert_eq!(streamed, in_turn, "{text}");
     }
 }
+
+#[test]
+fn a_limit_stops_early_on_arithmetic_that_cannot_fail() {
+    let db = chain(500);
+    for (text, most) in [
+        (
+            "MATCH (a)-[:R]->(b) UNWIND range(1, 2) AS i WITH a, i WHERE i % 2 = 1 \
+             RETURN a.k, i LIMIT 3",
+            3,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) UNWIND [1, -2, null] AS i \
+             RETURN i ^ 2, i * 1.5, i / 2, i / 2.0, i % -3, +i, -(i * 1.0), i - 0.5, $f * i, i % $n \
+             LIMIT 3",
+            1,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WITH count(*) AS c MATCH (x)-[:R]->(y) WHERE c % 2 = 0 \
+             RETURN y.k LIMIT 2",
+            503,
+        ),
+    ] {
+        let parameters = Parameters::new().with("f", 0.5).with("n", 7);
+        let (in_turn, all) = counted(true, || db.execute(text, &parameters));
+        let (streamed, read) = counted(false, || db.execute(text, &parameters));
+        assert_eq!(streamed, in_turn, "{text}");
+        assert!(
+            read <= most,
+            "{text} produced {read} matches, more than {most}"
+        );
+        assert!(all > 400, "{text} produced only {all} matches in turn");
+    }
+}
+
+#[test]
+fn arithmetic_that_could_fail_on_a_later_row_raises_its_error_under_a_limit() {
+    let db = chain(500);
+    db.execute(
+        "MATCH (n:N) SET n.s = CASE n.k WHEN 450 THEN 'x' ELSE n.k END",
+        &none(),
+    )
+    .unwrap();
+    let grouped = "MATCH (a)-[:R]->(b) UNWIND range(coalesce(b.m, b.k), coalesce(b.m, b.k)) AS i \
+                   WITH i, b.s AS s, count(*) AS c";
+    for (late, expr, error) in [
+        (i64::MIN, "i / -1", ErrorKind::IntegerOverflow),
+        (i64::MIN, "-i", ErrorKind::IntegerOverflow),
+        (i64::MIN, "i - 1", ErrorKind::IntegerOverflow),
+        (i64::MAX, "i + 1", ErrorKind::IntegerOverflow),
+        (1 << 62, "i * 2", ErrorKind::IntegerOverflow),
+        (1 << 62, "2 * i", ErrorKind::IntegerOverflow),
+        (0, "7 % i", ErrorKind::DivisionByZero),
+        (0, "7 / i", ErrorKind::DivisionByZero),
+        (0, "s % 7", ErrorKind::TypeMismatch),
+        (0, "i - s", ErrorKind::TypeMismatch),
+    ] {
+        db.execute(
+            "MATCH (n:N {k: 450}) SET n.m = $late",
+            &Parameters::new().with("late", late),
+        )
+        .unwrap();
+        for text in [
+            format!("{grouped} RETURN {expr} AS q LIMIT 3"),
+            format!("{grouped} WITH i, s WHERE {expr} <> 3 RETURN i LIMIT 3"),
+            format!("{grouped} WITH i, s ORDER BY c, i DESC LIMIT 1000 RETURN {expr} AS q LIMIT 3"),
+        ] {
+            let (in_turn, _) = counted(true, || db.execute(&text, &none()));
+            let (streamed, _) = counted(false, || db.execute(&text, &none()));
+            assert_eq!(in_turn, Err(error), "{text} with {late}");
+            assert_eq!(streamed, in_turn, "{text} with {late}");
+        }
+    }
+    let text = format!("{grouped} RETURN i % $zero AS q LIMIT 3");
+    let parameters = Parameters::new().with("zero", 0);
+    assert_eq!(
+        counted(false, || db.execute(&text, &parameters)).0,
+        Err(ErrorKind::DivisionByZero)
+    );
+}
+
+#[test]
+fn arithmetic_with_a_fixed_operand_that_fails_raises_its_error_under_a_limit() {
+    let db = chain(500);
+    let parameters = Parameters::new().with("zero", 0).with("text", "x");
+    for (expr, error) in [
+        ("j % 0", ErrorKind::DivisionByZero),
+        ("j / 0", ErrorKind::DivisionByZero),
+        ("j % $zero", ErrorKind::DivisionByZero),
+        ("j / -0", ErrorKind::DivisionByZero),
+        ("j - 'x'", ErrorKind::TypeMismatch),
+        ("j * $text", ErrorKind::TypeMismatch),
+        ("'x' % j", ErrorKind::TypeMismatch),
+        ("-j - 'x'", ErrorKind::TypeMismatch),
+    ] {
+        let text = format!("MATCH (a)-[:R]->(b) UNWIND [null, 1] AS j RETURN {expr} AS q LIMIT 1");
+        let (in_turn, _) = counted(true, || db.execute(&text, &parameters));
+        let (streamed, _) = counted(false, || db.execute(&text, &parameters));
+        assert_eq!(in_turn, Err(error), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
+}

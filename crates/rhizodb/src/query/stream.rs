@@ -702,6 +702,24 @@ pub(crate) fn sort_row<'c, T: ReadTransaction>(
     sorted.offer(&projection.order_by, row);
 }
 
+/// The kind of number an expression gives on every row, or null.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Number {
+    Integer,
+    /// A float, or null alone, since no arithmetic on either fails.
+    Float,
+}
+
+impl Number {
+    fn of(value: &Datum) -> Option<Self> {
+        match value {
+            Datum::Integer(_) => Some(Self::Integer),
+            Datum::Float(_) | Datum::Null => Some(Self::Float),
+            _ => None,
+        }
+    }
+}
+
 /// What the plan and the parameters prove about which expressions cannot fail.
 pub(crate) struct Sure<'q, 'e, T: ReadTransaction> {
     env: &'q Env<'e, T>,
@@ -785,7 +803,70 @@ impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
         match expr {
             Expr::Constant(_) | Expr::Parameter(_) | Expr::Slot(_) => true,
             Expr::Property(base, _) => self.element(base) || self.map_like(base),
+            Expr::Binary(
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Modulo
+                | BinaryOp::Power,
+                _,
+                _,
+            )
+            | Expr::Negate(_)
+            | Expr::UnaryPlus(_) => self.number(expr).is_some(),
             _ => self.condition(expr, fixed_fails),
+        }
+    }
+
+    /// The kind of number `expr` gives on every row, when it cannot fail and gives a number of
+    /// one kind or null. Integer arithmetic fails where it overflows or divides by zero, so it qualifies
+    /// only where neither can happen whatever the integers.
+    pub(crate) fn number(&self, expr: &Expr) -> Option<Number> {
+        match expr {
+            Expr::Constant(value) => Number::of(value),
+            Expr::Parameter(index) => Number::of(self.env.parameters.get(*index)?),
+            Expr::Slot(slot) => {
+                (self.env.holds.get(*slot) == Some(&Holds::Integer)).then_some(Number::Integer)
+            }
+            Expr::UnaryPlus(operand) => self.number(operand),
+            Expr::Negate(operand) => match self.number(operand)? {
+                Number::Float => Some(Number::Float),
+                Number::Integer => self.integer(expr).map(|_| Number::Integer),
+            },
+            Expr::Binary(op, lhs, rhs) => {
+                let (left, right) = (self.number(lhs)?, self.number(rhs)?);
+                let float = left == Number::Float || right == Number::Float;
+                match op {
+                    BinaryOp::Power => Some(Number::Float),
+                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply if float => {
+                        Some(Number::Float)
+                    }
+                    BinaryOp::Divide | BinaryOp::Modulo if float => Some(Number::Float),
+                    BinaryOp::Divide | BinaryOp::Modulo => {
+                        let divisor = self.integer(rhs)?;
+                        let fails = divisor == 0 || (*op == BinaryOp::Divide && divisor == -1);
+                        (!fails).then_some(left)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The integer `expr` gives on every row, when it is a literal or a parameter, maybe
+    /// negated, that is an integer.
+    pub(crate) fn integer(&self, expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Constant(Datum::Integer(value)) => Some(*value),
+            Expr::Parameter(index) => match self.env.parameters.get(*index)? {
+                Datum::Integer(value) => Some(*value),
+                _ => None,
+            },
+            Expr::UnaryPlus(operand) => self.integer(operand),
+            Expr::Negate(operand) => self.integer(operand)?.checked_neg(),
+            _ => None,
         }
     }
 
@@ -928,6 +1009,12 @@ impl Bindings {
                     Expr::Constant(Datum::List(items)) => items
                         .iter()
                         .all(|item| matches!(item, Datum::Integer(_) | Datum::Null)),
+                    Expr::List(items) => items.iter().all(|item| match item {
+                        Expr::Negate(operand) => {
+                            matches!(**operand, Expr::Constant(Datum::Integer(_)))
+                        }
+                        _ => matches!(item, Expr::Constant(Datum::Integer(_) | Datum::Null)),
+                    }),
                     _ => false,
                 };
                 if integers {
