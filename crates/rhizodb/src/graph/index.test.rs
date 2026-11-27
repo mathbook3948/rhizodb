@@ -1200,6 +1200,43 @@ fn a_phrase_misses_a_word_its_transaction_removed_from_a_committed_text() {
 }
 
 #[test]
+fn a_word_its_transaction_removed_from_a_committed_text_is_not_found() {
+    for after in [Some("blue blue"), None] {
+        let graph = Graph::open(test_engine::in_memory()).unwrap();
+        let mut write = graph.write().unwrap();
+        create_indexes(&mut write);
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        let node = write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(
+                    text,
+                    PropertyValue::String("red blue".to_owned()),
+                )]),
+            })
+            .unwrap();
+        write.commit().unwrap();
+        let mut write = graph.write().unwrap();
+        match after {
+            Some(words) => write
+                .set_node_property(node, text, PropertyValue::String(words.to_owned()))
+                .unwrap(),
+            None => write.remove_node_property(node, text).unwrap(),
+        }
+        for query in ["red", "\"red blue\""] {
+            assert_eq!(
+                write
+                    .keyword_search("words", ElementKind::Node, query, 10)
+                    .unwrap(),
+                vec![],
+                "{query} after the text became {after:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_phrase_counts_the_blocks_its_transaction_wrote_when_it_picks_the_rarest_word() {
     let posting_gets = Rc::new(Cell::new(0));
     let graph = Graph::open(CountingStorage {
