@@ -275,9 +275,22 @@ them and decides which node writes.
 - [`Database::promote`] makes a node the writer of a term the host chose, higher than every term
   before it. [`Database::demote`] stops a writer and returns its final position, which the next
   writer applies before it promotes, so a planned handover loses no write.
-- Changes of an older term fail with [`ErrorKind::Fenced`]. Two databases with other changes at
-  one place fail with [`ErrorKind::Diverged`], and the host keeps only the side of the node that
-  holds its lease.
+- A writer reopens fenced after every restart, as [`Database::role`] reports, and refuses writes
+  until the host promotes it again with its own newest term and writer id, which writes nothing.
+- Changes of an older term fail with [`ErrorKind::Fenced`], and changes of an unrelated database
+  fail with [`ErrorKind::DifferentDatabase`]. Two databases with other changes at one place fail
+  with [`ErrorKind::Diverged`], and the host keeps only the side of the node that holds its lease.
+  [`Database::compare_lineage`] tells the same from the [`History`] of another node, and
+  [`Error::replication_failure`] gives the positions behind each of these errors.
+- A new replica, or one that fails with [`ErrorKind::TooFarBehind`] or
+  [`ErrorKind::Diverged`], installs a copy of another node. [`Database::snapshot`] pins one, the
+  host streams its bytes with [`Snapshot::read_at`], and [`Database::install_snapshot`] writes
+  them to a file and opens it as a replica, which then follows the log from
+  [`Snapshot::position`].
+- Checkpoints remove the log a node no longer needs for itself. The host passes each peer's
+  position to [`Database::acknowledge`], and the node then keeps the log after it, up to
+  [`OpenOptions::max_retained_bytes`], so a peer that falls behind or restarts catches up from
+  the log instead of a snapshot.
 
 The host routes every write to the current writer and keeps data that belongs to one node in a
 database file of its own. Replication is asynchronous, so a write that no replica applied yet can
