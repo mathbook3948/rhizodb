@@ -1359,7 +1359,7 @@ pub(crate) fn comparison(op: ComparisonOp, left: &Datum, right: &Datum) -> Optio
     }
 }
 
-fn binary(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
+pub(crate) fn binary(limits: Limits, op: BinaryOp, lhs: Datum, rhs: Datum) -> Result<Datum, Error> {
     match op {
         BinaryOp::And => Ok(from_truth(and(truth(&lhs)?, truth(&rhs)?))),
         BinaryOp::Or => Ok(from_truth(or(truth(&lhs)?, truth(&rhs)?))),
