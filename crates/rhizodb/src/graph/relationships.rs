@@ -5,7 +5,7 @@ use crate::value::put_varint;
 use super::GraphError;
 use super::ids::RelationshipId;
 
-const CHUNK_SHIFT: u32 = 5;
+pub(crate) const CHUNK_SHIFT: u32 = 5;
 /// How many consecutive relationship IDs one chunk covers.
 pub(crate) const CHUNK_SLOTS: usize = 1 << CHUNK_SHIFT;
 const LAYOUT_VERSION: u8 = 1;

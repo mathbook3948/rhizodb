@@ -42,6 +42,7 @@ mod properties;
 mod records;
 mod relationships;
 mod tokenize;
+mod upgrade;
 mod value_key;
 
 pub(crate) use adjacency::AdjacencyReader;
@@ -97,6 +98,9 @@ use meta::Part;
 use meta::Slot;
 use relationships::ChunkEdit;
 use relationships::ChunkRef;
+use upgrade::UPGRADE_BATCH_BYTES;
+use upgrade::UpgradeBudget;
+use upgrade::UpgradeStep;
 
 const FORMAT_VERSION: u32 = 14;
 
@@ -107,22 +111,35 @@ pub(crate) fn newer_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
         return None;
     }
     let version = u32::from_be_bytes(value.try_into().ok()?);
-    (version > FORMAT_VERSION).then_some(version)
+    (version & UPGRADING == 0 && version > FORMAT_VERSION).then_some(version)
 }
 
 /// The graph format a write of `value` under `key` of the metadata table leaves for its writer
-/// to upgrade: an older format version, or this build's for another tokenizer.
+/// to upgrade: an older format version, an upgrade still under way, or this build's for another
+/// tokenizer.
 pub(crate) fn older_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
     if key == keys::FORMAT_VERSION_KEY {
         let version = u32::from_be_bytes(value.try_into().ok()?);
+        if version & UPGRADING != 0 {
+            return Some(version & !UPGRADING);
+        }
         return (version < FORMAT_VERSION).then_some(version);
     }
     (key == keys::TOKENIZER_KEY && value != tokenize::fingerprint().as_slice())
         .then_some(FORMAT_VERSION)
 }
+
+const UPGRADING: u32 = 1 << 31;
 const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
+const UPGRADE_STEPS: [(u32, UpgradeStep); 2] = [
+    (
+        RELATIONSHIP_CHUNKS_FORMAT_VERSION,
+        UpgradeStep::RelationshipChunks,
+    ),
+    (POSTING_BLOCKS_FORMAT_VERSION, UpgradeStep::PostingBlocks),
+];
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
 const ENTRIES_OUT_OF_ORDER: GraphError =
     GraphError::Corrupt("the adjacency entries of a segment are out of order");
@@ -331,7 +348,7 @@ impl<S: Storage> Graph<S> {
         if access == Access::ReadOnly {
             let tx = GraphTx::bare(storage.begin_read()?);
             let found = Self::stored_format(&tx)?;
-            if found.is_some_and(|found| found != FORMAT_VERSION) {
+            if found.is_some_and(|(found, upgrading)| upgrading || found != FORMAT_VERSION) {
                 return Err(GraphError::ReadOnly(
                     "upgrade a database written in an older format",
                 ));
@@ -374,23 +391,22 @@ impl<S: Storage> Graph<S> {
         })
     }
 
-    fn stored_format(tx: &GraphTx<impl ReadTransaction>) -> Result<Option<u32>, GraphError> {
+    fn stored_format(
+        tx: &GraphTx<impl ReadTransaction>,
+    ) -> Result<Option<(u32, bool)>, GraphError> {
         let found = match tx
             .transaction
             .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
         {
-            None => None,
-            Some(bytes) => Some(decode_u32(&bytes)?),
+            None => return Ok(None),
+            Some(bytes) => decode_u32(&bytes)?,
         };
-        match found {
-            Some(found)
-                if found != FORMAT_VERSION
-                    && !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) =>
-            {
-                Err(GraphError::UnsupportedFormatVersion(found))
-            }
-            found => Ok(found),
+        let (version, upgrading) = (found & !UPGRADING, found & UPGRADING != 0);
+        if version != FORMAT_VERSION && !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&version)
+        {
+            return Err(GraphError::UnsupportedFormatVersion(found));
         }
+        Ok(Some((version, upgrading)))
     }
 
     fn pending_format(storage: &S) -> Result<Option<u32>, GraphError> {
@@ -398,41 +414,105 @@ impl<S: Storage> Graph<S> {
     }
 
     fn pending_in(tx: &GraphTx<impl ReadTransaction>) -> Result<Option<u32>, GraphError> {
-        let Some(found) = Self::stored_format(tx)? else {
+        let Some((found, upgrading)) = Self::stored_format(tx)? else {
             return Ok(None);
         };
-        Ok((found != FORMAT_VERSION || !tx.tokenizer_is_current()?).then_some(found))
+        Ok((upgrading || found != FORMAT_VERSION || !tx.tokenizer_is_current()?).then_some(found))
     }
 
     fn upgrade(storage: &S) -> Result<(), GraphError> {
-        let rewrote = {
-            let mut tx = GraphTx::bare(storage.begin_write()?);
-            let found = Self::stored_format(&tx)?;
-            let upgrade = found != Some(FORMAT_VERSION);
-            if let Some(found) = found
-                && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
-            {
-                tx.move_relationships_to_chunks()?;
-            }
-            if found.is_some_and(|found| found < POSTING_BLOCKS_FORMAT_VERSION) {
-                tx.move_postings_to_blocks()?;
-            }
-            let changed = tx.adopt_current_tokenizer()?;
-            if upgrade {
+        let (from, plan, mut at) = {
+            let tx = GraphTx::bare(storage.begin_read()?);
+            let Some((from, upgrading)) = Self::stored_format(&tx)? else {
+                drop(tx);
+                let mut tx = GraphTx::bare(storage.begin_write()?);
                 tx.transaction.put(
                     Table::Metadata,
                     keys::FORMAT_VERSION_KEY,
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
+                tx.record_current_tokenizer()?;
+                return tx.commit();
+            };
+            let tokenizer = !tx.tokenizer_is_current()?;
+            if !upgrading && from == FORMAT_VERSION && !tokenizer {
+                return Ok(());
             }
-            if changed || upgrade {
-                tx.commit()?;
-            }
-            found.is_some() && (changed || upgrade)
+            let plan: Vec<UpgradeStep> = UPGRADE_STEPS
+                .iter()
+                .filter(|(below, _)| from < *below)
+                .map(|(_, step)| *step)
+                .chain(tokenizer.then_some(UpgradeStep::Tokenizer))
+                .collect();
+            let at = match tx
+                .transaction
+                .get(Table::Metadata, keys::UPGRADE_PROGRESS_KEY)?
+            {
+                Some(progress) if upgrading => {
+                    let (target, rest) = progress
+                        .split_first_chunk::<4>()
+                        .ok_or(GraphError::Corrupt("an upgrade's progress names no target"))?;
+                    let target = u32::from_be_bytes(*target);
+                    if target > FORMAT_VERSION {
+                        return Err(GraphError::UnsupportedFormatVersion(target));
+                    }
+                    let (code, cursor) = rest
+                        .split_first()
+                        .ok_or(GraphError::Corrupt("an upgrade's progress names no step"))?;
+                    let index = UpgradeStep::of_code(*code)
+                        .and_then(|step| plan.iter().position(|planned| *planned == step))
+                        .ok_or(GraphError::Corrupt(
+                            "an upgrade's progress names no planned step",
+                        ))?;
+                    (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec()))
+                }
+                _ => (0, None),
+            };
+            (from, plan, at)
         };
-        if rewrote {
-            storage.checkpoint()?;
+        loop {
+            let mut tx = GraphTx::bare(storage.begin_write()?);
+            let mut budget = UpgradeBudget::new(UPGRADE_BATCH_BYTES);
+            let next = match plan.get(at.0) {
+                Some(step) => tx.run_upgrade_step(*step, at.1.as_deref(), &mut budget)?,
+                None => None,
+            };
+            at = match next {
+                Some(cursor) => (at.0, Some(cursor)),
+                None => (at.0 + 1, None),
+            };
+            match plan.get(at.0) {
+                Some(step) => {
+                    let mut progress = FORMAT_VERSION.to_be_bytes().to_vec();
+                    progress.push(step.code());
+                    if let Some(cursor) = &at.1 {
+                        progress.push(1);
+                        progress.extend_from_slice(cursor);
+                    }
+                    tx.transaction
+                        .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)?;
+                    tx.transaction.put(
+                        Table::Metadata,
+                        keys::FORMAT_VERSION_KEY,
+                        &(from | UPGRADING).to_be_bytes(),
+                    )?;
+                    tx.commit()?;
+                }
+                None => {
+                    tx.transaction
+                        .delete(Table::Metadata, keys::UPGRADE_PROGRESS_KEY)?;
+                    tx.record_current_tokenizer()?;
+                    tx.transaction.put(
+                        Table::Metadata,
+                        keys::FORMAT_VERSION_KEY,
+                        &FORMAT_VERSION.to_be_bytes(),
+                    )?;
+                    tx.commit()?;
+                    break;
+                }
+            }
         }
+        storage.checkpoint()?;
         Ok(())
     }
 
@@ -587,7 +667,7 @@ impl<S: Storage> Graph<S> {
             keys::FORMAT_VERSION_KEY,
             &FORMAT_VERSION.to_be_bytes(),
         )?;
-        tx.adopt_current_tokenizer()?;
+        tx.record_current_tokenizer()?;
         tx.commit()
     }
 
@@ -1876,44 +1956,61 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    fn move_relationships_to_chunks(&mut self) -> Result<(), GraphError> {
-        const BATCH_SHIFT: u32 = 16;
-        let mut batches = BTreeSet::new();
-        self.transaction
-            .visit_prefix(Table::Relationships, &[], |key, _| {
-                batches.insert(decode_u64(key)? >> BATCH_SHIFT);
-                Ok::<(), GraphError>(())
-            })?;
-        for batch in batches {
-            let start = keys::element_key(batch << BATCH_SHIFT);
-            let end = batch
-                .checked_add(1)
-                .and_then(|next| next.checked_mul(1 << BATCH_SHIFT))
-                .map_or([0xff; 9].to_vec(), |next| keys::element_key(next).to_vec());
-            let mut chunks: BTreeMap<u64, ChunkEdit> = BTreeMap::new();
-            self.transaction
-                .visit_range(Table::Relationships, &start, &end, |key, value| {
-                    let record = RelationshipRecord::decode(value)?;
-                    let (chunk, slot) = relationships::locate(RelationshipId(decode_u64(key)?));
-                    chunks
-                        .entry(chunk)
-                        .or_default()
-                        .set(slot, Some(&record.encode()));
-                    Ok::<(), GraphError>(())
-                })?;
-            for (chunk, edit) in chunks {
-                if let Some(bytes) = edit.encode() {
-                    self.transaction.put(
-                        Table::RelationshipChunks,
-                        &relationships::chunk_key(chunk),
-                        &bytes,
-                    )?;
-                }
-            }
-            self.transaction
-                .delete_range(Table::Relationships, &start, &end)?;
+    fn run_upgrade_step(
+        &mut self,
+        step: UpgradeStep,
+        cursor: Option<&[u8]>,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        match step {
+            UpgradeStep::RelationshipChunks => self.move_relationships_to_chunks_from(budget),
+            UpgradeStep::PostingBlocks => self.move_postings_to_blocks_from(cursor, budget),
+            UpgradeStep::Tokenizer => self.rebuild_keyword_indexes_from(cursor, budget),
         }
-        Ok(())
+    }
+
+    fn move_relationships_to_chunks_from(
+        &mut self,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        let mut chunks: BTreeMap<u64, ChunkEdit> = BTreeMap::new();
+        let mut next = None;
+        let complete = upgrade::finished(self.transaction.visit_prefix(
+            Table::Relationships,
+            &[],
+            |key, value| {
+                let (chunk, slot) = relationships::locate(RelationshipId(decode_u64(key)?));
+                if budget.full() && !chunks.contains_key(&chunk) {
+                    next = Some(chunk);
+                    return Err(upgrade::Scan::Full);
+                }
+                budget.spend(key.len() + value.len());
+                let record = RelationshipRecord::decode(value)?;
+                chunks
+                    .entry(chunk)
+                    .or_default()
+                    .set(slot, Some(&record.encode()));
+                Ok(())
+            },
+        ))?;
+        let Some(last) = chunks.keys().next_back().copied() else {
+            return Ok(None);
+        };
+        for (chunk, edit) in chunks {
+            if let Some(bytes) = edit.encode() {
+                self.transaction.put(
+                    Table::RelationshipChunks,
+                    &relationships::chunk_key(chunk),
+                    &bytes,
+                )?;
+            }
+        }
+        let end = last.checked_add(1).map_or([0xff; 9].to_vec(), |after| {
+            keys::element_key(relationships::relationship_at(after, 0).0).to_vec()
+        });
+        self.transaction
+            .delete_range(Table::Relationships, &[], &end)?;
+        Ok((!complete).then(|| next.map_or_else(Vec::new, |chunk| chunk.to_be_bytes().to_vec())))
     }
 
     fn meta_edit(&mut self, group: u64) -> Result<&mut GroupEdit, GraphError> {
@@ -2344,6 +2441,11 @@ impl<T: WriteTransaction> GraphTx<T> {
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::counted;
+
+#[cfg(test)]
+pub(crate) use tests::store_as_format_eleven;
+#[cfg(test)]
+pub(crate) use upgrade::UPGRADE_BATCH_BYTES as TEST_UPGRADE_BATCH_BYTES;
 
 #[cfg(test)]
 #[path = "graph/crash.test.rs"]

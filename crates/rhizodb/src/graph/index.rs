@@ -30,10 +30,15 @@ use super::postings;
 use super::postings::Block;
 use super::postings::Entries;
 use super::postings::Posting;
+use super::relationships;
+use super::relationships::ChunkRef;
 use super::tokenize;
 use super::tokenize::Clause;
 use super::tokenize::Purpose;
 use super::tokenize::Term;
+use super::upgrade::Scan;
+use super::upgrade::UpgradeBudget;
+use super::upgrade::finished;
 use super::value_key;
 use super::value_key::KeyRange;
 
@@ -57,6 +62,10 @@ const KIND_PROPERTY: u8 = 2;
 const METRIC_COSINE: u8 = 0;
 const METRIC_EUCLIDEAN: u8 = 1;
 const METRIC_DOT_PRODUCT: u8 = 2;
+
+const SCAN_BYTES: usize = 64;
+const DELETE_BYTES: usize = 16;
+const TOTALS_ROW_BYTES: usize = 32;
 
 /// The tables that hold index entries, each keyed first by index ID.
 pub(crate) const ENTRY_TABLES: [Table; 5] = [
@@ -1291,55 +1300,230 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
-    /// Records the current tokenizer, first rebuilding every keyword index from the elements it
-    /// covers when the stored entries came from another tokenizer. Returns whether anything was
-    /// written.
-    pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
-        if self.tokenizer_is_current()? {
-            return Ok(false);
-        }
-        for (_, index) in self.indexes()? {
-            if !matches!(index.definition.kind, IndexKind::Keyword { .. }) {
-                continue;
-            }
-            self.clear(&index)?;
-            self.fill(&index)?;
-        }
-        self.transaction.put(
+    /// Records this build's tokenizer as the one the keyword indexes follow.
+    pub(crate) fn record_current_tokenizer(&mut self) -> Result<(), GraphError> {
+        Ok(self.transaction.put(
             Table::Metadata,
             keys::TOKENIZER_KEY,
             &tokenize::fingerprint(),
-        )?;
-        Ok(true)
+        )?)
+    }
+
+    fn keyword_indexes(&self) -> Result<Vec<Index>, GraphError> {
+        let mut keyword: Vec<Index> = self
+            .indexes()?
+            .into_iter()
+            .map(|(_, index)| index)
+            .filter(|index| matches!(index.definition.kind, IndexKind::Keyword { .. }))
+            .collect();
+        keyword.sort_by_key(|index| index.id);
+        Ok(keyword)
+    }
+
+    /// Rebuilds the keyword indexes for this build's tokenizer from `cursor` on, until `budget`
+    /// is full. Returns where the next commit resumes, or `None` once every keyword index is
+    /// rebuilt. The upgrade records the tokenizer after the last step.
+    pub(crate) fn rebuild_keyword_indexes_from(
+        &mut self,
+        cursor: Option<&[u8]>,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        let keyword = self.keyword_indexes()?;
+        let (mut id, mut filling, mut at) = match cursor {
+            Some(cursor) => {
+                let mut reader = Reader::new(cursor);
+                let parsed = (reader.u32()?, reader.u8()? == 1, reader.u64()?);
+                reader.finish()?;
+                parsed
+            }
+            None => (0, false, 0),
+        };
+        let resume = |id: u32, filling: bool, at: u64| {
+            let mut out = id.to_be_bytes().to_vec();
+            out.push(u8::from(filling));
+            out.extend_from_slice(&at.to_be_bytes());
+            Some(out)
+        };
+        loop {
+            let Some(index) = keyword.iter().find(|index| index.id >= id) else {
+                return Ok(None);
+            };
+            if index.id != id {
+                (id, filling, at) = (index.id, false, 0);
+            }
+            if !filling {
+                if !self.clear_from(index, budget)? {
+                    return Ok(resume(id, false, 0));
+                }
+                self.transaction.put(
+                    Table::KeywordTotals,
+                    &keys::index_prefix(index.id),
+                    &encode_totals(0, 0),
+                )?;
+                budget.spend(64);
+                (filling, at) = (true, 0);
+                if budget.full() {
+                    return Ok(resume(id, filling, at));
+                }
+            }
+            match self.fill_from(index, at, budget)? {
+                Some(next) => return Ok(resume(id, true, next)),
+                None => match id.checked_add(1) {
+                    Some(next) => (id, filling, at) = (next, false, 0),
+                    None => return Ok(None),
+                },
+            }
+            if budget.full() {
+                return Ok(resume(id, filling, at));
+            }
+        }
+    }
+
+    fn fill_from(
+        &mut self,
+        index: &Index,
+        at: u64,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<u64>, GraphError> {
+        const WINDOW: u64 = 64;
+        let mut at = at;
+        loop {
+            let (elements, next) = match index.definition.target {
+                Target::Label(label) => {
+                    let (group, _) = meta::locate(NodeId(at));
+                    match self.node_group(group, Some(label))? {
+                        Some((group, ids)) => (
+                            ids.iter().map(|id| id.0).filter(|id| *id >= at).collect(),
+                            meta::first_node(group + 1).0,
+                        ),
+                        None => return Ok(None),
+                    }
+                }
+                Target::RelationshipType(covered) => {
+                    let last = match self
+                        .transaction
+                        .get(Table::Metadata, keys::NEXT_RELATIONSHIP_ID_KEY)?
+                    {
+                        Some(bytes) => super::decode_u64(&bytes)?,
+                        None => 0,
+                    };
+                    if at > last {
+                        return Ok(None);
+                    }
+                    let (chunk, _) = relationships::locate(RelationshipId(at));
+                    let end = chunk.saturating_add(WINDOW);
+                    let mut ids = Vec::new();
+                    self.transaction.visit_range(
+                        Table::RelationshipChunks,
+                        &relationships::chunk_key(chunk),
+                        &relationships::chunk_key(end),
+                        |key, value| {
+                            let chunk = relationships::parse_key(key)?;
+                            for entry in ChunkRef::parse(value)?.entries() {
+                                let (slot, record) = entry?;
+                                let id = relationships::relationship_at(chunk, slot).0;
+                                if id >= at
+                                    && RelationshipRecord::decode(record)?.rel_type == covered
+                                {
+                                    ids.push(id);
+                                }
+                            }
+                            Ok::<(), GraphError>(())
+                        },
+                    )?;
+                    (ids, relationships::relationship_at(end, 0).0)
+                }
+            };
+            for element in elements {
+                let entry = self.with_reader(|tx, reader| {
+                    tx.covered_entry(reader, &index.definition, element)
+                })?;
+                let staged = match entry {
+                    Some(entry) => self.insert_entry(index, element, &entry)?,
+                    None => 0,
+                };
+                budget.spend(SCAN_BYTES.saturating_add(staged));
+                if budget.full() {
+                    return Ok(Some(element + 1));
+                }
+            }
+            at = next;
+        }
     }
 
     /// Rewrites the postings stored before format version 14, one row per term and element, as
-    /// posting blocks, keeping each posting's frequency, term count, and positions.
-    pub(crate) fn move_postings_to_blocks(&mut self) -> Result<(), GraphError> {
-        for (_, index) in self.indexes()? {
-            if !matches!(index.definition.kind, IndexKind::Keyword { .. }) {
-                continue;
-            }
-            let prefix = keys::index_prefix(index.id);
-            let rows = self
-                .transaction
-                .scan_prefix(Table::KeywordPostings, &prefix)?;
+    /// posting blocks, from the row key `cursor` on, until `budget` is full. Rows sort by index,
+    /// term, and element, and a block's key sorts before the rows of the elements after it, so
+    /// every key from the cursor on is a row still to move. Returns where the next commit
+    /// resumes, or `None` once every keyword index holds blocks only.
+    pub(crate) fn move_postings_to_blocks_from(
+        &mut self,
+        cursor: Option<&[u8]>,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        let keyword: Vec<u32> = self
+            .keyword_indexes()?
+            .iter()
+            .map(|index| index.id)
+            .collect();
+        let mut start = match cursor {
+            Some(cursor) => cursor.to_vec(),
+            None => match keyword.first() {
+                Some(id) => keys::index_prefix(*id).to_vec(),
+                None => return Ok(None),
+            },
+        };
+        loop {
+            let id = start
+                .get(..4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_be_bytes)
+                .ok_or(GraphError::Corrupt("an upgrade cursor names no index"))?;
+            let end = id
+                .checked_add(1)
+                .map_or_else(|| vec![0xff; 5], |next| keys::index_prefix(next).to_vec());
+            let mut rows = Vec::new();
+            let complete = finished(self.transaction.visit_range(
+                Table::KeywordPostings,
+                &start,
+                &end,
+                |key, value| {
+                    if budget.full() {
+                        return Err(Scan::Full);
+                    }
+                    budget.spend(key.len() + value.len());
+                    rows.push((key.to_vec(), value.to_vec()));
+                    Ok(())
+                },
+            ))?;
             for (key, _) in &rows {
                 self.transaction.delete(Table::KeywordPostings, key)?;
             }
             let mut block_key = Vec::new();
-            for (key, value) in rows {
-                let term = keys::parse_posting_term(&key)?;
-                let element = keys::parse_posting_block(&key)?;
-                let (positions, length) = decode_row_posting(&value)?;
+            for (key, value) in &rows {
+                let term = keys::parse_posting_term(key)?;
+                let element = keys::parse_posting_block(key)?;
+                let (positions, length) = decode_row_posting(value)?;
                 let block = postings::block_of(element);
-                keys::put_posting_key(&mut block_key, index.id, term, block);
+                keys::put_posting_key(&mut block_key, id, term, block);
                 self.edit_posting_block(&block_key, block, |held| {
                     held.insert(block, element, &positions, length)
                 })?;
             }
+            self.flush_postings()?;
+            if !complete {
+                let mut next = rows.last().map_or(start, |(key, _)| key.clone());
+                next.push(0);
+                return Ok(Some(next));
+            }
+            match keyword.iter().find(|next| **next > id) {
+                Some(next) => start = keys::index_prefix(*next).to_vec(),
+                None => return Ok(None),
+            }
+            if budget.full() {
+                return Ok(Some(start));
+            }
         }
-        self.flush_postings()
     }
 
     /// Removes the index and all its entries. Returns whether there was one to remove.
@@ -1375,6 +1559,37 @@ impl<T: WriteTransaction> GraphTx<T> {
             }
         }
         Ok(())
+    }
+
+    fn clear_from(
+        &mut self,
+        index: &Index,
+        budget: &mut UpgradeBudget,
+    ) -> Result<bool, GraphError> {
+        let prefix = keys::index_prefix(index.id);
+        self.postings.forget(&prefix);
+        for table in ENTRY_TABLES {
+            let mut doomed = Vec::new();
+            let complete = finished(self.transaction.visit_prefix_peek(
+                table,
+                &prefix,
+                |key, _| {
+                    if budget.full() {
+                        return Err(Scan::Full);
+                    }
+                    budget.spend(key.len().saturating_add(DELETE_BYTES));
+                    doomed.push(key.to_vec());
+                    Ok(())
+                },
+            ))?;
+            for key in doomed {
+                self.transaction.delete(table, &key)?;
+            }
+            if !complete {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Brings every index in line with the element with ID `element` that changed from
@@ -1424,8 +1639,10 @@ impl<T: WriteTransaction> GraphTx<T> {
         index: &Index,
         element: u64,
         entry: &Entry,
-    ) -> Result<(), GraphError> {
+    ) -> Result<usize, GraphError> {
+        let mut staged = 0usize;
         for (table, key, value) in index.rows(element, entry) {
+            staged = staged.saturating_add(key.len()).saturating_add(value.len());
             self.transaction.put(table, &key, &value)?;
         }
         if let Entry::Keyword(document) = entry {
@@ -1434,13 +1651,15 @@ impl<T: WriteTransaction> GraphTx<T> {
             let mut key = Vec::new();
             for (term, positions) in document {
                 keys::put_posting_key(&mut key, index.id, term, block);
-                self.edit_posting_block(&key, block, |held| {
+                let grown = self.edit_posting_block(&key, block, |held| {
                     held.insert(block, element, positions, length)
                 })?;
+                staged = staged.saturating_add(grown);
             }
             self.adjust_totals(index.id, length, true)?;
+            staged = staged.saturating_add(TOTALS_ROW_BYTES);
         }
-        Ok(())
+        Ok(staged)
     }
 
     fn edit_posting_block(
@@ -1448,7 +1667,8 @@ impl<T: WriteTransaction> GraphTx<T> {
         key: &[u8],
         block: u64,
         edit: impl FnOnce(&mut Block) -> Result<(), DecodeError>,
-    ) -> Result<(), GraphError> {
+    ) -> Result<usize, GraphError> {
+        let mut staged = 0usize;
         let held = match self.postings.get_mut(key, block) {
             Some(held) => held,
             None => {
@@ -1458,6 +1678,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                         Block::load(block, bytes).map_err(GraphError::from)
                     })?
                     .unwrap_or_default();
+                staged = key.len().saturating_add(loaded.len());
                 self.postings.insert(key, block, loaded);
                 self.postings
                     .get_mut(key, block)
@@ -1471,7 +1692,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         if self.postings.bytes() > HELD_POSTING_BYTES {
             self.flush_postings()?;
         }
-        Ok(())
+        Ok(staged.saturating_add(after.saturating_sub(before)))
     }
 
     /// Writes every posting block this transaction holds into storage.

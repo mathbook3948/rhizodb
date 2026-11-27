@@ -1079,6 +1079,11 @@ fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
         &(FORMAT_VERSION - 1).to_be_bytes(),
     );
     assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+    rewrite(
+        keys::FORMAT_VERSION_KEY,
+        &(FORMAT_VERSION | UPGRADING).to_be_bytes(),
+    );
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
     rewrite(keys::FORMAT_VERSION_KEY, &99u32.to_be_bytes());
     assert!(matches!(
         read_only(),
@@ -1088,6 +1093,29 @@ fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
     assert!(read_only().is_ok());
     rewrite(keys::TOKENIZER_KEY, b"another tokenizer");
     assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+}
+
+#[test]
+fn an_upgrade_a_newer_build_began_is_refused_as_a_newer_format() {
+    let storage = test_engine::in_memory();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &((FORMAT_VERSION - 1) | UPGRADING).to_be_bytes(),
+        )
+        .unwrap();
+    let mut progress = (FORMAT_VERSION + 1).to_be_bytes().to_vec();
+    progress.push(UpgradeStep::PostingBlocks.code());
+    write
+        .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)
+        .unwrap();
+    write.commit().unwrap();
+    assert!(matches!(
+        Graph::open(storage),
+        Err(GraphError::UnsupportedFormatVersion(version)) if version == FORMAT_VERSION + 1
+    ));
 }
 
 #[test]
