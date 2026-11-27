@@ -3,6 +3,7 @@ pub(crate) mod blob;
 pub(crate) mod block_file;
 pub(crate) mod cache;
 pub(crate) mod catalog;
+pub(crate) mod changes;
 pub(crate) mod check;
 pub(crate) mod checkpoint;
 pub(crate) mod codec;
@@ -20,6 +21,7 @@ pub(crate) mod page;
 pub(crate) mod pages;
 #[cfg(test)]
 pub(crate) mod sim_fs;
+pub(crate) mod snapshot;
 pub(crate) mod staged;
 pub(crate) mod store;
 pub(crate) mod tree;
@@ -34,3 +36,9 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "engine/bench.test.rs"]
 mod bench_tests;
+
+pub(crate) use store::Epoch;
+pub(crate) use store::Role;
+pub(crate) use store::different;
+pub(crate) use store::epoch_at;
+pub(crate) use store::fork_lsn;

@@ -1,5 +1,8 @@
+use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 
+use crate::engine::Role;
 use crate::engine::any_fs;
 use crate::engine::any_fs::AnyFs;
 use crate::engine::store::Engine;
@@ -14,8 +17,10 @@ use crate::query;
 use crate::query::Limits;
 use crate::query::Parallelism;
 use crate::query::Statements;
+use crate::replication::Position;
 use crate::result::Parameters;
 use crate::result::QueryResult;
+use crate::snapshot::Snapshot;
 use crate::storage::Maintenance;
 use crate::storage::StorageError;
 use crate::transaction::ReadTransaction;
@@ -23,13 +28,28 @@ use crate::transaction::WriteTransaction;
 
 pub(crate) type Backend = Engine<AnyFs>;
 
-fn open_backend(path: &Path) -> Result<Backend, Error> {
-    Ok(any_fs::open_path(path, EngineOptions::default()).map_err(StorageError::from)?)
+fn open_backend(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
+    Ok(any_fs::open_path(path, options).map_err(StorageError::from)?)
 }
 
-fn in_memory_backend() -> Result<Backend, Error> {
-    Ok(any_fs::in_memory(EngineOptions::default()).map_err(StorageError::from)?)
+fn in_memory_backend(options: EngineOptions) -> Result<Backend, Error> {
+    Ok(any_fs::in_memory(options).map_err(StorageError::from)?)
 }
+
+fn peer_id(peer: &[u8]) -> Result<&[u8], Error> {
+    if (1..=PEER_ID_LIMIT).contains(&peer.len()) {
+        return Ok(peer);
+    }
+    Err(Error::new(
+        ErrorKind::InvalidPeerId,
+        format!(
+            "a peer id holds 1 to {PEER_ID_LIMIT} bytes, not {}",
+            peer.len()
+        ),
+    ))
+}
+
+const PEER_ID_LIMIT: usize = 64;
 
 /// How to open a database file, for settings beyond what [`Database::open`] chooses. Settings
 /// start at what [`Database::open`] uses, and later releases may add more.
@@ -51,7 +71,10 @@ fn in_memory_backend() -> Result<Backend, Error> {
 #[must_use]
 pub struct OpenOptions {
     create: bool,
+    replica: bool,
     parallelism: Parallelism,
+    engine: EngineOptions,
+    force_install: bool,
     limits: Limits,
 }
 
@@ -59,7 +82,10 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             create: true,
+            replica: false,
             parallelism: Parallelism::default(),
+            engine: EngineOptions::default(),
+            force_install: false,
             limits: Limits::default(),
         }
     }
@@ -76,6 +102,37 @@ impl OpenOptions {
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
     pub fn create(mut self, create: bool) -> Self {
         self.create = create;
+        self
+    }
+
+    /// Whether the database opens as a replica, which it does not unless this is set to
+    /// `true`. A replica serves reads as any database does, and refuses every local write for
+    /// the whole file with [`ErrorKind::NotWriter`](crate::ErrorKind::NotWriter): queries that
+    /// update the graph, write transactions, index changes, and imports.
+    ///
+    /// A file remembers its [role](crate::Role), so this setting matters only for a file that
+    /// holds no change yet, which becomes a replica and stays one, without writing the graph's
+    /// format version, until it applies its writer's first change. A file that already holds a
+    /// writer's changes fails to open with [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica)
+    /// unless that writer was demoted, and a file written in an older format fails to open as a
+    /// replica with `NotWriter`, since its upgrade is a write. Data that belongs to the node
+    /// itself goes in a database file of its own.
+    ///
+    /// ```
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Role;
+    ///
+    /// let replica = OpenOptions::new().replica(true).in_memory()?;
+    /// assert_eq!(replica.role(), Role::Replica);
+    /// assert!(replica.execute("MATCH (n) RETURN n", &Parameters::new())?.rows().is_empty());
+    /// let error = replica.execute("INSERT ()", &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::NotWriter);
+    /// # Ok::<(), rhizodb::Error>(())
+    /// ```
+    pub fn replica(mut self, replica: bool) -> Self {
+        self.replica = replica;
         self
     }
 
@@ -111,6 +168,45 @@ impl OpenOptions {
     /// split.
     pub fn parallel_threshold(mut self, nodes: usize) -> Self {
         self.parallelism.threshold = nodes;
+        self
+    }
+
+    /// How many bytes of write-ahead log the database keeps beyond what its own recovery needs,
+    /// for peers that [acknowledged](Database::acknowledge) a position and for
+    /// [snapshots](Database::snapshot) still being read. It defaults to 1 GiB. When the kept
+    /// log passes it, the database stops keeping the log for the peers furthest behind, oldest
+    /// first, until the rest fits, and those peers then need a new snapshot. Zero keeps no log
+    /// for peers at all.
+    pub fn max_retained_bytes(mut self, bytes: u64) -> Self {
+        self.engine.max_retained_bytes = bytes;
+        self
+    }
+
+    /// Whether [`OpenOptions::install_snapshot`] replaces a database it would otherwise keep,
+    /// which it does not unless this is set to `true`: one that has seen a newer term of its
+    /// history than the snapshot holds, refused with
+    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced), and one that holds the changes of
+    /// another database, refused with
+    /// [`ErrorKind::DifferentDatabase`](crate::ErrorKind::DifferentDatabase), and one whose
+    /// history of terms cannot be read, refused with
+    /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData). A snapshot of an older term
+    /// comes from a writer that a later one replaced, so a host forces it only to roll a node
+    /// back on purpose, forces another database only to reuse the file for it, and forces a
+    /// damaged database to resync it from the snapshot.
+    pub fn force_install(mut self, force: bool) -> Self {
+        self.force_install = force;
+        self
+    }
+
+    /// How long a [`Snapshot`] may hold the pages of its checkpoint, which defaults to one hour.
+    /// While a snapshot lives the file cannot reuse the space of pages that later commits
+    /// rewrite, so the file grows by what they rewrite; [`DatabaseStats::held_bytes`] reports
+    /// that space. Past the limit the database releases the snapshot, and reading it fails with
+    /// [`ErrorKind::SnapshotExpired`](crate::ErrorKind::SnapshotExpired). Set it above the
+    /// longest transfer the host expects. A limit past what the clock can reach, such as
+    /// [`Duration::MAX`](std::time::Duration::MAX), never releases a snapshot.
+    pub fn snapshot_time_limit(mut self, limit: std::time::Duration) -> Self {
+        self.engine.pin_limit = limit;
         self
     }
 
@@ -152,10 +248,10 @@ impl OpenOptions {
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
     pub fn in_memory(&self) -> Result<Database, Error> {
-        Ok(Database {
-            graph: Graph::open(in_memory_backend()?)?,
-            statements: Statements::new(self.parallelism, self.limits),
-        })
+        Ok(Database::from_parts(
+            graph_on(in_memory_backend(self.engine)?, self.replica)?,
+            Statements::new(self.parallelism, self.limits),
+        ))
     }
 
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
@@ -171,11 +267,36 @@ impl OpenOptions {
                 format!("there is no database file at {}", path.display()),
             ));
         }
-        Ok(Database {
-            graph: Graph::open(open_backend(path)?)?,
-            statements: Statements::new(self.parallelism, self.limits),
-        })
+        Ok(Database::from_parts(
+            graph_on(open_backend(path, self.engine)?, self.replica)?,
+            Statements::new(self.parallelism, self.limits),
+        ))
     }
+
+    /// Writes the snapshot that `input` streams to the database file at `path` with these
+    /// settings and opens it, as [`Database::install_snapshot`] describes.
+    pub fn install_snapshot(
+        &self,
+        path: impl AsRef<Path>,
+        input: impl Read,
+    ) -> Result<Database, Error> {
+        let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
+            .map_err(StorageError::from)?;
+        Ok(Database::from_parts(
+            graph_on(installed, true)?,
+            Statements::new(self.parallelism, self.limits),
+        ))
+    }
+}
+
+/// The graph over `backend`, which becomes a replica first when `replica` asks for one. A file
+/// that is not the writer opens without writing.
+pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>, Error> {
+    if replica {
+        backend.declare_replica().map_err(StorageError::from)?;
+    }
+    let follows = backend.role() != Role::Writer;
+    Ok(Graph::open_as(backend, follows)?)
 }
 
 fn holds_bytes(path: &Path) -> Result<bool, Error> {
@@ -213,17 +334,29 @@ pub struct DatabaseStats {
     /// The reads of pages and long values that the cache could not serve, which read the file,
     /// since the database was opened.
     pub cache_misses: u64,
+    /// The bytes of pages that checkpoints have replaced but the file cannot reuse yet, since a
+    /// [`ReadTransaction`] or a [`Snapshot`] still reads them.
+    pub held_bytes: u64,
 }
 
 /// An embedded graph database. Share one `Database` across threads: reads run concurrently, and
 /// writing queries run one at a time.
 #[derive(Debug)]
 pub struct Database {
-    graph: Graph<Backend>,
+    pub(crate) graph: Graph<Backend>,
     statements: Statements,
+    pub(crate) roles: Mutex<()>,
 }
 
 impl Database {
+    pub(crate) fn from_parts(graph: Graph<Backend>, statements: Statements) -> Self {
+        Self {
+            graph,
+            statements,
+            roles: Mutex::new(()),
+        }
+    }
+
     /// Opens the database file at `path`, creating it when it does not exist.
     ///
     /// Fails with
@@ -385,6 +518,119 @@ impl Database {
     /// ```
     pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         Ok(self.graph.backup_to(path.as_ref())?)
+    }
+
+    /// Pins the database as its last checkpoint left it and returns it as a [`Snapshot`] to
+    /// stream to another node, which installs it with [`Database::install_snapshot`] and then
+    /// follows the log from the snapshot's position. Commits after that checkpoint stay out of
+    /// the snapshot and reach the receiver through the log. Taking a snapshot forces no
+    /// checkpoint, and readers and writers carry on while it is read.
+    ///
+    /// While the snapshot lives, the database keeps every page of its checkpoint and the log
+    /// after its position, as [`OpenOptions::max_retained_bytes`] bounds, so the file and the log
+    /// grow by what commits rewrite meanwhile. A database that serves as a replica takes
+    /// snapshots the same way, so a replica can seed further replicas.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let source = Database::open(directory.path().join("source.rhizodb"))?;
+    /// source.execute("INSERT (:Person {name: 'Ada'})", &Parameters::new())?;
+    /// source.compact()?;
+    ///
+    /// let snapshot = source.snapshot()?;
+    /// let mut stream = vec![0; snapshot.len() as usize];
+    /// let mut offset = 0;
+    /// while offset < stream.len() {
+    ///     offset += snapshot.read_at(offset as u64, &mut stream[offset..])?;
+    /// }
+    ///
+    /// let replica = Database::install_snapshot(directory.path().join("replica.rhizodb"), stream.as_slice())?;
+    /// let result = replica.execute("MATCH (p:Person) RETURN p.name", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Ada".to_owned())]]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn snapshot(&self) -> Result<Snapshot<'_>, Error> {
+        let export = self
+            .graph
+            .storage()
+            .export(&[])
+            .map_err(StorageError::from)?;
+        Ok(Snapshot::new(export))
+    }
+
+    /// Writes the snapshot that `input` streams, as [`Snapshot::read_at`] reads it, to the
+    /// database file at `path`, and opens that file as a replica with the default settings, as
+    /// [`OpenOptions::replica`] describes, since it holds its writer's changes up to the
+    /// snapshot's position and follows them from there.
+    ///
+    /// The snapshot is written under a staging name beside `path`, synced, and checked page by
+    /// page before it is renamed over `path`, so after a crash or a failure `path` holds the
+    /// database it held before, or none, or the whole snapshot. A database at `path` is replaced
+    /// together with its log, and must not be open: the install then fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen) and leaves it as
+    /// it was.
+    ///
+    /// It fails with [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData) when a chunk of
+    /// the stream fails its checksum, comes from another offset or another snapshot, or the
+    /// stream ends early, or when the database at `path` or its log is too damaged to tell
+    /// which terms it has seen, which [`OpenOptions::force_install`] resyncs, and with [`ErrorKind::Io`](crate::ErrorKind::Io) when reading `input`
+    /// fails. A transfer that was cut off can be retried with a reader that resumes from the
+    /// offset it reached, since the snapshot gives the same bytes at every offset.
+    ///
+    /// On Unix the rename is synced into its directory before this returns. On other platforms
+    /// the directory cannot be synced, so a crash right after an install may leave the database
+    /// that was there before, and on Windows another open may take the file between the rename
+    /// and this open, which then fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen).
+    ///
+    /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::install_snapshot`].
+    pub fn install_snapshot(path: impl AsRef<Path>, input: impl Read) -> Result<Self, Error> {
+        OpenOptions::new().install_snapshot(path, input)
+    }
+
+    /// Keeps the write-ahead log after `position` for the peer named `peer`, replacing the
+    /// position it kept for that peer before, so the peer can read the changes after it with
+    /// `changes_since`. Call it with the position a peer reports once it holds the changes up to
+    /// there, and with a snapshot's position before that snapshot is dropped.
+    /// Peers are named by 1 to 64 bytes the host chooses. The database file records each
+    /// peer's position with every checkpoint and when it closes, so the peers and the log kept
+    /// for them survive a restart. After a crash the file keeps each peer at the position the
+    /// last checkpoint recorded, and a peer first acknowledged after it is forgotten.
+    ///
+    /// The kept log is bounded by [`OpenOptions::max_retained_bytes`], past which the peers
+    /// furthest behind are released and need a new snapshot. Call
+    /// [`Database::forget_peer`] for a peer that is gone, so it keeps nothing.
+    ///
+    /// A position of a newer term than this database has seen tells it that another writer
+    /// took over, so a writer becomes fenced, as [`Database::promote`] describes for a newer
+    /// term.
+    ///
+    /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
+    /// peer id or one longer than 64 bytes, and with
+    /// [`ErrorKind::TooManyPeers`](crate::ErrorKind::TooManyPeers) for a new peer when 32 are
+    /// kept.
+    pub fn acknowledge(&self, peer: &[u8], position: &Position) -> Result<(), Error> {
+        let peer = peer_id(peer)?;
+        let storage = self.graph.storage();
+        storage
+            .observe_term(position.term())
+            .map_err(StorageError::from)?;
+        Ok(storage
+            .acknowledge(peer, position.lsn())
+            .map_err(StorageError::from)?)
+    }
+
+    /// Stops keeping the write-ahead log for the peer named `peer`, and returns whether it kept
+    /// any.
+    ///
+    /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
+    /// peer id or one longer than 64 bytes.
+    pub fn forget_peer(&self, peer: &[u8]) -> Result<bool, Error> {
+        Ok(self.graph.storage().forget(peer_id(peer)?))
     }
 
     /// Writes every index definition, node, and relationship of the committed database to `out`
@@ -678,6 +924,7 @@ impl Database {
             wal_bytes: stats.wal_bytes,
             cache_hits: stats.cache_hits,
             cache_misses: stats.cache_misses,
+            held_bytes: stats.held_bytes,
         })
     }
 

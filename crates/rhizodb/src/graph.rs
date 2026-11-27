@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -116,6 +117,7 @@ pub(crate) enum GraphError {
     IndexExists(String),
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
+    NotWriter(&'static str),
 }
 
 impl fmt::Display for GraphError {
@@ -148,6 +150,9 @@ impl fmt::Display for GraphError {
             ),
             Self::InvalidIndex(reason) => write!(formatter, "invalid index: {reason}"),
             Self::InvalidQueryVector(reason) => write!(formatter, "invalid query vector: {reason}"),
+            Self::NotWriter(what) => {
+                write!(formatter, "a database that is not the writer cannot {what}")
+            }
         }
     }
 }
@@ -192,6 +197,7 @@ pub(crate) struct Adjacent {
 pub(crate) struct Graph<S> {
     storage: S,
     writers: Arc<Writers>,
+    replica: AtomicBool,
     committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -246,7 +252,14 @@ impl<S: Storage> Graph<S> {
     /// version to the current one, and rejects a database written in a newer version or one
     /// older than the oldest it upgrades. Keyword indexes built by another tokenizer are rebuilt
     /// in the same write transaction.
+    #[cfg(test)]
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
+        Self::open_as(storage, false)
+    }
+
+    /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
+    /// and so fails instead of writing the format version or an upgrade.
+    pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
         {
             let mut tx = GraphTx::bare(storage.begin_write()?);
             let found = match tx
@@ -263,6 +276,11 @@ impl<S: Storage> Graph<S> {
                 }
                 _ => true,
             };
+            if replica && upgrade && found.is_some() {
+                return Err(GraphError::NotWriter(
+                    "upgrade a database written in an older format",
+                ));
+            }
             if let Some(found) = found
                 && found < RELATIONSHIP_CHUNKS_FORMAT_VERSION
             {
@@ -278,7 +296,13 @@ impl<S: Storage> Graph<S> {
                     &FORMAT_VERSION.to_be_bytes(),
                 )?;
             }
-            if tx.adopt_current_tokenizer()? || upgrade {
+            let changed = tx.adopt_current_tokenizer()?;
+            if replica && changed && found.is_some() {
+                return Err(GraphError::NotWriter(
+                    "rebuild keyword indexes for this build's tokenizer",
+                ));
+            }
+            if !replica && (changed || upgrade) {
                 tx.commit()?;
             }
         }
@@ -286,6 +310,7 @@ impl<S: Storage> Graph<S> {
         Ok(Self {
             storage,
             writers: Arc::default(),
+            replica: AtomicBool::new(replica),
             committed_index_definitions: Arc::new(CommittedCatalog {
                 definitions: Mutex::new(definitions),
                 changes: AtomicU64::new(0),
@@ -297,7 +322,6 @@ impl<S: Storage> Graph<S> {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn storage(&self) -> &S {
         &self.storage
     }
@@ -345,6 +369,71 @@ impl<S: Storage> Graph<S> {
         })
     }
 
+    /// Records the format version and the tokenizer in a graph that holds neither, as a
+    /// replica that never applied a change leaves it, so a replica promoted before its first
+    /// change writes what opening a new database as a writer writes.
+    pub(crate) fn record_format_if_missing(&self) -> Result<(), GraphError> {
+        let mut tx = self.write()?;
+        if tx
+            .transaction
+            .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
+            .is_some()
+        {
+            return tx.rollback();
+        }
+        tx.transaction.put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &FORMAT_VERSION.to_be_bytes(),
+        )?;
+        tx.adopt_current_tokenizer()?;
+        tx.commit()
+    }
+
+    /// Makes the graph a replica that refuses local writes, or a writer that takes them. A
+    /// write transaction that began before stays open, so a caller that needs every write to
+    /// have ended waits for the storage's writer after this.
+    pub(crate) fn set_replica(&self, replica: bool) {
+        if !replica {
+            lock(&self.committed_column_deltas).clear();
+        }
+        self.replica.store(replica, Ordering::Release);
+    }
+
+    /// Runs `work`, which changes the storage outside a graph transaction, and then reloads the
+    /// index definitions when `indexes` says the work may have changed them. Readers that begin
+    /// meanwhile read the definitions from their own snapshot, so none sees data and
+    /// definitions of different commits.
+    pub(crate) fn apply_outside<R>(
+        &self,
+        indexes: bool,
+        work: impl FnOnce(&S) -> R,
+    ) -> Result<R, GraphError> {
+        if lock(&self.writers.slot).writer == Some(thread::current().id()) {
+            return Err(GraphError::WriterOnThisThread);
+        }
+        lock(&self.committed_column_deltas).clear();
+        if !indexes {
+            return Ok(work(&self.storage));
+        }
+        let committed = &self.committed_index_definitions;
+        let publishing = lock(&committed.publishing);
+        committed.changes.fetch_add(1, Ordering::SeqCst);
+        let result = work(&self.storage);
+        let reloaded = self
+            .storage
+            .begin_read()
+            .map_err(GraphError::from)
+            .and_then(|read| GraphTx::bare(read).index_definitions());
+        if let Ok(definitions) = &reloaded {
+            *lock(&committed.definitions) = Arc::clone(definitions);
+        }
+        committed.changes.fetch_add(1, Ordering::SeqCst);
+        drop(publishing);
+        reloaded?;
+        Ok(result)
+    }
+
     /// Runs `work` on the storage, which may take the storage's writer itself, and fails when
     /// this thread holds the write transaction that work would wait for.
     pub(crate) fn maintain<R>(&self, work: impl FnOnce(&S) -> R) -> Result<R, GraphError> {
@@ -381,6 +470,9 @@ impl<S: Storage> Graph<S> {
     /// thread's exclusive writes. Fails instead of waiting forever when the calling thread
     /// already holds it.
     pub(crate) fn write(&self) -> Result<GraphTx<S::Write<'_>>, GraphError> {
+        if self.replica.load(Ordering::Acquire) {
+            return Err(GraphError::NotWriter("write to the graph"));
+        }
         let current = thread::current().id();
         let transaction = loop {
             {
@@ -393,6 +485,10 @@ impl<S: Storage> Graph<S> {
                 }
             }
             let transaction = self.storage.begin_write()?;
+            if self.replica.load(Ordering::Acquire) {
+                transaction.rollback()?;
+                return Err(GraphError::NotWriter("write to the graph"));
+            }
             let mut slot = lock(&self.writers.slot);
             if !slot.excludes(current) {
                 slot.writer = Some(current);

@@ -1,5 +1,6 @@
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::ReadTransaction;
@@ -14,6 +15,7 @@ use super::mem_fs::MemFile;
 use super::mem_fs::MemFs;
 use super::os_fs::OsFile;
 use super::os_fs::OsFs;
+use super::snapshot::install;
 use super::store::Engine;
 use super::store::EngineOptions;
 use super::store::staging_name;
@@ -162,8 +164,7 @@ impl BlockFile for AnyFile {
 
 const MEMORY_NAME: &str = "memory";
 
-/// Opens the database file at `path` with the engine, creating it when there is none.
-pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<AnyFs>, EngineError> {
+fn split(path: &Path) -> Result<(PathBuf, &str), EngineError> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -180,7 +181,31 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => Path::new(".").to_path_buf(),
     };
+    Ok((directory, name))
+}
+
+/// Opens the database file at `path` with the engine, creating it when there is none.
+pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<AnyFs>, EngineError> {
+    let (directory, name) = split(path)?;
     Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
+}
+
+/// Installs the snapshot `input` streams as the database file at `path`, as
+/// [`super::snapshot::install`] does, and opens it.
+pub(crate) fn install_path(
+    path: &Path,
+    input: impl io::Read,
+    options: EngineOptions,
+    force: bool,
+) -> Result<Engine<AnyFs>, EngineError> {
+    let (directory, name) = split(path)?;
+    install(
+        Arc::new(AnyFs::Os(OsFs::new(directory))),
+        name,
+        input,
+        options,
+        force,
+    )
 }
 
 /// A database of the engine that lives in memory and is gone when dropped.

@@ -37,6 +37,13 @@ fn sample() -> Header {
         },
         clean: true,
         staged_lsn: 0,
+        replication: Replication {
+            incarnation: 0xFEED_F00D,
+            replica: true,
+            seen_term: 4,
+            checkpoint_chain: 0xC4A1,
+            origin: 0xD00D,
+        },
     }
 }
 
@@ -273,6 +280,13 @@ fn header_strategy() -> impl Strategy<Value = Header> {
                         lsn + 1 + hlc % 1000
                     },
                     clean,
+                    replication: Replication {
+                        incarnation: u128::from(hlc) << 3,
+                        replica: clean,
+                        seen_term: lsn / 3,
+                        checkpoint_chain: hlc ^ lsn,
+                        origin: u128::from(lsn) << 64,
+                    },
                 };
                 for (entry, (present, slot, written)) in header.open.iter_mut().zip(open) {
                     if present == 1 {
@@ -311,6 +325,27 @@ proptest! {
 }
 
 #[test]
+fn the_log_kept_for_peers_round_trips_beside_the_header_and_reads_as_none_in_older_slots() {
+    let retained = Retained {
+        from: 42,
+        peers: (0..PEER_LIMIT)
+            .map(|index| (vec![index as u8; 64], index as u64 * 1000))
+            .collect(),
+    };
+    let block = sample().encode_with(&retained);
+    assert_eq!(block.len(), BLOCK);
+    assert_eq!(Header::decode(&block).unwrap(), sample());
+    assert_eq!(decode_retained(&block).unwrap(), retained);
+    assert_eq!(
+        decode_retained(&sample().encode()).unwrap(),
+        Retained::default()
+    );
+    let mut damaged = block.clone();
+    damaged[RETAINED_AT + 9] = 200;
+    assert!(decode_retained(&resealed(damaged)).is_err());
+}
+
+#[test]
 fn a_counter_in_the_upper_half_of_its_range_is_corrupt() {
     let top = 1 << 63;
     let bad = [
@@ -345,4 +380,75 @@ fn a_counter_in_the_upper_half_of_its_range_is_corrupt() {
         ..sample()
     };
     assert_eq!(Header::decode(&highest.encode()).unwrap(), highest);
+}
+
+#[test]
+fn a_header_with_replication_fields_records_the_minor_that_added_them() {
+    let older = Header {
+        minor: 3,
+        replication: Replication::default(),
+        ..sample()
+    };
+    assert_eq!(Header::decode(&older.encode()).unwrap().minor, 3);
+    let drawn = Header {
+        replication: Replication {
+            incarnation: 7,
+            ..Replication::default()
+        },
+        ..older
+    };
+    assert_eq!(Header::decode(&drawn.encode()).unwrap().minor, FORMAT_MINOR);
+    let kept = Retained {
+        from: 2,
+        peers: vec![(b"peer".to_vec(), 9)],
+    };
+    assert_eq!(
+        Header::decode(&older.encode_with(&kept)).unwrap().minor,
+        FORMAT_MINOR
+    );
+}
+
+#[test]
+fn a_clean_file_of_an_earlier_minor_only_opened_and_closed_is_refused_by_that_minor() {
+    let directory = tempfile::tempdir().unwrap();
+    let name = "graph.rhizodb";
+    let path = directory.path().join(name);
+    let open = || {
+        crate::engine::store::Engine::open(
+            std::sync::Arc::new(crate::engine::os_fs::OsFs::new(directory.path())),
+            name,
+            crate::engine::store::EngineOptions::default(),
+        )
+        .unwrap()
+    };
+    open().close().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    for slot in bytes.chunks_mut(BLOCK).take(2) {
+        if let Ok(header) = Header::decode(slot) {
+            let older = Header {
+                minor: 3,
+                replication: Replication::default(),
+                ..header
+            };
+            slot.copy_from_slice(&older.encode());
+        }
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    open().close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut carrying = 0;
+    for slot in bytes.chunks(BLOCK).take(2) {
+        let Ok(header) = Header::decode(slot) else {
+            continue;
+        };
+        if header.replication != Replication::default() {
+            carrying += 1;
+            assert_eq!(
+                header.minor, FORMAT_MINOR,
+                "a slot holds replication fields under minor {}, which reads them as reserved",
+                header.minor
+            );
+        }
+    }
+    assert!(carrying > 0);
 }

@@ -45,7 +45,7 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A failed fsync of a file in the simulated file system leaves the writes since the last sync to land, tear, or vanish at a crash, and no later fsync makes them durable, as Linux marks the pages of a failed writeback clean.
 - A failed sync of the simulated file system's names fails every later one.
 - The copy is closed cleanly before the rename, so the renamed file needs no log.
-- `OpenOptions` holds no engine setting, so the engine's tuning stays internal.
+- `OpenOptions` holds no engine setting but the log it keeps for peers, so the engine's tuning stays internal.
 - `Database` gains `compact`, `stats`, and `check`, and they are its whole maintenance API.
 - Maintenance on the thread that holds the write transaction fails instead of waiting for itself.
 - `stats` reports the file's bytes and live bytes, its live and free extents, the log's bytes, and the block cache's hits and misses since the open.

@@ -23,7 +23,8 @@ use crate::fingerprint::RowHasher;
 
 const NODE_BATCH: usize = 5_000;
 const EDGE_BATCH: usize = 20_000;
-const FILE_NAME: &str = "graph.rhizodb";
+/// The name of the database file RhizoDB stores the benchmark graph in.
+pub const FILE_NAME: &str = "graph.rhizodb";
 
 const CREATE_PERSONS: &str = "UNWIND $rows AS r CREATE (p:Person {id: r.id, name: r.name, age: r.age, bio: r.bio, embedding: r.embedding}) RETURN id(p)";
 const CREATE_CITIES: &str =
