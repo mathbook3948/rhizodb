@@ -277,8 +277,9 @@ them and decides which node writes.
   writer applies before it promotes, so a planned handover loses no write.
 - A writer that a promotion made reopens fenced after every restart, as [`Database::role`]
   reports, and refuses writes until the host promotes it again with its own newest term and
-  writer id, which writes nothing, or demotes it. A database that never took part in
-  replication reopens as a writer.
+  writer id, which writes nothing, or demotes it. Once it has heard of a higher term, which it
+  remembers across restarts, only a promotion with a higher term or a demotion remains. A
+  database that never took part in replication reopens as a writer.
 - A writer that lost its lease to a failover, once it has heard of the new term from
   [`Database::changes_since`] or [`Database::acknowledge`] with the new writer's position,
   steps aside when demoted and reopens as a replica. It then applies the new writer's changes
@@ -299,9 +300,11 @@ them and decides which node writes.
   to [`Database::acknowledge`] for the receiver, or a checkpoint can remove the log after it
   and the new replica fails with [`ErrorKind::TooFarBehind`].
 - A node that installs over its own path drops its `Database` first, or the install fails with
-  [`ErrorKind::DatabaseAlreadyOpen`]. An install refuses a snapshot of an older term than the
-  replaced file has seen, with [`ErrorKind::Fenced`], unless [`OpenOptions::force_install`] is
-  set.
+  [`ErrorKind::DatabaseAlreadyOpen`]. Unless [`OpenOptions::force_install`] is set, an install
+  refuses to replace a file that has seen a newer term than the snapshot holds, with
+  [`ErrorKind::Fenced`], one that holds another database's changes, with
+  [`ErrorKind::DifferentDatabase`], and one whose history of terms cannot be read, with
+  [`ErrorKind::CorruptData`].
 - Checkpoints remove the log a node no longer needs for itself. The host passes each peer's
   position to [`Database::acknowledge`], and the node then keeps the log after it, up to
   [`OpenOptions::max_retained_bytes`], so a peer that falls behind or restarts catches up from
