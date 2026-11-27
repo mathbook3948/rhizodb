@@ -41,9 +41,9 @@ description = "Run the tests that check leaves out, which are marked ignored: th
 run = "cargo test --workspace --exclude tck --no-fail-fast -- --ignored --skip engine::bench_tests::"
 
 [tasks.storage-deep]
-description = "Run the storage, engine, database crash, dump, node meta, property column, adjacency, index key, scan, and replication simulation tests with 100 times the random cases that random runs, as the nightly workflow does"
+description = "Run the storage, engine, database crash, dump, node meta, property column, adjacency, relationship chunk, index key, scan, and replication simulation tests with 100 times the random cases that random runs, as the nightly workflow does"
 env = { RHIZODB_TEST_SCALE = "100" }
-run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::upgrade query::keys query::scan replication:: --include-ignored --skip engine::bench_tests::"
+run = "cargo test --release --package rhizodb --lib -- storage:: engine:: database:: dump:: graph::meta graph::node_meta graph::columns graph::adjacency graph::relationships graph::upgrade query::keys query::scan replication:: --include-ignored --skip engine::bench_tests::"
 
 [tasks.random-deep]
 description = "Run the randomized integration tests (isolation history check, kill-and-reopen, replicas killed during apply, model of random transactions, damaged files, concurrent writers and readers, large transactions, killed backups, query reference evaluator, heap growth, snapshots held across checkpoints, shuttle schedules) with 100 times the cases that random runs, then every integration test with each read query that can split forced across four threads"

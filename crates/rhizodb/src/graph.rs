@@ -31,6 +31,8 @@ mod adjacency;
 mod budget;
 mod columns;
 mod dump;
+#[cfg(any(test, fuzzing))]
+pub(crate) mod fuzz;
 mod ids;
 mod index;
 #[cfg(test)]
@@ -102,7 +104,7 @@ use upgrade::UPGRADE_BATCH_BYTES;
 use upgrade::UpgradeBudget;
 use upgrade::UpgradeStep;
 
-const FORMAT_VERSION: u32 = 14;
+pub(crate) const FORMAT_VERSION: u32 = 15;
 
 /// The graph format a write of `value` under `key` of the metadata table records, when it is
 /// newer than this build reads.
@@ -133,12 +135,17 @@ const UPGRADING: u32 = 1 << 31;
 const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
-const UPGRADE_STEPS: [(u32, UpgradeStep); 2] = [
+const RELATIONSHIP_CHECKSUMS_FORMAT_VERSION: u32 = 15;
+const UPGRADE_STEPS: [(u32, UpgradeStep); 3] = [
     (
         RELATIONSHIP_CHUNKS_FORMAT_VERSION,
         UpgradeStep::RelationshipChunks,
     ),
     (POSTING_BLOCKS_FORMAT_VERSION, UpgradeStep::PostingBlocks),
+    (
+        RELATIONSHIP_CHECKSUMS_FORMAT_VERSION,
+        UpgradeStep::RelationshipChecksums,
+    ),
 ];
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
 const ENTRIES_OUT_OF_ORDER: GraphError =
@@ -464,7 +471,15 @@ impl<S: Storage> Graph<S> {
                         .ok_or(GraphError::Corrupt(
                             "an upgrade's progress names no planned step",
                         ))?;
-                    (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec()))
+                    let unknown_to_target = plan.iter().position(|planned| {
+                        UPGRADE_STEPS
+                            .iter()
+                            .any(|(below, step)| step == planned && *below > target)
+                    });
+                    match unknown_to_target {
+                        Some(first) if first < index => (first, None),
+                        _ => (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec())),
+                    }
                 }
                 _ => (0, None),
             };
@@ -592,6 +607,25 @@ impl<S: Storage> Graph<S> {
 
     pub(crate) fn storage(&self) -> &S {
         &self.storage
+    }
+
+    /// Checks every committed relationship chunk against its checksum, unless the graph holds an
+    /// older format, whose chunks carry none until its writer upgrades it.
+    pub(crate) fn check_relationship_chunks(&self) -> Result<(), GraphError> {
+        let tx = GraphTx::bare(self.storage.begin_read()?);
+        let format = tx
+            .transaction
+            .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?;
+        if format.as_deref() != Some(FORMAT_VERSION.to_be_bytes().as_slice()) {
+            return Ok(());
+        }
+        tx.transaction
+            .visit_prefix(Table::RelationshipChunks, &[], |key, value| {
+                relationships::parse_key(key)?;
+                ChunkRef::parse(key, value)?
+                    .entries()
+                    .try_for_each(|entry| entry.map(drop))
+            })
     }
 
     /// Copies the committed graph, as one read snapshot sees it, into a new database file at
@@ -1039,13 +1073,15 @@ impl<T: ReadTransaction> GraphTx<T> {
         if let Some(edit) = self.relationship_chunks.get(&chunk) {
             return edit.get(slot).map(read).transpose();
         }
+        let key = relationships::chunk_key(chunk);
         Ok(self
             .transaction
-            .get_with(
-                Table::RelationshipChunks,
-                &relationships::chunk_key(chunk),
-                |bytes| ChunkRef::parse(bytes)?.get(slot)?.map(read).transpose(),
-            )?
+            .get_with(Table::RelationshipChunks, &key, |bytes| {
+                ChunkRef::parse(&key, bytes)?
+                    .get(slot)?
+                    .map(read)
+                    .transpose()
+            })?
             .flatten())
     }
 
@@ -1065,7 +1101,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                         return Ok(());
                     }
                 }
-                for entry in ChunkRef::parse(value)?.entries() {
+                for entry in ChunkRef::parse(key, value)?.entries() {
                     let (slot, record) = entry?;
                     visit(relationships::relationship_at(chunk, slot), record)?;
                 }
@@ -1910,7 +1946,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     fn flush_relationships(&mut self) -> Result<(), GraphError> {
         for (chunk, edit) in std::mem::take(&mut self.relationship_chunks) {
             let key = relationships::chunk_key(chunk);
-            match edit.encode() {
+            match edit.encode(&key) {
                 Some(bytes) => self
                     .transaction
                     .put(Table::RelationshipChunks, &key, &bytes)?,
@@ -1930,13 +1966,12 @@ impl<T: WriteTransaction> GraphTx<T> {
         let edit = match self.relationship_chunks.entry(chunk) {
             btree_map::Entry::Occupied(held) => held.into_mut(),
             btree_map::Entry::Vacant(vacant) => {
+                let key = relationships::chunk_key(chunk);
                 let edit = self
                     .transaction
-                    .get_with(
-                        Table::RelationshipChunks,
-                        &relationships::chunk_key(chunk),
-                        ChunkEdit::load,
-                    )?
+                    .get_with(Table::RelationshipChunks, &key, |bytes| {
+                        ChunkEdit::load(&key, bytes)
+                    })?
                     .unwrap_or_default();
                 self.relationship_bytes += edit.bytes();
                 vacant.insert(edit)
@@ -1965,6 +2000,9 @@ impl<T: WriteTransaction> GraphTx<T> {
         match step {
             UpgradeStep::RelationshipChunks => self.move_relationships_to_chunks_from(budget),
             UpgradeStep::PostingBlocks => self.move_postings_to_blocks_from(cursor, budget),
+            UpgradeStep::RelationshipChecksums => {
+                self.seal_relationship_chunks_from(cursor, budget)
+            }
             UpgradeStep::Tokenizer => self.rebuild_keyword_indexes_from(cursor, budget),
         }
     }
@@ -1997,12 +2035,10 @@ impl<T: WriteTransaction> GraphTx<T> {
             return Ok(None);
         };
         for (chunk, edit) in chunks {
-            if let Some(bytes) = edit.encode() {
-                self.transaction.put(
-                    Table::RelationshipChunks,
-                    &relationships::chunk_key(chunk),
-                    &bytes,
-                )?;
+            let key = relationships::chunk_key(chunk);
+            if let Some(bytes) = edit.encode(&key) {
+                self.transaction
+                    .put(Table::RelationshipChunks, &key, &bytes)?;
             }
         }
         let end = last.checked_add(1).map_or([0xff; 9].to_vec(), |after| {
@@ -2011,6 +2047,39 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.transaction
             .delete_range(Table::Relationships, &[], &end)?;
         Ok((!complete).then(|| next.map_or_else(Vec::new, |chunk| chunk.to_be_bytes().to_vec())))
+    }
+
+    fn seal_relationship_chunks_from(
+        &mut self,
+        cursor: Option<&[u8]>,
+        budget: &mut UpgradeBudget,
+    ) -> Result<Option<Vec<u8>>, GraphError> {
+        let mut sealed = Vec::new();
+        let mut next = None;
+        let complete = upgrade::finished(self.transaction.visit_range(
+            Table::RelationshipChunks,
+            cursor.unwrap_or_default(),
+            &[0xff; 9],
+            |key, value| {
+                if budget.full() {
+                    next = Some(key.to_vec());
+                    return Err(upgrade::Scan::Full);
+                }
+                if let Some(bytes) = relationships::seal(key, value)? {
+                    for entry in ChunkRef::parse(key, &bytes)?.entries() {
+                        RelationshipRecord::decode(entry?.1)?;
+                    }
+                    budget.spend(key.len() + bytes.len());
+                    sealed.push((key.to_vec(), bytes));
+                }
+                Ok(())
+            },
+        ))?;
+        for (key, bytes) in sealed {
+            self.transaction
+                .put(Table::RelationshipChunks, &key, &bytes)?;
+        }
+        Ok(if complete { None } else { next })
     }
 
     fn meta_edit(&mut self, group: u64) -> Result<&mut GroupEdit, GraphError> {
@@ -2438,7 +2507,7 @@ impl<T: WriteTransaction> GraphTx<T> {
 
 #[cfg(test)]
 #[path = "graph.test.rs"]
-mod tests;
+pub(crate) mod tests;
 #[cfg(test)]
 pub(crate) use tests::counted;
 
@@ -2486,6 +2555,14 @@ mod adjacency_model_tests;
 #[cfg(test)]
 #[path = "graph/adjacency_crash.test.rs"]
 mod adjacency_crash_tests;
+
+#[cfg(test)]
+#[path = "graph/relationships_corrupt.test.rs"]
+mod relationships_corrupt_tests;
+
+#[cfg(test)]
+#[path = "graph/relationships_crash.test.rs"]
+mod relationships_crash_tests;
 
 fn visit_held(
     chunk: u64,

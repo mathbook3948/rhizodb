@@ -35,6 +35,7 @@ pub(crate) enum UpgradeStep {
     RelationshipChunks,
     PostingBlocks,
     Tokenizer,
+    RelationshipChecksums,
 }
 
 impl UpgradeStep {
@@ -43,6 +44,7 @@ impl UpgradeStep {
             Self::RelationshipChunks => 1,
             Self::PostingBlocks => 2,
             Self::Tokenizer => 3,
+            Self::RelationshipChecksums => 4,
         }
     }
 
@@ -51,6 +53,7 @@ impl UpgradeStep {
             1 => Some(Self::RelationshipChunks),
             2 => Some(Self::PostingBlocks),
             3 => Some(Self::Tokenizer),
+            4 => Some(Self::RelationshipChecksums),
             _ => None,
         }
     }

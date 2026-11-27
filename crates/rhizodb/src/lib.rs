@@ -94,6 +94,15 @@ pub fn install_damaged_snapshot_for_fuzzing(bytes: &[u8]) -> Result<(), String> 
     engine::fuzz::install_damaged_stream(bytes)
 }
 
+/// Damages the stored relationship chunks of a small graph by `bytes`, past the storage engine's
+/// own checks, and reads every relationship, for the fuzzer. Fails when a damaged chunk reads
+/// without an error or passes the check.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn read_damaged_relationship_chunks_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    graph::fuzz::read_damaged_relationship_chunks(bytes)
+}
+
 /// Damages a batch of replication changes by `bytes`, reseals it, decodes it, applies it to a
 /// replica, and reads the replica, for the fuzzer. Fails when decoded changes keep other bytes.
 #[cfg(fuzzing)]

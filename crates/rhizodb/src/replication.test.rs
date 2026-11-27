@@ -942,6 +942,46 @@ mod crash {
         }
 
         #[test]
+        fn a_replica_of_format_fourteen_passes_the_check_while_it_waits_and_after_the_upgrade() {
+            fn relationships(db: &Database) -> Result<Vec<Vec<Value>>, crate::Error> {
+                db.execute(
+                    "MATCH (a)-[r:R]->() RETURN a.k, r.k ORDER BY a.k",
+                    &Parameters::new(),
+                )
+                .map(|result| result.rows().to_vec())
+            }
+            let writer_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .execute(
+                    "UNWIND range(0, 99) AS k INSERT (:N {k: k})-[:R {k: k * 3}]->(:M)",
+                    &Parameters::new(),
+                )
+                .unwrap();
+            let expected = relationships(&writer).unwrap();
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            let mut write = writer.graph.storage().begin_write().unwrap();
+            crate::graph::tests::store_as_format_fourteen(&mut write);
+            write.commit().unwrap();
+            sync(&writer, &replica).unwrap();
+            drop(writer);
+            assert_eq!(
+                relationships(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            replica.check().unwrap();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            sync(&writer, &replica).unwrap();
+            assert_eq!(relationships(&replica).unwrap(), expected);
+            assert_eq!(export(&replica), export(&writer));
+            integrity(&replica);
+            integrity(&writer);
+        }
+
+        #[test]
         fn a_new_replica_that_follows_a_writer_of_an_older_format_waits_without_a_restart() {
             let writer = open_on(&SimFs::new(), false);
             writer.promote(1, b"w").unwrap();
@@ -961,7 +1001,11 @@ mod crash {
                 count(&replica).unwrap_err().kind(),
                 ErrorKind::FormatUpgradePending
             );
-            store(&writer, b"format_version", &14u32.to_be_bytes());
+            store(
+                &writer,
+                b"format_version",
+                &crate::graph::FORMAT_VERSION.to_be_bytes(),
+            );
             sync(&writer, &replica).unwrap();
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
         }
@@ -1472,7 +1516,11 @@ mod crash {
             store(&writer, b"format_version", &OLDER.to_be_bytes());
             let older_at = writer.position().lsn();
             insert(&writer, 2);
-            store(&writer, b"format_version", &14u32.to_be_bytes());
+            store(
+                &writer,
+                b"format_version",
+                &crate::graph::FORMAT_VERSION.to_be_bytes(),
+            );
             let (pauses, at, resume) = pause(&replica);
             let timeout = std::time::Duration::from_secs(10);
             std::thread::scope(|scope| {
@@ -1529,7 +1577,11 @@ mod crash {
             store(&writer, b"format_version", &OLDER.to_be_bytes());
             let older_at = writer.position().lsn();
             insert(&writer, 2);
-            store(&writer, b"format_version", &14u32.to_be_bytes());
+            store(
+                &writer,
+                b"format_version",
+                &crate::graph::FORMAT_VERSION.to_be_bytes(),
+            );
             let reader_thread = Arc::new(std::sync::Mutex::new(None));
             let (reached, at) = std::sync::mpsc::channel::<u8>();
             let (resume, resumed) = std::sync::mpsc::channel::<()>();

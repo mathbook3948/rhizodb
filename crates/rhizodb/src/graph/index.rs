@@ -1483,7 +1483,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                         &relationships::chunk_key(end),
                         |key, value| {
                             let chunk = relationships::parse_key(key)?;
-                            for entry in ChunkRef::parse(value)?.entries() {
+                            for entry in ChunkRef::parse(key, value)?.entries() {
                                 let (slot, record) = entry?;
                                 let id = relationships::relationship_at(chunk, slot).0;
                                 if id >= at
