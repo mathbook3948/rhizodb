@@ -12,6 +12,7 @@ thread_local! {
 pub(crate) enum Read {
     TokenLookup,
     RelationshipDecode,
+    MetaLoad,
 }
 
 /// How many reads of each [`Read`] a thread made.
@@ -21,12 +22,15 @@ pub(crate) struct Reads {
     pub(crate) token_lookups: usize,
     /// Relationship records decoded whole.
     pub(crate) relationship_decodes: usize,
+    /// Node meta chunks loaded from storage.
+    pub(crate) meta_loads: usize,
 }
 
 impl Reads {
     const NONE: Self = Self {
         token_lookups: 0,
         relationship_decodes: 0,
+        meta_loads: 0,
     };
 }
 
@@ -36,6 +40,7 @@ pub(crate) fn note(read: Read) {
         match read {
             Read::TokenLookup => counts.token_lookups += 1,
             Read::RelationshipDecode => counts.relationship_decodes += 1,
+            Read::MetaLoad => counts.meta_loads += 1,
         }
         reads.set(counts);
     });
@@ -49,6 +54,7 @@ pub(crate) fn counted<R>(run: impl FnOnce() -> R) -> (R, Reads) {
     let reads = Reads {
         token_lookups: after.token_lookups - before.token_lookups,
         relationship_decodes: after.relationship_decodes - before.relationship_decodes,
+        meta_loads: after.meta_loads - before.meta_loads,
     };
     (result, reads)
 }

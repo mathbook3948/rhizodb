@@ -1028,6 +1028,8 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::MetaLoad);
         let Some((bytes, deltas)) = self.stored_group(group)? else {
             return Ok(None);
         };

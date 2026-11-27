@@ -493,7 +493,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let direction = match read {
             HopRead::Stored(direction, rel_type) => {
                 return Ok(self.tx.adjacent_into(
-                    &mut self.adjacency.borrow_mut(),
+                    &mut self.caches.adjacency.borrow_mut(),
                     node,
                     direction,
                     rel_type,
@@ -510,9 +510,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         for name in labels.names() {
             tokens.push((name.0.as_str(), self.rel_type_token(&name.0)?));
         }
-        let adjacent =
-            self.tx
-                .adjacent_with(&mut self.adjacency.borrow_mut(), node, direction, None)?;
+        let adjacent = self.tx.adjacent_with(
+            &mut self.caches.adjacency.borrow_mut(),
+            node,
+            direction,
+            None,
+        )?;
         for adjacent in adjacent {
             let Ok(matched) = labels.matches::<Infallible>(true, &mut |name| {
                 Ok(tokens
