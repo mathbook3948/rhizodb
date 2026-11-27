@@ -13,7 +13,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Phase 3 lets read-only processes join a session whose one read-write process writes and checkpoints, and it builds the side file, catch-up, the slots, the cache journal, and recovery for the first process of a session.
 - In phase 3 the read-write process holds the write lock for as long as it is open, so a second read-write open of the session fails.
 - Phase 4 takes the write lock for each write transaction and lets the committing process checkpoint.
-- Phase 4 moves the replication role, the acknowledged peers, and the snapshot pins into the side file.
+- Phase 4 moves the replication role and the acknowledged peers into the side file.
 - Any number of processes on one machine read a database file at once, and one write transaction at a time, in any of them, writes it.
 - A read-write open takes part in multi-process access only when its `OpenOptions` ask for it.
 - An open that does not ask keeps the exclusive lock, creates no side file, and runs none of the code below.
@@ -22,13 +22,16 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - An open that locks the file exclusively fails while a session is open, and a session's open fails while an exclusive open holds the file.
 - A database in memory cannot take part in a session.
 - A process opens a file at most once, through a process-wide registry of open files keyed by device and inode, as SQLite's `unixInodeInfo` is, so a second open in the same process fails even through a hard link or another path, since a byte-range lock never conflicts with another lock of its own process.
-- On Windows the registry is keyed by the volume serial number and the file index.
+- On Windows the registry is keyed by the volume serial number and the 128-bit file id of `FILE_ID_INFO`, since the 64-bit file index is not unique on ReFS.
+- The registry also holds the side file's one handle, so no other open in the process opens or closes a descriptor of it.
 - A session keeps its shared state in a side file named after the database file with `-shm`, which the first process of each session creates or resets in place and never truncates.
 - The side file holds the session's identity, a copy of the newest durable header, the end of the log, a journal of reused blocks, the acknowledged peers, the replication role, and one slot per process.
 - The session's identity is the side file's layout version, the engine format minor, the graph format version, the tokenizer fingerprint, and the database id.
 - A process whose build or file differs in any part of the identity fails to join.
 - The replication role is not part of the identity, since `promote` and `demote` change it while the session runs.
-- The side file grows by writing zeros into it, never by setting its length, so a full disk fails the write instead of a later store into a mapped page that has no block, which raises `SIGBUS`.
+- The side file grows by `posix_fallocate` on Linux, by `F_PREALLOCATE` on macOS, and by writing a non-zero pattern on Windows, never by setting its length, so a full disk fails the growth instead of a later store into a mapped page that has no block, which raises `SIGBUS`.
+- The side file never grows by writing zeros, since zeros reserve no space on a compressing file system such as ZFS or compressed btrfs.
+- An open whose growth of the side file fails is refused.
 - Every process maps the side file into memory and reads and writes it with atomic operations, as SQLite maps its wal-index and LMDB its lock file.
 - A record of several words sits behind a sequence number that is odd while it changes, so a reader retries a torn read instead of taking a lock.
 - The side file is never synced and never trusted across sessions, since the first process of a session rebuilds it from the database file and the log.
@@ -52,8 +55,10 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process that gets another slot's liveness lock knows that slot's owner is dead.
 - Locks are taken in the order session lock, write lock, checkpoint lock, and no process that holds the checkpoint lock waits for the write lock, so no two processes wait for each other.
 - On Linux every lock of a session is an open-file-description lock, so closing another descriptor of the file drops none of them.
-- Where only classic `fcntl` locks exist, a process opens the side file once and never closes a descriptor of it while it is open, since closing any descriptor of a file drops every `fcntl` lock the process holds on it.
-- A blocking classic `fcntl` lock that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process and so reports false ones between the threads of one process.
+- Where only classic `fcntl` locks exist, as on macOS, a process opens the side file once and never closes a descriptor of it while it is open, since closing any descriptor of a file drops every `fcntl` lock the process holds on it.
+- The engine opens the side file only through its one handle, and its docs name opening or closing the side file anywhere else in the process as a hazard that drops the session's locks there, as SQLite's docs do for its files.
+- A blocking classic `fcntl` wait for the write lock or the checkpoint lock that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process and so reports false ones between the threads of one process, and the lock order rules out a real one.
+- No other lock is retried after `EDEADLK`, so a real deadlock fails instead of spinning.
 - The database file is locked only with the standard library's whole-file lock or a range lock past its blocks, and the side file only with range locks, so no file mixes `flock` and `fcntl`.
 - A child forked from a process that has the file open must not touch the database, as SQLite and LMDB forbid it for their handles.
 - A forked child shares its parent's open-file-description locks until it closes the descriptors or runs a program, so a parent that dies first keeps its slot alive and its tree held until then.
@@ -70,12 +75,15 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process never reads a record past the published end, so it never sees a record that is still being appended or that a dead writer tore.
 - `changes_since` in any process serves only the records that process has caught up with, since it reads no further than its own published view.
 - `position` catches up first, so it reports the end the side file publishes.
-- A process that finds a newer durable header in the side file adopts it before it reads the log, by loading that header's catalog and extent table and pointing new readers at its tree.
+- Catching up with a configuration record updates the process's term history and its writer's term, as `apply` does through `note_config`, so `changes_since`, `position`, and the next commit use the newest term of the session.
+- Catching up sets the writer's chain hash, last LSN, and last HLC from the last record it replays, so the next commit in that process follows the newest commit of every process and takes an HLC above it whatever the wall clocks say.
+- A process that finds a newer whole checkpoint's header in the side file adopts it before it reads the log, by loading that header's catalog and extent table and pointing new readers at its tree.
 - Adopting a whole checkpoint's header moves the process's view to at least the checkpoint's LSN, since its tree holds every commit up to that LSN.
 - Adopting a whole checkpoint's header gives new readers a memtable that holds only the commits after the checkpoint's LSN, and readers that began before keep the old memtable and tree until they end.
 - A stage's tree holds each key it covers at its value as of the stage's frozen LSN, so a process adopts a stage's header only once it has caught up through the `staged_lsn` that header records.
 - Adopting a stage's header replaces only the tree for new readers, and readers whose view lies below the stage's frozen LSN keep the previous tree, since the memtable still holds every commit after the LSN the log replays from.
 - A log segment that is gone when a process opens it was released by a checkpoint, so the process adopts the newest header and goes on from its LSN.
+- When that newest header is a stage, the process loads the stage's tree, replays the log from the header's `checkpoint_lsn` through its `staged_lsn` and on into a new memtable, and lets new readers begin only once it has caught up.
 - On Windows, a segment that another process is removing refuses access, and the process treats that refusal as a released segment.
 - In a session, a process keeps every tombstone in its memtable until it adopts a checkpoint that covers it, since a checkpoint another process writes from its own frozen memtable may hold the key's older value.
 - After catching up with records that change index definitions, the graph reloads them before any reader begins, as after `apply`.
@@ -89,9 +97,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process joins by writing the newest durable generation into a free slot and checking that it is still the newest, retrying otherwise, as an LMDB reader does, so a checkpoint either sees the slot or the process loads a newer header.
 - A joining process takes its slot's liveness lock before it writes the slot's generation, so no checkpoint clears the slot as dead after it holds a tree.
 - A sequentially consistent fence separates the joiner's store of its generation from its load of the newest generation, and a checkpoint's store of a new header from its loads of the slots, since each pair is a Dekker pattern that weaker orderings let both sides miss.
-- A process records every free block range and free extent slot of the first header it loads as freed under that header's generation, since a tree of an older generation in another process may still reach them.
 - Beginning a read writes nothing to the side file and takes no lock, since the process's slot already covers the tree its published view holds.
-- A slot also records the oldest LSN that its process's snapshot pins keep, and a checkpoint keeps the log after the oldest such LSN of every slot, as it keeps the log for a pin of its own.
+- From phase 3 on, a slot also records the oldest LSN that its process's snapshot pins keep, so a pin in a read-only process keeps the log too, and a checkpoint keeps the log after the oldest such LSN of every slot, as it keeps the log for a pin of its own.
 - Acknowledged peers live in the side file, so an `acknowledge` in any process keeps the log for that peer, and every header a checkpoint writes records them.
 - A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process before it reads the generations.
 - The log needs no entry in the slots, since a process that misses a segment adopts the checkpoint that released it.
@@ -105,17 +112,23 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process that takes the checkpoint lock and finds a valid header in the file newer than the one the side file publishes syncs the file and then publishes that header, since a dead process wrote it and the page cache may hold it alone.
 - The process that writes a header removes the segments that header released and publishes the log's new first segment in the side file.
 - Every process reads the log's size and first segment from the side file, since today they change only when the process that checkpointed next commits.
-- Each process records which blocks and extent slots each generation freed by comparing the extent table of every header it adopts with the one before, so a checkpoint in any process holds freed space as long as the rules of one process require.
-- A process that skipped generations records the blocks they freed under the newest of them, which holds those blocks at least as long as needed.
+- A process records which blocks and extent slots a generation freed by comparing the extent table of a header it adopts with the one it adopted last, when the new header is exactly one generation past it, so a checkpoint in any process holds freed space as long as the rules of one process require.
+- A process records every free block range and free extent slot of the first header it loads, and of any header more than one generation past the one it adopted last, as freed or dropped under that header's generation, since a skipped generation may have reused a range and freed it again while a tree in another process still reaches it.
+- Generations are consecutive, so that rule holds a range free in the adopted header until every slot reaches that header's generation, which is as long as any skipped generation needs.
+- No side-file journal of each generation's freed ranges and dropped slots replaces that rule, since such a journal grows with the free ranges of every generation and still needs the rule once it no longer reaches back.
 - A header written outside a checkpoint, such as one that records a higher term, takes the checkpoint lock and is published the same way.
 - A process that closes while others have the file open finishes a checkpoint it is running and then writes nothing to the file or the log.
-- The last process to close gets the session lock exclusively, catches up with the log, and then closes as a single process does today, checkpointing the whole log, writing a clean header, and removing the segments no peer needs.
+- A closing process tries once, without waiting, to turn its shared session lock into an exclusive one, since two closers that each waited for the other's shared lock would deadlock.
+- On Windows, which has no atomic upgrade, the closer makes that try while it holds the gate lock, and takes the shared session lock again when the try fails, so no open finds the session lock free in between.
+- A closer whose try succeeds is the last process of the session, catches up with the log, and then closes as a single process does today, checkpointing the whole log, writing a clean header, and removing the segments no peer needs.
+- A closer whose try fails writes nothing and closes, so when the last processes close together the next session's first process recovers the log.
 - An automatic compaction that finds a slot below the durable generation marks itself due and runs once the checkpoint thread's poll finds every slot at the durable generation, as it defers for older trees in one process today.
 - `compact` shrinks the file only as far as the trees of other processes allow.
 - Each process keeps its own block cache.
 - A block that a durable header reaches is never written again, and a freed block is reused only once no slot holds a tree that reaches it, so a process's cache is right for every tree that process holds.
 - An extent in a reused slot has a new id, so the cached pages of the extent before it are never looked up again.
 - A checkpoint records an extent's id in the side file's journal under its generation before its first write into a free range of that extent, so a checkpoint that dies after the write still leaves the extent named.
+- The journal only appends, so a dead checkpoint's entries and the entries its successor writes under the same generation number both stay, and a process drops the extents of both.
 - A process that adopts a header first drops its cached pages and values in the extents the journal names for every generation after the last one it adopted, and drops its whole cache when the journal no longer reaches back that far.
 - The first process of a session resets the side file under the session lock, held exclusively, and then opens the file as an open does today.
 - A first process that opened read-write recovers the log, or starts a new log on a clean file, before it lets another process join.
@@ -129,6 +142,10 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A session's first process decides the replication role as an open decides it today, and every process of the session shares that role through the side file.
 - A writer therefore opens fenced after a restart of its whole session, and a process that joins a running session without `OpenOptions::replica` takes the session's role.
 - A process that joins with `OpenOptions::replica` takes the session's role when it is a replica, makes the session a replica under the write lock when the file holds no change and no history, and otherwise fails with `NotReplica`, as an open of such a file does today.
+- The seen term, the replica mark, the incarnation, and the role live in one side-file record behind a sequence number, which changes only under the session write lock.
+- `promote`, `demote`, `observe_term`, and `declare_replica` take the write lock and decide from that record, never from a copy in the process.
+- `observe_term` takes the writer mutex and the write lock before it compares the term, rather than a compare-and-swap on the record, since the higher term must also reach a durable header, which it writes under the same locks as `promote`.
+- In one process today `observe_term` runs without the writer mutex, so it can fence the writer between `promote`'s check of the seen term and its change of the role, which `promote` then overwrites, and phase 3 fixes that by making `observe_term` take the writer mutex.
 - Every local commit checks the role in the side file under the write lock.
 - `apply`, `promote`, and `demote` take the write lock.
 - `promote`, `demote`, and an observed higher term change the role in the side file, so every process takes or refuses local writes from its next commit on.
@@ -167,4 +184,5 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - How the block cache budget is shared among the processes of a session, since each takes the default for itself, which a benchmark of a session of several processes against the machine's memory decides.
 - Whether the last process of a session removes the side file, as SQLite does, which needs an open that raced with the removal to find that its mapping names a removed file, and a test of opens racing the last close on each CI platform decides.
 - Whether writers waiting on the write lock are served in order, since neither `fcntl` nor `LockFileEx` promises it, which a phase 4 test of writers in several processes racing for the lock on each CI platform decides by measuring the longest wait.
+- Whether a copy-on-write file system such as ZFS or btrfs is refused for multi-process access, since it may allocate a new block for each store into a mapped page whatever the growth reserved, so a full disk can still raise `SIGBUS`; a full-disk test on each decides.
 - How a read-only open on read-only media joins a session, since from phase 3 every read-only open needs a side file it may not create there, while SQLite falls back to a private copy of its shared memory; a test of opens on a read-only mount decides whether to fall back or to refuse.

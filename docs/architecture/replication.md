@@ -33,7 +33,8 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - Every header that holds any of these fields records minor 4, so a build before it refuses a file this build only opened as an unsupported format instead of reading the fields as a damaged reserved area.
 - A new file and an installed copy get a new random incarnation, so a copy of a file never passes as the file that began a term.
 - A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer unless it stepped aside for a higher term it heard of, and every other file is a replica.
-- A writer opens fenced after every restart and takes writes again only once the host promotes it with its own newest term and writer id.
+- A writer opens fenced after every restart, of its whole session under multi-process access, and takes writes again only once the host promotes it with its own newest term and writer id.
+- Under multi-process access a process that joins a running session takes the session's role, the writer lock is the session's write lock, and the replication fields come from the side file, as `multi-process.md` decides.
 - A replica opened on a missing or empty file writes nothing and stays a replica, so it holds no change until it applies its writer's first one.
 - `OpenOptions::replica` makes a file that holds no change a replica and refuses a file that holds a writer's changes with `NotReplica`.
 - Every local write of a database that is not the writer fails with `NotWriter`, checked again inside the commit under the writer lock.
