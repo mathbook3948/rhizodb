@@ -130,6 +130,11 @@ pub(crate) struct Held {
 
 impl Held {
     /// The held block whose key, of `term` and `block`, is `key`.
+    pub(crate) fn get(&self, key: &[u8], block: u64) -> Option<&Block> {
+        self.terms.get(term_of(key))?.get(&block)
+    }
+
+    /// The held block whose key, of `term` and `block`, is `key`.
     pub(crate) fn get_mut(&mut self, key: &[u8], block: u64) -> Option<&mut Block> {
         self.terms.get_mut(term_of(key))?.get_mut(&block)
     }
