@@ -60,6 +60,7 @@ cargo add rhizodb
 * Damage is detected, not served: every page carries a checksum, and a damaged file fails with `ErrorKind::CorruptData`.
 * Property indexes, BM25 keyword indexes with phrases and prefixes, and exact vector indexes, all updated in the same transaction as the data they index.
 * Online backups, and a versioned JSON Lines export and import.
+* Embedded replication that the host wires up: one writer, replicas that apply its changes and relay them, terms that fence an old writer, a handover that loses no write, and snapshots that seed a new replica while writes go on.
 * Procedures that the host program registers and queries run with `CALL`.
 * No `unsafe` code.
 

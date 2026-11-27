@@ -24,6 +24,7 @@ Hosts embed `rhizodb` as a library, so every public type, field, and signature i
 - The `Display` text of null, booleans, integers, finite floats, strings, temporals, and lists and maps of them is a GQL expression that evaluates back to an equal value in every later release, while the text of bytes, non-finite floats, and elements is for reading only.
 - A datetime in a named zone reads back from its `Display` text through the zone rules of the reading build, so a changed rule can move it to another instant.
 - `Error` implements `std::error::Error` and is `Send`, `Sync`, and `'static`.
+- `Error` states each cause once: a cause the host can name, such as a procedure body's error or an I/O error, is its `source` and stays out of its message, and a failure inside the database has no `source` and its message holds the whole account.
 - `Error::byte_offset` returns the position of a syntax error in the query text and is `Some` exactly when the kind is `ErrorKind::Syntax`.
 - Every public type is `Send` and `Sync`, except that `WriteTransaction` is neither, and tests assert both.
 - No public signature names a type that hosts cannot name.

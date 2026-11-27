@@ -2217,7 +2217,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         labels: &[Token<Label>],
         add: bool,
     ) -> Result<(), GraphError> {
-        let current = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let current = self.read_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
         let changed: BTreeSet<Token<Label>> = labels
             .iter()
             .copied()
