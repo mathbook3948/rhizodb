@@ -25,6 +25,7 @@ use super::columns::Delta;
 use super::columns::DeltaRef;
 use super::columns::Deltas;
 use super::columns::IndexedColumn;
+use super::columns::Probes;
 use super::columns::Quick;
 use super::columns::SEGMENT_SLOTS;
 use super::columns::Segment;
@@ -195,26 +196,21 @@ impl<T: ReadTransaction> GraphTx<T> {
         group: u64,
         slot: usize,
     ) -> Result<Option<&'r Delta>, GraphError> {
-        let index = match reader
-            .deltas
-            .binary_search_by_key(&group, |(held, _)| *held)
-        {
-            Ok(index) => index,
-            Err(index) => {
-                let delta = self.probe_delta(group, slot)?;
-                reader
-                    .deltas
-                    .insert(index, (group, Cached::Probed((slot, delta))));
-                index
+        let read = match reader.deltas.get(&group) {
+            Some(Cached::Probed((probed, _))) if *probed != slot => {
+                Some(Cached::Loaded(self.load_deltas(group)?))
             }
+            Some(_) => None,
+            None => Some(Cached::Probed((slot, self.probe_delta(group, slot)?))),
         };
-        let cached = &mut reader.deltas[index].1;
-        if matches!(cached, Cached::Probed((probed, _)) if *probed != slot) {
-            *cached = Cached::Loaded(self.load_deltas(group)?);
-        }
+        let cached = match read {
+            Some(read) => Some(reader.deltas.insert(group, read)),
+            None => reader.deltas.get(&group),
+        };
         Ok(match cached {
-            Cached::Probed((_, delta)) => delta.as_ref(),
-            Cached::Loaded(deltas) => columns::find_delta(deltas, slot),
+            Some(Cached::Probed((_, delta))) => delta.as_ref(),
+            Some(Cached::Loaded(deltas)) => columns::find_delta(deltas, slot),
+            None => None,
         })
     }
 
@@ -270,25 +266,26 @@ impl<T: ReadTransaction> GraphTx<T> {
         slot: usize,
         read: impl Fn(Option<Cell<'_>>) -> Result<R, GraphError>,
     ) -> Result<R, GraphError> {
-        let index = match reader.columns.binary_search_by_key(&id, |(held, _)| *held) {
-            Ok(index) => index,
-            Err(index) => {
-                reader.columns.insert(index, (id, Cached::Probed(1)));
-                return self.segment_cell(id, slot, read);
-            }
+        if let Some(column) = reader.columns.get(&id) {
+            return read(column.cell_at(slot)?);
+        }
+        let probes = match reader.probes.get(&id) {
+            Some(probes) => probes,
+            None => reader.probes.insert(id, Probes::Read(0)),
         };
-        let cached = &mut reader.columns[index].1;
-        if let Cached::Probed(probes) = cached {
-            if *probes < columns::PROBES {
-                *probes += 1;
+        match probes {
+            Probes::Read(reads) if *reads < columns::PROBES => {
+                *reads += 1;
                 return self.segment_cell(id, slot, read);
             }
-            *cached = Cached::Loaded(self.load_column(id)?);
+            Probes::Read(_) => {}
+            Probes::Loaded => return self.segment_cell(id, slot, read),
         }
-        match cached {
-            Cached::Loaded(column) => read(column.cell_at(slot)?),
-            Cached::Probed(_) => self.segment_cell(id, slot, read),
-        }
+        let column = self.load_column(id)?;
+        *probes = Probes::Loaded;
+        let value = column.cell_at(slot).and_then(read);
+        reader.columns.insert(id, column);
+        value
     }
 
     fn stored_value(
@@ -379,16 +376,14 @@ impl<T: ReadTransaction> GraphTx<T> {
         group: u64,
         slot: usize,
     ) -> Result<BTreeSet<Token<PropertyKey>>, GraphError> {
-        if reader.keys(group).is_none() {
-            let keys = self.stored_keys(group)?;
-            reader.insert_keys(group, keys);
-        }
-        let mut keys: BTreeSet<Token<PropertyKey>> = reader
-            .keys(group)
-            .unwrap_or_default()
-            .iter()
-            .copied()
-            .collect();
+        let stored = match reader.keys.get(&group) {
+            Some(stored) => stored,
+            None => {
+                let stored = self.stored_keys(group)?;
+                reader.keys.insert(group, stored)
+            }
+        };
+        let mut keys: BTreeSet<Token<PropertyKey>> = stored.iter().copied().collect();
         if let Some(delta) = self.stored_delta(reader, group, slot)? {
             for token in delta.view().tokens() {
                 keys.insert(token?);

@@ -10,6 +10,8 @@ use crate::value::TAG_STRING;
 use crate::value::put_varint;
 
 use super::GraphError;
+use super::budget::Budgeted;
+use super::budget::Weigh;
 use super::ids::PropertyKey;
 use super::ids::Token;
 use super::meta::SLOTS;
@@ -1234,6 +1236,10 @@ impl Delta {
         }
     }
 
+    fn weight(&self) -> usize {
+        self.bytes.len() + self.starts.len() * size_of::<(Token<PropertyKey>, usize)>()
+    }
+
     /// The value of the property `token` now, as [`DeltaRef::get`] gives it.
     pub(crate) fn get(
         &self,
@@ -1515,12 +1521,12 @@ pub(crate) fn merged<'a>(
     Ok(cells)
 }
 
-/// A stored column or set of deltas a reader read in place so far, or loaded whole.
+/// A group's stored deltas a reader read in place so far, or loaded whole.
 #[derive(Debug)]
 pub(crate) enum Cached<P, L> {
-    /// Read in place: a column after fewer than `PROBES` reads, a group's deltas after one.
+    /// The delta of one slot, read in place.
     Probed(P),
-    /// Loaded whole.
+    /// Every delta of the group, loaded.
     Loaded(L),
 }
 
@@ -1535,30 +1541,81 @@ pub(crate) type CachedDeltas = Cached<(usize, Option<Delta>), Deltas>;
 /// reads a few nodes of a group, as a traversal does, never loads it.
 pub(crate) const PROBES: usize = 16;
 
-/// The stored columns and deltas one query read so far. A column read fewer than `PROBES` times
-/// and a group's deltas read once are read in place, so a point lookup copies nothing; read more,
-/// they are loaded and checked whole, so a scan reads each value with one storage access per
-/// segment.
+/// How a reader reads one column of a group it does not hold loaded.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Probes {
+    /// Read in place this many times.
+    Read(usize),
+    /// Loaded, so read from the loaded column while the reader holds it and in place once the
+    /// budget dropped it. Loading it again would copy the column over and over when a traversal
+    /// in random group order reads more columns than the budget holds.
+    Loaded,
+}
+
+/// The stored columns and deltas one query read so far, each map up to a budget of bytes. A
+/// column read fewer than `PROBES` times and a group's deltas read once are read in place, so a
+/// point lookup copies nothing; read more, they are loaded and checked whole, so a scan reads each
+/// value with one storage access per segment. A column the budget dropped is read in place from
+/// then on, and deltas it dropped are read as if new.
 #[derive(Debug, Default)]
 pub(crate) struct ColumnReader {
-    pub(crate) columns: Vec<(ColumnId, Cached<usize, Column>)>,
-    pub(crate) deltas: Vec<(u64, CachedDeltas)>,
-    pub(crate) keys: Vec<(u64, Vec<Token<PropertyKey>>)>,
+    pub(crate) columns: Budgeted<ColumnId, Column>,
+    pub(crate) probes: Budgeted<ColumnId, Probes>,
+    pub(crate) deltas: Budgeted<u64, CachedDeltas>,
+    pub(crate) keys: Budgeted<u64, Vec<Token<PropertyKey>>>,
 }
 
 impl ColumnReader {
-    /// The property keys with a stored segment in `group`, if read before.
-    pub(crate) fn keys(&self, group: u64) -> Option<&[Token<PropertyKey>]> {
-        self.keys
-            .binary_search_by_key(&group, |(held, _)| *held)
-            .ok()
-            .map(|index| self.keys[index].1.as_slice())
-    }
-
-    pub(crate) fn insert_keys(&mut self, group: u64, keys: Vec<Token<PropertyKey>>) {
-        if let Err(index) = self.keys.binary_search_by_key(&group, |(held, _)| *held) {
-            self.keys.insert(index, (group, keys));
+    /// A reader whose columns, deltas, and key lists each hold about `bytes` bytes.
+    #[cfg(test)]
+    pub(crate) fn with_budget(bytes: usize) -> Self {
+        Self {
+            columns: Budgeted::new(bytes),
+            probes: Budgeted::default(),
+            deltas: Budgeted::new(bytes),
+            keys: Budgeted::new(bytes),
         }
+    }
+}
+
+impl Weigh for Column {
+    fn weight(&self) -> usize {
+        self.segments.capacity() * size_of::<Vec<Segment>>()
+            + self
+                .segments
+                .iter()
+                .map(|parts| {
+                    parts.capacity() * size_of::<Segment>()
+                        + parts.iter().map(|part| part.bytes.len()).sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+}
+
+impl Weigh for Probes {
+    fn weight(&self) -> usize {
+        0
+    }
+}
+
+impl Weigh for CachedDeltas {
+    fn weight(&self) -> usize {
+        match self {
+            Cached::Probed((_, delta)) => delta.as_ref().map_or(0, Delta::weight),
+            Cached::Loaded(deltas) => {
+                deltas.capacity() * size_of::<(usize, Delta)>()
+                    + deltas
+                        .iter()
+                        .map(|(_, delta)| delta.weight())
+                        .sum::<usize>()
+            }
+        }
+    }
+}
+
+impl Weigh for Vec<Token<PropertyKey>> {
+    fn weight(&self) -> usize {
+        self.capacity() * size_of::<Token<PropertyKey>>()
     }
 }
 

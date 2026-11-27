@@ -269,6 +269,28 @@ pub(super) fn check(
             );
         }
     }
+    let mut labels = LabelReader::with_budget(1);
+    let mut columns = ColumnReader::with_budget(1);
+    for (id, (_, values)) in model.nodes.iter().chain(model.nodes.iter().rev()) {
+        let node = NodeId(*id);
+        for (name, token) in &tokens {
+            let starved = read
+                .node_property(&mut labels, &mut columns, node, *token)
+                .unwrap();
+            prop_assert!(starved.is_some(), "{} exists", id);
+            prop_assert!(
+                agrees(starved.flatten().as_ref(), values.get(name)),
+                "{}.{} through readers that hold one entry each",
+                id,
+                name
+            );
+        }
+        let all = read
+            .node_properties(&mut labels, &mut columns, node)
+            .unwrap()
+            .unwrap_or_default();
+        prop_assert_eq!(all.len(), values.len(), "listed properties of {}", id);
+    }
     for probe in probes(model) {
         let node = NodeId(probe);
         prop_assert!(read.node(node).unwrap().is_none(), "no node {}", probe);
@@ -1070,9 +1092,12 @@ fn a_query_reads_a_few_values_of_a_column_in_place_and_loads_the_column_to_read_
     let b = read.lookup_token::<PropertyKey>("b").unwrap().unwrap();
     let mut labels = LabelReader::default();
     let mut columns = ColumnReader::default();
-    let state = |columns: &ColumnReader| match columns.columns.as_slice() {
-        [(_, columns::Cached::Probed(probes))] => Some(*probes),
-        [(_, columns::Cached::Loaded(_))] => None,
+    let state = |columns: &ColumnReader| match (
+        columns.columns.values().count(),
+        columns.probes.values().collect::<Vec<_>>().as_slice(),
+    ) {
+        (0, [columns::Probes::Read(probes)]) => Some(*probes),
+        (1, [columns::Probes::Loaded]) => None,
         other => panic!("{other:?}"),
     };
     for id in 0..=columns::PROBES as u64 {

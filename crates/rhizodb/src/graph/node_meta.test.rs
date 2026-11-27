@@ -194,6 +194,21 @@ pub(super) fn check_with(
             id
         );
     }
+    let mut starved = LabelReader::with_budget(1);
+    for id in model.nodes.keys().chain(model.nodes.keys().rev()) {
+        let node = NodeId(*id);
+        let held = read
+            .with_labels(&mut starved, node, |found| found.to_vec())
+            .unwrap();
+        prop_assert_eq!(
+            held,
+            read.node_labels(node)
+                .unwrap()
+                .map(|labels| labels.to_vec()),
+            "labels of {} through a reader that holds one group",
+            id
+        );
+    }
     for probe in ids_without_a_node_worth_asking(model) {
         if model.nodes.contains_key(&probe) {
             continue;
