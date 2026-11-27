@@ -964,3 +964,30 @@ fn opening_a_new_or_current_database_checkpoints_nothing() {
     let graph = Graph::open(storage).unwrap();
     assert_eq!(graph.storage.header().generation, before.generation);
 }
+
+#[test]
+fn opening_a_database_of_another_tokenizer_as_its_writer_checkpoints_the_rebuilt_indexes() {
+    let storage = test_engine::in_memory();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &FORMAT_VERSION.to_be_bytes(),
+        )
+        .unwrap();
+    write
+        .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+        .unwrap();
+    write.commit().unwrap();
+    let before = storage.header();
+    let graph = Graph::open(storage).unwrap();
+    let after = graph.storage.header();
+    assert!(after.generation > before.generation);
+    assert!(after.checkpoint_lsn > before.checkpoint_lsn);
+    let stored = GraphTx::bare(graph.storage.begin_read().unwrap())
+        .transaction
+        .get(Table::Metadata, keys::TOKENIZER_KEY)
+        .unwrap();
+    assert_eq!(stored, Some(tokenize::fingerprint()));
+}
