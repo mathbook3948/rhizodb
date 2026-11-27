@@ -446,13 +446,21 @@ impl<S: Storage> Graph<S> {
                 .get(Table::Metadata, keys::UPGRADE_PROGRESS_KEY)?
             {
                 Some(progress) if upgrading => {
-                    let (step, cursor) = progress
+                    let (target, rest) = progress
+                        .split_first_chunk::<4>()
+                        .ok_or(GraphError::Corrupt("an upgrade's progress names no target"))?;
+                    let target = u32::from_be_bytes(*target);
+                    if target > FORMAT_VERSION {
+                        return Err(GraphError::UnsupportedFormatVersion(target));
+                    }
+                    let (code, cursor) = rest
                         .split_first()
-                        .and_then(|(code, cursor)| Some((UpgradeStep::of_code(*code)?, cursor)))
                         .ok_or(GraphError::Corrupt("an upgrade's progress names no step"))?;
-                    let index = plan.iter().position(|planned| *planned == step).ok_or(
-                        GraphError::Corrupt("an upgrade's progress names no planned step"),
-                    )?;
+                    let index = UpgradeStep::of_code(*code)
+                        .and_then(|step| plan.iter().position(|planned| *planned == step))
+                        .ok_or(GraphError::Corrupt(
+                            "an upgrade's progress names no planned step",
+                        ))?;
                     (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec()))
                 }
                 _ => (0, None),
@@ -472,7 +480,8 @@ impl<S: Storage> Graph<S> {
             };
             match plan.get(at.0) {
                 Some(step) => {
-                    let mut progress = vec![step.code()];
+                    let mut progress = FORMAT_VERSION.to_be_bytes().to_vec();
+                    progress.push(step.code());
                     if let Some(cursor) = &at.1 {
                         progress.push(1);
                         progress.extend_from_slice(cursor);

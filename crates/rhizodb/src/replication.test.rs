@@ -1032,6 +1032,104 @@ mod crash {
         }
 
         #[test]
+        fn a_tokenizer_rebuild_of_long_texts_runs_in_commits_of_bounded_size() {
+            let fs = SimFs::new();
+            let writer = open_on(&fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                .unwrap();
+            let texts = (0..300)
+                .map(|k| {
+                    let words: Vec<String> = (0..200).map(|i| format!("t{k}x{i}")).collect();
+                    Value::String(format!("river {}", words.join(" ")))
+                })
+                .collect();
+            writer
+                .execute(
+                    "UNWIND $texts AS text INSERT (:N {text: text})",
+                    &Parameters::new().with("texts", Value::List(texts)),
+                )
+                .unwrap();
+            let expected = search(&writer);
+            assert_eq!(expected.len(), 100);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            drop(writer);
+            let writer = open_on(&fs, false);
+            let before = writer.position();
+            writer.promote(1, b"w").unwrap();
+            assert_eq!(search(&writer), expected);
+            integrity(&writer);
+            let upgrade = writer.changes_since(&before, usize::MAX).unwrap();
+            let sizes: Vec<usize> = upgrade
+                .decoded
+                .records
+                .iter()
+                .map(|change| change.bytes.len())
+                .collect();
+            let bound = 4 * crate::graph::TEST_UPGRADE_BATCH_BYTES;
+            assert!(sizes.len() >= 8, "{sizes:?}");
+            assert!(sizes.iter().all(|size| *size <= bound), "{sizes:?}");
+            let postings = TableId::of(Table::KeywordPostings);
+            let clearing: Vec<(usize, bool)> = upgrade
+                .decoded
+                .records
+                .iter()
+                .map(|change| match &change.record.body {
+                    Body::Batch(ops) => (
+                        ops.iter()
+                            .filter(
+                                |op| matches!(op, Op::Delete { table, .. } if *table == postings),
+                            )
+                            .count(),
+                        ops.iter().any(|op| matches!(op, Op::DeleteRange { .. })),
+                    ),
+                    _ => (0, false),
+                })
+                .collect();
+            assert!(
+                clearing.iter().all(|(_, ranged)| !ranged),
+                "the clear deleted a range at once"
+            );
+            assert!(
+                clearing.iter().filter(|(deleted, _)| *deleted > 0).count() >= 2,
+                "{clearing:?}"
+            );
+            assert_eq!(stored(&writer, b"upgrade_progress"), None);
+        }
+
+        #[test]
+        fn a_replica_waits_on_a_marked_upgrade_even_when_its_format_and_tokenizer_are_current() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica_fs = SimFs::new();
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            let current = stored(&writer, b"format_version").unwrap();
+            let version = u32::from_be_bytes(current.as_slice().try_into().unwrap());
+            store(
+                &writer,
+                b"format_version",
+                &(version | 1 << 31).to_be_bytes(),
+            );
+            sync(&writer, &replica).unwrap();
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            drop(replica);
+            let replica = open_on(&replica_fs, true);
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            store(&writer, b"format_version", &current);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(1)]]);
+        }
+
+        #[test]
         fn a_replica_that_follows_a_chunked_upgrade_waits_from_its_first_commit_to_its_last() {
             let replica = open_on(&SimFs::new(), true);
             let (fs, expected, exported) = large_older_file_followed_by(Some(&replica));

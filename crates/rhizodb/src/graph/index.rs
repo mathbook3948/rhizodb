@@ -63,6 +63,10 @@ const METRIC_COSINE: u8 = 0;
 const METRIC_EUCLIDEAN: u8 = 1;
 const METRIC_DOT_PRODUCT: u8 = 2;
 
+const SCAN_BYTES: usize = 64;
+const DELETE_BYTES: usize = 16;
+const TOTALS_ROW_BYTES: usize = 32;
+
 /// The tables that hold index entries, each keyed first by index ID.
 pub(crate) const ENTRY_TABLES: [Table; 5] = [
     Table::KeywordPostings,
@@ -1348,7 +1352,9 @@ impl<T: WriteTransaction> GraphTx<T> {
                 (id, filling, at) = (index.id, false, 0);
             }
             if !filling {
-                self.clear(index)?;
+                if !self.clear_from(index, budget)? {
+                    return Ok(resume(id, false, 0));
+                }
                 self.transaction.put(
                     Table::KeywordTotals,
                     &keys::index_prefix(index.id),
@@ -1432,10 +1438,11 @@ impl<T: WriteTransaction> GraphTx<T> {
                 let entry = self.with_reader(|tx, reader| {
                     tx.covered_entry(reader, &index.definition, element)
                 })?;
-                if let Some(entry) = entry {
-                    self.insert_entry(index, element, &entry)?;
-                }
-                budget.spend(256);
+                let staged = match entry {
+                    Some(entry) => self.insert_entry(index, element, &entry)?,
+                    None => 0,
+                };
+                budget.spend(SCAN_BYTES.saturating_add(staged));
                 if budget.full() {
                     return Ok(Some(element + 1));
                 }
@@ -1554,6 +1561,37 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
+    fn clear_from(
+        &mut self,
+        index: &Index,
+        budget: &mut UpgradeBudget,
+    ) -> Result<bool, GraphError> {
+        let prefix = keys::index_prefix(index.id);
+        self.postings.forget(&prefix);
+        for table in ENTRY_TABLES {
+            let mut doomed = Vec::new();
+            let complete = finished(self.transaction.visit_prefix_peek(
+                table,
+                &prefix,
+                |key, _| {
+                    if budget.full() {
+                        return Err(Scan::Full);
+                    }
+                    budget.spend(key.len().saturating_add(DELETE_BYTES));
+                    doomed.push(key.to_vec());
+                    Ok(())
+                },
+            ))?;
+            for key in doomed {
+                self.transaction.delete(table, &key)?;
+            }
+            if !complete {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Brings every index in line with the element with ID `element` that changed from
     /// `before` to `after`, both records of one node or of one relationship. `None` stands for
     /// an element that did not exist or no longer does. Only the definitions whose target
@@ -1601,8 +1639,10 @@ impl<T: WriteTransaction> GraphTx<T> {
         index: &Index,
         element: u64,
         entry: &Entry,
-    ) -> Result<(), GraphError> {
+    ) -> Result<usize, GraphError> {
+        let mut staged = 0usize;
         for (table, key, value) in index.rows(element, entry) {
+            staged = staged.saturating_add(key.len()).saturating_add(value.len());
             self.transaction.put(table, &key, &value)?;
         }
         if let Entry::Keyword(document) = entry {
@@ -1611,13 +1651,15 @@ impl<T: WriteTransaction> GraphTx<T> {
             let mut key = Vec::new();
             for (term, positions) in document {
                 keys::put_posting_key(&mut key, index.id, term, block);
-                self.edit_posting_block(&key, block, |held| {
+                let grown = self.edit_posting_block(&key, block, |held| {
                     held.insert(block, element, positions, length)
                 })?;
+                staged = staged.saturating_add(grown);
             }
             self.adjust_totals(index.id, length, true)?;
+            staged = staged.saturating_add(TOTALS_ROW_BYTES);
         }
-        Ok(())
+        Ok(staged)
     }
 
     fn edit_posting_block(
@@ -1625,7 +1667,8 @@ impl<T: WriteTransaction> GraphTx<T> {
         key: &[u8],
         block: u64,
         edit: impl FnOnce(&mut Block) -> Result<(), DecodeError>,
-    ) -> Result<(), GraphError> {
+    ) -> Result<usize, GraphError> {
+        let mut staged = 0usize;
         let held = match self.postings.get_mut(key, block) {
             Some(held) => held,
             None => {
@@ -1635,6 +1678,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                         Block::load(block, bytes).map_err(GraphError::from)
                     })?
                     .unwrap_or_default();
+                staged = key.len().saturating_add(loaded.len());
                 self.postings.insert(key, block, loaded);
                 self.postings
                     .get_mut(key, block)
@@ -1648,7 +1692,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         if self.postings.bytes() > HELD_POSTING_BYTES {
             self.flush_postings()?;
         }
-        Ok(())
+        Ok(staged.saturating_add(after.saturating_sub(before)))
     }
 
     /// Writes every posting block this transaction holds into storage.
