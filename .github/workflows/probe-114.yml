@@ -1,0 +1,52 @@
+name: probe-114
+
+on:
+  push:
+    branches: [claude/probe-114-timeout]
+
+permissions:
+  contents: read
+
+jobs:
+  slow:
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [times-out, passes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - shell: bash
+        run: echo first > deep.log
+      - shell: bash
+        run: |
+          echo second | tee deep.log
+          if [ "${{ matrix.kind }}" = times-out ]; then sleep 150; fi
+      - if: failure() || cancelled()
+        shell: bash
+        run: echo "PROBE upload step ran"; cat deep.log
+      - if: failure()
+        run: echo "PROBE failure-only step ran"
+
+  report-old:
+    needs: [slow]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PROBE old condition ran"
+
+  report-not-cancelled:
+    needs: [slow]
+    if: ${{ !cancelled() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PROBE not-cancelled condition ran"
+
+  report-always:
+    needs: [slow]
+    if: ${{ always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "PROBE always condition ran"; echo "$NEEDS"
