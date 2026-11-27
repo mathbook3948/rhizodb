@@ -1,5 +1,6 @@
 use proptest::prelude::*;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
@@ -944,6 +945,14 @@ struct CountingStorage {
     entry_writes: Rc<Cell<usize>>,
     posting_bytes: Rc<Cell<usize>>,
     posting_gets: Rc<Cell<usize>>,
+    log: Rc<RefCell<Vec<Access>>>,
+}
+
+#[derive(Debug)]
+enum Access {
+    Scan(Table, Vec<u8>),
+    Delete(Table, Vec<u8>),
+    Commit,
 }
 
 struct CountingWrite<'a> {
@@ -951,6 +960,7 @@ struct CountingWrite<'a> {
     entry_writes: Rc<Cell<usize>>,
     posting_bytes: Rc<Cell<usize>>,
     posting_gets: Rc<Cell<usize>>,
+    log: Rc<RefCell<Vec<Access>>>,
 }
 
 impl CountingWrite<'_> {
@@ -982,6 +992,7 @@ impl Storage for CountingStorage {
             entry_writes: Rc::clone(&self.entry_writes),
             posting_bytes: Rc::clone(&self.posting_bytes),
             posting_gets: Rc::clone(&self.posting_gets),
+            log: Rc::clone(&self.log),
         })
     }
 
@@ -1058,6 +1069,9 @@ impl ReadTransaction for CountingWrite<'_> {
         prefix: &[u8],
         visit: impl FnMut(&[u8], crate::storage::Peek<'_>) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.log
+            .borrow_mut()
+            .push(Access::Scan(table, prefix.to_vec()));
         self.inner.visit_prefix_peek(table, prefix, visit)
     }
 
@@ -1068,6 +1082,9 @@ impl ReadTransaction for CountingWrite<'_> {
         end: &[u8],
         visit: impl FnMut(&[u8], crate::storage::Peek<'_>) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.log
+            .borrow_mut()
+            .push(Access::Scan(table, start.to_vec()));
         self.inner.visit_range_peek(table, start, end, visit)
     }
 }
@@ -1080,6 +1097,9 @@ impl WriteTransaction for CountingWrite<'_> {
 
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<(), StorageError> {
         self.count(table);
+        self.log
+            .borrow_mut()
+            .push(Access::Delete(table, key.to_vec()));
         self.inner.delete(table, key)
     }
 
@@ -1089,12 +1109,85 @@ impl WriteTransaction for CountingWrite<'_> {
     }
 
     fn commit(self) -> Result<(), StorageError> {
+        self.log.borrow_mut().push(Access::Commit);
         self.inner.commit()
     }
 
     fn rollback(self) -> Result<(), StorageError> {
         self.inner.rollback()
     }
+}
+
+#[test]
+fn a_rebuild_clears_every_entry_without_scanning_back_over_its_committed_deletions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("clear.rhizodb");
+    let entries = {
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        for k in 0..3000 {
+            let words: Vec<String> = (0..20).map(|i| format!("t{k}x{i}")).collect();
+            write
+                .create_node(NodeRecord {
+                    labels: [label].into(),
+                    properties: Properties::from([(text, PropertyValue::String(words.join(" ")))]),
+                })
+                .unwrap();
+        }
+        write.commit().unwrap();
+        let mut stale = graph.storage.begin_write().unwrap();
+        stale
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"an older tokenizer")
+            .unwrap();
+        let mut entries = BTreeSet::new();
+        for (at, table) in ENTRY_TABLES.into_iter().enumerate() {
+            for (key, _) in stale.scan_prefix(table, &keys::index_prefix(0)).unwrap() {
+                entries.insert((at, key));
+            }
+        }
+        stale.commit().unwrap();
+        entries
+    };
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let graph = Graph::open(CountingStorage {
+        inner: test_engine::open(&path),
+        entry_writes: Rc::default(),
+        posting_bytes: Rc::default(),
+        posting_gets: Rc::default(),
+        log: Rc::clone(&log),
+    })
+    .unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+    let at = |table: Table| ENTRY_TABLES.iter().position(|entry| *entry == table);
+    let mut committed = BTreeSet::new();
+    let mut deleting = Vec::new();
+    let mut scans = 0;
+    for access in log.borrow().iter() {
+        match access {
+            Access::Scan(table, start) => {
+                let Some(table) = at(*table) else { continue };
+                let walked = committed
+                    .range((table, start.clone())..(table + 1, Vec::new()))
+                    .count();
+                assert!(walked <= 1, "a scan of {table} walks {walked} deletions");
+                scans += 1;
+            }
+            Access::Delete(table, key) => {
+                if let Some(table) = at(*table) {
+                    deleting.push((table, key.clone()));
+                }
+            }
+            Access::Commit => committed.extend(deleting.drain(..)),
+        }
+    }
+    assert!(scans >= 10, "{scans}");
+    let missed: Vec<_> = entries.difference(&committed).take(3).collect();
+    assert!(missed.is_empty(), "the clear kept {missed:?}");
 }
 
 #[test]
@@ -1106,6 +1199,7 @@ fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
         entry_writes: Rc::clone(&entry_writes),
         posting_bytes: Rc::default(),
         posting_gets: Rc::default(),
+        log: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
@@ -1225,6 +1319,7 @@ fn a_phrase_reads_a_common_word_only_where_its_rarest_word_occurs() {
         entry_writes: Rc::default(),
         posting_bytes: Rc::clone(&posting_bytes),
         posting_gets: Rc::default(),
+        log: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
@@ -1347,6 +1442,7 @@ fn a_phrase_counts_the_blocks_its_transaction_wrote_when_it_picks_the_rarest_wor
         entry_writes: Rc::default(),
         posting_bytes: Rc::default(),
         posting_gets: Rc::clone(&posting_gets),
+        log: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
