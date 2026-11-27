@@ -141,6 +141,18 @@ pub(crate) enum GraphError {
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
     NotWriter(&'static str),
+    ReadOnly(&'static str),
+}
+
+/// What a graph may write as it opens its storage and afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// Records the format version and upgrades an older format, and takes local writes.
+    Writer,
+    /// Refuses every local write, and so fails instead of writing an upgrade.
+    Replica,
+    /// Over storage that takes no write at all, which fails instead of writing an upgrade.
+    ReadOnly,
 }
 
 impl fmt::Display for GraphError {
@@ -186,6 +198,10 @@ impl fmt::Display for GraphError {
             Self::NotWriter(what) => {
                 write!(formatter, "a database that is not the writer cannot {what}")
             }
+            Self::ReadOnly(what) => write!(
+                formatter,
+                "a database opened read-only cannot {what}; open it once for writing to do so"
+            ),
         }
     }
 }
@@ -288,17 +304,36 @@ impl<S: Storage> Graph<S> {
     /// in the same write transaction.
     #[cfg(test)]
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
-        Self::open_as(storage, false)
+        Self::open_as(storage, Access::Writer)
     }
 
-    /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
-    /// and so fails instead of writing the format version or an upgrade.
-    pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
-        let pending = if replica {
-            Self::pending_format(&storage)?
-        } else {
-            Self::upgrade(&storage)?;
-            None
+    /// Opens the graph as [`Graph::open`] does, or, for any `access` but a writer's, without
+    /// writing the format version or an upgrade: a replica of an older format or tokenizer opens
+    /// waiting for its writer's upgrade, and a graph opened read-only reads the current format
+    /// and tokenizer only, since the graph reads no older layout as it is.
+    pub(crate) fn open_as(storage: S, access: Access) -> Result<Self, GraphError> {
+        if access == Access::ReadOnly {
+            let tx = GraphTx::bare(storage.begin_read()?);
+            let found = Self::stored_format(&tx)?;
+            if found.is_some_and(|found| found != FORMAT_VERSION) {
+                return Err(GraphError::ReadOnly(
+                    "upgrade a database written in an older format",
+                ));
+            }
+            if found.is_some() && !tx.tokenizer_is_current()? {
+                return Err(GraphError::ReadOnly(
+                    "rebuild keyword indexes for this build's tokenizer",
+                ));
+            }
+        }
+        let replica = access == Access::Replica;
+        let pending = match access {
+            Access::Replica => Self::pending_format(&storage)?,
+            Access::Writer => {
+                Self::upgrade(&storage)?;
+                None
+            }
+            Access::ReadOnly => None,
         };
         let definitions = match pending {
             Some(_) => Arc::from(Vec::new()),
@@ -344,7 +379,7 @@ impl<S: Storage> Graph<S> {
         let Some(found) = Self::stored_format(&tx)? else {
             return Ok(None);
         };
-        Ok((found != FORMAT_VERSION || !tx.holds_current_tokenizer()?).then_some(found))
+        Ok((found != FORMAT_VERSION || !tx.tokenizer_is_current()?).then_some(found))
     }
 
     fn upgrade(storage: &S) -> Result<(), GraphError> {

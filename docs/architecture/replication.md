@@ -45,6 +45,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `promote` of a file with its upgrade pending runs the upgrade as the new writer, checkpoints it, and serves reads after, and the upgrade reaches its replicas as changes.
 - A rolling upgrade restarts the replicas on the new build first, which wait for the upgrade without serving reads, hands writing over to one of them, whose promotion upgrades the graph, and restarts the old writer last, which rejoins as a replica.
 - A snapshot of a file with its upgrade pending holds the older format, which an installer of the new build opens with its upgrade pending and one of the old build reads as it is.
+- A database opened read-only refuses `apply`, `promote`, `demote`, `acknowledge`, and `forget_peer` with `ReadOnly`, and keeps no term a peer's position carries, so `changes_since` serves it as it serves any database.
 - A writer that opens a file of an older graph format or tokenizer checkpoints once after it commits the upgrade, so a snapshot taken right after holds the format a replica opens, and opening a file of the current format, a new file, or a replica checkpoints nothing.
 - Data that belongs to one node lives in a database file of its own, beside its replica.
 - `changes_since` reads whole records from the log segments on disk after the asker's position, seeding each record with its own segment's salt, and holds no writer lock.

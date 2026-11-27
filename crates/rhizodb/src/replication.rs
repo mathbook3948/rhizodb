@@ -754,6 +754,10 @@ impl Database {
     /// [`ErrorKind::Diverged`] when it does, as any replica would.
     pub fn demote(&self, wait: Duration) -> Result<Position, Error> {
         let _roles = self.roles();
+        self.graph
+            .storage()
+            .writable("step down")
+            .map_err(engine_error)?;
         self.graph.set_replica(true);
         self.graph
             .maintain(|engine| engine.demote(wait))?

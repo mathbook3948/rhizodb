@@ -1113,3 +1113,53 @@ fn fail_and_lose_power_while_a_close_compacts(chosen: EngineOptions) {
         }
     }
 }
+
+#[test]
+fn a_read_only_open_of_a_checkpoint_cut_between_its_stages_refuses_to_pin_it_as_read_only() {
+    let load: Vec<Write> = (0..60u8)
+        .map(|key| Write::Put(Table::NodeColumns, vec![key], vec![key; 2000]))
+        .collect();
+    let rewrite: Vec<Write> = (0..60u8)
+        .map(|key| {
+            Write::Put(
+                Table::NodeColumns,
+                vec![key],
+                vec![!key; 1500 + usize::from(key)],
+            )
+        })
+        .chain([Write::DeleteRange(Table::NodeColumns, vec![50], vec![55])])
+        .collect();
+    let options = by_hand(options());
+    let base = SimFs::new();
+    let engine = open(&base, options).unwrap();
+    commit(&engine, &load).unwrap();
+    engine.checkpoint().unwrap();
+    let checkpointed = base.crash(Crash::DropUnsynced);
+    drop(engine);
+    let mut staged = 0;
+    for fail_at in 0..400 {
+        let copy = checkpointed.crash(Crash::KeepUnsynced);
+        let engine = open(&copy, options).unwrap();
+        copy.fail_after(fail_at, Failure::FromThenOn);
+        if commit(&engine, &rewrite).is_ok() {
+            let _ = engine.checkpoint();
+        }
+        drop(engine);
+        let crashed = copy.crash(Crash::DropUnsynced);
+        if durable_header(&crashed).staged_lsn == 0 {
+            continue;
+        }
+        staged += 1;
+        let reader = Engine::open_read_only(Arc::new(crashed.clone()), NAME, options).unwrap();
+        let error = reader.pin().map(drop).unwrap_err();
+        assert!(
+            matches!(error, crate::engine::error::EngineError::ReadOnly(_)),
+            "fail at {fail_at}: {error}"
+        );
+        drop(reader);
+        drop(open(&crashed, options).unwrap());
+        let reader = Engine::open_read_only(Arc::new(crashed), NAME, options).unwrap();
+        reader.pin().unwrap();
+    }
+    assert!(staged > 0, "no failure left a staged header");
+}

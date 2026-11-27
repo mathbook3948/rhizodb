@@ -302,6 +302,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     }
 
     fn write_replication(&self, change: impl FnOnce(&mut Replication)) -> Result<(), EngineError> {
+        self.writable("change its replication state")?;
         let shared = &*self.shared;
         let mut durable = lock(&shared.durable);
         let mut replication = durable.header.replication;
@@ -325,9 +326,10 @@ impl<F: FileSystem + 'static> Engine<F> {
 
     /// Records that a peer has seen `term`. A term above every one this database has seen is
     /// kept, and a writer that sees one stops taking writes until the host promotes it with a
-    /// higher term still.
+    /// higher term still. A database opened read-only takes no writes either way, and keeps no
+    /// term.
     pub(crate) fn observe_term(&self, term: u64) -> Result<(), EngineError> {
-        if term <= self.seen_term() {
+        if term <= self.seen_term() || self.is_read_only() {
             return Ok(());
         }
         self.write_replication(|replication| {
@@ -446,6 +448,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// under the writer lock, and skips each one already held in the same epoch. Stops at the
     /// first record it refuses, with the earlier ones applied.
     pub(crate) fn apply_changes(&self, changes: &Decoded) -> Result<(), EngineError> {
+        self.writable("apply changes")?;
         let shared = &*self.shared;
         let mut writer = lock(&shared.writer);
         if shared.is_poisoned() {
@@ -676,6 +679,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// begun by this file's incarnation without a step down since, takes writes again with no
     /// record. A lower term fails as fenced and any other reuse of a term as diverged.
     pub(crate) fn promote(&self, term: u64, writer_id: &[u8]) -> Result<(), EngineError> {
+        self.writable("become the writer")?;
         let shared = &*self.shared;
         let mut writer = lock(&shared.writer);
         if shared.is_poisoned() {
@@ -722,6 +726,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// with no history only records that it follows a writer now. When the wait runs out the
     /// database stays fenced, and calling this again finishes the demotion.
     pub(crate) fn demote(&self, wait: Duration) -> Result<(), EngineError> {
+        self.writable("step down")?;
         let shared = &*self.shared;
         shared.accepting.store(false, Ordering::Release);
         {
