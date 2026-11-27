@@ -1,8 +1,11 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use crate::error::Error;
 use crate::gql::ast::BinaryOp;
+use crate::gql::ast::SortDirection;
 use crate::storage::ReadTransaction;
 
 use super::aggregate::Groups;
@@ -10,6 +13,7 @@ use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::exec::rank;
 use super::functions::Function;
 use super::functions::range_items;
 use super::keys::KeySet;
@@ -51,8 +55,8 @@ enum State<'c> {
     Match { scans: bool },
     /// A projection without `ORDER BY` or aggregates.
     Plain(Plain),
-    /// A projection with `ORDER BY`, holding its rows until its input ends.
-    Sorted(Vec<Row>),
+    /// A projection with `ORDER BY`, holding the rows it may give until its input ends.
+    Sorted(Sorted<'c>),
     /// An aggregating projection, holding its groups until its input ends.
     Grouped(Groups<'c>),
 }
@@ -70,6 +74,97 @@ struct Plain {
     evaluated: bool,
     /// Whether it may stop the clauses before it once it has its rows.
     pub(crate) stops: bool,
+}
+
+/// What a projection with `ORDER BY` holds while its input lasts: with a `LIMIT`, only the
+/// `SKIP` plus `LIMIT` rows that rank first so far, in a heap whose top ranks last.
+pub(crate) struct Sorted<'c> {
+    skip: usize,
+    limit: Option<usize>,
+    /// How many rows it holds at most.
+    pub(crate) kept: usize,
+    seen: Option<KeySet>,
+    heap: BinaryHeap<Ranked<'c>>,
+    /// The sort keys of the row it reads, reused from row to row.
+    pub(crate) keys: Vec<Datum>,
+    /// How many rows it ranked, which gives each the position that breaks ties.
+    pub(crate) ranked: usize,
+    /// The first error a sort key raised. Applying the clauses in turn evaluates the items of
+    /// every row before any sort key, so it is raised only once the input ends.
+    pub(crate) failed: Option<Error>,
+}
+
+/// A row with its sort keys and its position among the rows ranked, which ranks after every
+/// row before it with the same keys.
+pub(crate) struct Ranked<'c> {
+    order_by: &'c [(Expr, SortDirection)],
+    keys: Vec<Datum>,
+    position: usize,
+    row: Row,
+}
+
+impl Ord for Ranked<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        rank(
+            self.order_by,
+            (&self.keys, self.position),
+            (&other.keys, other.position),
+        )
+    }
+}
+
+impl PartialOrd for Ranked<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Ranked<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Ranked<'_> {}
+
+impl<'c> Sorted<'c> {
+    /// Ranks `row`, whose sort keys are in [`Sorted::keys`], keeping it while it is among the
+    /// first [`Sorted::kept`] rows.
+    pub(crate) fn offer(&mut self, order_by: &'c [(Expr, SortDirection)], row: Row) {
+        let position = self.ranked;
+        self.ranked += 1;
+        if self.heap.len() < self.kept {
+            self.heap.push(Ranked {
+                order_by,
+                keys: std::mem::take(&mut self.keys),
+                position,
+                row,
+            });
+        } else if let Some(mut last) = self.heap.peek_mut()
+            && rank(
+                order_by,
+                (&self.keys, position),
+                (&last.keys, last.position),
+            ) == Ordering::Less
+        {
+            std::mem::swap(&mut last.keys, &mut self.keys);
+            last.position = position;
+            last.row = row;
+        }
+    }
+
+    /// The rows it holds, in order, or the first error a sort key raised.
+    pub(crate) fn finish(&mut self) -> Result<Vec<Row>, Error> {
+        if let Some(error) = self.failed.take() {
+            return Err(error);
+        }
+        let heap = std::mem::take(&mut self.heap);
+        Ok(heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|ranked| ranked.row)
+            .collect())
+    }
 }
 
 struct Stream<'s, 'e, T: ReadTransaction> {
@@ -225,7 +320,19 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Items::Aggregate {
                     keys, aggregates, ..
                 } => State::Grouped(Groups::new(keys, aggregates, self.limits)),
-                Items::Plain(_) if !projection.order_by.is_empty() => State::Sorted(Vec::new()),
+                Items::Plain(_) if !projection.order_by.is_empty() => {
+                    let (skip, limit) = self.window(projection)?;
+                    State::Sorted(Sorted {
+                        skip,
+                        limit,
+                        kept: limit.map_or(usize::MAX, |limit| skip.saturating_add(limit)),
+                        seen: projection.distinct.then(KeySet::default),
+                        heap: BinaryHeap::new(),
+                        keys: Vec::new(),
+                        ranked: 0,
+                        failed: None,
+                    })
+                }
                 Items::Plain(_) => {
                     let (skip, limit) = self.window(projection)?;
                     let kept = limit.map(|limit| skip.saturating_add(limit));
@@ -260,7 +367,7 @@ pub(crate) fn breaks(clause: &ReadClause) -> bool {
         if !projection.order_by.is_empty() || matches!(projection.items, Items::Aggregate { .. }))
 }
 
-impl<T: ReadTransaction> Stream<'_, '_, T> {
+impl<'s, T: ReadTransaction> Stream<'s, '_, T> {
     fn run(&mut self, rows: &[Row]) -> Result<(), Error> {
         if self.scan_first(rows)? {
             return self.finish();
@@ -311,27 +418,9 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
     /// Passes the rows each holding stage held to the stages after it, in order.
     pub(crate) fn finish(&mut self) -> Result<(), Error> {
         for at in 0..self.stages.len() {
-            let stage = &mut self.stages[at];
-            let ReadClause::Project(projection) = stage.clause else {
+            let Some(rows) = self.held(at).inspect_err(|_| self.fail(at))? else {
                 continue;
             };
-            let rows = match &mut stage.state {
-                State::Sorted(rows) => std::mem::take(rows),
-                State::Grouped(groups) => {
-                    let Items::Aggregate { finals, .. } = &projection.items else {
-                        continue;
-                    };
-                    let groups = std::mem::replace(groups, Groups::new(&[], &[], self.env.limits));
-                    groups
-                        .finish(self.env, finals)
-                        .inspect_err(|_| self.fail(at))?
-                }
-                State::Pass | State::Match { .. } | State::Plain(_) => continue,
-            };
-            let rows = self
-                .env
-                .arrange(projection, rows)
-                .inspect_err(|_| self.fail(at))?;
             for row in rows {
                 if !self.push(at + 1, Cow::Owned(row))? {
                     break;
@@ -339,6 +428,32 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
             }
         }
         Ok(())
+    }
+
+    /// The rows stage `at` gives once its input ends, when it holds them until then.
+    #[inline(never)]
+    pub(crate) fn held(&mut self, at: usize) -> Result<Option<Vec<Row>>, Error> {
+        let env = self.env;
+        let stage = &mut self.stages[at];
+        let ReadClause::Project(projection) = stage.clause else {
+            return Ok(None);
+        };
+        match &mut stage.state {
+            State::Sorted(sorted) => {
+                let rows = sorted.finish()?;
+                env.page(projection, rows, sorted.skip, sorted.limit)
+                    .map(Some)
+            }
+            State::Grouped(groups) => {
+                let Items::Aggregate { finals, .. } = &projection.items else {
+                    return Ok(None);
+                };
+                let groups = std::mem::replace(groups, Groups::new(&[], &[], env.limits));
+                let rows = groups.finish(env, finals)?;
+                env.arrange(projection, rows).map(Some)
+            }
+            State::Pass | State::Match { .. } | State::Plain(_) => Ok(None),
+        }
     }
 
     /// Passes `row` to stage `at`, and says whether the stages from `at` on want more rows.
@@ -486,7 +601,7 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
     fn project(
         &mut self,
         at: usize,
-        projection: &Projection,
+        projection: &'s Projection,
         row: Cow<'_, Row>,
     ) -> Result<bool, Error> {
         let env = self.env;
@@ -506,10 +621,10 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
             Ok(())
         };
         let plain = match state {
-            State::Sorted(rows) => {
+            State::Sorted(sorted) => {
                 let mut row = row.into_owned();
                 evaluate(&mut row)?;
-                rows.push(row);
+                sort_row(env, projection, sorted, row);
                 return Ok(true);
             }
             State::Plain(plain) => plain,
@@ -549,6 +664,42 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
         let more = self.push(at + 1, Cow::Owned(row))?;
         Ok(more && !full)
     }
+}
+
+/// Ranks a row whose items `projection` evaluated, unless `DISTINCT` drops it or a sort key
+/// failed on an earlier row.
+#[inline(never)]
+pub(crate) fn sort_row<'c, T: ReadTransaction>(
+    env: &Env<'_, T>,
+    projection: &'c Projection,
+    sorted: &mut Sorted<'c>,
+    row: Row,
+) {
+    if let Some(seen) = &mut sorted.seen {
+        let outputs: Vec<Datum> = projection
+            .outputs
+            .iter()
+            .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+            .collect();
+        if !seen.insert(&outputs) {
+            return;
+        }
+    }
+    if sorted.failed.is_some() {
+        return;
+    }
+    sorted.keys.clear();
+    for (expr, _) in &projection.order_by {
+        match env.eval(expr, &row) {
+            Ok(key) => sorted.keys.push(key),
+            Err(error) => {
+                sorted.failed = Some(error);
+                sorted.heap.clear();
+                return;
+            }
+        }
+    }
+    sorted.offer(&projection.order_by, row);
 }
 
 /// What the plan and the parameters prove about which expressions cannot fail.

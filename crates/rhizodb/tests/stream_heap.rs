@@ -1,5 +1,5 @@
 //! The peak heap of a query whose rows stream holds per-group state and the rows a LIMIT keeps,
-//! not every row its source produces. The scenarios run in one test, since other tests on other
+//! sorted or not, not every row its source produces. The scenarios run in one test, since other tests on other
 //! threads would move the count.
 
 use std::alloc::GlobalAlloc;
@@ -87,6 +87,28 @@ fn streamed_rows_hold_group_state_not_every_input_row() {
              WITH i RETURN sum(i)",
             vec![vec![integer(2000 * 1000 * 1001 / 2)]],
             1 << 20,
+        ),
+        (
+            "UNWIND range(1, 2000000) AS i RETURN i ORDER BY -i LIMIT 3",
+            vec![
+                vec![integer(2_000_000)],
+                vec![integer(1_999_999)],
+                vec![integer(1_999_998)],
+            ],
+            1 << 20,
+        ),
+        (
+            "UNWIND range(1, 2000000) AS i RETURN i, i % 1000 AS k ORDER BY k DESC SKIP 2 LIMIT 2",
+            vec![
+                vec![integer(2999), integer(999)],
+                vec![integer(3999), integer(999)],
+            ],
+            1 << 20,
+        ),
+        (
+            "MATCH (a:P) RETURN a.id ORDER BY a.id % 7, a.id DESC LIMIT 2",
+            vec![vec![integer(49_994)], vec![integer(49_987)]],
+            4 << 20,
         ),
         (
             "MATCH (a:P) MATCH (b:P) RETURN a.id, b.id LIMIT 3",

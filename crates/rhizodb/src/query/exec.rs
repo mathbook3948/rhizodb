@@ -76,6 +76,22 @@ pub(crate) fn run_read<T: ReadTransaction>(
     )
 }
 
+/// How row `a` ranks against row `b`, each given by its sort keys and its position: by the keys
+/// in the directions of `order_by`, then by position, so rows with equal keys keep their order.
+pub(crate) fn rank(
+    order_by: &[(Expr, SortDirection)],
+    a: (&[Datum], usize),
+    b: (&[Datum], usize),
+) -> Ordering {
+    for ((x, y), (_, direction)) in a.0.iter().zip(b.0).zip(order_by) {
+        let ordering = sort_order(*direction, x, y);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    a.1.cmp(&b.1)
+}
+
 /// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does, given
 /// the clauses left in the pipeline.
 pub(crate) fn read_program<T: ReadTransaction>(
@@ -779,6 +795,18 @@ impl<T: ReadTransaction> Env<'_, T> {
             let kept = limit.map(|limit| skip.saturating_add(limit));
             rows = self.sort(rows, &projection.order_by, kept)?;
         }
+        self.page(projection, rows, skip, limit)
+    }
+
+    /// The rows of a projection from its sorted `rows`, past the first `skip` and up to
+    /// `limit` of them, that its `WHERE` keeps.
+    pub(crate) fn page(
+        &self,
+        projection: &Projection,
+        mut rows: Vec<Row>,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<Row>, Error> {
         if skip > 0 {
             rows = rows.into_iter().skip(skip).collect();
         }
@@ -870,13 +898,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let compare = |(a, a_position, _): &(Vec<Datum>, usize, Row),
                        (b, b_position, _): &(Vec<Datum>, usize, Row)| {
-            for ((x, y), (_, direction)) in a.iter().zip(b).zip(order_by) {
-                let ordering = sort_order(*direction, x, y);
-                if ordering != Ordering::Equal {
-                    return ordering;
-                }
-            }
-            a_position.cmp(b_position)
+            rank(order_by, (a, *a_position), (b, *b_position))
         };
         if let Some(kept) = kept
             && kept < keyed.len()

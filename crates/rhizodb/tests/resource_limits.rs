@@ -677,6 +677,10 @@ fn every_way_a_query_grows_a_value_stops_at_the_configured_limits() {
         "RETURN replace($wide, 'x', 'xxxxxxxxxx')",
         "RETURN toUpper($upper)",
         "RETURN normalize($ligature, NFKD)",
+        "UNWIND range(1, 5) AS i RETURN i ORDER BY range(1, 101) LIMIT 2",
+        "UNWIND range(1, 5) AS i RETURN range(1, 101) AS l ORDER BY i DESC LIMIT 1",
+        "MATCH (n:N) RETURN n.i ORDER BY CASE n.i WHEN 60 THEN range(1, 101) END SKIP 1 LIMIT 1",
+        "MATCH (n:N) WITH n ORDER BY n.i LIMIT 0 RETURN count(*) + size(range(1, 101))",
     ] {
         assert_eq!(
             db.execute(query, &text).unwrap_err().kind(),
@@ -814,6 +818,20 @@ fn skip_and_limit_at_the_integer_maximum_neither_overflow_nor_allocate() {
     assert_eq!(
         run(&db, "UNWIND [1, 2] AS x RETURN x LIMIT 9223372036854775807").len(),
         2
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 2] AS x RETURN x ORDER BY x SKIP 9223372036854775807 LIMIT 9223372036854775807"
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        run(
+            &db,
+            "UNWIND [1, 2] AS x RETURN x ORDER BY x DESC SKIP 1 LIMIT 9223372036854775807"
+        ),
+        vec![vec![Value::Integer(1)]]
     );
 }
 

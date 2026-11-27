@@ -352,3 +352,120 @@ fn a_write_before_a_limit_applies_to_every_row() {
         .unwrap();
     assert_eq!(seen.rows()[0], vec![Value::Integer(50)]);
 }
+
+const ORDER_KEYS: &[&str] = &[
+    "a.a",
+    "a.a DESC, b.k",
+    "b.a, a.k DESC",
+    "a.b",
+    "a.b DESC",
+    "b.b ASC NULLS FIRST, a.k",
+    "a.k % 3, b.a DESC NULLS LAST",
+    "1 / (a.k - 4)",
+    "toInteger(a.b), a.k",
+    "EXISTS { MATCH (a)-[:S]->() }, b.k",
+];
+
+const SORTED_ITEMS: &[&str] = &["a.k, b.k", "a.a AS g, b.k", "a.k / (b.k - 3) AS q", "a, b"];
+
+fn sorted_query(rng: &mut Rng) -> (String, String, usize, Option<usize>) {
+    let mut parts = vec![
+        match rng.below(3) {
+            0 => "MATCH (a)-[:R]->(b)",
+            1 => "MATCH (a) OPTIONAL MATCH (a)-[:S]->(b)",
+            _ => "UNWIND range(0, 30) AS i MATCH (a {k: i}) MATCH (b) WHERE b.k = a.k % 7",
+        }
+        .to_owned(),
+    ];
+    if rng.below(3) == 0 {
+        parts.push(format!("WITH a, b WHERE {}", rng.pick(CONDITIONS)));
+    }
+    let distinct = if rng.below(4) == 0 { "DISTINCT " } else { "" };
+    let items = if distinct.is_empty() {
+        rng.pick(SORTED_ITEMS)
+    } else {
+        "a.a AS g, b.a AS h"
+    };
+    parts.push(format!("RETURN {distinct}{items}"));
+    let keys = if distinct.is_empty() {
+        rng.pick(ORDER_KEYS)
+    } else {
+        "g DESC, h"
+    };
+    parts.push(format!("ORDER BY {keys}"));
+    let plain = parts.join(" ");
+    let skip = rng.below(4) as usize;
+    let limit = (rng.below(4) != 0).then(|| rng.below(12) as usize);
+    if skip > 0 {
+        parts.push(format!("SKIP {skip}"));
+    }
+    if let Some(limit) = limit {
+        parts.push(format!("LIMIT {limit}"));
+    }
+    (parts.join(" "), plain, skip, limit)
+}
+
+#[test]
+fn an_order_by_with_a_limit_keeps_the_rows_and_the_first_error_of_a_full_sort() {
+    let mut rng = Rng(test_scale::seed());
+    let (mut found, mut failed) = (0, 0);
+    for _ in 0..test_scale::cases(12) {
+        let writes = graph_writes(&mut rng);
+        let serial = build(&writes, OpenOptions::new().threads(1));
+        let split = build(&writes, OpenOptions::new().threads(4).parallel_threshold(2));
+        for _ in 0..30 {
+            let (text, plain, skip, limit) = sorted_query(&mut rng);
+            let (in_turn, _) = counted(true, || serial.execute(&text, &none()));
+            let (streamed, _) = counted(false, || serial.execute(&text, &none()));
+            let (parallel, _) = counted(false, || split.execute(&text, &none()));
+            let (sorted, _) = counted(false, || serial.execute(&plain, &none()));
+            let sliced = sorted.map(|rows| {
+                rows.into_iter()
+                    .skip(skip)
+                    .take(limit.unwrap_or(usize::MAX))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(in_turn, sliced, "{text}\n{writes:#?}");
+            assert_eq!(streamed, in_turn, "{text}\n{writes:#?}");
+            assert_eq!(parallel, in_turn, "{text} split\n{writes:#?}");
+            match &in_turn {
+                Ok(_) => found += 1,
+                Err(_) => failed += 1,
+            }
+        }
+    }
+    assert!(
+        found > 0 && failed > 0,
+        "{found} queries found rows, {failed} failed"
+    );
+}
+
+#[test]
+fn an_order_by_with_a_limit_raises_an_error_of_its_last_row() {
+    let db = chain(500);
+    for (text, error) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.k ORDER BY 1 / (b.k - 480) LIMIT 2",
+            ErrorKind::DivisionByZero,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.k ORDER BY CASE b.k WHEN 480 THEN b.k + true END LIMIT 2",
+            ErrorKind::TypeMismatch,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN 1 / (b.k - 480) AS q \
+             ORDER BY CASE b.k WHEN 5 THEN b.k + true END LIMIT 2",
+            ErrorKind::DivisionByZero,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WITH b ORDER BY b.k SKIP 1 LIMIT 1 WHERE 1 / (b.k - 2) > 0 \
+             RETURN b.k",
+            ErrorKind::DivisionByZero,
+        ),
+    ] {
+        let (in_turn, _) = counted(true, || db.execute(text, &none()));
+        let (streamed, _) = counted(false, || db.execute(text, &none()));
+        assert_eq!(in_turn, Err(error), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
+}
