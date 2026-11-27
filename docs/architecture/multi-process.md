@@ -16,7 +16,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Phase 4 moves the replication role and the acknowledged peers into the side file.
 - Any number of processes on one machine read a database file at once, and one write transaction at a time, in any of them, writes it.
 - A read-write open takes part in multi-process access only when its `OpenOptions` ask for it.
-- An open that does not ask keeps the exclusive lock, creates no side file, and runs none of the code below.
+- An open that does not ask keeps the exclusive lock, creates no side file, and runs none of the code below but the role rules it keeps in its own memory.
 - The processes that have a file open with multi-process access form a session, which begins with the first of them and ends when the last one closes.
 - From phase 3 on, every read-only open joins a session, so a read-write process that joins later finds it.
 - An open that locks the file exclusively fails while a session is open, and a session's open fails while an exclusive open holds the file.
@@ -147,20 +147,24 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - The seen term, the replica mark, and the incarnation live in one side-file record behind a sequence number, which only a holder of the session write lock writes.
 - The role and a fence counter share one atomic word beside that record, which changes only by a compare-and-swap and never under the record's sequence number, so a fencer that dies leaves no sequence odd forever.
 - A fence is one compare-and-swap that raises the counter and turns the writer role into fenced, and it raises the counter of a role that is already fenced too, so any fence since a read shows.
-- A fence needs no lock, since it only takes write rights away, and a reader that sees one land during its read is safe, since fenced is the safe value.
+- A fence needs no lock, since it only takes write rights away.
+- An open without a session keeps the same role word, observed-term word, and rules in its own memory, so single-process code takes the same path.
 - An observed-term word beside the role word holds the highest term any process has heard of in the session, and `observe_term` raises it by a sequentially consistent `fetch_max` before its fence.
 - The observed-term word may be lost when the session restarts, since the writer then opens fenced anyway.
 - `promote` and `declare_replica` take the write lock and decide from the record and from the higher of the seen term and the observed term, never from a copy in the process.
 - `promote` sets the writer role by a compare-and-swap from the role word it read, and fails with `Fenced` or `WriterBusy` instead of deciding again when the counter changed, so it never undoes a fence from `demote` or `observe_term`.
 - After that compare-and-swap, `promote` loads the observed term again with sequential consistency, fences again and fails with `Fenced` when it is above its own term, since that store and load pair with `observe_term`'s as a Dekker pattern.
-- `observe_term` first reads the record under its sequence number without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term already recorded.
+- `observe_term` first reads the record under its sequence number and the observed term without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term already recorded.
+- A term above the seen term but not above the observed term skips the fence, which already happened, and takes the locks only to make the term durable.
+- Until a term is durable, every call of `observe_term` with it on the thread that holds the write transaction fences and fails.
 - For a higher term, `observe_term` raises the observed term, fences, then takes the writer mutex and the write lock, checks the term again, and records the observed term as the seen term in a durable header under the same locks as `promote`.
 - On the thread that holds the write transaction, `observe_term` with a higher term raises the observed term, fences, and then fails instead of waiting for itself, as maintenance does, so the caller learns that the term is not yet durable.
 - In one process today `observe_term` and `demote` fence without the writer mutex, so `promote` can overwrite either fence with the writer role between its check and its change of the role, and phase 3 fixes both with the role word above.
 - Every local commit checks the role word under the write lock.
 - `apply`, `promote`, and `demote` take the write lock.
 - `promote`, `demote`, and an observed higher term change the role in the side file, so every process takes or refuses local writes from its next commit on.
-- `demote` marks the role fenced in the side file before it waits for the write lock, so a write transaction open in any process fails at its commit.
+- `demote` marks the role fenced in the side file before it waits for the write lock, so a write transaction open in any process fails at its commit unless that commit already passed its check of the role under the write lock.
+- A commit past that check still appends, and `demote`'s step down follows it once `demote` gets the write lock, as in one process today, where a commit checks `accepting` before it appends.
 - `demote` waits for the write lock by trying it without blocking until its deadline, as it polls the writer mutex today.
 - `install_snapshot` locks the database file exclusively, as it does today, so it fails while a session is open.
 - A graph format or tokenizer upgrade runs only in the first process of a session, before another process joins, since a process of another build fails to join.
