@@ -686,6 +686,7 @@ dependencies = [
  "proptest",
  "regex-automata",
  "regex-syntax",
+ "rustix",
  "tempfile",
  "twox-hash",
  "unicode-normalization",

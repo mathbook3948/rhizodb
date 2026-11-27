@@ -342,6 +342,12 @@ fn refusals_carry_the_positions_and_lsns_behind_them() {
     };
     assert_eq!((local, remote), (b.position(), a.position()));
     assert_eq!(fork_lsn, b.history().entries()[1].start_lsn());
+    assert!(
+        error
+            .to_string()
+            .ends_with(&format!("from LSN {fork_lsn} onward")),
+        "{error}"
+    );
     let _ = a.changes_since(&b.position(), 1 << 20);
     assert_eq!(
         a.execute("INSERT ()", &Parameters::new())

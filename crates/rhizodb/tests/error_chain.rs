@@ -86,3 +86,124 @@ fn a_failed_export_leaves_the_io_error_to_its_source() {
     let io = error.source().unwrap().downcast_ref::<io::Error>().unwrap();
     assert_eq!(io.kind(), io::ErrorKind::StorageFull);
 }
+
+struct Dropped;
+
+impl io::Read for Dropped {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "peer went away",
+        ))
+    }
+}
+
+fn io_source(error: &Error) -> &io::Error {
+    error
+        .source()
+        .and_then(|source| source.downcast_ref::<io::Error>())
+        .unwrap_or_else(|| panic!("no I/O source: {error}"))
+}
+
+#[test]
+fn a_failed_snapshot_read_leaves_the_io_error_to_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let error =
+        Database::install_snapshot(directory.path().join("replica.rhizodb"), Dropped).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Io);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(messages[1], "peer went away");
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::ConnectionReset);
+}
+
+#[test]
+fn an_open_in_a_missing_directory_leaves_the_io_error_to_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = Database::open(directory.path().join("missing").join("graph.rhizodb")).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].starts_with("cannot open the database at"),
+        "{messages:?}"
+    );
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn a_backup_into_a_missing_directory_leaves_the_io_error_to_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = Database::in_memory()
+        .unwrap()
+        .backup_to(directory.path().join("missing").join("backup.rhizodb"))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages[0].starts_with("cannot write the backup to"),
+        "{messages:?}"
+    );
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::NotFound);
+}
+
+// Windows resolves `missing\..` lexically to the existing directory, so the
+// path names a directory there, not a path without a file name.
+#[cfg(unix)]
+#[test]
+fn a_backup_path_that_names_no_file_leaves_the_io_error_to_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = Database::in_memory()
+        .unwrap()
+        .backup_to(directory.path().join("missing").join(".."))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("cannot back up to"), "{messages:?}");
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::InvalidInput);
+}
+
+// Windows reports a file used as a directory as a missing path, so the open
+// fails with `DatabaseNotFound` there instead of an I/O error.
+#[cfg(unix)]
+#[test]
+fn a_path_that_cannot_be_checked_states_its_cause_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    let error = rhizodb::OpenOptions::new()
+        .create(false)
+        .open(file.join("graph.rhizodb"))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::NotADirectory);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_file_used_as_a_directory_is_a_missing_database_on_windows() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    let error = rhizodb::OpenOptions::new()
+        .create(false)
+        .open(file.join("graph.rhizodb"))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DatabaseNotFound);
+}
+
+#[test]
+fn a_replication_refusal_states_its_cause_once() {
+    let writer = Database::in_memory().unwrap();
+    writer.promote(1, b"node-a").unwrap();
+    let changes = writer
+        .changes_since(&rhizodb::Position::start(), 1 << 20)
+        .unwrap();
+    let error = Database::in_memory().unwrap().apply(&changes).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NotReplica);
+    assert_eq!(chain(&error).len(), 1);
+}

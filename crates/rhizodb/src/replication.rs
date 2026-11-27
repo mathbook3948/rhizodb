@@ -495,8 +495,8 @@ fn diverged(local: Position, remote: &Position, fork_lsn: u64) -> Error {
     let refusal = crate::engine::error::Refusal {
         kind: ErrorKind::Diverged,
         message: format!(
-            "LSN {} of term {} is not part of this database's history, which differs from LSN \
-             {fork_lsn} on",
+            "LSN {} of term {} is not part of this database's history, which holds other changes \
+             from LSN {fork_lsn} onward",
             remote.lsn, remote.term
         ),
         failure: Some(Failure::Diverged {

@@ -327,8 +327,8 @@ impl Error {
         self.rejects_type || self.kind.is_type_error()
     }
 
-    /// The storage failure behind this one, which `source` leaves out since
-    /// the message already holds it.
+    /// The storage failure behind this one. `source` returns only the I/O error inside it,
+    /// when there is one, and the message holds the rest.
     pub(crate) fn storage(&self) -> Option<&StorageError> {
         self.storage.as_ref()
     }
@@ -381,9 +381,13 @@ impl fmt::Display for Error {
 
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn StdError + 'static))
+        match (&self.source, &self.storage) {
+            (Some(source), _) => Some(source.as_ref()),
+            (None, Some(storage)) => storage
+                .io_cause()
+                .map(|(_, io)| io as &(dyn StdError + 'static)),
+            (None, None) => None,
+        }
     }
 }
 
@@ -398,7 +402,11 @@ impl From<SyntaxError> for Error {
 
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
-        let failure = Self::new(error.kind(), error.to_string());
+        let message = match error.io_cause() {
+            Some((context, _)) => context.to_owned(),
+            None => error.to_string(),
+        };
+        let failure = Self::new(error.kind(), message);
         Self {
             storage: Some(error),
             ..failure
@@ -408,8 +416,8 @@ impl From<StorageError> for Error {
 
 impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
-        let kind = match &error {
-            GraphError::Storage(error) => error.kind(),
+        let kind = match error {
+            GraphError::Storage(error) => return error.into(),
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,
             GraphError::IdSpaceExhausted => ErrorKind::IdSpaceExhausted,

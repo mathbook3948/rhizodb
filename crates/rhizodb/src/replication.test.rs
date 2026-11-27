@@ -1,7 +1,14 @@
 use proptest::prelude::*;
 
 use super::Position;
+use super::ReplicationFailure;
+use crate::engine::error::EngineError;
+use crate::engine::error::Failure;
+use crate::engine::error::Refusal;
+use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::GraphError;
+use crate::storage::StorageError;
 
 proptest! {
     #[test]
@@ -697,4 +704,19 @@ mod crash {
             }
         }
     }
+}
+
+#[test]
+fn a_refusal_raised_under_the_graph_layer_keeps_its_facts() {
+    let refusal = EngineError::Replication(Box::new(Refusal {
+        kind: ErrorKind::Gap,
+        message: "the changes start after LSN 7".to_owned(),
+        failure: Some(Failure::Gap { expected_lsn: 7 }),
+    }));
+    let error = Error::from(GraphError::Storage(StorageError::from(refusal)));
+    assert_eq!(error.kind(), ErrorKind::Gap);
+    assert_eq!(
+        error.replication_failure(),
+        Some(ReplicationFailure::Gap { expected_lsn: 7 })
+    );
 }
