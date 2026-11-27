@@ -925,6 +925,39 @@ fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
 }
 
 #[test]
+fn labels_that_change_nothing_on_a_committed_node_read_its_node_meta_once() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: test_engine::in_memory(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("A").unwrap();
+    let other = write.intern_token("B").unwrap();
+    let node = write
+        .create_node(NodeRecord {
+            labels: BTreeSet::from([label]),
+            properties: Properties::new(),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    gate.node_chunk_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..100 {
+        write.add_labels(node, &[label]).unwrap();
+        write.remove_labels(node, &[other]).unwrap();
+    }
+    let reads = gate
+        .node_chunk_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads <= 4, "{reads} node meta reads");
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
 fn opening_a_database_of_an_older_format_as_its_writer_checkpoints_the_upgrade() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
