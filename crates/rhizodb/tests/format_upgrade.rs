@@ -561,9 +561,9 @@ fn a_database_of_release_zero_one_moves_to_engine_minor_four_and_the_current_gra
                 .all(|format| !release_zero_one_reads(*format)),
             "{fixture}: release 0.1.0 refuses the upgraded file"
         );
-        // Release 0.1.0 already wrote graph format 14, this build's, so only the engine minor
-        // moves. A replica opens without writing and refuses a graph format that needs an
-        // upgrade, so a replica of the upgraded file opens only when its format is current.
+        // The writer open above also moved the graph to this build's format. A replica opens
+        // without writing and serves no graph reads until its format is current, so a replica
+        // of the upgraded file reads it only because that upgrade ran.
         let db = Database::open(&path).unwrap();
         let snapshot = db.snapshot().unwrap();
         let mut stream = vec![0; usize::try_from(snapshot.len()).unwrap()];
