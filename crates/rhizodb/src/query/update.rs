@@ -38,13 +38,13 @@ use super::exec::extend_row;
 use super::exec::table_rows;
 use super::plan::Clause;
 use super::plan::Expr;
+use super::plan::Holds;
 use super::plan::MergeClause;
 use super::plan::NodePattern;
 use super::plan::PatternPart;
 use super::plan::ReadClause;
 use super::plan::RemoveAction;
 use super::plan::SetAction;
-use super::plan::Slot;
 use super::plan::UpdateClause;
 use super::regex::Patterns;
 
@@ -67,8 +67,8 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) graveyard: &'a mut Graveyard,
     pub(crate) limits: Limits,
     pub(crate) tokens: Vec<(u8, String, u32)>,
-    /// The slots that only ever hold a graph element or null, in ascending order.
-    pub(crate) elements: &'a [Slot],
+    /// Per slot, what every value it holds is known to be.
+    pub(crate) holds: &'a [Holds],
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -186,7 +186,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             self.patterns,
             self.limits,
         )
-        .with_elements(self.elements)
+        .with_holds(self.holds)
     }
 
     fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
