@@ -22,6 +22,15 @@ const MAX_VALUE_NESTING: usize = 128;
 /// the profile the test runs in.
 const HOST_SAFE_DEPTH: usize = if cfg!(debug_assertions) { 2_000 } else { 8_000 };
 
+/// The stack the queries nested to the parser's limit must fit in. A release build gets half of
+/// the 1 MiB a query may use, because its frames grow or shrink with what the compiler inlines on
+/// each target, so a query that fits with no room to spare on one target overflows on another.
+const NESTING_STACK: usize = if cfg!(debug_assertions) {
+    1 << 20
+} else {
+    1 << 19
+};
+
 fn nested_list(depth: usize) -> Value {
     let mut value = Value::Integer(1);
     for _ in 0..depth {
@@ -439,7 +448,7 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
             ]
         })
         .collect();
-    on_small_stack(|| {
+    on_stack(NESTING_STACK, || {
         for text in &texts {
             if let Err(error) = db.execute(text, &Parameters::new()) {
                 assert_eq!(

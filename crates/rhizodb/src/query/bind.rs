@@ -493,6 +493,7 @@ impl Binder<'_> {
         }
     }
 
+    #[inline(never)]
     fn call_clause(
         &mut self,
         call: &ast::Call,
@@ -510,6 +511,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Call(Box::new(bound))))
     }
 
+    #[inline(never)]
     fn return_clause(
         &mut self,
         returned: &ast::Projection,
@@ -524,6 +526,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
     }
 
+    #[inline(never)]
     fn delete_clause(
         &mut self,
         delete: &ast::Delete,
@@ -563,6 +566,7 @@ impl Binder<'_> {
         }))
     }
 
+    #[inline(never)]
     fn unwind_clause(&mut self, unwind: &ast::Unwind, scope: &mut Scope) -> Result<Clause, Error> {
         let expr = self.expr(&unwind.expr, scope, &mut Mode::Plain)?;
         let name = &unwind.variable.0;
@@ -577,11 +581,13 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Unwind { expr, slot }))
     }
 
+    #[inline(never)]
     fn filter_clause(&mut self, condition: &ast::Expr, scope: &Scope) -> Result<Clause, Error> {
         let condition = self.filter(condition, scope, &mut Mode::Plain)?;
         Ok(Clause::Read(ReadClause::Filter(condition)))
     }
 
+    #[inline(never)]
     fn let_clause(
         &mut self,
         bindings: &[(ast::Name, ast::Expr)],
@@ -643,6 +649,7 @@ impl Binder<'_> {
         })
     }
 
+    #[inline(never)]
     fn next_chain(
         &mut self,
         blocks: &[ast::Block],
@@ -791,6 +798,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::CallSubquery(Box::new(call))))
     }
 
+    #[inline(never)]
     fn with_clause(&mut self, with: &ast::With, scope: &mut Scope) -> Result<Clause, Error> {
         let (projection, next, _) =
             self.projection(&with.projection, scope, true, with.filter.as_ref())?;
@@ -798,6 +806,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
     }
 
+    #[inline(never)]
     fn insert_clause(
         &mut self,
         parts: &[ast::PatternPart],
@@ -816,6 +825,7 @@ impl Binder<'_> {
         Ok(Clause::Update(UpdateClause::Create(parts_bound)))
     }
 
+    #[inline(never)]
     fn merge_clause(&mut self, merge: &ast::Merge, scope: &mut Scope) -> Result<Clause, Error> {
         let mut introduced = Vec::new();
         let mut pattern =
@@ -830,6 +840,7 @@ impl Binder<'_> {
         }))))
     }
 
+    #[inline(never)]
     fn remove_clause(&mut self, items: &[ast::RemoveItem], scope: &Scope) -> Result<Clause, Error> {
         let mut actions = Vec::new();
         for item in items {
@@ -971,6 +982,7 @@ impl Binder<'_> {
         })
     }
 
+    #[inline(never)]
     fn set_items(
         &mut self,
         items: &[ast::SetItem],
@@ -1003,6 +1015,7 @@ impl Binder<'_> {
         Ok(actions)
     }
 
+    #[inline(never)]
     fn match_clause(&mut self, found: &ast::Match, scope: &mut Scope) -> Result<ReadClause, Error> {
         let mut introduced = Vec::new();
         let mut patterns = Vec::new();
