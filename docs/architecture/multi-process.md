@@ -59,7 +59,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Where only classic `fcntl` locks exist, as on macOS, a process opens the side file once and never closes a descriptor of it while it is open, since closing any descriptor of a file drops every `fcntl` lock the process holds on it.
 - The engine opens the side file only through its one handle, and its docs name opening or closing the side file anywhere else in the process as a hazard that drops the session's locks there, as SQLite's docs do for its files.
 - A blocking classic `fcntl` wait that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process across all of its files and so reports false ones between threads of one process or between databases it has open.
-- That retry covers the write lock, the checkpoint lock, and an open's wait for the session lock, which waits while it holds no other lock on that side file.
+- That retry covers the write lock, the checkpoint lock, and an open's wait for the session lock, which waits while it holds no other lock on that side file, and it sleeps between tries with a growing backoff instead of spinning.
 - The lock order rules out a real deadlock only within one database, so a host that makes two processes each hold a write transaction of one database while they wait for the other's hangs forever, as it would with two databases in one process today.
 - The database file is locked only with the standard library's whole-file lock or a range lock past its blocks, and the side file only with range locks, so no file mixes `flock` and `fcntl`.
 - A child forked from a process that has the file open must not touch the database, as SQLite and LMDB forbid it for their handles.
@@ -144,15 +144,20 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A session's first process decides the replication role as an open decides it today, and every process of the session shares that role through the side file.
 - A writer therefore opens fenced after a restart of its whole session, and a process that joins a running session without `OpenOptions::replica` takes the session's role.
 - A process that joins with `OpenOptions::replica` takes the session's role when it is a replica, makes the session a replica under the write lock when the file holds no change and no history, and otherwise fails with `NotReplica`, as an open of such a file does today.
-- The seen term, the replica mark, the incarnation, and the role live in one side-file record behind a sequence number, which changes only under the session write lock, except that a change of the role from writer to fenced is a compare-and-swap that needs no lock, since it only takes write rights away.
-- That exemption serves `demote` and an observed higher term rather than a separate fencing word, so a commit checks one record under the write lock and finds every fence there.
-- `promote` and `declare_replica` change the record by a compare-and-swap from the record they read under the write lock, and decide again when a fence changed it in between, so neither undoes a fence.
-- `promote`, `demote`, and `declare_replica` take the write lock and decide from that record, never from a copy in the process.
-- `observe_term` first reads the record under its sequence number without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term they already know.
-- For a higher term, `observe_term` fences the writer by the compare-and-swap at once, then takes the writer mutex and the write lock, checks the term again, and records it in a durable header under the same locks as `promote`.
-- On the thread that holds the write transaction, `observe_term` with a higher term fences the writer and then fails instead of waiting for itself, as maintenance does, rather than record the term without the locks, since a term kept only in the side file is lost at the next restart of the session.
-- In one process today `observe_term` runs without the writer mutex, so it can fence the writer between `promote`'s check of the seen term and its change of the role, which `promote` then overwrites, and phase 3 fixes that with the compare-and-swap above.
-- Every local commit checks the role in the side file under the write lock.
+- The seen term, the replica mark, and the incarnation live in one side-file record behind a sequence number, which only a holder of the session write lock writes.
+- The role and a fence counter share one atomic word beside that record, which changes only by a compare-and-swap and never under the record's sequence number, so a fencer that dies leaves no sequence odd forever.
+- A fence is one compare-and-swap that raises the counter and turns the writer role into fenced, and it raises the counter of a role that is already fenced too, so any fence since a read shows.
+- A fence needs no lock, since it only takes write rights away, and a reader that sees one land during its read is safe, since fenced is the safe value.
+- An observed-term word beside the role word holds the highest term any process has heard of in the session, and `observe_term` raises it by a sequentially consistent `fetch_max` before its fence.
+- The observed-term word may be lost when the session restarts, since the writer then opens fenced anyway.
+- `promote` and `declare_replica` take the write lock and decide from the record and from the higher of the seen term and the observed term, never from a copy in the process.
+- `promote` sets the writer role by a compare-and-swap from the role word it read, and fails with `Fenced` or `WriterBusy` instead of deciding again when the counter changed, so it never undoes a fence from `demote` or `observe_term`.
+- After that compare-and-swap, `promote` loads the observed term again with sequential consistency, fences again and fails with `Fenced` when it is above its own term, since that store and load pair with `observe_term`'s as a Dekker pattern.
+- `observe_term` first reads the record under its sequence number without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term already recorded.
+- For a higher term, `observe_term` raises the observed term, fences, then takes the writer mutex and the write lock, checks the term again, and records the observed term as the seen term in a durable header under the same locks as `promote`.
+- On the thread that holds the write transaction, `observe_term` with a higher term raises the observed term, fences, and then fails instead of waiting for itself, as maintenance does, so the caller learns that the term is not yet durable.
+- In one process today `observe_term` and `demote` fence without the writer mutex, so `promote` can overwrite either fence with the writer role between its check and its change of the role, and phase 3 fixes both with the role word above.
+- Every local commit checks the role word under the write lock.
 - `apply`, `promote`, and `demote` take the write lock.
 - `promote`, `demote`, and an observed higher term change the role in the side file, so every process takes or refuses local writes from its next commit on.
 - `demote` marks the role fenced in the side file before it waits for the write lock, so a write transaction open in any process fails at its commit.
