@@ -840,12 +840,14 @@ struct CountingStorage {
     inner: TestStorage,
     entry_writes: Rc<Cell<usize>>,
     posting_bytes: Rc<Cell<usize>>,
+    posting_gets: Rc<Cell<usize>>,
 }
 
 struct CountingWrite<'a> {
     inner: <TestStorage as Storage>::Write<'a>,
     entry_writes: Rc<Cell<usize>>,
     posting_bytes: Rc<Cell<usize>>,
+    posting_gets: Rc<Cell<usize>>,
 }
 
 impl CountingWrite<'_> {
@@ -876,6 +878,7 @@ impl Storage for CountingStorage {
             inner: self.inner.begin_write()?,
             entry_writes: Rc::clone(&self.entry_writes),
             posting_bytes: Rc::clone(&self.posting_bytes),
+            posting_gets: Rc::clone(&self.posting_gets),
         })
     }
 
@@ -912,6 +915,9 @@ impl ReadTransaction for CountingWrite<'_> {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> Result<R, E>,
     ) -> Result<Option<R>, E> {
+        if table == Table::KeywordPostings {
+            self.posting_gets.set(self.posting_gets.get() + 1);
+        }
         self.inner.get_with(table, key, |value| {
             self.read(table, value);
             read(value)
@@ -996,6 +1002,7 @@ fn dropping_an_index_deletes_its_entries_by_range_instead_of_one_by_one() {
         inner: test_engine::open(directory.path().join("drop.rhizodb")),
         entry_writes: Rc::clone(&entry_writes),
         posting_bytes: Rc::default(),
+        posting_gets: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
@@ -1114,6 +1121,7 @@ fn a_phrase_reads_a_common_word_only_where_its_rarest_word_occurs() {
         inner: test_engine::in_memory(),
         entry_writes: Rc::default(),
         posting_bytes: Rc::clone(&posting_bytes),
+        posting_gets: Rc::default(),
     })
     .unwrap();
     let mut write = graph.write().unwrap();
@@ -1124,7 +1132,7 @@ fn a_phrase_reads_a_common_word_only_where_its_rarest_word_occurs() {
     for i in 0..2000 {
         let zebra = i % 1000 == 999;
         let words = if zebra {
-            "a zebra the end"
+            "the zebra the end"
         } else {
             "the cat on the mat"
         };
@@ -1152,11 +1160,92 @@ fn a_phrase_reads_a_common_word_only_where_its_rarest_word_occurs() {
         (found, posting_bytes.get())
     };
     let (_, common) = search("the");
-    let (found, phrase) = search("\"zebra the\"");
-    assert_eq!(found, zebras);
+    for query in ["\"zebra the\"", "\"the zebra\""] {
+        let (found, phrase) = search(query);
+        assert_eq!(found, zebras, "{query}");
+        assert!(
+            phrase * 4 < common,
+            "{query} read {phrase} posting bytes, the common word alone {common}"
+        );
+    }
+}
+
+#[test]
+fn a_phrase_misses_a_word_its_transaction_removed_from_a_committed_text() {
+    let graph = Graph::open(test_engine::in_memory()).unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let node = write
+        .create_node(NodeRecord {
+            labels: [label].into(),
+            properties: Properties::from([(text, PropertyValue::String("red blue".to_owned()))]),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    write
+        .set_node_property(node, text, PropertyValue::String("red".to_owned()))
+        .unwrap();
+    for query in ["\"red blue\"", "\"blue red\""] {
+        assert_eq!(
+            write
+                .keyword_search("words", ElementKind::Node, query, 10)
+                .unwrap(),
+            vec![],
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn a_phrase_counts_the_blocks_its_transaction_wrote_when_it_picks_the_rarest_word() {
+    let posting_gets = Rc::new(Cell::new(0));
+    let graph = Graph::open(CountingStorage {
+        inner: test_engine::in_memory(),
+        entry_writes: Rc::default(),
+        posting_bytes: Rc::default(),
+        posting_gets: Rc::clone(&posting_gets),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    create_indexes(&mut write);
+    let label = write.intern_token("Doc").unwrap();
+    let text = write.intern_token("text").unwrap();
+    let create = |write: &mut GraphTx<_>, words: &str| {
+        write
+            .create_node(NodeRecord {
+                labels: [label].into(),
+                properties: Properties::from([(text, PropertyValue::String(words.to_owned()))]),
+            })
+            .unwrap()
+            .0
+    };
+    let mut zebras = Vec::new();
+    for words in ["zebra", "zebra", "zebra", "zebra the"] {
+        zebras.push(create(&mut write, words));
+        for _ in 0..128 {
+            write.create_node(NodeRecord::default()).unwrap();
+        }
+    }
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    for _ in 0..2000 {
+        create(&mut write, "the cat");
+    }
+    posting_gets.set(0);
+    let found = write
+        .keyword_search("words", ElementKind::Node, "\"zebra the\"", 10)
+        .unwrap();
+    assert_eq!(
+        found.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![zebras[3]]
+    );
     assert!(
-        phrase * 4 < common,
-        "the phrase read {phrase} posting bytes, the common word alone {common}"
+        posting_gets.get() <= zebras.len(),
+        "{} posting blocks read one by one",
+        posting_gets.get()
     );
 }
 
@@ -1330,6 +1419,23 @@ fn create_sentence(
         .0
 }
 
+#[derive(Clone, Debug)]
+enum Change {
+    SetText(Vec<usize>),
+    RemoveText,
+    RemoveLabel,
+    Delete,
+}
+
+fn change() -> impl Strategy<Value = Change> {
+    prop_oneof![
+        3 => prop::collection::vec(0usize..3, 0..6).prop_map(Change::SetText),
+        1 => Just(Change::RemoveText),
+        1 => Just(Change::RemoveLabel),
+        1 => Just(Change::Delete),
+    ]
+}
+
 fn phrase_hits(read: &GraphTx<impl ReadTransaction>, phrase: &[usize]) -> BTreeSet<u64> {
     let words = ["red", "green", "blue"];
     let text = phrase.iter().map(|pick| words[*pick]).collect::<Vec<_>>();
@@ -1353,7 +1459,7 @@ proptest! {
     fn a_phrase_finds_exactly_the_nodes_that_hold_it_before_and_after_commit(
         committed in prop::collection::vec((0usize..160, prop::collection::vec(0usize..3, 0..6)), 0..8),
         written in prop::collection::vec((0usize..160, prop::collection::vec(0usize..3, 0..6)), 0..8),
-        deleted in prop::collection::vec(any::<prop::sample::Index>(), 0..4),
+        changes in prop::collection::vec((any::<prop::sample::Index>(), change()), 0..6),
         phrase in prop::collection::vec(0usize..3, 1..4),
     ) {
         let graph = Graph::open(test_engine::in_memory()).unwrap();
@@ -1377,11 +1483,35 @@ proptest! {
             sentences.insert(create_sentence(&mut write, &names, *gap, picks), picks.clone());
         }
         let ids: Vec<u64> = sentences.keys().copied().collect();
-        for index in &deleted {
-            if !ids.is_empty() {
-                let id = ids[index.index(ids.len())];
-                if sentences.remove(&id).is_some() {
-                    write.delete_node(NodeId(id)).unwrap();
+        for (index, change) in &changes {
+            if ids.is_empty() {
+                break;
+            }
+            let id = ids[index.index(ids.len())];
+            if !sentences.contains_key(&id) {
+                continue;
+            }
+            let node = NodeId(id);
+            match change {
+                Change::SetText(picks) => {
+                    let words = ["red", "green", "blue"];
+                    let text = picks.iter().map(|pick| words[*pick]).collect::<Vec<_>>();
+                    write
+                        .set_node_property(node, names.text, PropertyValue::String(text.join(" ")))
+                        .unwrap();
+                    sentences.insert(id, picks.clone());
+                }
+                Change::RemoveText => {
+                    write.remove_node_property(node, names.text).unwrap();
+                    sentences.remove(&id);
+                }
+                Change::RemoveLabel => {
+                    write.remove_labels(node, &[names.label]).unwrap();
+                    sentences.remove(&id);
+                }
+                Change::Delete => {
+                    write.delete_node(node).unwrap();
+                    sentences.remove(&id);
                 }
             }
         }
