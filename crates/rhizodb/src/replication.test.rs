@@ -516,6 +516,85 @@ mod crash {
         assert_eq!(export(&fresh), export(&writer));
     }
 
+    fn stepped_aside_writer() -> (SimFs, Database, Database) {
+        let fs = SimFs::new();
+        let old = open_on(&fs, false);
+        old.promote(1, b"old").unwrap();
+        insert(&old, 1);
+        let next = open_on(&SimFs::new(), true);
+        sync(&old, &next).unwrap();
+        next.promote(2, b"next").unwrap();
+        insert(&next, 2);
+        old.acknowledge(b"next", &next.position()).unwrap();
+        old.demote(std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(old.role(), Role::Replica);
+        (fs, old, next)
+    }
+
+    fn heard_of(term: u64) -> Position {
+        let other = open_on(&SimFs::new(), false);
+        other.promote(term, b"later").unwrap();
+        other.position()
+    }
+
+    #[test]
+    fn a_writer_that_stepped_aside_reopens_as_a_replica_before_it_applies_anything() {
+        let (fs, old, _next) = stepped_aside_writer();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(old);
+        let reopened = open_on(&crashed, false);
+        assert_eq!(reopened.role(), Role::Replica);
+        assert_eq!(reopened.history().entries().last().unwrap().term(), 1);
+    }
+
+    #[test]
+    fn a_promotion_of_a_writer_that_stepped_aside_clears_its_mark_for_good() {
+        let (fs, old, next) = stepped_aside_writer();
+        sync(&next, &old).unwrap();
+        old.promote(3, b"old").unwrap();
+        old.acknowledge(b"later", &heard_of(4)).unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(old);
+        assert_eq!(open_on(&crashed, false).role(), Role::Fenced);
+    }
+
+    #[test]
+    fn a_promotion_cut_off_before_it_clears_the_mark_leaves_a_fenced_writer_it_finishes() {
+        let (base, old, next) = stepped_aside_writer();
+        sync(&next, &old).unwrap();
+        drop(old);
+        let probe = base.crash(Crash::KeepUnsynced);
+        let old = open_on(&probe, false);
+        let before = probe.operations();
+        old.promote(3, b"old").unwrap();
+        let operations = probe.operations() - before;
+        drop(old);
+        let mut cut_off = 0;
+        for failing in 0..operations {
+            let fs = base.crash(Crash::KeepUnsynced);
+            let old = open_on(&fs, false);
+            fs.fail_after(failing, Failure::FromThenOn);
+            drop(old.promote(3, b"old"));
+            let recovered = fs.crash(Crash::DropUnsynced);
+            drop(old);
+            let old = open_on(&recovered, false);
+            let began = old.history().entries().last().unwrap().term() == 3;
+            let marked = old.graph.storage().header().replication.replica;
+            if !(began && marked) {
+                continue;
+            }
+            cut_off += 1;
+            assert_eq!(old.role(), Role::Fenced, "{failing}");
+            old.promote(3, b"old").unwrap();
+            assert_eq!(old.role(), Role::Writer, "{failing}");
+            old.acknowledge(b"later", &heard_of(4)).unwrap();
+            let crashed = recovered.crash(Crash::KeepUnsynced);
+            drop(old);
+            assert_eq!(open_on(&crashed, false).role(), Role::Fenced, "{failing}");
+        }
+        assert!(cut_off > 0);
+    }
+
     #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);
