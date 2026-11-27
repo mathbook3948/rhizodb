@@ -77,3 +77,4 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 
 - How a replica or a fenced writer of a newer build follows a writer that has not upgraded the graph's format yet, since opening it as anything but a writer refuses the upgrade with `NotWriter`.
 - How a writer fenced by an unplanned failover rejoins without a snapshot when it holds every change the new writer began from, since its step down at the next LSN conflicts with the new writer's first record there.
+- How `demote` waits up to its deadline for a write transaction in another process of a session, since it waits on the cross-process write lock, and a blocking `fcntl` lock takes no timeout.

@@ -182,3 +182,4 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - Where extents are placed across files, disks, and servers.
 - How data is replicated, erasure-coded, and partitioned across servers.
 - How an open makes a header that only the page cache held durable without risking the one durable header, since the open's clean header goes to that header's slot, and a torn write there falls back to an older header and loses acknowledged commits without an error.
+- Which decisions above change once several processes share a file, since a session replaces the exclusive lock and its side file carries the oldest tree, the end of the log, and the blocks a checkpoint reused, as `multi-process.md` decides for phases 3 and 4.

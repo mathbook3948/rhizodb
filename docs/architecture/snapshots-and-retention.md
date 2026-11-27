@@ -62,4 +62,4 @@ A replica starts from a copy of the database file and then follows the log from 
 
 ## Open
 
-None
+- How snapshot pins and acknowledged peers move out of one process's memory once several processes share a file, which `multi-process.md` decides through the side file's slots and peer table and its phase 4 builds.

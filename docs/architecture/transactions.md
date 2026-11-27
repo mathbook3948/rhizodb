@@ -27,4 +27,4 @@ A host often needs several queries to read one state of the graph or to take eff
 
 ## Open
 
-None
+- Whether a write transaction that waits for a write in another process gives up after a time, since a wait in one process has no bound and a stopped process could hold the write lock forever.
