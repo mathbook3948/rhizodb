@@ -944,6 +944,64 @@ mod crash {
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
         }
 
+        fn apply_through(writer: &Database, replica: &Database, lsn: u64) {
+            while replica.position().lsn() < lsn {
+                let changes = writer.changes_since(&replica.position(), 1).unwrap();
+                replica.apply(&changes).unwrap();
+            }
+        }
+
+        #[test]
+        fn a_read_that_spans_a_wait_and_its_end_refuses_the_older_snapshot_it_began() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            let reader_thread = Arc::new(std::sync::Mutex::new(None));
+            let (reached, at) = std::sync::mpsc::channel::<u8>();
+            let (resume, resumed) = std::sync::mpsc::channel::<()>();
+            let hook_state = (
+                Arc::clone(&reader_thread),
+                std::sync::Mutex::new(reached),
+                std::sync::Mutex::new(resumed),
+            );
+            replica.graph.hook_reads(Arc::new(move |point| {
+                let (thread, reached, resumed) = &hook_state;
+                if *thread.lock().unwrap() == Some(std::thread::current().id()) {
+                    reached.lock().unwrap().send(point).unwrap();
+                    resumed.lock().unwrap().recv().unwrap();
+                }
+            }));
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let reader = scope.spawn(|| {
+                    *reader_thread.lock().unwrap() = Some(std::thread::current().id());
+                    replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind())
+                });
+                assert_eq!(at.recv().unwrap(), 0);
+                apply_through(&writer, &replica, older_at);
+                resume.send(()).unwrap();
+                assert_eq!(at.recv().unwrap(), 1);
+                sync(&writer, &replica).unwrap();
+                assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                resume.send(()).unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began over format 13 and served it once the wait ended"
+                );
+            });
+        }
+
         #[test]
         #[ignore = "left out of mise run check, run by mise run random"]
         fn no_read_begins_over_an_older_format_that_an_apply_is_about_to_publish() {

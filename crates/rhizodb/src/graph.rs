@@ -242,12 +242,25 @@ pub(crate) struct Adjacent {
     pub(crate) other: NodeId,
 }
 
+#[cfg(test)]
+pub(crate) struct ReadHook(Option<Arc<dyn Fn(u8) + Send + Sync>>);
+
+#[cfg(test)]
+impl fmt::Debug for ReadHook {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReadHook")
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Graph<S> {
     storage: S,
     writers: Arc<Writers>,
     replica: AtomicBool,
     pending: AtomicU32,
+    upgrades: AtomicU64,
+    #[cfg(test)]
+    read_hook: Mutex<ReadHook>,
     committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -344,6 +357,9 @@ impl<S: Storage> Graph<S> {
             writers: Arc::default(),
             replica: AtomicBool::new(replica),
             pending: AtomicU32::new(pending.unwrap_or(0)),
+            upgrades: AtomicU64::new(0),
+            #[cfg(test)]
+            read_hook: Mutex::new(ReadHook(None)),
             committed_index_definitions: Arc::new(CommittedCatalog {
                 definitions: Mutex::new(definitions),
                 changes: AtomicU64::new(0),
@@ -375,8 +391,11 @@ impl<S: Storage> Graph<S> {
     }
 
     fn pending_format(storage: &S) -> Result<Option<u32>, GraphError> {
-        let tx = GraphTx::bare(storage.begin_read()?);
-        let Some(found) = Self::stored_format(&tx)? else {
+        Self::pending_in(&GraphTx::bare(storage.begin_read()?))
+    }
+
+    fn pending_in(tx: &GraphTx<impl ReadTransaction>) -> Result<Option<u32>, GraphError> {
+        let Some(found) = Self::stored_format(tx)? else {
             return Ok(None);
         };
         Ok((found != FORMAT_VERSION || !tx.tokenizer_is_current()?).then_some(found))
@@ -424,7 +443,23 @@ impl<S: Storage> Graph<S> {
     /// Makes the graph wait for its writer's upgrade of the graph format `found` before it
     /// serves reads, ahead of changes that leave it in that format.
     pub(crate) fn wait_for_upgrade(&self, found: u32) {
-        self.pending.store(found, Ordering::Release);
+        self.upgrades.fetch_add(1, Ordering::SeqCst);
+        self.pending.store(found, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    /// Calls `hook` with 0 after a read checks that the graph is ready and with 1 after it begins
+    /// its snapshot, so a test can run an apply between them.
+    pub(crate) fn hook_reads(&self, hook: Arc<dyn Fn(u8) + Send + Sync>) {
+        lock(&self.read_hook).0 = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn reached(&self, point: u8) {
+        let hook = lock(&self.read_hook).0.clone();
+        if let Some(hook) = hook {
+            hook(point);
+        }
     }
 
     /// Whether the graph waits for its writer's upgrade before it serves reads.
@@ -475,11 +510,17 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        let upgrades = self.upgrades.load(Ordering::SeqCst);
         self.ready()?;
+        #[cfg(test)]
+        self.reached(0);
         let committed = &self.committed_index_definitions;
         let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
+        #[cfg(test)]
+        self.reached(1);
         self.ready()?;
+        let waited = self.upgrades.load(Ordering::SeqCst) != upgrades;
         let definitions = Arc::clone(&lock(&committed.definitions));
         let index_definitions =
             if before.is_multiple_of(2) && committed.changes.load(Ordering::SeqCst) == before {
@@ -487,7 +528,7 @@ impl<S: Storage> Graph<S> {
             } else {
                 OnceLock::new()
             };
-        Ok(GraphTx {
+        let tx = GraphTx {
             transaction,
             _writer: None,
             index_definitions,
@@ -510,7 +551,11 @@ impl<S: Storage> Graph<S> {
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
-        })
+        };
+        if waited && let Some(found) = Self::pending_in(&tx)? {
+            return Err(GraphError::UpgradePending(found));
+        }
+        Ok(tx)
     }
 
     /// Records the format version and the tokenizer in a graph that holds neither, as a
