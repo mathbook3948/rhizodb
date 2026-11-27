@@ -99,6 +99,9 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A commit that fails forgets every count, since the storage may hold either side of it.
 - A read of one value reads the node's delta and then the part that holds the value, and a query that reads a second node of a group loads all of the group's deltas once.
 - A query that reads many values of one column of a group loads and checks its segments once, with one prefix scan, and a query that reads only a few, as a traversal does, reads each in place.
+- A query holds what it loaded of columns, deltas, and node meta up to a fixed budget of bytes per kind, and drops what it used longest ago, so its memory does not grow with the groups it reaches.
+- A column or node meta chunk the budget dropped is read in place for the rest of the query, since loading it again would copy it over and over when a traversal reaches more groups than the budget holds.
+- A traversal that reads more columns in random group order than the budget holds pays for bounded memory with reads in place, since a larger budget only helps once it holds most of the columns the traversal reads.
 - A query reads only the columns of the properties it reads.
 - Listing a node's properties seeks to the first segment of each column of its group and reads the node's delta.
 - Listing a node's or a relationship's property keys, its labels, or a relationship's type decodes no property value.

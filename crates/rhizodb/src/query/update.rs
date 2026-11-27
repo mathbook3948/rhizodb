@@ -29,6 +29,7 @@ use super::datum::check_item;
 use super::datum::into_property;
 use super::datum::owned;
 use super::datum::to_property;
+use super::eval::Caches;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
@@ -69,6 +70,8 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) tokens: Vec<(u8, String, u32)>,
     /// Per slot, what every value it holds is known to be.
     pub(crate) holds: &'a [Holds],
+    /// What the query's evaluations read and looked up so far.
+    pub(crate) caches: Caches,
 }
 
 impl<W: WriteTransaction> Writer<'_, W> {
@@ -187,6 +190,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
             self.limits,
         )
         .with_holds(self.holds)
+        .with_caches(&self.caches)
     }
 
     fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
@@ -403,7 +407,7 @@ impl<W: WriteTransaction> Writer<'_, W> {
                 Some(Datum::Node(id)) => {
                     let mut tokens = Vec::new();
                     for label in labels {
-                        tokens.push(self.tx.intern_token::<Label>(label)?);
+                        tokens.push(self.token::<Label>(label)?);
                     }
                     self.tx.add_labels(*id, &tokens)?;
                     Ok(())
@@ -422,11 +426,10 @@ impl<W: WriteTransaction> Writer<'_, W> {
         key: &str,
         writing: bool,
     ) -> Result<Option<Token<PropertyKey>>, Error> {
-        Ok(if writing {
-            Some(self.tx.intern_token(key)?)
-        } else {
-            self.tx.lookup_token(key)?
-        })
+        match writing {
+            true => Ok(Some(self.token(key)?)),
+            false => self.env().property_key(key),
+        }
     }
 
     fn write_property(
@@ -496,8 +499,9 @@ impl<W: WriteTransaction> Writer<'_, W> {
             RemoveAction::Labels { target, labels } => match row.get(*target) {
                 Some(Datum::Node(id)) => {
                     let mut tokens = Vec::new();
+                    let env = self.env();
                     for label in labels {
-                        if let Some(token) = self.tx.lookup_token::<Label>(label)? {
+                        if let Some(token) = env.label_token(label)? {
                             tokens.push(token);
                         }
                     }
@@ -586,3 +590,7 @@ fn collect_targets(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "update.test.rs"]
+mod tests;

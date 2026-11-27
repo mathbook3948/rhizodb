@@ -25,6 +25,7 @@ use super::datum::PathIds;
 use super::datum::dismantle;
 use super::datum::from_parameter;
 use super::datum::owned;
+use super::eval::Caches;
 use super::eval::Check;
 use super::eval::Env;
 use super::eval::Row;
@@ -144,6 +145,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         limits,
         tokens: Vec::new(),
         holds: &program.holds,
+        caches: Caches::default(),
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {

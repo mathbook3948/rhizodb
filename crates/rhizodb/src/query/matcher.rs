@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
+use crate::graph::RelationshipRecord;
 use crate::graph::Token;
 use crate::storage::ReadTransaction;
 use crate::value::PropertyValue;
@@ -35,6 +37,18 @@ use super::seek::Sought;
 pub(crate) type Emit<'a> = dyn FnMut(&Row) -> Result<bool, Error> + 'a;
 
 type ExpectedProperties = Vec<(Option<Token<PropertyKey>>, Datum)>;
+
+#[derive(Default)]
+struct Fixed<'s>(RefCell<Vec<(&'s Expr, ExpectedProperties)>>);
+
+fn row_free(expr: &Expr) -> bool {
+    match expr {
+        Expr::Constant(_) | Expr::Parameter(_) => true,
+        Expr::List(items) => items.iter().all(row_free),
+        Expr::Map(entries) => entries.iter().all(|(_, value)| row_free(value)),
+        _ => false,
+    }
+}
 
 /// How a hop of one relationship pattern reads the relationships at a node.
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +79,7 @@ struct Search<'s, 'e, T: ReadTransaction> {
     patterns: &'s [PatternPart],
     used: Vec<RelationshipId>,
     trails: Vec<Trail<'s>>,
+    fixed: Fixed<'s>,
 }
 
 struct Trail<'s> {
@@ -170,6 +185,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                     split: 0,
                 })
                 .collect(),
+            fixed: Fixed::default(),
         };
         let mut row = row.clone();
         search.run(&mut row, emit)?;
@@ -190,6 +206,8 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn expected_properties(&self, expected: &Expr, row: &Row) -> Result<ExpectedProperties, Error> {
+        #[cfg(test)]
+        tests::evaluated();
         let entries = match self.eval(expected, row)? {
             Datum::Map(entries) => entries,
             other => {
@@ -201,20 +219,35 @@ impl<T: ReadTransaction> Env<'_, T> {
         };
         Arc::unwrap_or_clone(entries)
             .into_iter()
-            .map(|(key, value)| Ok((self.tx.lookup_token::<PropertyKey>(&key)?, value)))
+            .map(|(key, value)| Ok((self.property_key(&key)?, value)))
             .collect()
     }
 
-    fn properties_match(
+    fn with_expected<'p, R>(
         &self,
-        stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
-        expected: Option<&Expr>,
+        expected: &'p Expr,
         row: &Row,
-    ) -> Result<bool, Error> {
-        match expected {
-            Some(expected) => holds(&self.expected_properties(expected, row)?, stored),
-            None => Ok(true),
-        }
+        fixed: Option<&Fixed<'p>>,
+        test: impl FnOnce(&ExpectedProperties) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let Some(fixed) = fixed.filter(|_| row_free(expected)) else {
+            return test(&self.expected_properties(expected, row)?);
+        };
+        let held = fixed
+            .0
+            .borrow()
+            .iter()
+            .position(|(held, _)| std::ptr::eq(*held, expected));
+        let index = match held {
+            Some(index) => index,
+            None => {
+                let properties = self.expected_properties(expected, row)?;
+                let mut maps = fixed.0.borrow_mut();
+                maps.push((expected, properties));
+                maps.len() - 1
+            }
+        };
+        test(&fixed.0.borrow()[index].1)
     }
 
     fn node_labelled(&self, id: NodeId, labels: &LabelExpr) -> Result<Option<bool>, Error> {
@@ -231,12 +264,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
     }
 
-    fn node_matches(
+    fn node_matches<'p>(
         &self,
         id: NodeId,
-        pattern: &NodePattern,
+        pattern: &'p NodePattern,
         known: Known,
         row: &Row,
+        fixed: Option<&Fixed<'p>>,
     ) -> Result<bool, Error> {
         if known.labels && pattern.properties.is_none() {
             return Ok(true);
@@ -253,32 +287,31 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(expected) = &pattern.properties else {
             return Ok(true);
         };
-        let mut expected = self.expected_properties(expected, row)?;
-        if let Some(served) = known.served {
-            expected.retain(|(key, _)| *key != Some(served));
-        }
-        holds(&expected, |key| {
-            Ok(self.node_property(id, Some(key))?.flatten())
+        self.with_expected(expected, row, fixed, |expected| {
+            holds(expected, known.served, |key| {
+                Ok(self.node_property(id, Some(key))?.flatten())
+            })
         })
     }
 
-    fn relationship_matches(
+    fn relationship_matches<'p>(
         &self,
         id: RelationshipId,
-        pattern: &RelationshipPattern,
+        pattern: &'p RelationshipPattern,
         row: &Row,
+        fixed: &Fixed<'p>,
     ) -> Result<bool, Error> {
-        if pattern.properties.is_none() {
+        let Some(expected) = &pattern.properties else {
             return Ok(true);
-        }
-        let Some(record) = self.tx.relationship(id)? else {
-            return Ok(false);
         };
-        self.properties_match(
-            |key| Ok(record.properties.get(&key).cloned()),
-            pattern.properties.as_ref(),
-            row,
-        )
+        self.with_expected(expected, row, Some(fixed), |expected| {
+            let held = self.tx.with_relationship(id, |bytes| {
+                holds(expected, None, |key| {
+                    Ok(RelationshipRecord::property(bytes, key)?)
+                })
+            })?;
+            Ok(held == Some(true))
+        })
     }
 
     fn start_candidates<'p>(
@@ -291,7 +324,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                 labels: label_scan_decides(&part.start),
                 served: None,
             };
-            return Ok((part, Candidates::Listed(Vec::from(ids).into_iter()), known));
+            return Ok((
+                part,
+                Candidates::Listed(Vec::from(&*ids).into_iter()),
+                known,
+            ));
         }
         let (part, sought) = self.oriented(part, row)?;
         let pattern = &part.start;
@@ -428,7 +465,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         pattern: &NodePattern,
         row: &Row,
     ) -> Result<bool, Error> {
-        self.node_matches(id, pattern, Known::NOTHING, row)
+        self.node_matches(id, pattern, Known::NOTHING, row, None)
     }
 
     /// How a hop of `pattern` reads the relationships at a node.
@@ -460,7 +497,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let direction = match read {
             HopRead::Stored(direction, rel_type) => {
                 return Ok(self.tx.adjacent_into(
-                    &mut self.adjacency.borrow_mut(),
+                    &mut self.caches.adjacency.borrow_mut(),
                     node,
                     direction,
                     rel_type,
@@ -477,9 +514,12 @@ impl<T: ReadTransaction> Env<'_, T> {
         for name in labels.names() {
             tokens.push((name.0.as_str(), self.rel_type_token(&name.0)?));
         }
-        let adjacent =
-            self.tx
-                .adjacent_with(&mut self.adjacency.borrow_mut(), node, direction, None)?;
+        let adjacent = self.tx.adjacent_with(
+            &mut self.caches.adjacency.borrow_mut(),
+            node,
+            direction,
+            None,
+        )?;
         for adjacent in adjacent {
             let Ok(matched) = labels.matches::<Infallible>(true, &mut |name| {
                 Ok(tokens
@@ -500,11 +540,15 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 }
 
-fn holds(
+fn holds<E>(
     expected: &ExpectedProperties,
-    stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, Error>,
-) -> Result<bool, Error> {
+    skipped: Option<Token<PropertyKey>>,
+    stored: impl Fn(Token<PropertyKey>) -> Result<Option<PropertyValue>, E>,
+) -> Result<bool, E> {
     for (key, value) in expected {
+        if key.is_some() && *key == skipped {
+            continue;
+        }
         let stored = match key {
             Some(key) => stored(*key)?.map_or(Datum::Null, Datum::from),
             None => Datum::Null,
@@ -695,7 +739,10 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
         let start = &self.trails[index].part.start;
-        if !self.env.node_matches(id, start, known, row)? {
+        if !self
+            .env
+            .node_matches(id, start, known, row, Some(&self.fixed))?
+        {
             return Ok(true);
         }
         set(row, start.slot, Datum::Node(id));
@@ -754,7 +801,8 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &mut Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.trails[index].part.steps[step_index].relationship;
+        let part = self.trails[index].part;
+        let relationship = &part.steps[step_index].relationship;
         for adjacent in adjacents {
             if self.used.contains(&adjacent.relationship) {
                 continue;
@@ -764,10 +812,12 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
             {
                 continue;
             }
-            if !self
-                .env
-                .relationship_matches(adjacent.relationship, relationship, row)?
-            {
+            if !self.env.relationship_matches(
+                adjacent.relationship,
+                relationship,
+                row,
+                &self.fixed,
+            )? {
                 continue;
             }
             set(
@@ -787,12 +837,16 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         adjacents: &mut std::vec::IntoIter<Adjacent>,
         row: &Row,
     ) -> Result<Option<Adjacent>, Error> {
-        let relationship = &self.trails[index].part.steps[step_index].relationship;
+        let part = self.trails[index].part;
+        let relationship = &part.steps[step_index].relationship;
         for adjacent in adjacents {
             if !self.used.contains(&adjacent.relationship)
-                && self
-                    .env
-                    .relationship_matches(adjacent.relationship, relationship, row)?
+                && self.env.relationship_matches(
+                    adjacent.relationship,
+                    relationship,
+                    row,
+                    &self.fixed,
+                )?
             {
                 return Ok(Some(adjacent));
             }
@@ -885,7 +939,8 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         frames: &mut Vec<Frame>,
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
-        let pattern = &self.trails[index].part.steps[step_index].node;
+        let part = self.trails[index].part;
+        let pattern = &part.steps[step_index].node;
         if pattern.bound {
             if row.get(pattern.slot) != Some(&Datum::Node(node)) {
                 return Ok(true);
@@ -893,9 +948,16 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         } else {
             set(row, pattern.slot, Datum::Node(node));
         }
-        if !self.env.node_matches(node, pattern, Known::NOTHING, row)? {
+        if !self
+            .env
+            .node_matches(node, pattern, Known::NOTHING, row, Some(&self.fixed))?
+        {
             return Ok(true);
         }
         self.begin_step(index, step_index + 1, node, row, frames, emit)
     }
 }
+
+#[cfg(test)]
+#[path = "matcher.test.rs"]
+mod tests;

@@ -28,6 +28,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod adjacency;
+mod budget;
 mod columns;
 mod dump;
 #[cfg(any(test, fuzzing))]
@@ -65,6 +66,8 @@ pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use meta::LabelReader;
+#[cfg(test)]
+pub(crate) use meta::SLOTS;
 pub(crate) use meta::row_group;
 pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
@@ -453,13 +456,21 @@ impl<S: Storage> Graph<S> {
                 .get(Table::Metadata, keys::UPGRADE_PROGRESS_KEY)?
             {
                 Some(progress) if upgrading => {
-                    let (step, cursor) = progress
+                    let (target, rest) = progress
+                        .split_first_chunk::<4>()
+                        .ok_or(GraphError::Corrupt("an upgrade's progress names no target"))?;
+                    let target = u32::from_be_bytes(*target);
+                    if target > FORMAT_VERSION {
+                        return Err(GraphError::UnsupportedFormatVersion(target));
+                    }
+                    let (code, cursor) = rest
                         .split_first()
-                        .and_then(|(code, cursor)| Some((UpgradeStep::of_code(*code)?, cursor)))
                         .ok_or(GraphError::Corrupt("an upgrade's progress names no step"))?;
-                    let index = plan.iter().position(|planned| *planned == step).ok_or(
-                        GraphError::Corrupt("an upgrade's progress names no planned step"),
-                    )?;
+                    let index = UpgradeStep::of_code(*code)
+                        .and_then(|step| plan.iter().position(|planned| *planned == step))
+                        .ok_or(GraphError::Corrupt(
+                            "an upgrade's progress names no planned step",
+                        ))?;
                     (index, (!cursor.is_empty()).then(|| cursor[1..].to_vec()))
                 }
                 _ => (0, None),
@@ -479,7 +490,8 @@ impl<S: Storage> Graph<S> {
             };
             match plan.get(at.0) {
                 Some(step) => {
-                    let mut progress = vec![step.code()];
+                    let mut progress = FORMAT_VERSION.to_be_bytes().to_vec();
+                    progress.push(step.code());
                     if let Some(cursor) = &at.1 {
                         progress.push(1);
                         progress.extend_from_slice(cursor);
@@ -654,6 +666,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         };
@@ -830,6 +843,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         })
@@ -859,6 +873,7 @@ pub(crate) struct GraphTx<T> {
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
     record_buffer: Vec<u8>,
+    committing: bool,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
 }
@@ -886,6 +901,7 @@ impl<T> GraphTx<T> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         }
@@ -1034,10 +1050,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<RelationshipRecord>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::RelationshipDecode);
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
     }
 
-    fn with_relationship<R>(
+    /// Calls `read` with the stored record of a relationship, if it exists.
+    pub(crate) fn with_relationship<R>(
         &self,
         id: RelationshipId,
         read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
@@ -1256,7 +1275,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         if self.meta.contains_key(&group) {
             return Ok(self.node_labels(id)?.map(|labels| read(&labels)));
         }
-        reader.with_labels(group, slot, || self.load_meta(group), read)
+        reader.with_labels(
+            group,
+            slot,
+            || self.load_meta(group),
+            || self.node_labels(id),
+            read,
+        )
     }
 
     fn stored_group(&self, group: u64) -> Result<Option<meta::StoredGroup>, GraphError> {
@@ -1292,6 +1317,8 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::MetaLoad);
         let Some((bytes, deltas)) = self.stored_group(group)? else {
             return Ok(None);
         };
@@ -1464,6 +1491,16 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         Ok(())
+    }
+
+    /// Whether a row group that holds IDs from `node` on keeps node meta. When none does, no node
+    /// has an ID of `node` or above.
+    pub(crate) fn may_hold_from(&self, node: NodeId) -> Result<bool, GraphError> {
+        match self.visit_meta_from(false, row_group(node), |_| Err(Flow::<GraphError>::Stop)) {
+            Ok(()) => Ok(false),
+            Err(Flow::Stop) => Ok(true),
+            Err(Flow::Failed(error)) => Err(error),
+        }
     }
 
     /// How many nodes there are, from the live count each group keeps. Like a label count, it
@@ -1742,6 +1779,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::TokenLookup);
         if let Some(token) = self.tokens.get(name).or_else(|| self.own_tokens.get(name)) {
             return Ok(Some(token));
         }
@@ -1787,6 +1826,7 @@ impl<T: ReadTransaction> GraphTx<T> {
 
 impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn commit(mut self) -> Result<(), GraphError> {
+        self.committing = true;
         self.flush()?;
         let definitions = match &self.catalog {
             Some(Catalog {
@@ -1837,6 +1877,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.flush_columns()?;
         self.flush_adjacency()?;
         self.flush_relationships()?;
+        self.expect_commit();
         for (group, edit) in std::mem::take(&mut self.meta) {
             match edit.flush()? {
                 Flush::Rewrite { view, stale } => {
@@ -1868,7 +1909,20 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
+    /// Checks, in a debug build, that the node meta, property column, and adjacency tables are
+    /// being written by [`GraphTx::commit`]. Those tables change only at commit, never while a
+    /// statement runs: the query layer's read caches keep what they read of them for a whole
+    /// statement and read the transaction's own pending writes in front of it, so a write to them
+    /// before commit would leave those caches stale.
+    pub(crate) fn expect_commit(&self) {
+        debug_assert!(
+            self.committing,
+            "node meta, property columns, and adjacency are written only at commit"
+        );
+    }
+
     fn flush_adjacency(&mut self) -> Result<(), GraphError> {
+        self.expect_commit();
         for (id, edit) in std::mem::take(&mut self.adjacency) {
             let flush = edit.flush(&id, &|key| fetch_adjacency(&self.transaction, key))?;
             for key in flush.delete {
@@ -2446,6 +2500,8 @@ impl<T: WriteTransaction> GraphTx<T> {
 #[cfg(test)]
 #[path = "graph.test.rs"]
 pub(crate) mod tests;
+#[cfg(test)]
+pub(crate) use tests::counted;
 
 #[cfg(test)]
 pub(crate) use tests::store_as_format_eleven;

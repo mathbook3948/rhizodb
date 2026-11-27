@@ -3,6 +3,62 @@ use super::*;
 use crate::storage::test_engine;
 use crate::storage::test_engine::TestStorage;
 
+thread_local! {
+    static READS: std::cell::Cell<Reads> = const { std::cell::Cell::new(Reads::NONE) };
+}
+
+/// A read whose count on one thread a test checks.
+#[derive(Clone, Copy)]
+pub(crate) enum Read {
+    TokenLookup,
+    RelationshipDecode,
+    MetaLoad,
+}
+
+/// How many reads of each [`Read`] a thread made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reads {
+    /// Tokens looked up in the tokens every transaction shares.
+    pub(crate) token_lookups: usize,
+    /// Relationship records decoded whole.
+    pub(crate) relationship_decodes: usize,
+    /// Node meta chunks loaded from storage.
+    pub(crate) meta_loads: usize,
+}
+
+impl Reads {
+    const NONE: Self = Self {
+        token_lookups: 0,
+        relationship_decodes: 0,
+        meta_loads: 0,
+    };
+}
+
+pub(crate) fn note(read: Read) {
+    READS.with(|reads| {
+        let mut counts = reads.get();
+        match read {
+            Read::TokenLookup => counts.token_lookups += 1,
+            Read::RelationshipDecode => counts.relationship_decodes += 1,
+            Read::MetaLoad => counts.meta_loads += 1,
+        }
+        reads.set(counts);
+    });
+}
+
+/// What `run` returns, with the reads it made on this thread.
+pub(crate) fn counted<R>(run: impl FnOnce() -> R) -> (R, Reads) {
+    let before = READS.with(std::cell::Cell::get);
+    let result = run();
+    let after = READS.with(std::cell::Cell::get);
+    let reads = Reads {
+        token_lookups: after.token_lookups - before.token_lookups,
+        relationship_decodes: after.relationship_decodes - before.relationship_decodes,
+        meta_loads: after.meta_loads - before.meta_loads,
+    };
+    (result, reads)
+}
+
 fn memory_graph() -> Graph<TestStorage> {
     Graph::open(test_engine::in_memory()).unwrap()
 }
@@ -1149,6 +1205,29 @@ fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
 }
 
 #[test]
+fn an_upgrade_a_newer_build_began_is_refused_as_a_newer_format() {
+    let storage = test_engine::in_memory();
+    let mut write = storage.begin_write().unwrap();
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &((FORMAT_VERSION - 1) | UPGRADING).to_be_bytes(),
+        )
+        .unwrap();
+    let mut progress = (FORMAT_VERSION + 1).to_be_bytes().to_vec();
+    progress.push(UpgradeStep::PostingBlocks.code());
+    write
+        .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)
+        .unwrap();
+    write.commit().unwrap();
+    assert!(matches!(
+        Graph::open(storage),
+        Err(GraphError::UnsupportedFormatVersion(version)) if version == FORMAT_VERSION + 1
+    ));
+}
+
+#[test]
 fn opening_a_database_of_another_tokenizer_as_its_writer_checkpoints_the_rebuilt_indexes() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
@@ -1173,4 +1252,18 @@ fn opening_a_database_of_another_tokenizer_as_its_writer_checkpoints_the_rebuilt
         .get(Table::Metadata, keys::TOKENIZER_KEY)
         .unwrap();
     assert_eq!(stored, Some(tokenize::fingerprint()));
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "written only at commit")]
+fn writing_node_columns_before_commit_fails_a_debug_build() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let id = write.create_node(node_with(&[])).unwrap();
+    let key = write.intern_token::<PropertyKey>("a").unwrap();
+    write
+        .set_node_property(id, key, PropertyValue::Integer(1))
+        .unwrap();
+    _ = write.flush_columns();
 }
