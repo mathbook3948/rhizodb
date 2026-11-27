@@ -27,6 +27,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - Opening a database written in a format version older than the first one RhizoDB's own engine wrote fails the same way.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them as the last step of the upgrade, before anything else reads them.
 - The rebuild clears an index by deleting its entries one key at a time in commits of bounded size, since a range delete marks every key it covers within one commit.
+- Each commit of that clear starts from the last key the commit before it deleted, which its cursor names with the table, so the clear never reads back over the deletions already committed.
 - Opening a database written in an older format version does not rebuild its keyword indexes for the upgrade alone.
 - Opening a database written before posting blocks moves each posting into its block as a step of the upgrade, without tokenizing again.
 - Adding a kind of index changes the format version, so an older build refuses the database instead of failing on an unknown definition.
