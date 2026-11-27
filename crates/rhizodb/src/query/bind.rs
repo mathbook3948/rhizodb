@@ -56,6 +56,7 @@ use super::shape::procedure_parameter;
 use super::shape::slice_bound_error;
 use super::shape::slice_error;
 use super::shape::unary_error;
+use super::stream::Bindings;
 use super::temporals::TemporalFunction;
 
 /// Resolves every variable of `query` to a row slot and rejects queries that are malformed by
@@ -78,6 +79,7 @@ pub(crate) fn bind(
         type_error: None,
         calls_host: false,
         updates_allowed: true,
+        bindings: Bindings::default(),
     };
     let BoundQuery {
         mut parts,
@@ -96,6 +98,14 @@ pub(crate) fn bind(
         return Err(type_error);
     }
     let slot_count = binder.slot_count;
+    let mut bindings = binder.bindings;
+    for clause in parts.iter().flat_map(|part| &part.clauses) {
+        match clause {
+            Clause::Read(clause) => bindings.read(clause),
+            Clause::Update(clause) => bindings.update(clause),
+        }
+    }
+    let holds = bindings.holds(slot_count);
     let closed = binder.closed;
     let parameters = binder.parameter_names;
     let calls_host = binder.calls_host;
@@ -113,6 +123,7 @@ pub(crate) fn bind(
             closed,
             parameters,
             calls_host,
+            holds,
         }));
     }
     let parts = parts
@@ -137,6 +148,7 @@ pub(crate) fn bind(
         closed,
         parameters,
         calls_host,
+        holds,
     }))
 }
 
@@ -332,6 +344,8 @@ struct Binder<'a> {
     type_error: Option<Error>,
     calls_host: bool,
     updates_allowed: bool,
+    /// What the clauses of each subquery expression bind, which no clause of the query holds.
+    pub(crate) bindings: Bindings,
 }
 
 struct BoundQuery {
@@ -479,6 +493,7 @@ impl Binder<'_> {
         }
     }
 
+    #[inline(never)]
     fn call_clause(
         &mut self,
         call: &ast::Call,
@@ -496,6 +511,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Call(Box::new(bound))))
     }
 
+    #[inline(never)]
     fn return_clause(
         &mut self,
         returned: &ast::Projection,
@@ -510,6 +526,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
     }
 
+    #[inline(never)]
     fn delete_clause(
         &mut self,
         delete: &ast::Delete,
@@ -549,6 +566,7 @@ impl Binder<'_> {
         }))
     }
 
+    #[inline(never)]
     fn unwind_clause(&mut self, unwind: &ast::Unwind, scope: &mut Scope) -> Result<Clause, Error> {
         let expr = self.expr(&unwind.expr, scope, &mut Mode::Plain)?;
         let name = &unwind.variable.0;
@@ -563,11 +581,13 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Unwind { expr, slot }))
     }
 
+    #[inline(never)]
     fn filter_clause(&mut self, condition: &ast::Expr, scope: &Scope) -> Result<Clause, Error> {
         let condition = self.filter(condition, scope, &mut Mode::Plain)?;
         Ok(Clause::Read(ReadClause::Filter(condition)))
     }
 
+    #[inline(never)]
     fn let_clause(
         &mut self,
         bindings: &[(ast::Name, ast::Expr)],
@@ -629,6 +649,7 @@ impl Binder<'_> {
         })
     }
 
+    #[inline(never)]
     fn next_chain(
         &mut self,
         blocks: &[ast::Block],
@@ -777,6 +798,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::CallSubquery(Box::new(call))))
     }
 
+    #[inline(never)]
     fn with_clause(&mut self, with: &ast::With, scope: &mut Scope) -> Result<Clause, Error> {
         let (projection, next, _) =
             self.projection(&with.projection, scope, true, with.filter.as_ref())?;
@@ -784,6 +806,7 @@ impl Binder<'_> {
         Ok(Clause::Read(ReadClause::Project(Box::new(projection))))
     }
 
+    #[inline(never)]
     fn insert_clause(
         &mut self,
         parts: &[ast::PatternPart],
@@ -802,6 +825,7 @@ impl Binder<'_> {
         Ok(Clause::Update(UpdateClause::Create(parts_bound)))
     }
 
+    #[inline(never)]
     fn merge_clause(&mut self, merge: &ast::Merge, scope: &mut Scope) -> Result<Clause, Error> {
         let mut introduced = Vec::new();
         let mut pattern =
@@ -816,6 +840,7 @@ impl Binder<'_> {
         }))))
     }
 
+    #[inline(never)]
     fn remove_clause(&mut self, items: &[ast::RemoveItem], scope: &Scope) -> Result<Clause, Error> {
         let mut actions = Vec::new();
         for item in items {
@@ -957,6 +982,7 @@ impl Binder<'_> {
         })
     }
 
+    #[inline(never)]
     fn set_items(
         &mut self,
         items: &[ast::SetItem],
@@ -989,6 +1015,7 @@ impl Binder<'_> {
         Ok(actions)
     }
 
+    #[inline(never)]
     fn match_clause(&mut self, found: &ast::Match, scope: &mut Scope) -> Result<ReadClause, Error> {
         let mut introduced = Vec::new();
         let mut patterns = Vec::new();
@@ -2253,7 +2280,10 @@ impl Binder<'_> {
                 Clause::Read(clause) => Some(clause),
                 Clause::Update(_) => None,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        for clause in &clauses {
+            self.bindings.read(clause);
+        }
         Ok((clauses, pipeline.output))
     }
 

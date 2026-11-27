@@ -14,7 +14,8 @@ A host calls RhizoDB on threads of its own, often with the 2 MiB stack Rust give
 - A chain of one of `AND`, `OR`, and `XOR` is parsed into a balanced tree, and a chain of comparisons is kept flat, so neither spends a nesting level per operator, while every other infix operator spends one.
 - A list the query text spells flat, such as the tests of a simple `CASE` branch or the conditions of a column scan, is joined into a balanced tree wherever a later pass turns it into a tree.
 - Every pass after parsing, from binding and type checks to evaluation and dropping the plan, recurses no deeper than the parser allowed.
-- A function that recurses over the query keeps its frame small, so a large `match` hands each case to a function of its own and large syntax tree variants are boxed.
+- A function that recurses over the query keeps its frame small, so a large `match` hands each case to a function of its own, marked `#[inline(never)]` so the compiler cannot merge the cases back into one frame, and large syntax tree variants are boxed.
+- Tests run queries nested to the parser's limit on half of that 1 MiB in release builds, since inlining changes frame sizes from one target and toolchain to the next.
 - A value in a query nests lists and maps at most 128 levels deep.
 - A parameter, a procedure result, or a list or map a query builds past that depth fails with `ErrorKind::NestingTooDeep`.
 - A parameter's depth is checked with a loop before it is converted, and a procedure result that is too deep is dropped with a loop, so a host value of any depth is refused without recursing over it.
@@ -24,4 +25,4 @@ A host calls RhizoDB on threads of its own, often with the 2 MiB stack Rust give
 
 ## Open
 
-None
+- How to give debug builds, whose frames are unoptimized, the same room to spare at the parser's limit as release builds.

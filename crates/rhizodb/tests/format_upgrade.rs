@@ -479,3 +479,100 @@ fn a_database_of_release_zero_one_takes_writes_after_the_upgrade_and_exports_dum
         );
     }
 }
+
+/// The engine format `(major, minor)` that each of the two header slots at the start of a
+/// database file records, as little-endian `u16`s after the eight-byte magic.
+fn engine_formats(path: &Path) -> Vec<(u16, u16)> {
+    let bytes = std::fs::read(path).unwrap();
+    bytes
+        .chunks(4096)
+        .take(2)
+        .map(|slot| {
+            assert_eq!(&slot[..8], b"RHIZODB\0");
+            (
+                u16::from_le_bytes([slot[8], slot[9]]),
+                u16::from_le_bytes([slot[10], slot[11]]),
+            )
+        })
+        .collect()
+}
+
+/// Whether release 0.1.0 opens a file of engine format `(major, minor)`. Its header decoder
+/// writes 1.3, reads 1.0 to 1.3, and refuses another major or a newer minor.
+fn release_zero_one_reads((major, minor): (u16, u16)) -> bool {
+    major == 1 && minor <= 3
+}
+
+/// Each file of a release fixture, by name, with its bytes.
+fn release_fixture_files(fixture: &str) -> Vec<(String, Vec<u8>)> {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut files: Vec<_> = std::fs::read_dir(&fixtures)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with(&format!("{fixture}.rhizodb")))
+        .map(|name| {
+            let bytes = std::fs::read(fixtures.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn a_database_of_release_zero_one_moves_to_engine_minor_four_and_the_current_graph_format() {
+    for fixture in RELEASE_ZERO_ONE {
+        let originals = release_fixture_files(fixture);
+        let directory = tempfile::tempdir().unwrap();
+        let path = copy_of_release_fixture(fixture, directory.path());
+        let formats = engine_formats(&path);
+        assert_eq!(formats, [(1, 3), (1, 3)], "{fixture}");
+        assert!(
+            formats.iter().all(|format| release_zero_one_reads(*format)),
+            "{fixture}"
+        );
+
+        let db = Database::open(&path).unwrap();
+        db.check().unwrap();
+        drop(db);
+        let formats = engine_formats(&path);
+        assert_eq!(formats, [(1, 4), (1, 4)], "{fixture}");
+        assert!(
+            formats
+                .iter()
+                .all(|format| !release_zero_one_reads(*format)),
+            "{fixture}: release 0.1.0 refuses the upgraded file"
+        );
+        // Release 0.1.0 already wrote graph format 14, this build's, so only the engine minor
+        // moves. A replica opens without writing and refuses a graph format that needs an
+        // upgrade, so a replica of the upgraded file opens only when its format is current.
+        let db = Database::open(&path).unwrap();
+        let snapshot = db.snapshot().unwrap();
+        let mut stream = vec![0; usize::try_from(snapshot.len()).unwrap()];
+        let mut offset = 0;
+        while offset < stream.len() {
+            offset += snapshot
+                .read_at(offset as u64, &mut stream[offset..])
+                .unwrap();
+        }
+        let replica =
+            Database::install_snapshot(directory.path().join("replica.rhizodb"), stream.as_slice())
+                .unwrap();
+        assert_eq!(
+            single(&replica, "MATCH (n) RETURN count(n)"),
+            single(&db, "MATCH (n) RETURN count(n)"),
+            "{fixture}"
+        );
+        drop(snapshot);
+        drop(db);
+        assert_eq!(engine_formats(&path), [(1, 4), (1, 4)], "{fixture}");
+
+        let original = &originals
+            .iter()
+            .find(|(name, _)| path.ends_with(name))
+            .unwrap()
+            .1;
+        assert_ne!(&std::fs::read(&path).unwrap(), original, "{fixture}");
+        assert_eq!(release_fixture_files(fixture), originals, "{fixture}");
+    }
+}

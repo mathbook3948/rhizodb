@@ -58,8 +58,12 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
     fn is_empty(&self) -> io::Result<bool>;
 
     /// Takes an exclusive lock on the file until this handle closes, and fails while another
-    /// handle holds one.
+    /// handle holds a lock of either kind.
     fn lock(&self) -> io::Result<()>;
+
+    /// Takes a shared lock on the file until this handle closes, and fails while another handle
+    /// holds an exclusive one. Any number of handles hold shared locks at once.
+    fn lock_shared(&self) -> io::Result<()>;
 
     /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
     fn set_block_count(&self, count: u64) -> io::Result<()>;

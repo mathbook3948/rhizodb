@@ -54,6 +54,21 @@ pub(crate) struct Program<C> {
     /// Whether the query calls a procedure the host registered, which then runs on the thread
     /// that runs the query.
     pub(crate) calls_host: bool,
+    /// Per slot, what every value it holds is known to be.
+    pub(crate) holds: Vec<Holds>,
+}
+
+/// What every value a slot holds is known to be, from the one binding that writes it. Every
+/// binding has a slot of its own, so the clause that binds a slot decides this for every row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Holds {
+    #[default]
+    Any,
+    /// A graph element or null: a node or single relationship a pattern binds.
+    Element,
+    /// An integer or null: an item of `UNWIND` over `range()` or over a list of integers, or a
+    /// `count()`.
+    Integer,
 }
 
 /// Clauses applied in order to the rows, then the slots read out as the result columns.

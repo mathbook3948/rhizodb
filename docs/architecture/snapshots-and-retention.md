@@ -59,6 +59,9 @@ A replica starts from a copy of the database file and then follows the log from 
 - Recovery does not replay kept segments before the checkpoint's log, and removes a missing or damaged one with every segment before it, so damage there only shortens what peers can read.
 - A snapshot's header and an installed image record no peers and no kept log, so an install leaves none of the old database's log to serve.
 - Snapshot pins live in memory and end with the database that holds them.
+- In a session of several processes, as `multi-process.md` decides, a snapshot's tree keeps its blocks from reuse by a checkpoint in any process, and `held_bytes` counts the trees of every process.
+- From phase 4 of `multi-process.md`, a session's snapshot pins live in the side file's slots and end with the process that holds them.
+- From phase 4 of `multi-process.md`, a session's acknowledged peers live in the side file, so an acknowledgement in any process keeps the log for that peer.
 
 ## Open
 

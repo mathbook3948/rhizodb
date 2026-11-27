@@ -33,18 +33,22 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - Every header that holds any of these fields records minor 4, so a build before it refuses a file this build only opened as an unsupported format instead of reading the fields as a damaged reserved area.
 - A new file and an installed copy get a new random incarnation, so a copy of a file never passes as the file that began a term.
 - A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer unless it stepped aside for a higher term it heard of, and every other file is a replica.
-- A writer opens fenced after every restart and takes writes again only once the host promotes it with its own newest term and writer id.
+- A writer opens fenced after every restart, of its whole session under multi-process access, and takes writes again only once the host promotes it with its own newest term and writer id.
+- Under multi-process access a process that joins a running session takes the session's role, the writer lock is the session's write lock, and the replication fields come from the side file, as `multi-process.md` decides.
 - A replica opened on a missing or empty file writes nothing and stays a replica, so it holds no change until it applies its writer's first one.
 - `OpenOptions::replica` makes a file that holds no change a replica and refuses a file that holds a writer's changes with `NotReplica`.
 - Every local write of a database that is not the writer fails with `NotWriter`, checked again inside the commit under the writer lock.
 - A file of an older graph format or tokenizer that opens as anything but its writer opens with its upgrade pending, since the upgrade is a write only the writer makes.
 - A file with its upgrade pending refuses graph reads with `FormatUpgradePending`, naming the stored format and this build's, so a host routes reads elsewhere, and writes with `NotWriter` as any file that is not the writer does, and it still applies, serves, and relays changes, reports its position and history, takes and installs snapshots, backs up, and runs the engine's check.
-- A read checks that the graph is ready both before and after it begins its snapshot, since an `apply` marks the graph pending before it publishes an older format, so no read begins over that format.
+- An `apply` that publishes an older format marks the graph pending and then counts one more wait, both before it publishes, so a read checks that the graph is ready before and after it begins its snapshot.
+- A read loads the wait count before its first check, so a read that loads it after a wait began finds the graph pending, and one that loads it before finds it changed once its snapshot holds the older format.
+- A read that saw the wait count change while it began checks the format and tokenizer of its own snapshot and refuses with `FormatUpgradePending` if they are older, since the wait may have ended between its snapshot and its second check.
 - After each `apply` a file with its upgrade pending reads the format and tokenizer again, and once its writer's upgrade arrived it reloads the index definitions before it serves any read, so no reader sees the graph between the old and the new format.
 - A writer's upgrade writes the format version in the same commit as the last step of its migration, so a replica sees the new version only over a fully migrated graph, and every commit before it marks the format version as upgrading, which a replica waits through.
 - `promote` of a file with its upgrade pending runs the upgrade as the new writer, checkpoints it, and serves reads after, and the upgrade reaches its replicas as changes.
 - A rolling upgrade restarts the replicas on the new build first, which wait for the upgrade without serving reads, hands writing over to one of them, whose promotion upgrades the graph, and restarts the old writer last, which rejoins as a replica.
 - A snapshot of a file with its upgrade pending holds the older format, which an installer of the new build opens with its upgrade pending and one of the old build reads as it is.
+- A database opened read-only refuses `apply`, `promote`, `demote`, `acknowledge`, and `forget_peer` with `ReadOnly`, and keeps no term a peer's position carries, so `changes_since` serves it as it serves any database.
 - A writer that opens a file of an older graph format or tokenizer checkpoints once after it commits the upgrade, so a snapshot taken right after holds the format a replica opens, and opening a file of the current format, a new file, or a replica checkpoints nothing.
 - Data that belongs to one node lives in a database file of its own, beside its replica.
 - `changes_since` reads whole records from the log segments on disk after the asker's position, seeding each record with its own segment's salt, and holds no writer lock.
