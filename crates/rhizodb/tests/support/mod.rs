@@ -241,9 +241,14 @@ pub fn isolated(test: &str, limit: std::time::Duration) -> bool {
 /// Runs `work` on a thread with 1 MiB of stack, the most a query may use, which leaves a host
 /// half of the 2 MiB stack Rust gives a spawned thread by default.
 pub fn on_small_stack<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    on_stack(1 << 20, work)
+}
+
+/// Runs `work` on a thread with `bytes` of stack.
+pub fn on_stack<T: Send>(bytes: usize, work: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(1 << 20)
+            .stack_size(bytes)
             .spawn_scoped(scope, work)
             .unwrap()
             .join()
