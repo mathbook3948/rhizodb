@@ -854,6 +854,36 @@ impl<T: ReadTransaction> Env<'_, T> {
         if rows.is_empty() {
             return Ok(());
         }
+        if let ([row], None) = (rows, self.morsel_of(scan.part)) {
+            let label = match scan.label {
+                Some(label) => match self.label_token(label)? {
+                    Some(token) => Some(token),
+                    None => return Ok(()),
+                },
+                None => None,
+            };
+            return self.tx.visit_node_groups(0, label, |_, ids| {
+                let Some(first) = ids.first() else {
+                    return Ok(true);
+                };
+                let group = self.tx.scan_group(*first, tokens)?;
+                for node in ids {
+                    let at = At {
+                        group: &group,
+                        node: *node,
+                        row,
+                    };
+                    if at.keeps(filter)? {
+                        #[cfg(test)]
+                        super::stream::produced();
+                        if !visit(&at, 0)? {
+                            return Ok(false);
+                        }
+                    }
+                }
+                Ok(true)
+            });
+        }
         let ids = self.scanned_ids(scan)?;
         let mut groups: Vec<(ScanGroup<'_>, usize)> = Vec::new();
         for (input, row) in rows.iter().enumerate() {
@@ -878,8 +908,12 @@ impl<T: ReadTransaction> Env<'_, T> {
                         node: *node,
                         row,
                     };
-                    if at.keeps(filter)? && !visit(&at, input)? {
-                        return Ok(());
+                    if at.keeps(filter)? {
+                        #[cfg(test)]
+                        super::stream::produced();
+                        if !visit(&at, input)? {
+                            return Ok(());
+                        }
                     }
                 }
                 start = *end;
@@ -925,11 +959,28 @@ impl<T: ReadTransaction> Env<'_, T> {
         found: &MatchClause,
         rows: &[Row],
     ) -> Result<Option<Vec<Row>>, Error> {
+        let mut out = Vec::new();
+        let scanned = self.scan_rows(scan, found, rows, &mut |row| {
+            out.push(row);
+            Ok(true)
+        })?;
+        Ok(scanned.map(|_| out))
+    }
+
+    /// Calls `emit` with each row of [`Env::scan_match`] until it returns false, and says
+    /// whether it did not. `None` when the filter has another form.
+    pub(crate) fn scan_rows(
+        &self,
+        scan: NodeScan<'_>,
+        found: &MatchClause,
+        rows: &[Row],
+        emit: &mut dyn FnMut(Row) -> Result<bool, Error>,
+    ) -> Result<Option<bool>, Error> {
         let mut compiler = Compiler::new(self, scan.slot);
         let Some(filter) = self.scan_filter(&mut compiler, &scan, found)? else {
             return Ok(None);
         };
-        let mut out = Vec::new();
+        let mut more = true;
         self.scan(
             &scan,
             rows,
@@ -938,11 +989,11 @@ impl<T: ReadTransaction> Env<'_, T> {
             &mut |at, _| {
                 let mut row = at.row.clone();
                 set(&mut row, scan.slot, Datum::Node(at.node));
-                out.push(row);
-                Ok(true)
+                more = emit(row)?;
+                Ok(more)
             },
         )?;
-        Ok(Some(out))
+        Ok(Some(more))
     }
 
     /// `MATCH` over `scan` fed straight into the plain projection after it, which reads only the
@@ -1253,6 +1304,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             .outputs
             .iter()
             .eq(items.iter().map(|(_, slot)| slot));
+        if early && !ordered {
+            self.stopping_at_limit();
+        }
         let mut seen = KeySet::default();
         let mut chosen = Chosen::new(kept, ordered);
         let mut keys = Vec::with_capacity(sort_values.len());

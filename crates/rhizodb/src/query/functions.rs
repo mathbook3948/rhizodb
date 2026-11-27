@@ -568,17 +568,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 .find(|value| !value.is_null())
                 .unwrap_or(Datum::Null));
         }
-        for (index, value) in args.iter().enumerate() {
-            if let Some(shape) = Shape::of(value)
-                && !admits(function.parameter(index), shape)
-            {
-                let error = invalid_value(function, value);
-                return Err(match function.argument_error() {
-                    Some(kind) => error.with_kind(kind),
-                    None => error,
-                });
-            }
-        }
+        admit_arguments(function, &args)?;
         let count = args.len();
         let mut args = args.into_iter();
         let first = args.next().unwrap_or(Datum::Null);
@@ -1069,12 +1059,54 @@ fn round_half_up(value: f64) -> f64 {
     }
 }
 
+fn admit_arguments(function: Function, args: &[Datum]) -> Result<(), Error> {
+    for (index, value) in args.iter().enumerate() {
+        if let Some(shape) = Shape::of(value)
+            && !admits(function.parameter(index), shape)
+        {
+            let error = invalid_value(function, value);
+            return Err(match function.argument_error() {
+                Some(kind) => error.with_kind(kind),
+                None => error,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The integers `range()` gives for `args`, one at a time, or `None` when it gives null. It
+/// fails exactly where `range()` does.
+pub(crate) fn range_items(
+    args: Vec<Datum>,
+    limits: Limits,
+) -> Result<Option<impl Iterator<Item = i64>>, Error> {
+    admit_arguments(Function::Range, &args)?;
+    let mut args = args.into_iter();
+    let start = args.next().unwrap_or(Datum::Null);
+    if start.is_null() {
+        return Ok(None);
+    }
+    range_span(start, args.next(), args.next(), limits)
+}
+
 fn range(
     start: Datum,
     end: Option<Datum>,
     step: Option<Datum>,
     limits: Limits,
 ) -> Result<Datum, Error> {
+    Ok(match range_span(start, end, step, limits)? {
+        Some(items) => Datum::list(items.map(Datum::Integer).collect()),
+        None => Datum::Null,
+    })
+}
+
+fn range_span(
+    start: Datum,
+    end: Option<Datum>,
+    step: Option<Datum>,
+    limits: Limits,
+) -> Result<Option<impl Iterator<Item = i64>>, Error> {
     let integer = |value: Option<Datum>| match value {
         Some(Datum::Integer(value)) => Ok(Some(value)),
         Some(Datum::Null) => Ok(None),
@@ -1086,7 +1118,7 @@ fn range(
         other => return Err(invalid_value(Function::Range, &other)),
     };
     let (Some(end), Some(step)) = (integer(end)?, integer(step)?) else {
-        return Ok(Datum::Null);
+        return Ok(None);
     };
     if step == 0 {
         return Err(Error::new(
@@ -1110,11 +1142,9 @@ fn range(
             format!("range() would build more than {} elements", limits.items),
         ));
     }
-    let items = (0..length)
-        .map_while(|index| i64::try_from(i128::from(start) + index * i128::from(step)).ok())
-        .map(Datum::Integer)
-        .collect();
-    Ok(Datum::list(items))
+    Ok(Some((0..length).map_while(move |index| {
+        i64::try_from(i128::from(start) + index * i128::from(step)).ok()
+    })))
 }
 
 fn to_integer(value: Datum) -> Result<Datum, Error> {

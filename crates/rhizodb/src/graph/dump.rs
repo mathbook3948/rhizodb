@@ -12,12 +12,8 @@ use super::Properties;
 use super::RelationshipId;
 use super::RelationshipRecord;
 use super::Token;
-use super::amend;
 use super::decode_u64;
 use super::keys;
-use super::meta;
-use super::meta::Meta;
-use super::meta::MetaBytes;
 
 impl<T: ReadTransaction> GraphTx<T> {
     /// The IDs the next created node and relationship take.
@@ -41,48 +37,17 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         mut visit: impl FnMut(NodeId, &[Token<Label>], Properties) -> Result<(), GraphError>,
     ) -> Result<(), GraphError> {
-        let mut group = None;
-        let mut ids = Vec::new();
-        let mut flush = |ids: &mut Vec<NodeId>| -> Result<(), GraphError> {
+        self.visit_node_groups(0, None, |_, ids| {
             let mut reader = ColumnReader::default();
-            for id in ids.drain(..) {
+            for id in ids {
                 let labels = self
-                    .node_labels(id)?
+                    .node_labels(*id)?
                     .ok_or(GraphError::Corrupt("a live node has no labels"))?;
-                let properties = self.live_node_properties(&mut reader, id)?;
-                visit(id, &labels, properties)?;
+                let properties = self.live_node_properties(&mut reader, *id)?;
+                visit(*id, &labels, properties)?;
             }
-            Ok(())
-        };
-        self.visit_meta(true, |entry| {
-            let at = match &entry {
-                Meta::Chunk { group, .. }
-                | Meta::Delta { group, .. }
-                | Meta::Edited { group, .. } => *group,
-            };
-            if group != Some(at) {
-                flush(&mut ids)?;
-                group = Some(at);
-            }
-            match entry {
-                Meta::Chunk { group, bytes } => ids.extend(
-                    MetaBytes::parse(group, bytes)?
-                        .live_codes()
-                        .map(|(slot, _)| meta::node_at(group, slot)),
-                ),
-                Meta::Delta { group, delta } => amend(
-                    &mut ids,
-                    meta::node_at(group, delta.slot),
-                    delta.before.is_some(),
-                    delta.after.is_some(),
-                )?,
-                Meta::Edited { group, edit } => {
-                    ids.extend(edit.live().map(|(slot, _)| meta::node_at(group, slot)));
-                }
-            }
-            Ok(())
-        })?;
-        flush(&mut ids)
+            Ok(true)
+        })
     }
 
     /// Calls `visit` with every relationship in ascending ID order.

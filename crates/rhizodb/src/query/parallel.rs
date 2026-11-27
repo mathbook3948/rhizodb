@@ -108,6 +108,9 @@ pub(crate) struct Morsel<'a> {
     part: &'a PatternPart,
     ids: &'a [NodeId],
     range: Cell<(usize, usize)>,
+    /// Set when the clause on the morsel stops at its `LIMIT` because no row past it can fail,
+    /// so the rows of a morsel after it are never needed once enough rows are found.
+    pub(crate) stops: Cell<bool>,
 }
 
 impl<'a, T: ReadTransaction> Env<'a, T> {
@@ -117,6 +120,13 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
         let morsel = self.morsel.filter(|morsel| ptr::eq(morsel.part, part))?;
         let (start, end) = morsel.range.get();
         morsel.ids.get(start..end)
+    }
+
+    /// Notes that the clause on this worker's morsel stops at its `LIMIT` once it has its rows.
+    pub(crate) fn stopping_at_limit(&self) {
+        if let Some(morsel) = self.morsel {
+            morsel.stops.set(true);
+        }
     }
 }
 
@@ -145,12 +155,16 @@ where
         parameters,
         now,
         limits,
-        |env, clause, next, rows| match split(env, parallelism, workers, clause, next, &rows) {
-            Some(read) => match read.run(env, parallelism) {
-                Some(done) => Ok(done),
-                None => env.read_clauses(clause, next, rows),
-            },
-            None => env.read_clauses(clause, next, rows),
+        |env, clauses, rows| {
+            env.read_run(clauses, rows, |clauses, streamed, rows| {
+                match split(env, parallelism, workers, clauses, streamed, &rows) {
+                    Some(read) => match read.run(env, parallelism) {
+                        Some(done) => Ok(done),
+                        None => env.read_clauses_at(clauses, streamed, rows),
+                    },
+                    None => env.read_clauses_at(clauses, streamed, rows),
+                }
+            })
         },
     )
 }
@@ -185,10 +199,11 @@ fn split<'q, 'w, T: ReadTransaction>(
     env: &Env<'_, T>,
     parallelism: Parallelism,
     workers: &'w Workers,
-    clause: &'q ReadClause,
-    next: Option<&'q ReadClause>,
+    clauses: &[&'q ReadClause],
+    streamed: Option<usize>,
     rows: &'q [Row],
 ) -> Option<Split<'q, 'w>> {
+    let (&clause, next) = (clauses.first()?, clauses.get(1).copied());
     let ReadClause::Match(found) = clause else {
         return None;
     };
@@ -201,6 +216,7 @@ fn split<'q, 'w, T: ReadTransaction>(
         || env.morsel.is_some()
         || row_at_a_time()
         || env.seek_possible(part).ok()?
+        || env.stops_early(clauses, streamed)
     {
         return None;
     }
@@ -338,8 +354,14 @@ impl<'q> Split<'q, '_> {
         let failed = AtomicBool::new(false);
         let last = AtomicUsize::new(usize::MAX);
         let counts = Mutex::new(vec![None; morsels.len()]);
-        let (tx, slots, parameters, now, limits) =
-            (env.tx, env.slots, env.parameters, env.now, env.limits);
+        let (tx, slots, parameters, now, limits, elements) = (
+            env.tx,
+            env.slots,
+            env.parameters,
+            env.now,
+            env.limits,
+            env.elements,
+        );
         let work = || {
             let graveyard = Graveyard::default();
             let patterns = Patterns::default();
@@ -347,10 +369,12 @@ impl<'q> Split<'q, '_> {
                 part: self.part,
                 ids: &self.ids,
                 range: Cell::new((0, 0)),
+                stops: Cell::new(false),
             };
             let worker = Env {
                 morsel: Some(&morsel),
                 ..Env::new(tx, slots, parameters, now, &graveyard, &patterns, limits)
+                    .with_elements(elements)
             };
             let mut done = Vec::new();
             while !failed.load(Ordering::Relaxed) {
@@ -362,10 +386,11 @@ impl<'q> Split<'q, '_> {
                     break;
                 }
                 morsel.range.set(*range);
+                morsel.stops.set(false);
                 let part = self.part_of(&worker);
                 match &part {
                     Err(_) => failed.store(true, Ordering::Relaxed),
-                    Ok(Part::Rows(rows, 2)) => {
+                    Ok(Part::Rows(rows, 2)) if morsel.stops.get() => {
                         if let Some(enough) = self.enough {
                             let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
                             if let Some(count) = counts.get_mut(index) {
@@ -425,8 +450,8 @@ impl<'q> Split<'q, '_> {
                 Items::Plain(_) => Ok(Part::Rows(Vec::new(), 0)),
             },
             Job::Rows { next, .. } => {
-                let (rows, applied) =
-                    worker.read_clauses(self.clause, next.as_ref(), rows.to_vec())?;
+                let clauses: Vec<&ReadClause> = std::iter::once(self.clause).chain(next).collect();
+                let (rows, applied) = worker.read_clauses(&clauses, rows.to_vec())?;
                 Ok(Part::Rows(rows, applied))
             }
         }
