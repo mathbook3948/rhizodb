@@ -960,6 +960,12 @@ mod crash {
         }
 
         fn large_older_file() -> (SimFs, Vec<Vec<Value>>, Vec<u8>) {
+            large_older_file_followed_by(None)
+        }
+
+        fn large_older_file_followed_by(
+            follower: Option<&Database>,
+        ) -> (SimFs, Vec<Vec<Value>>, Vec<u8>) {
             let fs = SimFs::new();
             let writer = open_on(&fs, false);
             writer.promote(1, b"w").unwrap();
@@ -986,6 +992,9 @@ mod crash {
                 .put(Table::Metadata, b"tokenizer", b"another tokenizer")
                 .unwrap();
             write.commit().unwrap();
+            if let Some(follower) = follower {
+                sync(&writer, follower).unwrap();
+            }
             (fs, expected, exported)
         }
 
@@ -1013,6 +1022,45 @@ mod crash {
                 stored(&open_on(&SimFs::new(), false), b"format_version")
             );
             assert_eq!(stored(&writer, b"upgrade_progress"), None);
+        }
+
+        #[test]
+        fn a_replica_that_follows_a_chunked_upgrade_waits_from_its_first_commit_to_its_last() {
+            let replica = open_on(&SimFs::new(), true);
+            let (fs, expected, exported) = large_older_file_followed_by(Some(&replica));
+            let writer = open_on(&fs, false);
+            writer.promote(1, b"w").unwrap();
+            let mut followed = 0;
+            loop {
+                let changes = writer.changes_since(&replica.position(), 1).unwrap();
+                if changes.is_empty() {
+                    break;
+                }
+                if followed == 0 {
+                    let marks = changes.decoded.records.iter().any(|change| {
+                        matches!(&change.record.body, Body::Batch(ops) if ops.iter().any(|op| {
+                            matches!(op, Op::Put { table, key, value }
+                                if *table == TableId::of(Table::Metadata)
+                                    && key.as_slice() == b"format_version"
+                                    && value[0] & 0x80 != 0)
+                        }))
+                    });
+                    assert!(marks, "the first commit of the upgrade does not mark it");
+                }
+                replica.apply(&changes).unwrap();
+                followed += 1;
+                if replica.position() != writer.position() {
+                    assert_eq!(
+                        count(&replica).unwrap_err().kind(),
+                        ErrorKind::FormatUpgradePending,
+                        "commit {followed}"
+                    );
+                }
+            }
+            assert!(followed >= 8, "{followed}");
+            assert_eq!(search(&replica), expected);
+            assert_eq!(export(&replica), exported);
+            integrity(&replica);
         }
 
         #[test]
