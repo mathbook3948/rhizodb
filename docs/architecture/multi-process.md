@@ -155,12 +155,13 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - `promote` sets the writer role by a compare-and-swap from the role word it read, and fails with `Fenced` or `WriterBusy` instead of deciding again when the counter changed, so it never undoes a fence from `demote` or `observe_term`.
 - After that compare-and-swap, `promote` loads the observed term again with sequential consistency, fences again and fails with `Fenced` when it is above its own term, since that store and load pair with `observe_term`'s as a Dekker pattern.
 - `observe_term` first reads the record under its sequence number and the observed term without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term already recorded.
-- A term above the seen term but not above the observed term skips the fence, which already happened, and takes the locks only to make the term durable.
+- A term above the seen term but not above the observed term skips the fence and takes the locks only to make the term durable.
+- Recording a term as the seen term under the locks also fences a writer of a lower term, so a fence that a dead or slow caller never made still lands before the term is durable.
 - Until a term is durable, every call of `observe_term` with it on the thread that holds the write transaction fences and fails.
 - For a higher term, `observe_term` raises the observed term, fences, then takes the writer mutex and the write lock, checks the term again, and records the observed term as the seen term in a durable header under the same locks as `promote`.
 - On the thread that holds the write transaction, `observe_term` with a higher term raises the observed term, fences, and then fails instead of waiting for itself, as maintenance does, so the caller learns that the term is not yet durable.
 - In one process today `observe_term` and `demote` fence without the writer mutex, so `promote` can overwrite either fence with the writer role between its check and its change of the role, and phase 3 fixes both with the role word above.
-- Every local commit checks the role word under the write lock.
+- Every local commit checks only the role word under the write lock, which is enough since no seen term above the writer's term becomes durable before its fence lands.
 - `apply`, `promote`, and `demote` take the write lock.
 - `promote`, `demote`, and an observed higher term change the role in the side file, so every process takes or refuses local writes from its next commit on.
 - `demote` marks the role fenced in the side file before it waits for the write lock, so a write transaction open in any process fails at its commit unless that commit already passed its check of the role under the write lock.
