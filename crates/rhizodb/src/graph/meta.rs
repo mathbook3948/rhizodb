@@ -46,6 +46,11 @@ pub(crate) fn row_group(node: NodeId) -> u64 {
     locate(node).0
 }
 
+/// The ID of the first node slot of row group `group`.
+pub(crate) fn first_node(group: u64) -> NodeId {
+    NodeId(group.saturating_mul(SLOTS as u64))
+}
+
 pub(crate) fn locate(node: NodeId) -> (u64, usize) {
     (
         node.0 >> GROUP_SHIFT,

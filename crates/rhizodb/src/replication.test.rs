@@ -897,21 +897,36 @@ mod crash {
             writer.promote(1, b"w").unwrap();
             assert_eq!(count(&writer).unwrap(), [vec![Value::Integer(6)]]);
             let upgrade = writer.changes_since(&before, 1 << 20).unwrap();
-            let version_puts: Vec<usize> = upgrade
-            .decoded
-            .records
-            .iter()
-            .enumerate()
-            .filter(|(_, change)| match &change.record.body {
-                Body::Batch(ops) => ops.iter().any(|op| {
-                    matches!(op, Op::Put { table, key, .. }
-                        if *table == TableId::of(Table::Metadata) && key.as_slice() == b"format_version")
-                }),
-                _ => false,
-            })
-            .map(|(index, _)| index)
-            .collect();
-            assert_eq!(version_puts, [upgrade.decoded.records.len() - 1]);
+            let versions: Vec<(usize, u32)> = upgrade
+                .decoded
+                .records
+                .iter()
+                .enumerate()
+                .flat_map(|(index, change)| match &change.record.body {
+                    Body::Batch(ops) => ops
+                        .iter()
+                        .filter_map(|op| match op {
+                            Op::Put { table, key, value }
+                                if *table == TableId::of(Table::Metadata)
+                                    && key.as_slice() == b"format_version" =>
+                            {
+                                Some((index, u32::from_be_bytes(value.as_slice().try_into().ok()?)))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            let (last, current) = *versions.last().unwrap();
+            assert_eq!(last, upgrade.decoded.records.len() - 1);
+            assert_eq!(current & (1 << 31), 0);
+            assert!(
+                versions[..versions.len() - 1]
+                    .iter()
+                    .all(|(_, version)| version & (1 << 31) != 0),
+                "{versions:?}"
+            );
             insert(&writer, 7);
             sync(&writer, &replica).unwrap();
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(7)]]);
@@ -942,6 +957,98 @@ mod crash {
             store(&writer, b"format_version", &14u32.to_be_bytes());
             sync(&writer, &replica).unwrap();
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
+        }
+
+        fn large_older_file() -> (SimFs, Vec<Vec<Value>>, Vec<u8>) {
+            let fs = SimFs::new();
+            let writer = open_on(&fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                .unwrap();
+            writer
+                .execute(
+                    "UNWIND range(0, 2999) AS k INSERT (:N {k: k, text: 'a river runs ' + toString(k)})",
+                    &Parameters::new(),
+                )
+                .unwrap();
+            writer
+                .execute(
+                    "MATCH (a:N), (b:N) WHERE b.k = a.k + 1 INSERT (a)-[:NEXT {w: a.k}]->(b)",
+                    &Parameters::new(),
+                )
+                .unwrap();
+            let expected = search(&writer);
+            let exported = export(&writer);
+            let mut write = writer.graph.storage().begin_write().unwrap();
+            crate::graph::store_as_format_eleven(&mut write);
+            write
+                .put(Table::Metadata, b"tokenizer", b"another tokenizer")
+                .unwrap();
+            write.commit().unwrap();
+            (fs, expected, exported)
+        }
+
+        #[test]
+        fn a_large_file_of_an_older_format_upgrades_in_commits_of_bounded_size() {
+            let (fs, expected, exported) = large_older_file();
+            let writer = open_on(&fs, false);
+            let before = writer.position();
+            writer.promote(1, b"w").unwrap();
+            assert_eq!(search(&writer), expected);
+            assert_eq!(export(&writer), exported);
+            integrity(&writer);
+            let upgrade = writer.changes_since(&before, usize::MAX).unwrap();
+            let sizes: Vec<usize> = upgrade
+                .decoded
+                .records
+                .iter()
+                .map(|change| change.bytes.len())
+                .collect();
+            assert!(sizes.len() >= 8, "{sizes:?}");
+            let bound = 4 * crate::graph::TEST_UPGRADE_BATCH_BYTES;
+            assert!(sizes.iter().all(|size| *size <= bound), "{sizes:?}");
+            assert_eq!(
+                stored(&writer, b"format_version"),
+                stored(&open_on(&SimFs::new(), false), b"format_version")
+            );
+            assert_eq!(stored(&writer, b"upgrade_progress"), None);
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn a_crash_at_any_write_of_a_chunked_upgrade_resumes_to_the_same_graph() {
+            let (base, expected, exported) = large_older_file();
+            let probe = base.crash(Crash::KeepUnsynced);
+            let writer = open_on(&probe, false);
+            let before = probe.operations();
+            writer.promote(1, b"w").unwrap();
+            let operations = probe.operations() - before;
+            drop(writer);
+            let step = (operations / 97).max(1);
+            for failing in (0..operations).step_by(step as usize) {
+                for crash in [Crash::DropUnsynced, Crash::Scramble { seed: failing }] {
+                    let fs = base.crash(Crash::KeepUnsynced);
+                    let writer = open_on(&fs, false);
+                    fs.fail_after(failing, Failure::FromThenOn);
+                    drop(writer.promote(1, b"w"));
+                    let recovered = fs.crash(crash);
+                    drop(writer);
+                    let follower = open_on(&recovered.crash(Crash::KeepUnsynced), false);
+                    match count(&follower) {
+                        Ok(_) => assert_eq!(search(&follower), expected, "{failing}"),
+                        Err(error) => {
+                            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending, "{failing}")
+                        }
+                    }
+                    drop(follower);
+                    let writer = open_on(&recovered, false);
+                    writer.promote(1, b"w").unwrap();
+                    assert_eq!(search(&writer), expected, "{failing}");
+                    assert_eq!(export(&writer), exported, "{failing}");
+                    integrity(&writer);
+                }
+            }
         }
 
         #[test]

@@ -22,6 +22,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
+- Opening a database of an older graph format or tokenizer upgrades it in commits of bounded size that record their progress, instead of one write transaction, so a large file upgrades within bounded memory and log records, and an upgrade cut off by a crash resumes where it stopped. While an upgrade is under way the file's format version is marked, so a build of any version refuses it instead of reading a half moved graph.
 - `Database::apply` refuses, with `ErrorKind::UnsupportedFormatVersion`, a change that records a graph format newer than this build reads, after applying the changes before it, so a replica of an older build never takes a format it would misread.
 - A writer that lost its lease to a failover rejoins as a replica without a snapshot when it holds no change the new writer lacks: once it has heard of the new term, from `Database::changes_since` or `Database::acknowledge` with the new writer's position, `Database::demote` records no step down and the file opens as a replica, and one that holds changes the new writer lacks still fails with `ErrorKind::Diverged`. A replica that heard of a term before receiving its first change applies that change.
 - Opening a database of an older graph format or tokenizer as its writer checkpoints the upgrade once, so a snapshot taken right after it installs on a replica instead of failing with `NotWriter`. Opening a database of the current format checkpoints nothing.
