@@ -230,9 +230,30 @@ impl<F: FileSystem> Wal<F> {
         Self::read_log(fs, base, header, retain_from, segment_target, true, replay)
     }
 
-    /// Reads the log `header` names after a crash as [`Wal::recover`] does, failing on the
-    /// same damage, but changes no file, and returns the highest term of the records after the
-    /// checkpoint.
+    /// Reads the log `header` names after a crash and calls `replay` with every record after
+    /// the checkpoint, as [`Wal::recover`] does, failing on the same damage, but changes no
+    /// file: a torn tail and an unfinished last segment stay on disk, and no segment is removed.
+    pub(crate) fn replay(
+        fs: Arc<F>,
+        base: &str,
+        header: &Header,
+        segment_target: u64,
+        replay: impl FnMut(Record) -> Result<(), EngineError>,
+    ) -> Result<Self, EngineError> {
+        Self::read_log(fs, base, header, 0, segment_target, false, replay)
+    }
+
+    /// Syncs every segment of the log, which writes nothing to them.
+    pub(crate) fn sync_segments(&self) -> Result<(), EngineError> {
+        for segment in &self.segments_oldest_first {
+            let name = segment_name(&self.base, segment.sequence);
+            self.fs.open(&name, wal_block()?)?.sync()?;
+        }
+        Ok(())
+    }
+
+    /// Reads the log `header` names after a crash as [`Wal::replay`] does, and returns the
+    /// highest term of the records after the checkpoint.
     pub(crate) fn newest_term_after_checkpoint(
         fs: Arc<F>,
         base: &str,
@@ -240,7 +261,7 @@ impl<F: FileSystem> Wal<F> {
         segment_target: u64,
     ) -> Result<u64, EngineError> {
         let mut newest = 0;
-        Self::read_log(fs, base, header, 0, segment_target, false, |record| {
+        Self::replay(fs, base, header, segment_target, |record| {
             newest = newest.max(record.term);
             Ok(())
         })?;

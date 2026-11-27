@@ -143,6 +143,15 @@ impl BlockFile for AnyFile {
         }
     }
 
+    fn lock_shared(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.lock_shared(),
+            AnyFile::Memory(file) => file.lock_shared(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.lock_shared(),
+        }
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         match self {
             AnyFile::Os(file) => file.set_block_count(count),
@@ -188,6 +197,17 @@ fn split(path: &Path) -> Result<(PathBuf, &str), EngineError> {
 pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<AnyFs>, EngineError> {
     let (directory, name) = split(path)?;
     Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
+}
+
+/// Opens the existing database file at `path` with the engine read-only, as
+/// [`Engine::open_read_only`] does.
+pub(crate) fn open_path_read_only(
+    path: &Path,
+    options: EngineOptions,
+) -> Result<Engine<AnyFs>, EngineError> {
+    let (directory, name) = split(path)?;
+    let fs = OsFs::read_only(directory, name)?;
+    Engine::open_read_only(Arc::new(AnyFs::Os(fs)), name, options)
 }
 
 /// Installs the snapshot `input` streams as the database file at `path`, as

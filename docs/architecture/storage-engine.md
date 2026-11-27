@@ -13,7 +13,23 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - The engine implements the storage trait, and the graph layer reaches it only through that trait.
 - A database at rest is one file.
 - The engine holds an exclusive lock on the database file while it is open, so a second open of a database fails in any process until the first closes it.
+- A read-only open takes a shared lock on the database file instead, so any number of read-only opens hold the file at once and each keeps out every open that writes.
 - An open that finds the lock held tries again for half a second before it fails, since a child process the host spawns shares the lock until it starts its program.
+- The simulated file system enforces locks as Windows does, so an exclusive lock keeps other handles from reading or writing the file, and a shared lock keeps every handle from writing it.
+- A read-only open opens every file without write access, and never creates, writes, renames, or removes a file, not even a staging file or a leftover segment.
+- A read-only open of a missing or empty file fails instead of creating a database.
+- A read-only open takes the standard library's whole-file shared lock, and only then fails with `DatabaseAlreadyOpen` when a `-shm` side file lies beside the database file, so it never reads a file that a multi-process session of a later build holds.
+- A read-only open detects a multi-process session only by its `-shm` file, so the session's first process must create that file while it holds the exclusive lock, and a session whose last process leaves the file behind keeps every read-only open refused until the file is removed.
+- A read-only open of a cleanly closed database reads no log, and one after an unclean shutdown replays the log into memory and leaves a torn tail and an unfinished last segment on disk.
+- A read-only open syncs every segment it replayed, and their names, before any reader sees a replayed commit, since a writer that died between an append and its sync left a record that only the page cache holds and a power loss would take back.
+- Syncing the segment names on replay is defense in depth, since a writer syncs the directory as it creates a segment, so the names are durable already unless that writer died in between.
+- On Windows a read-only open of a database that was not closed cleanly fails with `ReadOnly`, since only a handle with write access can flush a file there and a read-only open opens none.
+- A process holds at most one read-only open of a file, keyed by its canonical path, since shared locks of one process never conflict and the multi-process design lets a process open a file once.
+- A read-only open reads a file of an older engine minor as it is, since every minor this build reads needs no rewrite to be read.
+- A read-only open of a file whose graph format or tokenizer needs an upgrade fails with `ReadOnly`, since the graph reads only its current layout and the upgrade is a write.
+- A read-only database refuses every write, checkpoint, compaction, and change to its replication state or the log it keeps for peers with `ReadOnly`, and starts no checkpoint thread.
+- A read-only database reports through `Database::role` the role an open that writes would find in the file, such as `Writer` for a file without a replication history, though it refuses every write.
+- A snapshot of a read-only database whose last checkpoint a crash cut between its stages fails with `ReadOnly`, since only an open that writes finishes that checkpoint.
 - On a file system without locks the engine opens a database unlocked.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.

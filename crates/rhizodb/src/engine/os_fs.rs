@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
 use std::fs::TryLockError;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -15,12 +18,69 @@ use super::block_file::FileSystem;
 #[derive(Debug)]
 pub(crate) struct OsFs {
     directory: PathBuf,
+    read_only: Option<Claim>,
+}
+
+static READ_ONLY_FILES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+// ast-grep-ignore
+// Shared locks of one process never conflict, so a claim keeps it to one open of a file.
+#[derive(Debug)]
+struct Claim(PathBuf);
+
+impl Claim {
+    fn take(path: PathBuf) -> io::Result<Self> {
+        let path = fs::canonicalize(path)?;
+        let mut held = READ_ONLY_FILES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !held.insert(path.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the database file is already open read-only in this process",
+            ));
+        }
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        READ_ONLY_FILES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.0);
+    }
 }
 
 impl OsFs {
     pub(crate) fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
+            read_only: None,
+        }
+    }
+
+    /// The files of `directory`, opened without write access, so the operating system refuses
+    /// every write, and with no create, rename, or remove, for the one open of the database file
+    /// `name` that this process may hold at a time.
+    pub(crate) fn read_only(directory: impl Into<PathBuf>, name: &str) -> io::Result<Self> {
+        let directory = directory.into();
+        let claim = Claim::take(directory.join(name))?;
+        Ok(Self {
+            directory,
+            read_only: Some(claim),
+        })
+    }
+
+    fn writable(&self) -> io::Result<()> {
+        if self.read_only.is_some() {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the database is open read-only",
+            ))
+        } else {
+            Ok(())
         }
     }
 }
@@ -29,17 +89,20 @@ impl OsFs {
 pub(crate) struct OsFile {
     file: File,
     size: BlockSize,
+    read_only: bool,
 }
 
 const LOCK_PATIENCE: Duration = Duration::from_millis(500);
 
 const LONGEST_LOCK_PAUSE: Duration = Duration::from_millis(10);
 
-fn lock_or_skip_where_unsupported(file: &File) -> io::Result<()> {
+fn lock_or_skip_where_unsupported(
+    try_lock: impl Fn() -> Result<(), TryLockError>,
+) -> io::Result<()> {
     let start = Instant::now();
     let mut pause = Duration::from_micros(100);
     loop {
-        match file.try_lock() {
+        match try_lock() {
             Ok(()) => return Ok(()),
             Err(TryLockError::WouldBlock) if start.elapsed() < LOCK_PATIENCE => {
                 thread::sleep(pause);
@@ -63,27 +126,38 @@ impl FileSystem for OsFs {
     type File = OsFile;
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
+        self.writable()?;
         let file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(self.directory.join(name))?;
-        Ok(OsFile { file, size })
+        Ok(OsFile {
+            file,
+            size,
+            read_only: false,
+        })
     }
 
     fn open(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         let file = fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(self.read_only.is_none())
             .open(self.directory.join(name))?;
-        Ok(OsFile { file, size })
+        Ok(OsFile {
+            file,
+            size,
+            read_only: self.read_only.is_some(),
+        })
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.writable()?;
         fs::rename(self.directory.join(from), self.directory.join(to))
     }
 
     fn remove(&self, name: &str) -> io::Result<()> {
+        self.writable()?;
         fs::remove_file(self.directory.join(name))
     }
 
@@ -136,7 +210,11 @@ impl BlockFile for OsFile {
     }
 
     fn lock(&self) -> io::Result<()> {
-        lock_or_skip_where_unsupported(&self.file)
+        lock_or_skip_where_unsupported(|| self.file.try_lock())
+    }
+
+    fn lock_shared(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
@@ -144,6 +222,12 @@ impl BlockFile for OsFile {
     }
 
     fn sync(&self) -> io::Result<()> {
+        if cfg!(windows) && self.read_only {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Windows flushes a file only through a handle with write access",
+            ));
+        }
         self.file.sync_all()
     }
 }

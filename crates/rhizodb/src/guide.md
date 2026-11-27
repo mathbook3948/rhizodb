@@ -38,6 +38,12 @@ mounts, a second open succeeds and the host must keep to one `Database` per file
 [`ErrorKind::DatabaseNotFound`] instead of creating a missing file.
 [`Database::in_memory`] makes a database that is gone when dropped.
 
+[`OpenOptions::read_only`] opens an existing file for reading without ever writing a file, so
+any number of processes read one file at once while none of them writes it. A read-only open
+waits for no writer: it fails with [`ErrorKind::DatabaseAlreadyOpen`] while a `Database` that
+writes holds the file, and an open that writes fails the same way while a read-only one holds
+it. Every call that would change the file fails with [`ErrorKind::ReadOnly`].
+
 A damaged file fails with [`ErrorKind::CorruptData`] when it is opened or when an operation
 reads the damage, since every page of the file carries a checksum.
 

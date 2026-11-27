@@ -118,6 +118,18 @@ pub(crate) enum GraphError {
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
     NotWriter(&'static str),
+    ReadOnly(&'static str),
+}
+
+/// What a graph may write as it opens its storage and afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// Records the format version and upgrades an older format, and takes local writes.
+    Writer,
+    /// Refuses every local write, and so fails instead of writing an upgrade.
+    Replica,
+    /// Over storage that takes no write at all, which fails instead of writing an upgrade.
+    ReadOnly,
 }
 
 impl fmt::Display for GraphError {
@@ -153,6 +165,10 @@ impl fmt::Display for GraphError {
             Self::NotWriter(what) => {
                 write!(formatter, "a database that is not the writer cannot {what}")
             }
+            Self::ReadOnly(what) => write!(
+                formatter,
+                "a database opened read-only cannot {what}; open it once for writing to do so"
+            ),
         }
     }
 }
@@ -254,28 +270,32 @@ impl<S: Storage> Graph<S> {
     /// in the same write transaction.
     #[cfg(test)]
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
-        Self::open_as(storage, false)
+        Self::open_as(storage, Access::Writer)
     }
 
-    /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
-    /// and so fails instead of writing the format version or an upgrade.
-    pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
-        let rewrote = {
+    /// Opens the graph as [`Graph::open`] does, or, for any `access` but a writer's, fails
+    /// instead of writing the format version or an upgrade. A graph opened read-only reads the
+    /// current format and tokenizer only, since the graph reads no older layout as it is.
+    pub(crate) fn open_as(storage: S, access: Access) -> Result<Self, GraphError> {
+        if access == Access::ReadOnly {
+            let tx = GraphTx::bare(storage.begin_read()?);
+            let found = stored_format_version(&tx)?;
+            if needs_upgrade(found)? && found.is_some() {
+                return Err(GraphError::ReadOnly(
+                    "upgrade a database written in an older format",
+                ));
+            }
+            if found.is_some() && !tx.tokenizer_is_current()? {
+                return Err(GraphError::ReadOnly(
+                    "rebuild keyword indexes for this build's tokenizer",
+                ));
+            }
+        }
+        let replica = access == Access::Replica;
+        let rewrote = access != Access::ReadOnly && {
             let mut tx = GraphTx::bare(storage.begin_write()?);
-            let found = match tx
-                .transaction
-                .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
-            {
-                None => None,
-                Some(bytes) => Some(decode_u32(&bytes)?),
-            };
-            let upgrade = match found {
-                Some(FORMAT_VERSION) => false,
-                Some(found) if !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) => {
-                    return Err(GraphError::UnsupportedFormatVersion(found));
-                }
-                _ => true,
-            };
+            let found = stored_format_version(&tx)?;
+            let upgrade = needs_upgrade(found)?;
             if replica && upgrade && found.is_some() {
                 return Err(GraphError::NotWriter(
                     "upgrade a database written in an older format",
@@ -668,6 +688,26 @@ fn lock<V>(value: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
     value
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn stored_format_version<T: ReadTransaction>(tx: &GraphTx<T>) -> Result<Option<u32>, GraphError> {
+    match tx
+        .transaction
+        .get(Table::Metadata, keys::FORMAT_VERSION_KEY)?
+    {
+        None => Ok(None),
+        Some(bytes) => Ok(Some(decode_u32(&bytes)?)),
+    }
+}
+
+fn needs_upgrade(found: Option<u32>) -> Result<bool, GraphError> {
+    match found {
+        Some(FORMAT_VERSION) => Ok(false),
+        Some(found) if !(OLDEST_FORMAT_VERSION..FORMAT_VERSION).contains(&found) => {
+            Err(GraphError::UnsupportedFormatVersion(found))
+        }
+        _ => Ok(true),
+    }
 }
 
 fn decode_u32(bytes: &[u8]) -> Result<u32, DecodeError> {

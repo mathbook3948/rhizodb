@@ -235,6 +235,7 @@ struct Identity {
 #[derive(Debug)]
 struct Shared<F: FileSystem> {
     options: EngineOptions,
+    read_only: bool,
     fs: Arc<F>,
     name: String,
     epochs: Mutex<Vec<Epoch>>,
@@ -348,6 +349,11 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
 /// began a term from a copy of it.
 pub(crate) fn new_incarnation() -> u128 {
     (u128::from(random_u64()) << 64) | u128::from(random_u64())
+}
+
+/// The side file a multi-process session of a later build keeps beside the database file `name`.
+pub(crate) fn session_file_name(name: &str) -> String {
+    format!("{name}-shm")
 }
 
 pub(crate) fn staging_name(name: &str) -> String {
@@ -717,6 +723,21 @@ fn start_log<F: FileSystem>(
     Ok((wal, header))
 }
 
+// ast-grep-ignore
+// Windows cannot sync a file opened without write access, so recovery there fails instead.
+fn make_replayed_log_durable<F: FileSystem>(fs: &F, wal: &Wal<F>) -> Result<(), EngineError> {
+    let synced = wal.sync_segments().and_then(|()| Ok(fs.sync_names()?));
+    match synced {
+        Err(EngineError::Io(error)) if error.kind() == io::ErrorKind::Unsupported => {
+            Err(EngineError::ReadOnly(
+                "make the log of an unclean shutdown durable on this platform, so open it once \
+                 for writing",
+            ))
+        }
+        synced => synced,
+    }
+}
+
 fn make_recovery_durable<F: FileSystem + 'static>(
     shared: &Shared<F>,
     fs: &Arc<F>,
@@ -825,6 +846,28 @@ impl<F: FileSystem + 'static> Engine<F> {
         Self::open_loaded(fs, name, load(file, &options)?, options)
     }
 
+    /// Opens the existing database file `name` on `fs` under a shared lock, which any number of
+    /// read-only opens hold at once and which keeps out every open that writes. It writes no
+    /// file: the log of an unclean shutdown is replayed into memory alone, and every write,
+    /// checkpoint, and compaction is refused.
+    pub(crate) fn open_read_only(
+        fs: Arc<F>,
+        name: &str,
+        options: EngineOptions,
+    ) -> Result<Self, EngineError> {
+        let file = fs.open(name, block_size()?)?;
+        file.lock_shared()?;
+        if fs.names()?.contains(&session_file_name(name)) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "a multi-process session may hold the database file, since its -shm file exists, \
+                 and a read-only open of this build takes no part in one",
+            )
+            .into());
+        }
+        Self::start(fs, name, load(file, &options)?, options, true)
+    }
+
     /// Opens the database `loaded` read from the locked file named `name`, as [`Engine::open`]
     /// does once it holds the file.
     pub(crate) fn open_loaded(
@@ -832,6 +875,16 @@ impl<F: FileSystem + 'static> Engine<F> {
         name: &str,
         loaded: Loaded<F::File>,
         options: EngineOptions,
+    ) -> Result<Self, EngineError> {
+        Self::start(fs, name, loaded, options, false)
+    }
+
+    fn start(
+        fs: Arc<F>,
+        name: &str,
+        loaded: Loaded<F::File>,
+        options: EngineOptions,
+        read_only: bool,
     ) -> Result<Self, EngineError> {
         let Loaded {
             pages,
@@ -852,9 +905,24 @@ impl<F: FileSystem + 'static> Engine<F> {
             chain: header.replication.checkpoint_chain,
         };
         let recovered = !header.clean;
-        let (wal, header) = if header.clean {
+        let (wal, header) = if read_only {
+            let wal = if header.clean {
+                None
+            } else {
+                let wal = Wal::replay(
+                    Arc::clone(&fs),
+                    name,
+                    &header,
+                    options.segment_target,
+                    |record| replay_into(&layers, &mut replayed, record),
+                )?;
+                make_replayed_log_durable(&*fs, &wal)?;
+                Some(wal)
+            };
+            (wal, header)
+        } else if header.clean {
             replayed.hlc = hybrid_clock_after(replayed.hlc);
-            start_log(
+            let (wal, header) = start_log(
                 &fs,
                 name,
                 &pages,
@@ -863,7 +931,8 @@ impl<F: FileSystem + 'static> Engine<F> {
                 replayed.lsn,
                 replayed.hlc,
                 options.segment_target,
-            )?
+            )?;
+            (Some(wal), header)
         } else {
             let wal = Wal::recover(
                 Arc::clone(&fs),
@@ -873,7 +942,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 options.segment_target,
                 |record| replay_into(&layers, &mut replayed, record),
             )?;
-            (wal, header)
+            (Some(wal), header)
         };
         let Replayed {
             lsn: last_lsn,
@@ -881,16 +950,19 @@ impl<F: FileSystem + 'static> Engine<F> {
             chain,
         } = replayed;
         let needed = header.wal.first_segment;
-        let log_first = wal.first_sequence();
+        let log_first = wal.as_ref().map_or(needed, Wal::first_sequence);
+        let wal_bytes = wal.as_ref().map_or(0, Wal::size);
+        let wal = wal.filter(|_| !read_only);
         let epochs = replica::load_epochs(&layers)?;
         let term = epochs.last().map_or(0, |epoch| epoch.term);
         let role = replica::role_at_open(&header, &epochs);
         let shared = Arc::new(Shared {
             options,
+            read_only,
             fs: Arc::clone(&fs),
             name: name.to_owned(),
             epochs: Mutex::new(epochs),
-            accepting: AtomicBool::new(role == Role::Writer),
+            accepting: AtomicBool::new(role == Role::Writer && !read_only),
             role: Mutex::new(role),
             pages,
             published: Mutex::new(Published {
@@ -898,9 +970,9 @@ impl<F: FileSystem + 'static> Engine<F> {
                 chain,
                 readers: BTreeMap::new(),
             }),
-            wal_bytes: AtomicU64::new(wal.size()),
+            wal_bytes: AtomicU64::new(wal_bytes),
             writer: Mutex::new(Writer {
-                wal: Some(wal),
+                wal,
                 last_lsn,
                 last_hlc,
                 term,
@@ -936,10 +1008,11 @@ impl<F: FileSystem + 'static> Engine<F> {
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
         });
-        if recovered {
+        if recovered && !read_only {
             make_recovery_durable(&shared, &fs, name)?;
         }
         let (jobs, worker) = match options.checkpoint {
+            _ if read_only => (None, None),
             #[cfg(any(test, fuzzing))]
             CheckpointMode::Inline => (None, None),
             CheckpointMode::Background => {
@@ -1122,6 +1195,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Writes every commit so far into the database file and keeps the log, which the next
     /// checkpoint releases as any checkpoint does.
     pub(crate) fn checkpoint_keeping_log(&self) -> Result<(), EngineError> {
+        self.writable("checkpoint")?;
         let mut writer = lock(&self.shared.writer);
         self.shared.wait_for_checkpoint();
         if self.shared.is_poisoned() {
@@ -1141,6 +1215,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Writes every commit so far into the database file and drops the log segments it no
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
+        self.writable("checkpoint")?;
         let mut writer = lock(&self.shared.writer);
         self.shared.wait_for_checkpoint();
         if self.shared.is_poisoned() {
@@ -1161,11 +1236,27 @@ impl<F: FileSystem + 'static> Engine<F> {
     pub(crate) fn close(mut self) -> Result<(), EngineError> {
         self.stop_checkpoints();
         self.shared.close();
+        if self.shared.read_only {
+            return Ok(());
+        }
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal());
         }
         if !lock(&self.shared.durable).header.clean {
             return Err(EngineError::Poisoned);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.shared.read_only
+    }
+
+    /// Fails with [`EngineError::ReadOnly`], naming `what` was asked, when the database was
+    /// opened read-only.
+    pub(crate) fn writable(&self, what: &'static str) -> Result<(), EngineError> {
+        if self.is_read_only() {
+            return Err(EngineError::ReadOnly(what));
         }
         Ok(())
     }
@@ -1194,6 +1285,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Writes every commit into the database file, copies every table into as few extents as
     /// they need, and cuts the file after them.
     pub(crate) fn compact(&self) -> Result<(), EngineError> {
+        self.writable("compact the file")?;
         let mut writer = lock(&self.shared.writer);
         self.shared.wait_for_checkpoint();
         if self.shared.is_poisoned() {
@@ -1216,6 +1308,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Keeps the log after `lsn` for `peer`, in place of what it kept for that peer before,
     /// until the retained log passes the cap.
     pub(crate) fn acknowledge(&self, peer: &[u8], lsn: u64) -> Result<(), EngineError> {
+        self.writable("keep the log for a peer")?;
         {
             let mut retention = lock(&self.shared.retention);
             if !retention.peers.contains_key(peer) && retention.peers.len() >= PEER_LIMIT {
@@ -1248,6 +1341,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
         let durable = lock(&shared.durable);
         if durable.header.staged_lsn != 0 {
+            if shared.read_only {
+                return Err(EngineError::ReadOnly(
+                    "pin a checkpoint that a crash cut between its stages, so open it once for writing",
+                ));
+            }
             return Err(EngineError::corrupt(
                 "the last durable checkpoint wrote only some of its stages",
             ));
@@ -1989,6 +2087,7 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
     }
 
     fn begin_write(&self) -> Result<EngineWrite<'_, F>, StorageError> {
+        self.writable("write")?;
         let writer = lock(&self.shared.writer);
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal().into());

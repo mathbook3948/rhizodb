@@ -452,6 +452,42 @@ fn a_lock_keeps_other_handles_out_until_its_handle_closes() {
 }
 
 #[test]
+fn shared_locks_coexist_keep_out_an_exclusive_lock_and_every_write_but_no_read() {
+    let fs = SimFs::new();
+    let size = BlockSize::new(512).unwrap();
+    fs.create("locked", size)
+        .unwrap()
+        .set_block_count(1)
+        .unwrap();
+    let first = fs.open("locked", size).unwrap();
+    let second = fs.open("locked", size).unwrap();
+    let writer = fs.open("locked", size).unwrap();
+    first.lock_shared().unwrap();
+    second.lock_shared().unwrap();
+    assert_eq!(writer.lock().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    for handle in [&first, &second, &writer] {
+        let mut block = [0; 512];
+        handle.read(0, &mut block).unwrap();
+        assert_eq!(
+            handle.write(0, &block).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(handle.set_block_count(2).is_err());
+    }
+    drop(first);
+    assert_eq!(writer.lock().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    drop(second);
+    writer.lock().unwrap();
+    let reader = fs.open("locked", size).unwrap();
+    assert_eq!(
+        reader.lock_shared().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(reader.read(0, &mut [0; 512]).is_err());
+    writer.write(0, &[1; 512]).unwrap();
+}
+
+#[test]
 fn a_scrambled_tear_may_garble_synced_sectors_of_its_4_kib_unit_and_no_others() {
     let small = BlockSize::new(SECTOR_SIZE).unwrap();
     let mut garbled_neighbour = false;

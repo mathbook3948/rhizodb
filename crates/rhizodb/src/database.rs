@@ -9,6 +9,7 @@ use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
 use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::Access;
 use crate::graph::Graph;
 use crate::graph::IndexTarget;
 use crate::graph::VectorMetric;
@@ -30,6 +31,10 @@ pub(crate) type Backend = Engine<AnyFs>;
 
 fn open_backend(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
     Ok(any_fs::open_path(path, options).map_err(StorageError::from)?)
+}
+
+fn open_backend_read_only(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
+    Ok(any_fs::open_path_read_only(path, options).map_err(StorageError::from)?)
 }
 
 fn in_memory_backend(options: EngineOptions) -> Result<Backend, Error> {
@@ -71,6 +76,7 @@ const PEER_ID_LIMIT: usize = 64;
 #[must_use]
 pub struct OpenOptions {
     create: bool,
+    read_only: bool,
     replica: bool,
     parallelism: Parallelism,
     engine: EngineOptions,
@@ -82,6 +88,7 @@ impl Default for OpenOptions {
     fn default() -> Self {
         Self {
             create: true,
+            read_only: false,
             replica: false,
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
@@ -102,6 +109,64 @@ impl OpenOptions {
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound).
     pub fn create(mut self, create: bool) -> Self {
         self.create = create;
+        self
+    }
+
+    /// Whether the database opens read-only, which it does not unless this is set to `true`. A
+    /// read-only open takes a shared lock on the file, so any number of processes read the file
+    /// at once, while an open that writes fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen) until every one
+    /// of them is dropped, and a read-only open fails the same way while an open that writes
+    /// holds the file. A process holds one open of a file at a time, so a second read-only open
+    /// in the same process fails with `DatabaseAlreadyOpen` too; share the one `Database`
+    /// across threads instead.
+    ///
+    /// It never creates, writes, renames, or removes a file, whatever [`OpenOptions::create`]
+    /// says: a path with no file or an empty file fails with
+    /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound). After an unclean
+    /// shutdown it replays the write-ahead log into memory and leaves the log as it is, so reads
+    /// see every commit the log holds, once it has synced the log so that no power loss takes
+    /// back a commit a read saw. On Windows, where only a handle with write access can sync a
+    /// file, a read-only open of a file that was not closed cleanly fails with `ReadOnly`
+    /// instead, and opening it once for writing recovers it. Reads, [`Database::export`],
+    /// [`Database::snapshot`], [`Database::backup_to`], [`Database::stats`], and
+    /// [`Database::check`] work, and every
+    /// call that would change the file fails with
+    /// [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly): queries that update the graph, write
+    /// transactions, index changes, [`Database::import`], [`Database::compact`], and the calls
+    /// that write for replication. A file written in an older format, or whose keyword indexes
+    /// another build's tokenizer made, fails to open with `ReadOnly`, since only an open that
+    /// writes upgrades it. With [`OpenOptions::replica`], a writer's file still fails with
+    /// [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica), and a file that holds no change
+    /// fails with `ReadOnly`, since marking it a replica is a write. [`Database::role`] reports
+    /// the role the file records, such as `Writer` for a writer's file, though every write fails.
+    /// [`Database::snapshot`] fails with `ReadOnly` after a crash cut a checkpoint between its
+    /// stages, until an open that writes finishes it.
+    ///
+    /// A read-only open also fails with `DatabaseAlreadyOpen` while a file named after the
+    /// database file with `-shm` lies beside it, which a later build keeps for processes that
+    /// share the file while one of them writes, since this build cannot read alongside them.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    /// use rhizodb::Value;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("graph.rhizodb");
+    /// Database::open(&path)?.execute("INSERT (:City {name: 'Oslo'})", &Parameters::new())?;
+    /// let db = OpenOptions::new().read_only(true).open(&path)?;
+    /// let result = db.execute("MATCH (c:City) RETURN c.name", &Parameters::new())?;
+    /// assert_eq!(result.rows(), [vec![Value::String("Oslo".to_owned())]]);
+    /// let error = db.execute("INSERT (:City)", &Parameters::new()).unwrap_err();
+    /// assert_eq!(error.kind(), ErrorKind::ReadOnly);
+    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::DatabaseAlreadyOpen);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -247,7 +312,17 @@ impl OpenOptions {
 
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
+    ///
+    /// Fails with [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound) when
+    /// [`OpenOptions::read_only`] is `true`, since a database in memory starts with nothing to
+    /// read.
     pub fn in_memory(&self) -> Result<Database, Error> {
+        if self.read_only {
+            return Err(Error::new(
+                ErrorKind::DatabaseNotFound,
+                "a database in memory starts empty, so there is none to open read-only",
+            ));
+        }
         Ok(Database::from_parts(
             graph_on(in_memory_backend(self.engine)?, self.replica)?,
             Statements::new(self.parallelism, self.limits),
@@ -257,29 +332,44 @@ impl OpenOptions {
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
     ///
     /// Fails with [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound) when
-    /// [`OpenOptions::create`] is `false` and there is no file at `path` or the file there is
-    /// empty, and with the kinds [`Database::open`] lists.
+    /// [`OpenOptions::create`] is `false` or [`OpenOptions::read_only`] is `true` and there is
+    /// no file at `path` or the file there is empty, and with the kinds [`Database::open`]
+    /// lists.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, Error> {
         let path = path.as_ref();
-        if !self.create && !holds_bytes(path)? {
+        if (!self.create || self.read_only) && !holds_bytes(path)? {
             return Err(Error::new(
                 ErrorKind::DatabaseNotFound,
                 format!("there is no database file at {}", path.display()),
             ));
         }
+        let backend = if self.read_only {
+            open_backend_read_only(path, self.engine)?
+        } else {
+            open_backend(path, self.engine)?
+        };
         Ok(Database::from_parts(
-            graph_on(open_backend(path, self.engine)?, self.replica)?,
+            graph_on(backend, self.replica)?,
             Statements::new(self.parallelism, self.limits),
         ))
     }
 
     /// Writes the snapshot that `input` streams to the database file at `path` with these
     /// settings and opens it, as [`Database::install_snapshot`] describes.
+    ///
+    /// Fails with [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly) when
+    /// [`OpenOptions::read_only`] is `true`, since an install writes the file.
     pub fn install_snapshot(
         &self,
         path: impl AsRef<Path>,
         input: impl Read,
     ) -> Result<Database, Error> {
+        if self.read_only {
+            return Err(Error::new(
+                ErrorKind::ReadOnly,
+                "a snapshot cannot be installed read-only, since the install writes the file",
+            ));
+        }
         let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
             .map_err(StorageError::from)?;
         Ok(Database::from_parts(
@@ -290,13 +380,19 @@ impl OpenOptions {
 }
 
 /// The graph over `backend`, which becomes a replica first when `replica` asks for one. A file
-/// that is not the writer opens without writing.
+/// that is not the writer, or that is open read-only, opens without writing.
 pub(crate) fn graph_on(backend: Backend, replica: bool) -> Result<Graph<Backend>, Error> {
     if replica {
         backend.declare_replica().map_err(StorageError::from)?;
     }
-    let follows = backend.role() != Role::Writer;
-    Ok(Graph::open_as(backend, follows)?)
+    let access = if backend.is_read_only() {
+        Access::ReadOnly
+    } else if backend.role() != Role::Writer {
+        Access::Replica
+    } else {
+        Access::Writer
+    };
+    Ok(Graph::open_as(backend, access)?)
 }
 
 fn holds_bytes(path: &Path) -> Result<bool, Error> {
@@ -631,7 +727,12 @@ impl Database {
     /// Fails with [`ErrorKind::InvalidPeerId`](crate::ErrorKind::InvalidPeerId) for an empty
     /// peer id or one longer than 64 bytes.
     pub fn forget_peer(&self, peer: &[u8]) -> Result<bool, Error> {
-        Ok(self.graph.storage().forget(peer_id(peer)?))
+        let peer = peer_id(peer)?;
+        let storage = self.graph.storage();
+        storage
+            .writable("forget a peer")
+            .map_err(StorageError::from)?;
+        Ok(storage.forget(peer))
     }
 
     /// Writes every index definition, node, and relationship of the committed database to `out`
@@ -977,3 +1078,7 @@ mod backup_tests;
 #[cfg(test)]
 #[path = "database_format.test.rs"]
 mod format_tests;
+
+#[cfg(test)]
+#[path = "database_read_only.test.rs"]
+mod read_only_tests;
