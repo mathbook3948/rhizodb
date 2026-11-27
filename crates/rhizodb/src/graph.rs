@@ -442,14 +442,22 @@ impl<S: Storage> Graph<S> {
 
     /// Makes the graph wait for its writer's upgrade of the graph format `found` before it
     /// serves reads, ahead of changes that leave it in that format.
+    ///
+    /// It marks the graph pending before it counts the wait, both before the apply publishes the
+    /// format, so a read that loads the count after it changed finds the graph pending at its
+    /// first check, and a read that loaded it before finds it changed once its snapshot holds the
+    /// format and checks that snapshot.
     pub(crate) fn wait_for_upgrade(&self, found: u32) {
-        self.upgrades.fetch_add(1, Ordering::SeqCst);
         self.pending.store(found, Ordering::SeqCst);
+        #[cfg(test)]
+        self.reached(2);
+        self.upgrades.fetch_add(1, Ordering::SeqCst);
     }
 
     #[cfg(test)]
-    /// Calls `hook` with 0 after a read checks that the graph is ready and with 1 after it begins
-    /// its snapshot, so a test can run an apply between them.
+    /// Calls `hook` with 0 after a read checks that the graph is ready, with 1 after it begins
+    /// its snapshot, and with 2 between the two steps of `wait_for_upgrade`, so a test can run
+    /// an apply or a read between them.
     pub(crate) fn hook_reads(&self, hook: Arc<dyn Fn(u8) + Send + Sync>) {
         lock(&self.read_hook).0 = Some(hook);
     }

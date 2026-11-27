@@ -958,6 +958,123 @@ mod crash {
             }
         }
 
+        const READER: u8 = 0;
+        const APPLIER: u8 = 1;
+        const DONE: u8 = u8::MAX;
+
+        type Event = (u8, u8);
+
+        struct Pauses {
+            roles: std::sync::Mutex<HashMap<std::thread::ThreadId, u8>>,
+            events: std::sync::Mutex<std::sync::mpsc::Sender<Event>>,
+            resumes: HashMap<u8, std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        }
+
+        fn pause(
+            db: &Database,
+        ) -> (
+            Arc<Pauses>,
+            std::sync::mpsc::Receiver<Event>,
+            HashMap<u8, std::sync::mpsc::Sender<()>>,
+        ) {
+            let (events, at) = std::sync::mpsc::channel();
+            let mut resumes = HashMap::new();
+            let mut resume = HashMap::new();
+            for role in [READER, APPLIER] {
+                let (send, receive) = std::sync::mpsc::channel();
+                resume.insert(role, send);
+                resumes.insert(role, std::sync::Mutex::new(receive));
+            }
+            let pauses = Arc::new(Pauses {
+                roles: std::sync::Mutex::new(HashMap::new()),
+                events: std::sync::Mutex::new(events),
+                resumes,
+            });
+            let hooked = Arc::clone(&pauses);
+            db.graph.hook_reads(Arc::new(move |point| {
+                let role = hooked
+                    .roles
+                    .lock()
+                    .unwrap()
+                    .get(&std::thread::current().id())
+                    .copied();
+                if let Some(role) = role {
+                    hooked.events.lock().unwrap().send((role, point)).unwrap();
+                    hooked.resumes[&role].lock().unwrap().recv().unwrap();
+                }
+            }));
+            (pauses, at, resume)
+        }
+
+        fn as_role(pauses: &Pauses, role: u8) {
+            pauses
+                .roles
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().id(), role);
+        }
+
+        fn finish(pauses: &Pauses, role: u8) {
+            pauses.events.lock().unwrap().send((role, DONE)).unwrap();
+        }
+
+        #[test]
+        fn a_read_that_begins_while_an_apply_marks_the_graph_pending_refuses_the_older_snapshot() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            let (pauses, at, resume) = pause(&replica);
+            let timeout = std::time::Duration::from_secs(10);
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let applier = scope.spawn(|| {
+                    as_role(&pauses, APPLIER);
+                    apply_through(&writer, &replica, older_at);
+                    finish(&pauses, APPLIER);
+                });
+                assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, 2));
+                let reader = scope.spawn(|| {
+                    as_role(&pauses, READER);
+                    let read = replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind());
+                    finish(&pauses, READER);
+                    read
+                });
+                match at.recv_timeout(timeout).unwrap() {
+                    (READER, 0) => {
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, 1));
+                        sync(&writer, &replica).unwrap();
+                        assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, DONE));
+                    }
+                    event => {
+                        assert_eq!(event, (READER, DONE));
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                    }
+                }
+                applier.join().unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began between the two steps of a wait and served format 13"
+                );
+            });
+        }
+
         #[test]
         fn a_read_that_spans_a_wait_and_its_end_refuses_the_older_snapshot_it_began() {
             let writer = open_on(&SimFs::new(), false);
