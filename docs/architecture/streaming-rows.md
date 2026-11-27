@@ -27,11 +27,10 @@ The executor applied each clause to every row before the next clause began, so `
 - `EXISTS`, `COUNT`, `COLLECT`, and value subqueries stream their inner clauses from the outer row, and `EXISTS` stops at the first inner row when no unread row could fail.
 - A match reads its start nodes one row group at a time, as a column scan or as the row-at-a-time matcher, so a match that stops early reads only the groups it reached.
 - `UNWIND range(...)` gives its integers one at a time instead of building the list, while still checking its arguments and the value limits as `range()` does.
-- A run that stops early on one thread does not split across threads, since the serial run already reads only the start nodes it needs.
+- A run that stops early at the projection right after its match splits across threads by row group, as parallel reads decide, and any other run that stops early stays on one thread.
 - Tests compare streamed runs with every clause applied in turn, on one thread and split across threads, over random graphs and queries that include failing expressions, and count the matches a run produces to check where it stops.
 
 ## Open
 
-- A selective filter under a `LIMIT` that stops early reads its start nodes on one thread, even where splitting would find the rows sooner.
 - The check for expressions that cannot fail does not know the type of a property, so arithmetic such as `a.k % 7`, which fails on a string, keeps a `LIMIT` reading to the end.
 - Which clauses cannot fail is decided again on every run, since it depends on the parameters and on what the statement deleted.

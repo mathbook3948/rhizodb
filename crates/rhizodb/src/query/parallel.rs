@@ -1,5 +1,9 @@
 use std::cell::Cell;
+use std::cell::Ref;
+use std::cell::RefCell;
 use std::num::NonZeroUsize;
+use std::ops::Deref;
+use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -10,7 +14,9 @@ use std::thread;
 
 use crate::error::Error;
 use crate::graph::GraphTx;
+use crate::graph::Label;
 use crate::graph::NodeId;
+use crate::graph::Token;
 use crate::graph::row_group;
 use crate::result::QueryResult;
 use crate::storage::ReadTransaction;
@@ -101,25 +107,48 @@ impl Workers {
     }
 }
 
-/// The start nodes one worker of a parallel read matches its first pattern from: the run of
-/// `ids` that `range` holds, which the worker moves to each morsel it takes.
+/// The start nodes one worker of a parallel read matches its first pattern from: the run that
+/// `range` holds of the `listed` start nodes, or else of the row group in `group`, which the
+/// worker moves to each morsel it takes.
 #[derive(Debug)]
 pub(crate) struct Morsel<'a> {
     part: &'a PatternPart,
-    ids: &'a [NodeId],
+    listed: Option<&'a [NodeId]>,
+    group: RefCell<Vec<NodeId>>,
     range: Cell<(usize, usize)>,
     /// Set when the clause on the morsel stops at its `LIMIT` because no row past it can fail,
     /// so the rows of a morsel after it are never needed once enough rows are found.
     pub(crate) stops: Cell<bool>,
 }
 
+/// The start nodes of a worker's morsel, borrowed from the listed start nodes or from the row
+/// group the worker read.
+pub(crate) enum MorselNodes<'a> {
+    Listed(&'a [NodeId]),
+    Group(Ref<'a, [NodeId]>),
+}
+
+impl Deref for MorselNodes<'_> {
+    type Target = [NodeId];
+
+    fn deref(&self) -> &[NodeId] {
+        match self {
+            Self::Listed(ids) => ids,
+            Self::Group(ids) => ids,
+        }
+    }
+}
+
 impl<'a, T: ReadTransaction> Env<'a, T> {
     /// The start nodes of `part` on a worker of a parallel read, when `part` is the pattern its
     /// morsel splits.
-    pub(crate) fn morsel_of(&self, part: &PatternPart) -> Option<&'a [NodeId]> {
+    pub(crate) fn morsel_of(&self, part: &PatternPart) -> Option<MorselNodes<'a>> {
         let morsel = self.morsel.filter(|morsel| ptr::eq(morsel.part, part))?;
         let (start, end) = morsel.range.get();
-        morsel.ids.get(start..end)
+        Some(match morsel.listed {
+            Some(listed) => MorselNodes::Listed(&listed[start..end]),
+            None => MorselNodes::Group(Ref::map(morsel.group.borrow(), |group| &group[start..end])),
+        })
     }
 
     /// Notes that the clause on this worker's morsel stops at its `LIMIT` once it has its rows.
@@ -158,7 +187,7 @@ where
         |env, clauses, rows| {
             env.read_run(clauses, rows, |clauses, streamed, rows| {
                 match split(env, parallelism, workers, clauses, streamed, &rows) {
-                    Some(read) => match read.run(env, parallelism) {
+                    Some(read) => match read.run(env) {
                         Some(done) => Ok(done),
                         None => env.read_clauses_at(clauses, streamed, rows),
                     },
@@ -185,12 +214,58 @@ enum Part<'q> {
     Rows(Vec<Row>, usize),
 }
 
+enum Source {
+    Listed {
+        ids: Vec<NodeId>,
+        morsels: Vec<(usize, usize)>,
+    },
+    RowGroups(Option<Token<Label>>),
+}
+
+enum Claim {
+    Nodes(usize, usize),
+    EmptyUntil(usize),
+    NoneLeft,
+}
+
+impl Source {
+    fn claim<T: ReadTransaction>(
+        &self,
+        tx: &GraphTx<T>,
+        index: usize,
+        group: &mut Vec<NodeId>,
+    ) -> Result<Claim, Error> {
+        match self {
+            Source::Listed { morsels, .. } => Ok(match morsels.get(index) {
+                Some(&(start, end)) => Claim::Nodes(start, end),
+                None => Claim::NoneLeft,
+            }),
+            Source::RowGroups(label) => {
+                let from = index as u64;
+                let mut claim = Claim::NoneLeft;
+                tx.visit_node_groups(from, *label, |at, found| {
+                    claim = if at == from {
+                        group.clear();
+                        group.extend_from_slice(found);
+                        Claim::Nodes(0, found.len())
+                    } else {
+                        Claim::EmptyUntil(usize::try_from(at).unwrap_or(index + 1))
+                    };
+                    Ok::<_, Error>(false)
+                })?;
+                Ok(claim)
+            }
+        }
+    }
+}
+
 struct Split<'q, 'w> {
     clause: &'q ReadClause,
     part: &'q PatternPart,
     job: Job<'q>,
     row: &'q Row,
-    ids: Vec<NodeId>,
+    source: Source,
+    alone: usize,
     enough: Option<usize>,
     helpers: Busy<'w>,
 }
@@ -216,7 +291,6 @@ fn split<'q, 'w, T: ReadTransaction>(
         || env.morsel.is_some()
         || row_at_a_time()
         || env.seek_possible(part).ok()?
-        || env.stops_early(clauses, streamed)
     {
         return None;
     }
@@ -245,17 +319,6 @@ fn split<'q, 'w, T: ReadTransaction>(
             projection: None,
         },
     };
-    let threshold = parallelism.threshold.max(2);
-    if env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()?
-        || !ptr::eq(env.oriented(part, row).ok()?.0, part)
-    {
-        return None;
-    }
-    let helpers = workers.reserve(parallelism.threads - 1, parallelism.threads);
-    if helpers.threads == 0 {
-        return None;
-    }
-    let ids = env.scanned_nodes(&part.start).ok()?;
     let enough = match &job {
         Job::Rows {
             next: Some(ReadClause::Project(per_morsel)),
@@ -268,12 +331,36 @@ fn split<'q, 'w, T: ReadTransaction>(
         }
         _ => None,
     };
+    let stops = env.stops_early(clauses, streamed);
+    let threshold = parallelism.threshold.max(2);
+    let past = NodeId(u64::try_from(threshold).ok()?);
+    if (stops && (enough.is_none() || !env.tx.may_hold_from(past).ok()?))
+        || (!stops && env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()?)
+        || !ptr::eq(env.oriented(part, row).ok()?.0, part)
+    {
+        return None;
+    }
+    let helpers = workers.reserve(parallelism.threads - 1, parallelism.threads);
+    if helpers.threads == 0 {
+        return None;
+    }
+    let (source, alone) = if stops {
+        (
+            Source::RowGroups(env.scanned_label(&part.start).ok()??),
+            threshold,
+        )
+    } else {
+        let ids = env.scanned_nodes(&part.start).ok()?;
+        let morsels = morsels(&ids, parallelism.threads);
+        (Source::Listed { ids, morsels }, 0)
+    };
     Some(Split {
         clause,
         part,
         job,
         row,
-        ids,
+        source,
+        alone,
         enough,
         helpers,
     })
@@ -310,6 +397,20 @@ fn morsels(ids: &[NodeId], threads: usize) -> Vec<(usize, usize)> {
     morsels
 }
 
+fn settle(
+    counts: &Mutex<Vec<Option<usize>>>,
+    range: Range<usize>,
+    count: usize,
+    enough: usize,
+) -> Option<usize> {
+    let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
+    if counts.len() < range.end {
+        counts.resize(range.end, None);
+    }
+    counts[range].fill(Some(count));
+    prefix_reaching(&counts, enough)
+}
+
 fn prefix_reaching(counts: &[Option<usize>], enough: usize) -> Option<usize> {
     let mut total = 0usize;
     for (index, count) in counts.iter().enumerate() {
@@ -333,19 +434,14 @@ fn per_morsel<T: ReadTransaction>(env: &Env<'_, T>, projection: &Projection) -> 
 }
 
 impl<'q> Split<'q, '_> {
-    fn run<T: ReadTransaction>(
-        self,
-        env: &Env<'_, T>,
-        parallelism: Parallelism,
-    ) -> Option<(Vec<Row>, usize)>
+    fn run<T: ReadTransaction>(self, env: &Env<'_, T>) -> Option<(Vec<Row>, usize)>
     where
         GraphTx<T>: Sync,
     {
-        let morsels = morsels(&self.ids, parallelism.threads);
         let next = AtomicUsize::new(0);
         let failed = AtomicBool::new(false);
         let last = AtomicUsize::new(usize::MAX);
-        let counts = Mutex::new(vec![None; morsels.len()]);
+        let counts = Mutex::new(Vec::new());
         let (tx, slots, parameters, now, limits, holds) = (
             env.tx,
             env.slots,
@@ -354,12 +450,16 @@ impl<'q> Split<'q, '_> {
             env.limits,
             env.holds,
         );
-        let work = || {
+        let work = |budget: usize| {
             let graveyard = Graveyard::default();
             let patterns = Patterns::default();
             let morsel = Morsel {
                 part: self.part,
-                ids: &self.ids,
+                listed: match &self.source {
+                    Source::Listed { ids, .. } => Some(ids),
+                    Source::RowGroups(_) => None,
+                },
+                group: RefCell::new(Vec::new()),
                 range: Cell::new((0, 0)),
                 stops: Cell::new(false),
             };
@@ -369,63 +469,106 @@ impl<'q> Split<'q, '_> {
                     .with_holds(holds)
             };
             let mut done = Vec::new();
-            while !failed.load(Ordering::Relaxed) {
+            let mut taken = 0;
+            while taken < budget && !failed.load(Ordering::Relaxed) {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(range) = morsels.get(index) else {
-                    break;
-                };
                 if index > last.load(Ordering::Relaxed) {
                     break;
                 }
-                morsel.range.set(*range);
+                let claim = self.source.claim(tx, index, &mut morsel.group.borrow_mut());
+                let read = match claim {
+                    Ok(Claim::Nodes(start, end)) => {
+                        morsel.range.set((start, end));
+                        end - start
+                    }
+                    Ok(Claim::EmptyUntil(start)) => {
+                        next.fetch_max(start, Ordering::Relaxed);
+                        if let Some(enough) = self.enough
+                            && let Some(at) = settle(&counts, index..start, 0, enough)
+                        {
+                            last.fetch_min(at, Ordering::Relaxed);
+                        }
+                        done.extend((index..start).map(|empty| (empty, Ok(None))));
+                        continue;
+                    }
+                    Ok(Claim::NoneLeft) => {
+                        last.fetch_min(index, Ordering::Relaxed);
+                        done.push((index, Ok(None)));
+                        break;
+                    }
+                    Err(error) => {
+                        failed.store(true, Ordering::Relaxed);
+                        done.push((index, Err(error)));
+                        break;
+                    }
+                };
+                taken += read;
                 morsel.stops.set(false);
                 let part = self.part_of(&worker);
                 match &part {
                     Err(_) => failed.store(true, Ordering::Relaxed),
                     Ok(Part::Rows(rows, 2)) if morsel.stops.get() => {
-                        if let Some(enough) = self.enough {
-                            let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
-                            if let Some(count) = counts.get_mut(index) {
-                                *count = Some(rows.len());
-                            }
-                            if let Some(at) = prefix_reaching(&counts, enough) {
-                                last.fetch_min(at, Ordering::Relaxed);
-                            }
+                        if let Some(enough) = self.enough
+                            && let Some(at) = settle(&counts, index..index + 1, rows.len(), enough)
+                        {
+                            last.fetch_min(at, Ordering::Relaxed);
                         }
                     }
                     Ok(_) => {}
                 }
-                done.push((index, part));
+                done.push((index, part.map(Some)));
             }
             done
         };
-        let helpers = self.helpers.threads.min(morsels.len().saturating_sub(1));
+        let helpers = match &self.source {
+            Source::Listed { morsels, .. } => {
+                self.helpers.threads.min(morsels.len().saturating_sub(1))
+            }
+            Source::RowGroups(_) => self.helpers.threads,
+        };
         let finished = thread::scope(|scope| {
+            let mut finished = work(self.alone);
+            if failed.load(Ordering::Relaxed)
+                || next.load(Ordering::Relaxed) > last.load(Ordering::Relaxed)
+            {
+                #[cfg(test)]
+                tests::ran(0, &finished);
+                return finished;
+            }
             let handles: Vec<_> = (0..helpers)
                 .filter_map(|_| {
                     thread::Builder::new()
                         .stack_size(WORKER_STACK)
-                        .spawn_scoped(scope, work)
+                        .spawn_scoped(scope, move || work(usize::MAX))
                         .ok()
                 })
                 .collect();
-            let mut finished = work();
+            finished.extend(work(usize::MAX));
+            #[cfg(test)]
+            let helpers = handles.len();
             for handle in handles {
                 match handle.join() {
                     Ok(done) => finished.extend(done),
                     Err(panic) => std::panic::resume_unwind(panic),
                 }
             }
+            #[cfg(test)]
+            tests::ran(helpers, &finished);
             finished
         });
-        let kept = last.into_inner().saturating_add(1).min(morsels.len());
-        let mut parts: Vec<Option<Part<'q>>> = (0..kept).map(|_| None).collect();
+        let kept = last.into_inner().saturating_add(1);
+        let mut parts: Vec<Option<Option<Part<'q>>>> = Vec::new();
         for (index, part) in finished {
-            if let Some(slot) = parts.get_mut(index) {
-                *slot = Some(part.ok()?);
+            if index >= kept {
+                continue;
             }
+            if parts.len() <= index {
+                parts.resize_with(index + 1, || None);
+            }
+            parts[index] = Some(part.ok()?);
         }
-        self.combine(env, parts.into_iter().collect::<Option<Vec<_>>>()?)
+        let parts = parts.into_iter().collect::<Option<Vec<_>>>()?;
+        self.combine(env, parts.into_iter().flatten().collect())
             .ok()
             .flatten()
     }

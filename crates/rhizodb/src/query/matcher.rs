@@ -291,7 +291,11 @@ impl<T: ReadTransaction> Env<'_, T> {
                 labels: label_scan_decides(&part.start),
                 served: None,
             };
-            return Ok((part, Candidates::Listed(Vec::from(ids).into_iter()), known));
+            return Ok((
+                part,
+                Candidates::Listed(Vec::from(&*ids).into_iter()),
+                known,
+            ));
         }
         let (part, sought) = self.oriented(part, row)?;
         let pattern = &part.start;
