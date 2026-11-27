@@ -1563,6 +1563,8 @@ pub(crate) struct ColumnReader {
     pub(crate) probes: Budgeted<ColumnId, Probes>,
     pub(crate) deltas: Budgeted<u64, CachedDeltas>,
     pub(crate) keys: Budgeted<u64, Vec<Token<PropertyKey>>>,
+    #[cfg(test)]
+    pub(crate) loads: usize,
 }
 
 impl ColumnReader {
@@ -1574,6 +1576,7 @@ impl ColumnReader {
             probes: Budgeted::default(),
             deltas: Budgeted::new(bytes),
             keys: Budgeted::new(bytes),
+            loads: 0,
         }
     }
 }

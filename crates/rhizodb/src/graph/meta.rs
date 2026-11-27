@@ -890,6 +890,12 @@ impl LabelReader {
         }
     }
 
+    /// How many groups the reader holds loaded.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.groups.values().count()
+    }
+
     /// Calls `read` with the labels of the node in `slot` of `group`, if it is live, loading
     /// the group with `load` on a miss, or reading the node's labels with `in_place` once the
     /// budget dropped the group.

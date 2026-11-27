@@ -1084,6 +1084,30 @@ fn a_commit_that_changes_more_nodes_than_a_group_has_room_for_deltas_folds_even_
 }
 
 #[test]
+fn a_query_reads_a_column_the_budget_dropped_in_place_instead_of_loading_it_again() {
+    let (_fs, graph, _model) = graph_of(GROUP + 300, |id| {
+        Values::from([("b", PropertyValue::Integer(id as i64))])
+    });
+    let read = graph.read().unwrap();
+    let b = read.lookup_token::<PropertyKey>("b").unwrap().unwrap();
+    let mut labels = LabelReader::default();
+    let mut columns = ColumnReader::with_budget(1);
+    for _ in 0..4 {
+        for group in [0, 1] {
+            for at in 0..=2 * columns::PROBES as u64 {
+                let id = group * GROUP + at * 7;
+                let value = read
+                    .node_property(&mut labels, &mut columns, NodeId(id), Some(b))
+                    .unwrap()
+                    .flatten();
+                assert_eq!(value, Some(PropertyValue::Integer(id as i64)), "node {id}");
+            }
+        }
+    }
+    assert_eq!(columns.loads, 2, "each group's column is loaded once");
+}
+
+#[test]
 fn a_query_reads_a_few_values_of_a_column_in_place_and_loads_the_column_to_read_more() {
     let (_fs, graph, _model) = graph_of(300, |id| {
         Values::from([("b", PropertyValue::Integer(id as i64))])

@@ -283,6 +283,10 @@ impl<T: ReadTransaction> GraphTx<T> {
         }
         let column = self.load_column(id)?;
         *probes = Probes::Loaded;
+        #[cfg(test)]
+        {
+            reader.loads += 1;
+        }
         let value = column.cell_at(slot).and_then(read);
         reader.columns.insert(id, column);
         value

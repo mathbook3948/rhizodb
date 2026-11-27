@@ -4,8 +4,9 @@ use std::hash::Hash;
 use std::hash::Hasher;
 
 /// How many bytes each cache of a query's readers holds before it drops what it used longest
-/// ago. A group's column of 200-byte strings takes about 800 KiB, and its node meta chunk at most
-/// about 9 KiB.
+/// ago. The budget is per map, so a column reader and a label reader together hold about six
+/// times it. A group's column of 200-byte strings takes about 800 KiB, and its node meta chunk
+/// at most about 9 KiB.
 pub(crate) const BUDGET: usize = 8 << 20;
 
 /// What a cached value costs to hold, in bytes, besides its entry.
