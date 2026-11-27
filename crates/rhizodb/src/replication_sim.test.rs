@@ -517,7 +517,7 @@ impl Sim {
         let held = readable_export(&self.nodes[node].db, self.nodes[node].old_build);
         self.nodes[node].db.promote(self.term, &writer_id(node))?;
         let begun = self.nodes[node].db.changes_since(&before, 1).unwrap();
-        if let Some(held) = held {
+        if let Some(held) = held.or_else(|| self.seen.get(&before).cloned()) {
             self.seen.insert(begun.last().clone(), held);
         }
         self.note(node);
