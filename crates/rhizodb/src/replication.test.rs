@@ -475,6 +475,47 @@ mod crash {
     }
 
     #[test]
+    fn a_checkpoint_that_keeps_the_log_and_a_crash_leave_every_change_readable() {
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        writer.promote(1, b"w").unwrap();
+        for k in 0..20 {
+            insert(&writer, k);
+        }
+        writer.graph.storage().checkpoint_keeping_log().unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&crashed, false);
+        let fresh = open_on(&SimFs::new(), true);
+        assert_eq!(sync(&writer, &fresh).unwrap(), writer.position());
+        assert_eq!(export(&fresh), export(&writer));
+    }
+
+    #[test]
+    fn the_checkpoint_of_an_upgrade_keeps_the_log_for_replicas_behind_it() {
+        use crate::storage::Storage;
+        use crate::storage::Table;
+        use crate::storage::WriteTransaction;
+        let fs = SimFs::new();
+        let writer = open_on(&fs, false);
+        for k in 0..20 {
+            insert(&writer, k);
+        }
+        let mut write = writer.graph.storage().begin_write().unwrap();
+        write
+            .put(Table::Metadata, b"format_version", &13u32.to_be_bytes())
+            .unwrap();
+        write.commit().unwrap();
+        let crashed = fs.crash(Crash::KeepUnsynced);
+        drop(writer);
+        let writer = open_on(&crashed, false);
+        assert_eq!(writer.role(), crate::replication::Role::Writer);
+        let fresh = open_on(&SimFs::new(), true);
+        assert_eq!(sync(&writer, &fresh).unwrap(), writer.position());
+        assert_eq!(export(&fresh), export(&writer));
+    }
+
+    #[test]
     fn a_stale_writers_tail_relayed_to_a_replica_diverges_from_the_new_lineage() {
         let old = open_on(&SimFs::new(), false);
         old.promote(5, b"a").unwrap();

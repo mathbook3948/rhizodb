@@ -141,7 +141,8 @@ pub(crate) trait Storage {
     where
         Self: Sized;
 
-    /// Writes every commit so far into the database file, so a snapshot taken next holds them.
+    /// Writes every commit so far into the database file, so a snapshot taken next holds them,
+    /// and keeps the log for replicas that have not read it yet.
     fn checkpoint(&self) -> Result<(), StorageError> {
         Ok(())
     }

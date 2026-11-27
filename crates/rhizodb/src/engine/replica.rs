@@ -302,7 +302,10 @@ impl<F: FileSystem + 'static> Engine<F> {
             replication,
             ..durable.header
         };
-        if let Err(error) = shared.pages.write_header(&header, &shared.retained_area()) {
+        if let Err(error) = shared
+            .pages
+            .write_header(&header, &shared.retained_area(&header))
+        {
             shared.poison_with(&error);
             return Err(error);
         }
