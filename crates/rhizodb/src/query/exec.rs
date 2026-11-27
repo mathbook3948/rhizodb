@@ -638,7 +638,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             .map_err(|source| {
                 Error::caused_by(
                     ErrorKind::ProcedureFailed,
-                    format!("procedure `{}` failed: {source}", procedure.signature.name),
+                    format!("procedure `{}` failed", procedure.signature.name),
                     source,
                 )
             })?

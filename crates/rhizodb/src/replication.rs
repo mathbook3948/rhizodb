@@ -366,7 +366,7 @@ impl Error {
     /// [`ErrorKind::TooFarBehind`], [`ErrorKind::Gap`], or [`ErrorKind::DifferentDatabase`],
     /// and `None` for every other error.
     pub fn replication_failure(&self) -> Option<ReplicationFailure> {
-        let storage = std::error::Error::source(self)?.downcast_ref::<StorageError>()?;
+        let storage = self.storage()?;
         let engine = std::error::Error::source(storage)?.downcast_ref::<EngineError>()?;
         let EngineError::Replication(refusal) = engine else {
             return None;

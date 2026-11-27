@@ -305,7 +305,7 @@ fn holds_bytes(path: &Path) -> Result<bool, Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(Error::caused_by(
             ErrorKind::Storage,
-            format!("cannot read whether {} exists: {error}", path.display()),
+            format!("cannot read whether {} exists", path.display()),
             Box::new(error),
         )),
     }
@@ -497,7 +497,8 @@ impl Database {
     ///
     /// Fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when a
     /// file or directory already exists at `path`, which is never replaced. A `path` that names
-    /// no file fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage).
+    /// no file, or one on a file system that cannot hard-link the staging file to it, fails with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage).
     ///
     /// ```
     /// use rhizodb::Database;

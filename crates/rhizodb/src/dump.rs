@@ -48,7 +48,7 @@ const BATCH_BYTES: usize = 16 << 20;
 fn io_error(error: io::Error) -> Error {
     Error::caused_by(
         ErrorKind::Io,
-        format!("reading or writing the dump failed: {error}"),
+        "reading or writing the dump failed",
         Box::new(error),
     )
 }
