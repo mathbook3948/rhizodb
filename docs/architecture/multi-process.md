@@ -29,7 +29,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - The session's identity is the side file's layout version, the engine format minor, the graph format version, the tokenizer fingerprint, and the database id.
 - A process whose build or file differs in any part of the identity fails to join.
 - The replication role is not part of the identity, since `promote` and `demote` change it while the session runs.
-- The side file grows by `posix_fallocate` on Linux, by `F_PREALLOCATE` on macOS, and by writing a non-zero pattern on Windows, never by setting its length, so a full disk fails the growth instead of a later store into a mapped page that has no block, which raises `SIGBUS`.
+- The side file grows by `fallocate` on Linux, by `F_PREALLOCATE` followed by `ftruncate` on macOS, and by writing a non-zero pattern on Windows, never by setting its length alone, so a full disk fails the growth instead of a later store into a mapped page that has no block, which raises `SIGBUS`.
+- On Linux the engine calls `fallocate` itself rather than `posix_fallocate`, whose fallback in glibc writes zeros, and refuses multi-process access where it fails with `EOPNOTSUPP`.
 - The side file never grows by writing zeros, since zeros reserve no space on a compressing file system such as ZFS or compressed btrfs.
 - An open whose growth of the side file fails is refused.
 - Every process maps the side file into memory and reads and writes it with atomic operations, as SQLite maps its wal-index and LMDB its lock file.
@@ -57,8 +58,9 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - On Linux every lock of a session is an open-file-description lock, so closing another descriptor of the file drops none of them.
 - Where only classic `fcntl` locks exist, as on macOS, a process opens the side file once and never closes a descriptor of it while it is open, since closing any descriptor of a file drops every `fcntl` lock the process holds on it.
 - The engine opens the side file only through its one handle, and its docs name opening or closing the side file anywhere else in the process as a hazard that drops the session's locks there, as SQLite's docs do for its files.
-- A blocking classic `fcntl` wait for the write lock or the checkpoint lock that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process and so reports false ones between the threads of one process, and the lock order rules out a real one.
-- No other lock is retried after `EDEADLK`, so a real deadlock fails instead of spinning.
+- A blocking classic `fcntl` wait that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process across all of its files and so reports false ones between threads of one process or between databases it has open.
+- That retry covers the write lock, the checkpoint lock, and an open's wait for the session lock, which waits while it holds no other lock on that side file.
+- The lock order rules out a real deadlock only within one database, so a host that makes two processes each hold a write transaction of one database while they wait for the other's hangs forever, as it would with two databases in one process today.
 - The database file is locked only with the standard library's whole-file lock or a range lock past its blocks, and the side file only with range locks, so no file mixes `flock` and `fcntl`.
 - A child forked from a process that has the file open must not touch the database, as SQLite and LMDB forbid it for their handles.
 - A forked child shares its parent's open-file-description locks until it closes the descriptors or runs a program, so a parent that dies first keeps its slot alive and its tree held until then.
@@ -142,10 +144,14 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A session's first process decides the replication role as an open decides it today, and every process of the session shares that role through the side file.
 - A writer therefore opens fenced after a restart of its whole session, and a process that joins a running session without `OpenOptions::replica` takes the session's role.
 - A process that joins with `OpenOptions::replica` takes the session's role when it is a replica, makes the session a replica under the write lock when the file holds no change and no history, and otherwise fails with `NotReplica`, as an open of such a file does today.
-- The seen term, the replica mark, the incarnation, and the role live in one side-file record behind a sequence number, which changes only under the session write lock.
-- `promote`, `demote`, `observe_term`, and `declare_replica` take the write lock and decide from that record, never from a copy in the process.
-- `observe_term` takes the writer mutex and the write lock before it compares the term, rather than a compare-and-swap on the record, since the higher term must also reach a durable header, which it writes under the same locks as `promote`.
-- In one process today `observe_term` runs without the writer mutex, so it can fence the writer between `promote`'s check of the seen term and its change of the role, which `promote` then overwrites, and phase 3 fixes that by making `observe_term` take the writer mutex.
+- The seen term, the replica mark, the incarnation, and the role live in one side-file record behind a sequence number, which changes only under the session write lock, except that a change of the role from writer to fenced is a compare-and-swap that needs no lock, since it only takes write rights away.
+- That exemption serves `demote` and an observed higher term rather than a separate fencing word, so a commit checks one record under the write lock and finds every fence there.
+- `promote` and `declare_replica` change the record by a compare-and-swap from the record they read under the write lock, and decide again when a fence changed it in between, so neither undoes a fence.
+- `promote`, `demote`, and `declare_replica` take the write lock and decide from that record, never from a copy in the process.
+- `observe_term` first reads the record under its sequence number without a lock, and returns when the term is not above the seen term, so `changes_since` and `acknowledge` never wait behind a write transaction for a term they already know.
+- For a higher term, `observe_term` fences the writer by the compare-and-swap at once, then takes the writer mutex and the write lock, checks the term again, and records it in a durable header under the same locks as `promote`.
+- On the thread that holds the write transaction, `observe_term` with a higher term fences the writer and then fails instead of waiting for itself, as maintenance does, rather than record the term without the locks, since a term kept only in the side file is lost at the next restart of the session.
+- In one process today `observe_term` runs without the writer mutex, so it can fence the writer between `promote`'s check of the seen term and its change of the role, which `promote` then overwrites, and phase 3 fixes that with the compare-and-swap above.
 - Every local commit checks the role in the side file under the write lock.
 - `apply`, `promote`, and `demote` take the write lock.
 - `promote`, `demote`, and an observed higher term change the role in the side file, so every process takes or refuses local writes from its next commit on.
