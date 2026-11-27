@@ -10,6 +10,8 @@ use std::sync::RwLock;
 use crate::value::DecodeError;
 
 use super::GraphError;
+use super::budget::Budgeted;
+use super::budget::Weigh;
 use super::ids::Label;
 use super::ids::NodeId;
 use super::ids::Token;
@@ -835,12 +837,37 @@ struct CachedMeta {
     deltas: Vec<SlotLabels>,
 }
 
-/// The node meta chunks one query read so far, so testing a node's labels reads storage once
-/// per group.
+impl Weigh for Option<CachedMeta> {
+    fn weight(&self) -> usize {
+        let labels = |set: &Arc<[Token<Label>]>| 2 * size_of::<usize>() + size_of_val(&**set);
+        self.as_ref().map_or(0, |cached| {
+            cached.bytes.len()
+                + cached.sets.capacity() * size_of::<Arc<[Token<Label>]>>()
+                + cached.sets.iter().map(labels).sum::<usize>()
+                + cached.deltas.capacity() * size_of::<SlotLabels>()
+                + cached
+                    .deltas
+                    .iter()
+                    .filter_map(|(_, set)| set.as_ref().map(labels))
+                    .sum::<usize>()
+        })
+    }
+}
+
+/// The node meta chunks one query read so far, up to a budget of bytes, so testing a node's
+/// labels reads storage once per group. A group the budget dropped is read in place from then
+/// on, since loading it again would copy its chunk on almost every test when a traversal in
+/// random group order reaches more groups than the budget holds.
 #[derive(Debug, Default)]
 pub(crate) struct LabelReader {
-    groups: Vec<(u64, Option<CachedMeta>)>,
-    last: usize,
+    groups: Budgeted<u64, Option<CachedMeta>>,
+    loaded: Budgeted<u64, ()>,
+}
+
+impl Weigh for () {
+    fn weight(&self) -> usize {
+        0
+    }
 }
 
 /// A stored node meta chunk, checked, with the labels of each set in its dictionary, and the
@@ -854,32 +881,48 @@ pub(crate) type SlotLabels = (usize, Option<Arc<[Token<Label>]>>);
 pub(crate) type StoredGroup = (Box<[u8]>, Vec<Delta>);
 
 impl LabelReader {
+    /// A reader whose node meta chunks hold about `bytes` bytes.
+    #[cfg(test)]
+    pub(crate) fn with_budget(bytes: usize) -> Self {
+        Self {
+            groups: Budgeted::new(bytes),
+            loaded: Budgeted::default(),
+        }
+    }
+
+    /// How many groups the reader holds loaded.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.groups.values().count()
+    }
+
     /// Calls `read` with the labels of the node in `slot` of `group`, if it is live, loading
-    /// the group with `load` on a miss.
+    /// the group with `load` on a miss, or reading the node's labels with `in_place` once the
+    /// budget dropped the group.
     pub(crate) fn with_labels<R>(
         &mut self,
         group: u64,
         slot: usize,
         load: impl FnOnce() -> Result<Option<Loaded>, GraphError>,
+        in_place: impl FnOnce() -> Result<Option<Arc<[Token<Label>]>>, GraphError>,
         read: impl FnOnce(&[Token<Label>]) -> R,
     ) -> Result<Option<R>, GraphError> {
-        let index = match self.groups.get(self.last) {
-            Some((held, _)) if *held == group => self.last,
-            _ => match self.groups.binary_search_by_key(&group, |(held, _)| *held) {
-                Ok(index) => index,
-                Err(index) => {
-                    let loaded = load()?.map(|(bytes, sets, deltas)| CachedMeta {
-                        bytes,
-                        sets,
-                        deltas,
-                    });
-                    self.groups.insert(index, (group, loaded));
-                    index
-                }
-            },
+        let cached = match self.groups.get(&group) {
+            Some(cached) => cached,
+            None if self.loaded.get(&group).is_some() => {
+                return Ok(in_place()?.map(|labels| read(&labels)));
+            }
+            None => {
+                let loaded = load()?.map(|(bytes, sets, deltas)| CachedMeta {
+                    bytes,
+                    sets,
+                    deltas,
+                });
+                self.loaded.insert(group, ());
+                self.groups.insert(group, loaded)
+            }
         };
-        self.last = index;
-        let Some((_, Some(cached))) = self.groups.get(index) else {
+        let Some(cached) = cached else {
             return Ok(None);
         };
         if let Ok(found) = cached.deltas.binary_search_by_key(&slot, |(held, _)| *held) {

@@ -28,6 +28,7 @@ use crate::value::PropertyValue;
 use crate::value::Reader;
 
 mod adjacency;
+mod budget;
 mod columns;
 mod dump;
 mod ids;
@@ -1159,7 +1160,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         if self.meta.contains_key(&group) {
             return Ok(self.node_labels(id)?.map(|labels| read(&labels)));
         }
-        reader.with_labels(group, slot, || self.load_meta(group), read)
+        reader.with_labels(
+            group,
+            slot,
+            || self.load_meta(group),
+            || self.node_labels(id),
+            read,
+        )
     }
 
     fn stored_group(&self, group: u64) -> Result<Option<meta::StoredGroup>, GraphError> {

@@ -374,3 +374,45 @@ fn a_resealed_chunk_with_a_wrong_label_count_passes_its_checksums() {
     let canonical = chunk_of(&BTreeMap::from([(3, 1), (9, 2)]));
     assert_ne!(chunk, canonical);
 }
+
+#[test]
+fn a_label_reader_holds_about_its_budget_of_node_meta_chunks() {
+    let budget = 64 << 10;
+    let chunk = 8 << 10;
+    let mut reader = LabelReader::with_budget(budget);
+    let labels: Arc<[Token<Label>]> = Arc::from([Token::new(3)]);
+    for round in 0..2 {
+        for group in 0..200 {
+            let found = reader
+                .with_labels(
+                    group,
+                    5,
+                    || {
+                        Ok(Some((
+                            vec![0; chunk].into(),
+                            Vec::new(),
+                            vec![(5, Some(Arc::clone(&labels)))],
+                        )))
+                    },
+                    || Ok(Some(Arc::clone(&labels))),
+                    <[Token<Label>]>::to_vec,
+                )
+                .unwrap();
+            assert_eq!(
+                found.as_deref(),
+                Some(&*labels),
+                "group {group} in round {round}"
+            );
+            assert!(
+                reader.held() <= budget / chunk,
+                "{} groups held",
+                reader.held()
+            );
+        }
+    }
+    assert!(
+        reader.held() >= budget / chunk / 2 - 1,
+        "{} groups held",
+        reader.held()
+    );
+}

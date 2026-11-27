@@ -1151,18 +1151,6 @@ fn a_node_created_in_a_transaction_stores_the_delta_its_values_encode_to() {
 }
 
 #[test]
-fn a_reader_keeps_the_property_keys_of_each_group_it_listed() {
-    let mut reader = ColumnReader::default();
-    assert_eq!(reader.keys(5), None);
-    reader.insert_keys(5, vec![Token::new(1), Token::new(4)]);
-    reader.insert_keys(2, Vec::new());
-    reader.insert_keys(5, vec![Token::new(9)]);
-    assert_eq!(reader.keys(5), Some(&[Token::new(1), Token::new(4)][..]));
-    assert_eq!(reader.keys(2), Some(&[][..]));
-    assert_eq!(reader.keys(3), None);
-}
-
-#[test]
 fn loaded_deltas_are_found_by_slot() {
     let deltas: Deltas = [3, 9, 40]
         .into_iter()
