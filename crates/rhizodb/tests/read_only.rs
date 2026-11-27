@@ -24,6 +24,7 @@ use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Position;
 use rhizodb::Procedure;
+use rhizodb::Role;
 use rhizodb::VectorMetric;
 use support::*;
 
@@ -125,6 +126,11 @@ fn a_read_only_database_refuses_every_write_serves_every_read_and_changes_no_fil
         assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
         assert_eq!(count(&db), 100);
         assert_eq!(
+            db.role(),
+            Role::Writer,
+            "the role the file records, though it refuses writes"
+        );
+        assert_eq!(
             ints(&run(&db, "MATCH (n:Item {i: 42}) RETURN n.i")),
             [42],
             "the property index serves reads"
@@ -216,6 +222,11 @@ fn read_only_child() {
         return;
     };
     let db = match std::env::var(MODE_ENV).as_deref() {
+        Ok("crash") => {
+            let db = Database::open(&path).unwrap();
+            run(&db, "UNWIND range(101, 150) AS i INSERT (:Item {i: i})");
+            std::process::exit(0);
+        }
         Ok("write") => Database::open(&path).unwrap(),
         _ => read_only().open(&path).unwrap(),
     };
@@ -315,4 +326,29 @@ fn a_file_of_an_older_engine_minor_is_read_as_it_is_and_left_unchanged() {
     assert_eq!(error.kind(), ErrorKind::ReadOnly, "{error}");
     assert!(error.to_string().contains("older format"), "{error}");
     assert_eq!(files(directory.path()), before);
+}
+
+#[test]
+fn a_read_only_open_after_a_writer_exits_without_closing_replays_its_commits_where_it_can_sync() {
+    let (directory, path) = graph_file();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["read_only_child", "--exact", "--ignored", "--nocapture"])
+        .env(DATABASE_ENV, &path)
+        .env(MODE_ENV, "crash")
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let before = files(directory.path());
+    let opened = read_only().open(&path);
+    if cfg!(windows) {
+        let error = opened.map(drop).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ReadOnly, "{error}");
+    } else {
+        let db = opened.unwrap();
+        assert_eq!(count(&db), 150);
+        db.check().unwrap();
+    }
+    assert_eq!(files(directory.path()), before);
+    assert_eq!(count(&Database::open(&path).unwrap()), 150);
 }

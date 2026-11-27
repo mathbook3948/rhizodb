@@ -128,8 +128,9 @@ impl OpenOptions {
     /// see every commit the log holds, once it has synced the log so that no power loss takes
     /// back a commit a read saw. On Windows, where only a handle with write access can sync a
     /// file, a read-only open of a file that was not closed cleanly fails with `ReadOnly`
-    /// instead, and opening it once for writing recovers it. Reads, [`Database::export`], [`Database::snapshot`],
-    /// [`Database::backup_to`], [`Database::stats`], and [`Database::check`] work, and every
+    /// instead, and opening it once for writing recovers it. Reads, [`Database::export`],
+    /// [`Database::snapshot`], [`Database::backup_to`], [`Database::stats`], and
+    /// [`Database::check`] work, and every
     /// call that would change the file fails with
     /// [`ErrorKind::ReadOnly`](crate::ErrorKind::ReadOnly): queries that update the graph, write
     /// transactions, index changes, [`Database::import`], [`Database::compact`], and the calls
@@ -137,7 +138,10 @@ impl OpenOptions {
     /// another build's tokenizer made, fails to open with `ReadOnly`, since only an open that
     /// writes upgrades it. With [`OpenOptions::replica`], a writer's file still fails with
     /// [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica), and a file that holds no change
-    /// fails with `ReadOnly`, since marking it a replica is a write.
+    /// fails with `ReadOnly`, since marking it a replica is a write. [`Database::role`] reports
+    /// the role the file records, such as `Writer` for a writer's file, though every write fails.
+    /// [`Database::snapshot`] fails with `ReadOnly` after a crash cut a checkpoint between its
+    /// stages, until an open that writes finishes it.
     ///
     /// A read-only open also fails with `DatabaseAlreadyOpen` while a file named after the
     /// database file with `-shm` lies beside it, which a later build keeps for processes that

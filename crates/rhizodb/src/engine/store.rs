@@ -1341,6 +1341,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
         let durable = lock(&shared.durable);
         if durable.header.staged_lsn != 0 {
+            if shared.read_only {
+                return Err(EngineError::ReadOnly(
+                    "pin a checkpoint that a crash cut between its stages, so open it once for writing",
+                ));
+            }
             return Err(EngineError::corrupt(
                 "the last durable checkpoint wrote only some of its stages",
             ));
