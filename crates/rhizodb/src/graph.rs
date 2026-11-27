@@ -560,6 +560,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         };
@@ -736,6 +737,7 @@ impl<S: Storage> Graph<S> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         })
@@ -765,6 +767,7 @@ pub(crate) struct GraphTx<T> {
     relationship_chunks: BTreeMap<u64, ChunkEdit>,
     relationship_bytes: usize,
     record_buffer: Vec<u8>,
+    committing: bool,
     postings: postings::Held,
     counters: Vec<(Vec<u8>, u64)>,
 }
@@ -792,6 +795,7 @@ impl<T> GraphTx<T> {
             relationship_chunks: BTreeMap::new(),
             relationship_bytes: 0,
             record_buffer: Vec::new(),
+            committing: false,
             postings: postings::Held::default(),
             counters: Vec::new(),
         }
@@ -940,10 +944,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<RelationshipRecord>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::RelationshipDecode);
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
     }
 
-    fn with_relationship<R>(
+    /// Calls `read` with the stored record of a relationship, if it exists.
+    pub(crate) fn with_relationship<R>(
         &self,
         id: RelationshipId,
         read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
@@ -1202,6 +1209,8 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn load_meta(&self, group: u64) -> Result<Option<meta::Loaded>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::MetaLoad);
         let Some((bytes, deltas)) = self.stored_group(group)? else {
             return Ok(None);
         };
@@ -1662,6 +1671,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::TokenLookup);
         if let Some(token) = self.tokens.get(name).or_else(|| self.own_tokens.get(name)) {
             return Ok(Some(token));
         }
@@ -1707,6 +1718,7 @@ impl<T: ReadTransaction> GraphTx<T> {
 
 impl<T: WriteTransaction> GraphTx<T> {
     pub(crate) fn commit(mut self) -> Result<(), GraphError> {
+        self.committing = true;
         self.flush()?;
         let definitions = match &self.catalog {
             Some(Catalog {
@@ -1757,6 +1769,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         self.flush_columns()?;
         self.flush_adjacency()?;
         self.flush_relationships()?;
+        self.expect_commit();
         for (group, edit) in std::mem::take(&mut self.meta) {
             match edit.flush()? {
                 Flush::Rewrite { view, stale } => {
@@ -1788,7 +1801,20 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok(())
     }
 
+    /// Checks, in a debug build, that the node meta, property column, and adjacency tables are
+    /// being written by [`GraphTx::commit`]. Those tables change only at commit, never while a
+    /// statement runs: the query layer's read caches keep what they read of them for a whole
+    /// statement and read the transaction's own pending writes in front of it, so a write to them
+    /// before commit would leave those caches stale.
+    pub(crate) fn expect_commit(&self) {
+        debug_assert!(
+            self.committing,
+            "node meta, property columns, and adjacency are written only at commit"
+        );
+    }
+
     fn flush_adjacency(&mut self) -> Result<(), GraphError> {
+        self.expect_commit();
         for (id, edit) in std::mem::take(&mut self.adjacency) {
             let flush = edit.flush(&id, &|key| fetch_adjacency(&self.transaction, key))?;
             for key in flush.delete {
@@ -2316,6 +2342,8 @@ impl<T: WriteTransaction> GraphTx<T> {
 #[cfg(test)]
 #[path = "graph.test.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::counted;
 
 #[cfg(test)]
 #[path = "graph/crash.test.rs"]

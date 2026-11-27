@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use std::convert::Infallible;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::error::Error;
@@ -84,24 +85,12 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) limits: Limits,
     /// Set when evaluation only looks for the type errors the query text fixes.
     pub(crate) check: Option<&'a Check>,
-    /// The property columns read so far.
-    pub(crate) columns: RefCell<ColumnReader>,
-    /// The property keys looked up so far that have a token.
-    pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
-    /// The reader of node labels, opened on the first read.
-    pub(crate) labels: RefCell<LabelReader>,
-    /// The labels looked up so far that have a token.
-    pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
-    /// The property indexes looked up so far, each with its ID or none.
-    pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
+    /// What evaluation read and looked up so far.
+    pub(crate) caches: Held<'a>,
     /// The node counts read so far, per required label or none for every node. A count stays
     /// as first read for the rest of the statement, as only the choice of where a pattern
     /// starts reads it.
     pub(crate) node_counts: RefCell<Vec<(Option<Token<Label>>, u64)>>,
-    /// The adjacency segments read last.
-    pub(crate) adjacency: RefCell<AdjacencyReader>,
-    /// The relationship types looked up so far that have a token.
-    pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
     /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
     pub(crate) morsel: Option<&'a Morsel<'a>>,
     /// Per slot, what every value it holds is known to be.
@@ -112,6 +101,18 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
     /// This environment, taking `holds` as what each slot holds.
     pub(crate) fn with_holds(self, holds: &'a [Holds]) -> Self {
         Self { holds, ..self }
+    }
+
+    /// This environment, reading through `caches`, which an earlier environment over the same
+    /// transaction may have filled. The writes made in between leave `caches` valid: its
+    /// readers hold only stored state, which the transaction writes back at commit alone and
+    /// which every read checks the transaction's own writes before, and its token and index
+    /// caches hold only what no write takes away.
+    pub(crate) fn with_caches(self, caches: &'a Caches) -> Self {
+        Self {
+            caches: Held::Shared(caches),
+            ..self
+        }
     }
 
     pub(crate) fn new(
@@ -132,16 +133,47 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             patterns,
             limits,
             check: None,
-            columns: RefCell::default(),
-            keys: RefCell::default(),
-            labels: RefCell::default(),
-            label_tokens: RefCell::default(),
-            property_indexes: RefCell::default(),
+            caches: Held::Own(Box::default()),
             node_counts: RefCell::default(),
-            adjacency: RefCell::default(),
-            rel_type_tokens: RefCell::default(),
             morsel: None,
             holds: &[],
+        }
+    }
+}
+
+/// What evaluation read and looked up from a transaction, which a later evaluation over the
+/// same transaction can carry on with.
+#[derive(Default)]
+pub(crate) struct Caches {
+    /// The property columns read so far.
+    pub(crate) columns: RefCell<ColumnReader>,
+    /// The property keys looked up so far that have a token.
+    pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
+    /// The reader of node labels, opened on the first read.
+    pub(crate) labels: RefCell<LabelReader>,
+    /// The labels looked up so far that have a token.
+    pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
+    /// The property indexes looked up so far, each with its ID or none.
+    pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
+    /// The adjacency segments read last.
+    pub(crate) adjacency: RefCell<AdjacencyReader>,
+    /// The relationship types looked up so far that have a token.
+    pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
+}
+
+/// The caches an [`Env`] reads through: its own, or those of the statement it serves.
+pub(crate) enum Held<'a> {
+    Own(Box<Caches>),
+    Shared(&'a Caches),
+}
+
+impl Deref for Held<'_> {
+    type Target = Caches;
+
+    fn deref(&self) -> &Caches {
+        match self {
+            Held::Own(caches) => caches,
+            Held::Shared(caches) => caches,
         }
     }
 }
@@ -202,7 +234,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         id: NodeId,
         read: impl FnOnce(&[Token<Label>]) -> R,
     ) -> Result<Option<R>, Error> {
-        let Ok(mut reader) = self.labels.try_borrow_mut() else {
+        let Ok(mut reader) = self.caches.labels.try_borrow_mut() else {
             return Ok(self.tx.node_labels(id)?.map(|labels| read(&labels)));
         };
         Ok(self.tx.with_labels(&mut reader, id, read)?)
@@ -210,6 +242,7 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     pub(crate) fn label_token(&self, name: &str) -> Result<Option<Token<Label>>, Error> {
         if let Some((_, token)) = self
+            .caches
             .label_tokens
             .borrow()
             .iter()
@@ -219,7 +252,8 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let token = self.tx.lookup_token::<Label>(name)?;
         if let Some(token) = token {
-            self.label_tokens
+            self.caches
+                .label_tokens
                 .borrow_mut()
                 .push((name.to_owned(), token));
         }
@@ -231,6 +265,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         name: &str,
     ) -> Result<Option<Token<RelationshipType>>, Error> {
         if let Some((_, token)) = self
+            .caches
             .rel_type_tokens
             .borrow()
             .iter()
@@ -240,7 +275,8 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let token = self.tx.lookup_token::<RelationshipType>(name)?;
         if let Some(token) = token {
-            self.rel_type_tokens
+            self.caches
+                .rel_type_tokens
                 .borrow_mut()
                 .push((name.to_owned(), token));
         }
@@ -254,6 +290,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         property: Token<PropertyKey>,
     ) -> Result<Option<u32>, Error> {
         if let Some((_, _, index)) = self
+            .caches
             .property_indexes
             .borrow()
             .iter()
@@ -262,7 +299,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             return Ok(*index);
         }
         let index = self.tx.property_index(target, property)?;
-        self.property_indexes
+        self.caches
+            .property_indexes
             .borrow_mut()
             .push((target, property, index));
         Ok(index)
@@ -275,9 +313,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         id: NodeId,
         key: Option<Token<PropertyKey>>,
     ) -> Result<Option<Option<crate::value::PropertyValue>>, Error> {
-        let (Ok(mut labels), Ok(mut columns)) =
-            (self.labels.try_borrow_mut(), self.columns.try_borrow_mut())
-        else {
+        let (Ok(mut labels), Ok(mut columns)) = (
+            self.caches.labels.try_borrow_mut(),
+            self.caches.columns.try_borrow_mut(),
+        ) else {
             return Ok(self.tx.node_property(
                 &mut LabelReader::default(),
                 &mut ColumnReader::default(),
@@ -293,9 +332,10 @@ impl<T: ReadTransaction> Env<'_, T> {
         &self,
         id: NodeId,
     ) -> Result<Option<crate::graph::Properties>, Error> {
-        let (Ok(mut labels), Ok(mut columns)) =
-            (self.labels.try_borrow_mut(), self.columns.try_borrow_mut())
-        else {
+        let (Ok(mut labels), Ok(mut columns)) = (
+            self.caches.labels.try_borrow_mut(),
+            self.caches.columns.try_borrow_mut(),
+        ) else {
             return Ok(self.tx.node_properties(
                 &mut LabelReader::default(),
                 &mut ColumnReader::default(),
@@ -336,7 +376,10 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     /// The property names of the node with ID `id`, ascending, read without their values.
     pub(crate) fn node_keys(&self, id: NodeId) -> Result<Vec<Arc<str>>, Error> {
-        let keys = match (self.labels.try_borrow_mut(), self.columns.try_borrow_mut()) {
+        let keys = match (
+            self.caches.labels.try_borrow_mut(),
+            self.caches.columns.try_borrow_mut(),
+        ) {
             (Ok(mut labels), Ok(mut columns)) => {
                 self.tx.node_property_keys(&mut labels, &mut columns, id)?
             }
@@ -376,12 +419,18 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     #[inline]
     pub(crate) fn property_key(&self, key: &str) -> Result<Option<Token<PropertyKey>>, Error> {
-        if let Some((_, token)) = self.keys.borrow().iter().find(|(name, _)| name == key) {
+        if let Some((_, token)) = self
+            .caches
+            .keys
+            .borrow()
+            .iter()
+            .find(|(name, _)| name == key)
+        {
             return Ok(Some(*token));
         }
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
         if let Some(token) = token {
-            self.keys.borrow_mut().push((key.to_owned(), token));
+            self.caches.keys.borrow_mut().push((key.to_owned(), token));
         }
         Ok(token)
     }

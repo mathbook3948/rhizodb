@@ -159,6 +159,7 @@ fn corrupt_and_check<S: Storage>(
     let node = model.nodes.keys().find(|id| **id / GROUP == group).copied();
     if let Some(node) = node {
         let mut write = graph.write().unwrap();
+        write.committing = true;
         let wrote = write
             .set_node_property(NodeId(node), token, PropertyValue::Integer(-1))
             .and_then(|()| write.flush_columns());
