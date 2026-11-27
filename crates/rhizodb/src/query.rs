@@ -17,6 +17,7 @@ mod scalars;
 mod scan;
 mod seek;
 mod shape;
+mod stream;
 mod taint;
 mod temporals;
 mod types;

@@ -18,6 +18,7 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - A worker hands on one value for each `min` and `max` and its collected list for `collect`, and the merge keeps the value or appends the list as if the worker's rows followed the rows merged before them.
 - A plain projection runs per morsel without `SKIP` or its trailing filter and with a `LIMIT` of `SKIP` plus `LIMIT`, and the joined rows then go through the full projection once, which keeps ties in scan order.
 - With `LIMIT` and neither `ORDER BY` nor `DISTINCT`, no morsel starts once the finished morsels before it hold the rows the projection keeps.
+- A match whose streamed run stops early at a `LIMIT` on one thread does not split, since the serial run then reads only the start nodes it needs.
 - A `DISTINCT` projection without `LIMIT` stays on the calling thread, since joining the morsels would repeat its whole deduplication there.
 - A match that feeds any other clause returns its rows per morsel, joined in morsel order.
 - A table-wise `CALL`, which heads each block of a `NEXT` chain, never runs per morsel, since it reads all its input rows at once.

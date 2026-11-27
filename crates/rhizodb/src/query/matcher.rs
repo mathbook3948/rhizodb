@@ -6,6 +6,7 @@ use crate::gql::ast::Direction;
 use crate::gql::ast::LabelExpr;
 use crate::graph;
 use crate::graph::Adjacent;
+use crate::graph::Label;
 use crate::graph::NodeId;
 use crate::graph::PropertyKey;
 use crate::graph::RelationshipId;
@@ -78,7 +79,7 @@ enum Frame {
     /// The start nodes of a pattern part not tried yet.
     Part {
         index: usize,
-        candidates: std::vec::IntoIter<NodeId>,
+        candidates: Candidates,
         known: Known,
     },
     /// The relationships of a single-hop step not tried yet. `extended` is set while the trail
@@ -98,6 +99,41 @@ enum Frame {
         node: NodeId,
         state: WalkState,
     },
+}
+
+/// The start nodes of a pattern part: those a lookup, a bound node, or a morsel gives, or the
+/// nodes of the start's label, or every node, read one row group at a time.
+#[derive(Debug)]
+pub(crate) enum Candidates {
+    Listed(std::vec::IntoIter<NodeId>),
+    Scanned {
+        label: Option<Token<Label>>,
+        group: std::vec::IntoIter<NodeId>,
+        next: Option<u64>,
+    },
+}
+
+impl Candidates {
+    fn next<T: ReadTransaction>(&mut self, env: &Env<'_, T>) -> Result<Option<NodeId>, Error> {
+        match self {
+            Self::Listed(ids) => Ok(ids.next()),
+            Self::Scanned { label, group, next } => loop {
+                if let Some(id) = group.next() {
+                    return Ok(Some(id));
+                }
+                let Some(from) = *next else {
+                    return Ok(None);
+                };
+                match env.tx.node_group(from, *label)? {
+                    Some((at, ids)) => {
+                        *group = ids.into_iter();
+                        *next = at.checked_add(1);
+                    }
+                    None => *next = None,
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -249,13 +285,13 @@ impl<T: ReadTransaction> Env<'_, T> {
         &self,
         part: &'p PatternPart,
         row: &Row,
-    ) -> Result<(&'p PatternPart, Vec<NodeId>, Known), Error> {
+    ) -> Result<(&'p PatternPart, Candidates, Known), Error> {
         if let Some(ids) = self.morsel_of(part) {
             let known = Known {
                 labels: label_scan_decides(&part.start),
                 served: None,
             };
-            return Ok((part, ids.to_vec(), known));
+            return Ok((part, Candidates::Listed(Vec::from(ids).into_iter()), known));
         }
         let (part, sought) = self.oriented(part, row)?;
         let pattern = &part.start;
@@ -264,7 +300,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Some(Datum::Node(id)) => vec![*id],
                 _ => Vec::new(),
             };
-            return Ok((part, nodes, Known::NOTHING));
+            return Ok((part, Candidates::Listed(nodes.into_iter()), Known::NOTHING));
         }
         let labels_known = label_scan_decides(pattern);
         if let Some(sought) = sought {
@@ -272,13 +308,21 @@ impl<T: ReadTransaction> Env<'_, T> {
                 labels: labels_known && sought.labelled,
                 served: sought.served,
             };
-            return Ok((part, sought.nodes, known));
+            return Ok((part, Candidates::Listed(sought.nodes.into_iter()), known));
         }
         let known = Known {
             labels: labels_known,
             served: None,
         };
-        Ok((part, self.scanned_nodes(pattern)?, known))
+        let candidates = match self.scanned_label(pattern)? {
+            Some(label) => Candidates::Scanned {
+                label,
+                group: Vec::new().into_iter(),
+                next: Some(0),
+            },
+            None => Candidates::Listed(Vec::new().into_iter()),
+        };
+        Ok((part, candidates, known))
     }
 
     /// The order to walk `part` in from `row`, and the start nodes a lookup found for it. The
@@ -356,13 +400,23 @@ impl<T: ReadTransaction> Env<'_, T> {
     /// The nodes a pattern starts from when no seek serves it: those of its required label, or
     /// every node, in ascending ID order.
     pub(crate) fn scanned_nodes(&self, pattern: &NodePattern) -> Result<Vec<NodeId>, Error> {
+        Ok(match self.scanned_label(pattern)? {
+            Some(Some(label)) => self.tx.node_ids_with_label(label)?,
+            Some(None) => self.tx.node_ids()?,
+            None => Vec::new(),
+        })
+    }
+
+    /// The label whose nodes [`Env::scanned_nodes`] gives, or none for every node, or `None`
+    /// when no node carries the required label.
+    pub(crate) fn scanned_label(
+        &self,
+        pattern: &NodePattern,
+    ) -> Result<Option<Option<Token<Label>>>, Error> {
         Ok(
             match pattern.labels.as_ref().and_then(LabelExpr::required) {
-                Some(label) => match self.label_token(&label.0)? {
-                    Some(token) => self.tx.node_ids_with_label(token)?,
-                    None => Vec::new(),
-                },
-                None => self.tx.node_ids()?,
+                Some(label) => self.label_token(&label.0)?.map(Some),
+                None => Some(None),
             },
         )
     }
@@ -502,7 +556,7 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
                     known,
                 } => {
                     let (index, known) = (*index, *known);
-                    match candidates.next() {
+                    match candidates.next(self.env)? {
                         Some(id) => self.start(index, id, known, row, &mut frames, emit)?,
                         None => {
                             frames.pop();
@@ -617,13 +671,15 @@ impl<T: ReadTransaction> Search<'_, '_, T> {
         emit: &mut Emit<'_>,
     ) -> Result<bool, Error> {
         let Some(part) = self.patterns.get(index) else {
+            #[cfg(test)]
+            super::stream::produced();
             return emit(row);
         };
         let (walked, candidates, known) = self.env.start_candidates(part, row)?;
         self.trails[index].part = walked;
         frames.push(Frame::Part {
             index,
-            candidates: candidates.into_iter(),
+            candidates,
             known,
         });
         Ok(true)
