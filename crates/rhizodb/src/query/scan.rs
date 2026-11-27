@@ -28,10 +28,12 @@ use super::aggregate::Part;
 use super::compare::equals;
 use super::compare::sort_order;
 use super::datum::Datum;
+use super::datum::Limits;
 use super::datum::owned;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::and;
+use super::eval::binary;
 use super::eval::comparison;
 use super::eval::or;
 use super::eval::set;
@@ -48,6 +50,7 @@ use super::plan::SeekElement;
 use super::plan::SeekKey;
 use super::plan::Slot;
 use super::plan::Step;
+use super::stream::Sure;
 
 /// `MATCH (n)` or `MATCH (n:Label)` with no other pattern element: every live node, or every
 /// live node with the label, in ascending ID order.
@@ -159,6 +162,16 @@ enum Value {
     Node,
     Fixed(Datum),
     Row(Slot),
+    /// An arithmetic or concatenating operator, evaluated on each node as the row path would.
+    Operation(Box<Operation>),
+}
+
+#[derive(Clone, Debug)]
+struct Operation {
+    op: BinaryOp,
+    lhs: Value,
+    rhs: Value,
+    limits: Limits,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +191,9 @@ enum Pred {
     In(Value, Option<Vec<Datum>>),
     Not(Box<Pred>),
     Logic(BinaryOp, Box<Pred>, Box<Pred>),
+    /// The second only where the first holds, as a pattern's property map is tested before the
+    /// filter, which is not evaluated on a node the map rejects.
+    Then(Box<Pred>, Box<Pred>),
 }
 
 struct Compiler<'e, 'a, T: ReadTransaction> {
@@ -187,6 +203,7 @@ struct Compiler<'e, 'a, T: ReadTransaction> {
     names: Vec<String>,
     aliases: Vec<(Slot, Value)>,
     forbidden: Vec<Slot>,
+    allows_operations: bool,
 }
 
 impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
@@ -198,6 +215,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
             names: Vec::new(),
             aliases: Vec::new(),
             forbidden: Vec::new(),
+            allows_operations: true,
         }
     }
 
@@ -241,6 +259,35 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
         }))
     }
 
+    fn operand(&mut self, expr: &Expr) -> Result<Option<Value>, Error> {
+        let Expr::Binary(
+            op @ (BinaryOp::Add
+            | BinaryOp::Subtract
+            | BinaryOp::Multiply
+            | BinaryOp::Divide
+            | BinaryOp::Modulo
+            | BinaryOp::Power
+            | BinaryOp::Concat),
+            lhs,
+            rhs,
+        ) = expr
+        else {
+            return self.value(expr);
+        };
+        if !self.allows_operations {
+            return Ok(None);
+        }
+        let (Some(lhs), Some(rhs)) = (self.operand(lhs)?, self.operand(rhs)?) else {
+            return Ok(None);
+        };
+        Ok(Some(Value::Operation(Box::new(Operation {
+            op: *op,
+            lhs,
+            rhs,
+            limits: self.env.limits,
+        }))))
+    }
+
     fn hop_value<'q>(&mut self, expr: &'q Expr) -> Result<HopValue<'q>, Error> {
         Ok(match self.value(expr)? {
             Some(value) => HopValue::Scanned(value),
@@ -272,11 +319,11 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
         first: &Expr,
         rest: &[(ComparisonOp, Expr)],
     ) -> Result<Option<Pred>, Error> {
-        let Some(first) = self.value(first)? else {
+        let Some(first) = self.operand(first)? else {
             return Ok(None);
         };
         if let [(op, operand)] = rest {
-            let Some(operand) = self.value(operand)? else {
+            let Some(operand) = self.operand(operand)? else {
                 return Ok(None);
             };
             return Ok(Some(match (first, operand) {
@@ -297,7 +344,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
         }
         let mut operands = Vec::with_capacity(rest.len());
         for (op, operand) in rest {
-            let Some(operand) = self.value(operand)? else {
+            let Some(operand) = self.operand(operand)? else {
                 return Ok(None);
             };
             operands.push((*op, operand));
@@ -310,7 +357,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
             Expr::Constant(Datum::Boolean(value)) => Pred::Fixed(Some(*value)),
             Expr::Constant(Datum::Null) => Pred::Fixed(None),
             Expr::Comparison(first, rest) => return self.comparison(first, rest),
-            Expr::IsNull { operand, negated } => match self.value(operand)? {
+            Expr::IsNull { operand, negated } => match self.operand(operand)? {
                 Some(operand) => Pred::IsNull(operand, *negated),
                 None => return Ok(None),
             },
@@ -329,7 +376,7 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                 lhs,
                 rhs,
             ) => {
-                let (Some(lhs), Some(rhs)) = (self.value(lhs)?, self.value(rhs)?) else {
+                let (Some(lhs), Some(rhs)) = (self.operand(lhs)?, self.operand(rhs)?) else {
                     return Ok(None);
                 };
                 match (op, rhs) {
@@ -340,10 +387,10 @@ impl<'e, 'a, T: ReadTransaction> Compiler<'e, 'a, T> {
                 }
             }
             Expr::Binary(BinaryOp::In, needle, list) => {
-                let Some(needle) = self.value(needle)? else {
+                let Some(needle) = self.operand(needle)? else {
                     return Ok(None);
                 };
-                match self.value(list)? {
+                match self.operand(list)? {
                     Some(Value::Fixed(Datum::List(items))) => Pred::In(needle, Some(owned(items))),
                     Some(Value::Fixed(Datum::Null)) => Pred::In(needle, None),
                     _ => return Ok(None),
@@ -525,6 +572,7 @@ impl At<'_, '_> {
                 Some(value) => Arg::Datum(Cow::Borrowed(value)),
                 None => Arg::Datum(Cow::Owned(Datum::Null)),
             },
+            Value::Operation(operation) => Arg::Datum(Cow::Owned(self.operate(operation)?)),
         })
     }
 
@@ -534,6 +582,7 @@ impl At<'_, '_> {
             Value::Node => return Ok(Datum::Node(self.node)),
             Value::Fixed(value) => return Ok(value.clone()),
             Value::Row(slot) => return Ok(self.row.get(*slot).cloned().unwrap_or(Datum::Null)),
+            Value::Operation(operation) => return self.operate(operation),
         };
         match self.group.quick(self.node, column) {
             Quick::Absent => Ok(Datum::Null),
@@ -543,6 +592,13 @@ impl At<'_, '_> {
                 None => Ok(Datum::Null),
             },
         }
+    }
+
+    #[inline(never)]
+    fn operate(&self, operation: &Operation) -> Result<Datum, Error> {
+        let lhs = self.datum(&operation.lhs)?;
+        let rhs = self.datum(&operation.rhs)?;
+        binary(operation.limits, operation.op, lhs, rhs)
     }
 
     #[inline]
@@ -629,6 +685,10 @@ impl At<'_, '_> {
                     _ => lhs.zip(rhs).map(|(a, b)| a != b),
                 }
             }
+            Pred::Then(first, second) => match self.holds(first)? {
+                Some(true) => self.holds(second)?,
+                _ => Some(false),
+            },
         })
     }
 
@@ -947,13 +1007,17 @@ impl<T: ReadTransaction> Env<'_, T> {
                 conjuncts.push(Pred::Compare(column, vec![(ComparisonOp::Equal, value)]));
             }
         }
-        if let Some(filter) = &found.filter {
-            let Some(filter) = compiler.pred(filter)? else {
-                return Ok(None);
-            };
-            conjuncts.push(filter);
-        }
-        Ok(Some(conjunction(conjuncts)))
+        let map = conjunction(conjuncts);
+        let Some(filter) = &found.filter else {
+            return Ok(Some(map));
+        };
+        let Some(filter) = compiler.pred(filter)? else {
+            return Ok(None);
+        };
+        Ok(Some(Some(match map {
+            Some(map) => Pred::Then(Box::new(map), Box::new(filter)),
+            None => filter,
+        })))
     }
 
     /// `MATCH` over `scan`, reading only the columns its filter tests. `None` when the filter has
@@ -1011,14 +1075,11 @@ impl<T: ReadTransaction> Env<'_, T> {
         projection: &Projection,
         rows: &[Row],
     ) -> Result<Option<Vec<Row>>, Error> {
-        let Items::Plain(items) = &projection.items else {
-            return Ok(None);
-        };
         let mut compiler = Compiler::new(self, scan.slot);
         let Some(filter) = self.scan_filter(&mut compiler, &scan, found)? else {
             return Ok(None);
         };
-        self.scan_plain(scan, compiler, filter, projection, items, rows)
+        self.scan_plain(scan, found, compiler, filter, projection, rows)
     }
 
     /// The groups of the aggregating projection after a `MATCH` over `scan`, which reads its keys
@@ -1117,6 +1178,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let far = hop.step.node.slot;
         let mut compiler = Compiler::new(self, start);
         compiler.forbidden = vec![relationship.slot, far];
+        compiler.allows_operations = false;
         let Some(filter) = self.scan_filter(&mut compiler, &hop.scan, found)? else {
             return Ok(None);
         };
@@ -1146,7 +1208,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let by_far = key_values.iter().all(|value| match value {
             HopValue::Scanned(Value::Fixed(_)) => true,
             HopValue::Scanned(Value::Row(slot)) => *slot != relationship.slot,
-            HopValue::Scanned(Value::Column(_) | Value::Node) => false,
+            HopValue::Scanned(Value::Column(_) | Value::Node | Value::Operation(_)) => false,
             HopValue::Row(Expr::Property(base, _)) => {
                 matches!(base.as_ref(), Expr::Slot(slot) if *slot == far)
             }
@@ -1242,12 +1304,15 @@ impl<T: ReadTransaction> Env<'_, T> {
     fn scan_plain(
         &self,
         scan: NodeScan<'_>,
+        found: &MatchClause,
         mut compiler: Compiler<'_, '_, T>,
         filter: Option<Pred>,
         projection: &Projection,
-        items: &[(Expr, Slot)],
         rows: &[Row],
     ) -> Result<Option<Vec<Row>>, Error> {
+        let Items::Plain(items) = &projection.items else {
+            return Ok(None);
+        };
         compiler.forbidden = items.iter().map(|(_, slot)| *slot).collect();
         let Some(item_values) = compiler.values(items.iter().map(|(expr, _)| expr))? else {
             return Ok(None);
@@ -1282,13 +1347,29 @@ impl<T: ReadTransaction> Env<'_, T> {
             None
         };
         let empty = vec![Datum::Null; self.slots];
-        let skip = match &projection.skip {
-            Some(skip) => self.count(skip, &empty, "SKIP")?,
-            None => 0,
+        let window = || -> Result<_, Error> {
+            let skip = match &projection.skip {
+                Some(skip) => self.count(skip, &empty, "SKIP")?,
+                None => 0,
+            };
+            let limit = match &projection.limit {
+                Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
+                None => None,
+            };
+            Ok((skip, limit))
         };
-        let limit = match &projection.limit {
-            Some(limit) => Some(self.count(limit, &empty, "LIMIT")?),
-            None => None,
+        let (skip, limit) = match window() {
+            Ok(window) => window,
+            Err(error) => {
+                self.scan(
+                    &scan,
+                    rows,
+                    &compiler.tokens,
+                    filter.as_ref(),
+                    &mut |_, _| Ok(true),
+                )?;
+                return Err(error);
+            }
         };
         let kept = limit.map(|limit| skip.saturating_add(limit));
         let ordered = !directions.is_empty();
@@ -1309,7 +1390,8 @@ impl<T: ReadTransaction> Env<'_, T> {
             .outputs
             .iter()
             .eq(items.iter().map(|(_, slot)| slot));
-        if early && !ordered {
+        let stops = early && !ordered && Sure::new(self).matching(found);
+        if stops {
             self.stopping_at_limit();
         }
         let mut seen = KeySet::default();
@@ -1317,6 +1399,9 @@ impl<T: ReadTransaction> Env<'_, T> {
         let mut keys = Vec::with_capacity(sort_values.len());
         let mut position = 0usize;
         self.scan(&scan, rows, &tokens, filter.as_ref(), &mut |at, input| {
+            if !ordered && kept.is_some_and(|kept| chosen.len() >= kept) {
+                return Ok(true);
+            }
             let mut values = None;
             if let Some(outputs) = &outputs {
                 let one;
@@ -1373,7 +1458,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
             chosen.offer(&mut keys, (position, at.node, input), values, &directions);
             position += 1;
-            Ok(ordered || kept.is_none_or(|kept| chosen.len() < kept))
+            Ok(!stops || chosen.len() < kept.unwrap_or(usize::MAX))
         })?;
         let mut out = Vec::new();
         for ranked in chosen
@@ -1427,7 +1512,13 @@ fn is_read(
 }
 
 fn reads(value: &Value, column: usize) -> bool {
-    matches!(value, Value::Column(held) if *held == column)
+    match value {
+        Value::Column(held) => *held == column,
+        Value::Operation(operation) => {
+            reads(&operation.lhs, column) || reads(&operation.rhs, column)
+        }
+        Value::Node | Value::Fixed(_) | Value::Row(_) => false,
+    }
 }
 
 fn conjunction(mut conjuncts: Vec<Pred>) -> Option<Pred> {
@@ -1449,7 +1540,9 @@ fn pred_reads(pred: &Pred, column: usize) -> bool {
         Pred::IsNull(value, _) | Pred::In(value, _) | Pred::Contains(value, _) => reads(value),
         Pred::Text(_, lhs, rhs) => reads(lhs) || reads(rhs),
         Pred::Not(operand) => pred_reads(operand, column),
-        Pred::Logic(_, lhs, rhs) => pred_reads(lhs, column) || pred_reads(rhs, column),
+        Pred::Logic(_, lhs, rhs) | Pred::Then(lhs, rhs) => {
+            pred_reads(lhs, column) || pred_reads(rhs, column)
+        }
     }
 }
 

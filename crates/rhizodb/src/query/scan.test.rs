@@ -43,11 +43,15 @@ struct Compared {
 }
 
 fn compare(mut run: impl FnMut() -> Result<QueryResult, Error>) -> Compared {
+    compare_outcomes(|| outcome(run()))
+}
+
+fn compare_outcomes(mut run: impl FnMut() -> Outcome) -> Compared {
     let before = scans();
-    let fast = outcome(run());
+    let fast = run();
     let scanned = scans() > before;
     ROW_PATH.with(|flag| flag.set(true));
-    let row = outcome(run());
+    let row = run();
     ROW_PATH.with(|flag| flag.set(false));
     Compared { fast, row, scanned }
 }
@@ -254,6 +258,30 @@ impl Query {
     }
 
     fn operand(&mut self, rng: &mut Rng) -> String {
+        if rng.chance(1, 5) {
+            return self.operation(rng);
+        }
+        self.plain_operand(rng)
+    }
+
+    fn operation(&mut self, rng: &mut Rng) -> String {
+        let op = *rng.pick(&["+", "-", "*", "/", "%", "^", "||"]);
+        let rhs = match rng.below(4) {
+            0 => self.plain_operand(rng),
+            1 => {
+                let big = Value::Integer(i64::MAX - rng.below(2) as i64);
+                self.param(big)
+            }
+            _ => format!("{}", rng.below(4) as i64 - 1),
+        };
+        let lhs = match rng.below(5) {
+            0 => self.operation(rng),
+            _ => self.plain_operand(rng),
+        };
+        format!("({lhs} {op} {rhs})")
+    }
+
+    fn plain_operand(&mut self, rng: &mut Rng) -> String {
         match rng.below(8) {
             0..=3 => format!("n.{}", rng.pick(&["a", "b", "c", "k", "missing"])),
             4 => format!("{}", rng.below(5) as i64 - 1),
@@ -482,6 +510,37 @@ impl Query {
     }
 }
 
+impl Query {
+    fn generate_write(rng: &mut Rng) -> Query {
+        let mut query = Query {
+            text: String::new(),
+            parameters: Vec::new(),
+        };
+        let label = *rng.pick(&["", ":A", ":B", ":Missing"]);
+        let filter = query.pred(rng, 2);
+        let action = match rng.below(6) {
+            0 => format!("SET n.a = {}", query.operand(rng)),
+            1 => "SET n.a = n.k % 3, n.b = toString(n.k)".to_owned(),
+            2 => format!("SET n:{} REMOVE n.c", rng.pick(&["A", "B"])),
+            3 => "REMOVE n.a, n:A".to_owned(),
+            4 => "DETACH DELETE n".to_owned(),
+            _ => "SET n.c = n.a".to_owned(),
+        };
+        let again = query.pred(rng, 1);
+        let tail = match rng.below(4) {
+            0 => "RETURN count(*)".to_owned(),
+            1 => format!("WITH count(*) AS c MATCH (n) WHERE {again} RETURN c, n.k ORDER BY n.k"),
+            2 => format!("WITH count(*) AS c MATCH (n:A) WHERE {again} RETURN c, count(*)"),
+            _ => format!(
+                "WITH count(*) AS c MATCH (n) WHERE {again} RETURN c, n.k LIMIT {}",
+                rng.below(3)
+            ),
+        };
+        query.text = format!("MATCH (n{label}) WHERE {filter} {action} {tail}");
+        query
+    }
+}
+
 struct Report {
     queries: usize,
     scanned: usize,
@@ -533,6 +592,35 @@ fn check(graph: &mut Graph, rng: &mut Rng, queries: usize) -> Result<Report, Str
         });
         verify(query, compared, "uncommitted", &log)?;
     }
+    let after = Query::generate(rng);
+    let after_parameters = parameters(after.parameters.clone());
+    for _ in 0..queries / 4 {
+        let query = Query::generate_write(rng);
+        let parameters = parameters(query.parameters.clone());
+        let compared = compare_outcomes(|| {
+            let mut tx = graph.db.begin_write().unwrap();
+            for (text, edit_parameters) in &edits {
+                let _ = tx.execute(text, edit_parameters);
+            }
+            let mut seen = outcome(tx.execute(&query.text, &parameters))?;
+            for (text, parameters) in [
+                (after.text.as_str(), &after_parameters),
+                (
+                    "MATCH (n) RETURN n.k, labels(n), n.a, n.b, n.c ORDER BY n.k",
+                    &Parameters::new(),
+                ),
+            ] {
+                seen.push(format!("{:?}", outcome(tx.execute(text, parameters))));
+            }
+            tx.rollback().unwrap();
+            Ok(seen)
+        });
+        let query = Query {
+            text: format!("{} then {}", query.text, after.text),
+            parameters: [query.parameters, after.parameters.clone()].concat(),
+        };
+        verify(&query, compared, "written", &log)?;
+    }
     Ok(report)
 }
 
@@ -549,7 +637,7 @@ proptest! {
     #[ignore = "left out of mise run check, run by mise run random"]
     fn small_graphs_answer_as_the_row_path(nodes in 0i64..80, seed in any::<u64>()) {
         let report = equivalent(nodes, seed, 40).map_err(TestCaseError::fail)?;
-        prop_assert!(report.queries == 80);
+        prop_assert!(report.queries == 90);
     }
 }
 
@@ -618,7 +706,7 @@ fn each_benchmark_shape_takes_the_scan() {
 fn shapes_the_scan_cannot_answer_take_the_row_path() {
     let db = db_with(PEOPLE);
     for query in [
-        "MATCH (p:Person) WHERE p.age + 1 > 30 RETURN count(*)",
+        "MATCH (p:Person) WHERE abs(p.age) > 30 RETURN count(*)",
         "OPTIONAL MATCH (p:Person) WHERE p.age > 80 RETURN count(p)",
         "MATCH (p:Person {id: 3 + p.id}) RETURN p.name",
         "MATCH (p:Person|Other) WHERE p.age > 80 RETURN count(*)",
@@ -677,4 +765,81 @@ fn a_hop_into_an_aggregate_takes_the_scan_unless_it_tests_the_far_node() {
     ] {
         assert!(!takes_scan(&db, query).scanned, "{query} scanned");
     }
+}
+
+#[test]
+fn a_filter_with_arithmetic_takes_the_scan_in_reads_and_writes() {
+    let db = db_with(PEOPLE);
+    for query in [
+        "MATCH (p:Person) WHERE p.id % 4 = 0 RETURN count(*)",
+        "MATCH (p:Person) WHERE p.age + 1 > 30 AND p.name || '!' <> 'n3!' RETURN p.id ORDER BY p.id LIMIT 5",
+        "MATCH (p) WHERE p.id * 2 - 1 = 19997 OR p.id ^ 2 = 9.0 RETURN p.id",
+    ] {
+        assert!(takes_scan(&db, query).scanned, "{query} did not scan");
+    }
+    let compared = compare_outcomes(|| {
+        let mut tx = db.begin_write().unwrap();
+        let mut seen = outcome(tx.execute(
+            "MATCH (p:Person) WHERE p.id % 4 = 0 SET p.age = 99 \
+             WITH count(*) AS written MATCH (p:Person) WHERE p.age % 99 = 0 AND p.age > 0 \
+             RETURN written, count(*)",
+            &Parameters::new(),
+        ))?;
+        seen.extend(outcome(tx.execute(
+            "MATCH (p:Person) WHERE p.age - 98 = 1 RETURN count(*), min(p.id), max(p.id)",
+            &Parameters::new(),
+        ))?);
+        tx.rollback().unwrap();
+        Ok(seen)
+    });
+    assert_eq!(compared.fast, compared.row);
+    assert!(compared.scanned);
+    assert_eq!(
+        compared.fast.unwrap(),
+        [
+            "[Integer(2500), Integer(2500)]",
+            "[Integer(2500), Integer(0), Integer(9996)]"
+        ]
+    );
+}
+
+#[test]
+fn a_filter_with_arithmetic_fails_where_the_row_path_fails() {
+    let db = db_with("UNWIND [1, 0, 'x', 2] AS v CREATE (:N {v: v})");
+    db.execute(
+        "MATCH (a:N {v: 1}), (b:N {v: 2}) CREATE (a)-[:R]->(b)",
+        &Parameters::new(),
+    )
+    .unwrap();
+    let alone = db_with("CREATE (:N {v: 0})");
+    for (db, query, expected) in [
+        (
+            &db,
+            "MATCH (n:N) WHERE 1 / n.v = 1 RETURN n.v LIMIT 1",
+            Err(ErrorKind::DivisionByZero),
+        ),
+        (
+            &db,
+            "MATCH (n:N) WHERE n.v - 1 > 0 RETURN n.v LIMIT -1",
+            Err(ErrorKind::TypeMismatch),
+        ),
+        (
+            &db,
+            "MATCH (n:N {v: 2}) WHERE 1 / n.v = 0 RETURN n.v",
+            Ok(vec!["[Integer(2)]".to_owned()]),
+        ),
+        (
+            &alone,
+            "MATCH (n:N) WHERE (n.v || 'a') + (1 / n.v) = 1 RETURN n.v",
+            Err(ErrorKind::TypeMismatch),
+        ),
+    ] {
+        let compared = takes_scan(db, query);
+        assert!(compared.scanned, "{query} did not scan");
+        assert_eq!(compared.fast, expected, "{query}");
+    }
+    let hop = "MATCH (n:N)-[:R]->(m) WHERE 1 / n.v = 1 RETURN count(*)";
+    let compared = takes_scan(&db, hop);
+    assert!(!compared.scanned, "{hop} scanned");
+    assert_eq!(compared.fast, Ok(vec!["[Integer(1)]".to_owned()]));
 }

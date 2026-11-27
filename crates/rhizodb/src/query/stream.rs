@@ -728,7 +728,7 @@ pub(crate) struct Sure<'q, 'e, T: ReadTransaction> {
 }
 
 impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
-    fn new(env: &'q Env<'e, T>) -> Self {
+    pub(crate) fn new(env: &'q Env<'e, T>) -> Self {
         let graveyard = env.graveyard;
         Self {
             env,
