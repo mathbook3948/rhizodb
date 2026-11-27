@@ -869,7 +869,10 @@ impl<T: WriteTransaction> GraphTx<T> {
         result
     }
 
+    /// Writes the property columns this transaction changed into storage. Only
+    /// [`GraphTx::commit`] calls it, as [`GraphTx::expect_commit`] checks.
     pub(crate) fn flush_columns(&mut self) -> Result<(), GraphError> {
+        self.expect_commit();
         let mut all = Vec::new();
         for (group, edit) in std::mem::take(&mut self.columns) {
             let (writes, deltas) = self.column_writes(group, edit)?;

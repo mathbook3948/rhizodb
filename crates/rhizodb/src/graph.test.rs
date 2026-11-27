@@ -1116,3 +1116,17 @@ fn opening_a_database_of_another_tokenizer_as_its_writer_checkpoints_the_rebuilt
         .unwrap();
     assert_eq!(stored, Some(tokenize::fingerprint()));
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "written only at commit")]
+fn writing_node_columns_before_commit_fails_a_debug_build() {
+    let graph = memory_graph();
+    let mut write = graph.write().unwrap();
+    let id = write.create_node(node_with(&[])).unwrap();
+    let key = write.intern_token::<PropertyKey>("a").unwrap();
+    write
+        .set_node_property(id, key, PropertyValue::Integer(1))
+        .unwrap();
+    _ = write.flush_columns();
+}
