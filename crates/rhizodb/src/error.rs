@@ -172,6 +172,11 @@ pub enum ErrorKind {
     /// again until that `Database` is dropped. A file system that does not support file locks
     /// gives no such check, and a second open of a file there succeeds.
     DatabaseAlreadyOpen,
+    /// A database opened with [`OpenOptions::read_only`](crate::OpenOptions::read_only) was
+    /// asked to change its file: a query that updates the graph, a write transaction, an index
+    /// change, an import, a compaction, a call that writes for replication, or an upgrade of a
+    /// file written in an older format, which a database opened for writing makes once.
+    ReadOnly,
     /// [`Database::backup_to`](crate::Database::backup_to) found a file or directory at the
     /// path, which a backup never replaces.
     BackupTargetExists,
@@ -407,6 +412,7 @@ impl From<GraphError> for Error {
             GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
             GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
             GraphError::NotWriter(_) => ErrorKind::NotWriter,
+            GraphError::ReadOnly(_) => ErrorKind::ReadOnly,
         };
         Self {
             kind,

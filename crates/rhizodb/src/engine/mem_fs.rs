@@ -149,6 +149,10 @@ impl BlockFile for MemFile {
         Ok(())
     }
 
+    fn lock_shared(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         resize_blocks(&mut lock(&self.bytes), self.size, count)
     }

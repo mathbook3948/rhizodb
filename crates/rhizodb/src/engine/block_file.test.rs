@@ -186,3 +186,30 @@ fn a_block_size_is_a_power_of_two_from_a_sector_to_a_gibibyte() {
         assert_eq!(BlockSize::new(bytes), None);
     }
 }
+
+#[test]
+fn a_read_only_os_file_system_refuses_every_change_the_operating_system_could_make() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = OsFs::new(directory.path()).create("pages", size()).unwrap();
+    file.write(0, [page(1)].as_flattened()).unwrap();
+    let fs = OsFs::read_only(directory.path(), "pages").unwrap();
+    assert_eq!(
+        OsFs::read_only(directory.path(), "pages")
+            .unwrap_err()
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    let file = fs.open("pages", size()).unwrap();
+    assert_eq!(read_all(&file), [page(1)]);
+    assert!(file.write(0, [page(2)].as_flattened()).is_err());
+    assert!(file.set_block_count(0).is_err());
+    for refused in [
+        fs.create("other", size()).map(drop),
+        fs.rename("pages", "other"),
+        fs.remove("pages"),
+    ] {
+        assert_eq!(refused.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
+    assert_eq!(fs.names().unwrap(), ["pages"]);
+    assert_eq!(read_all(&file), [page(1)]);
+}

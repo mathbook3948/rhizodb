@@ -726,6 +726,10 @@ impl Database {
     /// term, so a planned handover loses no write.
     pub fn demote(&self, wait: Duration) -> Result<Position, Error> {
         let _roles = self.roles();
+        self.graph
+            .storage()
+            .writable("step down")
+            .map_err(engine_error)?;
         self.graph.set_replica(true);
         self.graph
             .maintain(|engine| engine.demote(wait))?

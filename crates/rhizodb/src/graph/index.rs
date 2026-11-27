@@ -690,6 +690,13 @@ fn best(mut scored: Vec<(u64, f64)>, limit: usize) -> Vec<(u64, f64)> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
+    /// Whether the keyword indexes were built by this build's tokenizer, as the stored
+    /// fingerprint records.
+    pub(crate) fn tokenizer_is_current(&self) -> Result<bool, GraphError> {
+        let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
+        Ok(stored.as_deref() == Some(tokenize::fingerprint().as_slice()))
+    }
+
     /// Every index, by name.
     pub(crate) fn indexes(&self) -> Result<Vec<(String, Index)>, GraphError> {
         self.transaction
@@ -1236,9 +1243,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     /// covers when the stored entries came from another tokenizer. Returns whether anything was
     /// written.
     pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
-        let fingerprint = tokenize::fingerprint();
-        let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
-        if stored.as_deref() == Some(fingerprint.as_slice()) {
+        if self.tokenizer_is_current()? {
             return Ok(false);
         }
         for (_, index) in self.indexes()? {
@@ -1248,8 +1253,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.clear(&index)?;
             self.fill(&index)?;
         }
-        self.transaction
-            .put(Table::Metadata, keys::TOKENIZER_KEY, &fingerprint)?;
+        self.transaction.put(
+            Table::Metadata,
+            keys::TOKENIZER_KEY,
+            &tokenize::fingerprint(),
+        )?;
         Ok(true)
     }
 

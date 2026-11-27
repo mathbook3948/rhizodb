@@ -75,7 +75,15 @@ struct State {
     fault: Option<Fault>,
     capacity: Option<u64>,
     handles: u64,
-    locks: BTreeMap<usize, u64>,
+    locks: BTreeMap<usize, Held>,
+}
+
+// ast-grep-ignore
+// As Windows: exclusive blocks other handles reading and writing; shared blocks all writes.
+#[derive(Clone, Debug)]
+enum Held {
+    Exclusive(u64),
+    Shared(BTreeSet<u64>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -120,13 +128,32 @@ fn not_found(name: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("no file named {name}"))
 }
 
+fn lock_violation() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "another handle holds the lock on the simulated file",
+    )
+}
+
+fn held_elsewhere() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "another handle holds the lock on the simulated file",
+    )
+}
+
 impl State {
-    fn unlocked_for(&self, inode: usize, handle: u64) -> io::Result<()> {
+    fn readable_by(&self, inode: usize, handle: u64) -> io::Result<()> {
         match self.locks.get(&inode) {
-            Some(holder) if *holder != handle => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "another handle holds the lock on the simulated file",
-            )),
+            Some(Held::Exclusive(holder)) if *holder != handle => Err(lock_violation()),
+            _ => Ok(()),
+        }
+    }
+
+    fn writable_by(&self, inode: usize, handle: u64) -> io::Result<()> {
+        match self.locks.get(&inode) {
+            Some(Held::Exclusive(holder)) if *holder != handle => Err(lock_violation()),
+            Some(Held::Shared(_)) => Err(lock_violation()),
             _ => Ok(()),
         }
     }
@@ -547,7 +574,15 @@ impl FileSystem for SimFs {
 impl Drop for SimFile {
     fn drop(&mut self) {
         let mut state = lock(&self.state);
-        if state.locks.get(&self.inode) == Some(&self.handle) {
+        let released = match state.locks.get_mut(&self.inode) {
+            Some(Held::Exclusive(holder)) => *holder == self.handle,
+            Some(Held::Shared(holders)) => {
+                holders.remove(&self.handle);
+                holders.is_empty()
+            }
+            None => false,
+        };
+        if released {
             state.locks.remove(&self.inode);
         }
     }
@@ -556,14 +591,14 @@ impl Drop for SimFile {
 impl BlockFile for SimFile {
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.unlocked_for(self.inode, self.handle)?;
+        state.readable_by(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         read_blocks(&state.inode(self.inode).live, self.size, first, buffer)
     }
 
     fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.unlocked_for(self.inode, self.handle)?;
+        state.writable_by(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let start = byte_index(self.size.offset(first)?)?;
         state.fits(self.inode, start + buffer.len())?;
@@ -593,13 +628,30 @@ impl BlockFile for SimFile {
 
     fn lock(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
-        match state.locks.get(&self.inode) {
-            Some(holder) if *holder != self.handle => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "another handle holds the lock on the simulated file",
-            )),
+        let free = match state.locks.get(&self.inode) {
+            None => true,
+            Some(Held::Exclusive(holder)) => *holder == self.handle,
+            Some(Held::Shared(holders)) => holders.iter().all(|holder| *holder == self.handle),
+        };
+        if !free {
+            return Err(held_elsewhere());
+        }
+        state.locks.insert(self.inode, Held::Exclusive(self.handle));
+        Ok(())
+    }
+
+    fn lock_shared(&self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        match state.locks.get_mut(&self.inode) {
+            Some(Held::Exclusive(holder)) if *holder != self.handle => Err(held_elsewhere()),
+            Some(Held::Shared(holders)) => {
+                holders.insert(self.handle);
+                Ok(())
+            }
             _ => {
-                state.locks.insert(self.inode, self.handle);
+                state
+                    .locks
+                    .insert(self.inode, Held::Shared(BTreeSet::from([self.handle])));
                 Ok(())
             }
         }
@@ -607,7 +659,7 @@ impl BlockFile for SimFile {
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         let mut state = lock(&self.state);
-        state.unlocked_for(self.inode, self.handle)?;
+        state.writable_by(self.inode, self.handle)?;
         state.operate(Some(self.inode), false)?;
         let length = byte_index(self.size.offset(count)?)?;
         state.fits(self.inode, length)?;

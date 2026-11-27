@@ -964,3 +964,39 @@ fn opening_a_new_or_current_database_checkpoints_nothing() {
     let graph = Graph::open(storage).unwrap();
     assert_eq!(graph.storage.header().generation, before.generation);
 }
+
+#[test]
+fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    drop(Graph::open(test_engine::open(&path)).unwrap());
+    let read_only = || {
+        let storage = crate::engine::any_fs::open_path_read_only(
+            &path,
+            crate::engine::store::EngineOptions::default(),
+        )
+        .unwrap();
+        Graph::open_as(storage, Access::ReadOnly)
+    };
+    assert!(read_only().is_ok());
+    let rewrite = |key: &[u8], value: &[u8]| {
+        let storage = test_engine::open(&path);
+        let mut write = storage.begin_write().unwrap();
+        write.put(Table::Metadata, key, value).unwrap();
+        write.commit().unwrap();
+    };
+    rewrite(
+        keys::FORMAT_VERSION_KEY,
+        &(FORMAT_VERSION - 1).to_be_bytes(),
+    );
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+    rewrite(keys::FORMAT_VERSION_KEY, &99u32.to_be_bytes());
+    assert!(matches!(
+        read_only(),
+        Err(GraphError::UnsupportedFormatVersion(99))
+    ));
+    rewrite(keys::FORMAT_VERSION_KEY, &FORMAT_VERSION.to_be_bytes());
+    assert!(read_only().is_ok());
+    rewrite(keys::TOKENIZER_KEY, b"another tokenizer");
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+}

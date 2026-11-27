@@ -1261,6 +1261,10 @@ impl BlockFile for GatedFile {
         self.file.lock()
     }
 
+    fn lock_shared(&self) -> io::Result<()> {
+        self.file.lock_shared()
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         self.file.set_block_count(count)
     }
@@ -1443,4 +1447,205 @@ fn cached_long_values_follow_overwrites_through_block_reuse_compaction_and_a_cra
     assert_eq!(everything(&engine).unwrap(), expected);
     assert_eq!(everything(&engine).unwrap(), expected);
     engine.check().unwrap();
+}
+
+#[test]
+fn a_read_only_engine_starts_no_checkpoint_thread_even_with_background_checkpoints() {
+    let fs = Arc::new(SimFs::new());
+    let options = tiny(CheckpointMode::Background);
+    let writer = Engine::open(Arc::clone(&fs), NAME, options).unwrap();
+    assert!(writer.worker.is_some());
+    let mut write = writer.begin_write().unwrap();
+    write.put(Table::Metadata, b"key", b"value").unwrap();
+    write.commit().unwrap();
+    let crashed = Arc::new(fs.crash(Crash::KeepUnsynced));
+    drop(writer);
+    for fs in [fs, crashed] {
+        let engine = Engine::open_read_only(fs, NAME, options).unwrap();
+        assert!(engine.worker.is_none() && engine.jobs.is_none());
+        assert_eq!(
+            engine
+                .begin_read()
+                .unwrap()
+                .get(Table::Metadata, b"key")
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+    }
+}
+
+fn mem_image(fs: &MemFs) -> BTreeMap<String, Vec<u8>> {
+    let sector = BlockSize::new(512).unwrap();
+    fs.names()
+        .unwrap()
+        .into_iter()
+        .map(|name| {
+            let file = fs.open(&name, sector).unwrap();
+            let mut bytes = vec![0; file.block_count().unwrap() as usize * 512];
+            file.read(0, &mut bytes).unwrap();
+            (name, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn a_read_only_engine_writes_nothing_on_a_file_system_that_would_let_it() {
+    for unclean in [false, true] {
+        let fs = Arc::new(MemFs::default());
+        let writer = Engine::open(Arc::clone(&fs), NAME, tiny(CheckpointMode::Inline)).unwrap();
+        let mut write = writer.begin_write().unwrap();
+        write.put(Table::Metadata, b"key", b"value").unwrap();
+        write.commit().unwrap();
+        if unclean {
+            std::mem::forget(writer);
+        } else {
+            drop(writer);
+        }
+        let before = mem_image(&fs);
+        let engine =
+            Engine::open_read_only(Arc::clone(&fs), NAME, tiny(CheckpointMode::Inline)).unwrap();
+        assert_eq!(
+            engine
+                .begin_read()
+                .unwrap()
+                .get(Table::Metadata, b"key")
+                .unwrap(),
+            Some(b"value".to_vec())
+        );
+        engine.check().unwrap();
+        engine.close().unwrap();
+        assert_eq!(mem_image(&fs), before, "unclean: {unclean}");
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DiesBeforeSync {
+    fs: SimFs,
+    dead: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct DiesBeforeSyncFile {
+    file: crate::engine::sim_fs::SimFile,
+    dead: Arc<AtomicBool>,
+}
+
+fn died() -> io::Error {
+    io::Error::other("the process died before its sync")
+}
+
+impl BlockFile for DiesBeforeSyncFile {
+    fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.file.read(first, buffer)
+    }
+
+    fn write(&self, first: u64, buffer: &[u8]) -> io::Result<()> {
+        self.file.write(first, buffer)
+    }
+
+    fn block_count(&self) -> io::Result<u64> {
+        self.file.block_count()
+    }
+
+    fn is_empty(&self) -> io::Result<bool> {
+        self.file.is_empty()
+    }
+
+    fn lock(&self) -> io::Result<()> {
+        self.file.lock()
+    }
+
+    fn lock_shared(&self) -> io::Result<()> {
+        self.file.lock_shared()
+    }
+
+    fn set_block_count(&self, count: u64) -> io::Result<()> {
+        self.file.set_block_count(count)
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(died());
+        }
+        self.file.sync()
+    }
+}
+
+impl FileSystem for DiesBeforeSync {
+    type File = DiesBeforeSyncFile;
+
+    fn create(&self, name: &str, size: BlockSize) -> io::Result<DiesBeforeSyncFile> {
+        Ok(DiesBeforeSyncFile {
+            file: self.fs.create(name, size)?,
+            dead: Arc::clone(&self.dead),
+        })
+    }
+
+    fn open(&self, name: &str, size: BlockSize) -> io::Result<DiesBeforeSyncFile> {
+        Ok(DiesBeforeSyncFile {
+            file: self.fs.open(name, size)?,
+            dead: Arc::clone(&self.dead),
+        })
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.fs.rename(from, to)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        self.fs.remove(name)
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        self.fs.names()
+    }
+
+    fn sync_names(&self) -> io::Result<()> {
+        if self.dead.load(Ordering::SeqCst) {
+            return Err(died());
+        }
+        self.fs.sync_names()
+    }
+}
+
+#[test]
+fn a_read_only_open_shows_no_commit_that_a_power_loss_after_it_would_lose() {
+    let options = EngineOptions {
+        segment_target: 1 << 20,
+        ..tiny(CheckpointMode::Inline)
+    };
+    let sim = SimFs::new();
+    let dead = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(DiesBeforeSync {
+        fs: sim.clone(),
+        dead: Arc::clone(&dead),
+    });
+    let writer = Engine::open(fs, NAME, options).unwrap();
+    let commit = |key: &[u8]| {
+        let mut write = writer.begin_write().unwrap();
+        write.put(Table::Metadata, key, b"value").unwrap();
+        write.commit()
+    };
+    commit(b"synced").unwrap();
+    dead.store(true, Ordering::SeqCst);
+    assert!(commit(b"unsynced").is_err());
+    drop(writer);
+    let get = |engine: &Engine<SimFs>, key: &[u8]| {
+        engine
+            .begin_read()
+            .unwrap()
+            .get(Table::Metadata, key)
+            .unwrap()
+    };
+    let reader = Engine::open_read_only(Arc::new(sim.clone()), NAME, options).unwrap();
+    let seen = get(&reader, b"unsynced");
+    assert!(get(&reader, b"synced").is_some());
+    drop(reader);
+    let after_power_loss = Arc::new(sim.crash(Crash::DropUnsynced));
+    let recovered = Engine::open(after_power_loss, NAME, options).unwrap();
+    assert_eq!(get(&recovered, b"unsynced"), seen);
+    assert!(
+        seen.is_some(),
+        "the read-only open replayed the unsynced commit"
+    );
 }
