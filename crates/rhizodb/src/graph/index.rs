@@ -76,6 +76,78 @@ pub(crate) const ENTRY_TABLES: [Table; 5] = [
     Table::PropertyEntries,
 ];
 
+#[derive(Debug, PartialEq, Eq)]
+enum Rebuild {
+    /// Deleting the index's entries, from the key `from` of `ENTRY_TABLES[table]` on.
+    Clearing { table: u8, from: Vec<u8> },
+    /// Indexing the covered elements, from the element with ID `at` on.
+    Filling { at: u64 },
+}
+
+const OLDER_BUILDS_CLEARING_FROM_START: u8 = 0;
+const REBUILD_FILLING: u8 = 1;
+const REBUILD_CLEARING: u8 = 2;
+
+impl Rebuild {
+    fn start(index: u32) -> Self {
+        Self::Clearing {
+            table: 0,
+            from: keys::index_prefix(index).to_vec(),
+        }
+    }
+
+    fn encode(&self, index: u32) -> Vec<u8> {
+        let mut out = index.to_be_bytes().to_vec();
+        match self {
+            Self::Clearing { table, from } => {
+                out.push(REBUILD_CLEARING);
+                out.push(*table);
+                out.extend_from_slice(from);
+            }
+            Self::Filling { at } => {
+                out.push(REBUILD_FILLING);
+                out.extend_from_slice(&at.to_be_bytes());
+            }
+        }
+        out
+    }
+
+    fn decode(cursor: &[u8]) -> Result<(u32, Self), GraphError> {
+        let mut reader = Reader::new(cursor);
+        let index = reader.u32()?;
+        let rebuild = match reader.u8()? {
+            OLDER_BUILDS_CLEARING_FROM_START => {
+                if reader.u64()? != 0 {
+                    return Err(GraphError::Corrupt(
+                        "an upgrade cursor clears from an element",
+                    ));
+                }
+                Self::start(index)
+            }
+            REBUILD_FILLING => Self::Filling { at: reader.u64()? },
+            REBUILD_CLEARING => {
+                let table = reader.u8()?;
+                let from = reader.take(reader.remaining())?.to_vec();
+                if usize::from(table) >= ENTRY_TABLES.len()
+                    || !from.starts_with(&keys::index_prefix(index))
+                {
+                    return Err(GraphError::Corrupt(
+                        "an upgrade cursor clears outside its index",
+                    ));
+                }
+                Self::Clearing { table, from }
+            }
+            _ => {
+                return Err(GraphError::Corrupt(
+                    "an upgrade cursor names no rebuild phase",
+                ));
+            }
+        };
+        reader.finish()?;
+        Ok((index, rebuild))
+    }
+}
+
 /// How a vector index measures closeness. Every metric gives a score that is higher for closer
 /// vectors, so results always come in descending score order. A vector so long that a score
 /// could overflow is not indexed and cannot be searched for, under every metric.
@@ -1329,52 +1401,44 @@ impl<T: WriteTransaction> GraphTx<T> {
         budget: &mut UpgradeBudget,
     ) -> Result<Option<Vec<u8>>, GraphError> {
         let keyword = self.keyword_indexes()?;
-        let (mut id, mut filling, mut at) = match cursor {
-            Some(cursor) => {
-                let mut reader = Reader::new(cursor);
-                let parsed = (reader.u32()?, reader.u8()? == 1, reader.u64()?);
-                reader.finish()?;
-                parsed
-            }
-            None => (0, false, 0),
-        };
-        let resume = |id: u32, filling: bool, at: u64| {
-            let mut out = id.to_be_bytes().to_vec();
-            out.push(u8::from(filling));
-            out.extend_from_slice(&at.to_be_bytes());
-            Some(out)
+        let (mut id, mut rebuild) = match cursor {
+            Some(cursor) => Rebuild::decode(cursor)?,
+            None => (0, Rebuild::start(0)),
         };
         loop {
             let Some(index) = keyword.iter().find(|index| index.id >= id) else {
                 return Ok(None);
             };
             if index.id != id {
-                (id, filling, at) = (index.id, false, 0);
+                (id, rebuild) = (index.id, Rebuild::start(index.id));
             }
-            if !filling {
-                if !self.clear_from(index, budget)? {
-                    return Ok(resume(id, false, 0));
+            let at = match rebuild {
+                Rebuild::Filling { at } => at,
+                Rebuild::Clearing { table, from } => {
+                    if let Some(resume) = self.clear_from(index, table, from, budget)? {
+                        return Ok(Some(resume.encode(id)));
+                    }
+                    self.transaction.put(
+                        Table::KeywordTotals,
+                        &keys::index_prefix(index.id),
+                        &encode_totals(0, 0),
+                    )?;
+                    budget.spend(64);
+                    if budget.full() {
+                        return Ok(Some(Rebuild::Filling { at: 0 }.encode(id)));
+                    }
+                    0
                 }
-                self.transaction.put(
-                    Table::KeywordTotals,
-                    &keys::index_prefix(index.id),
-                    &encode_totals(0, 0),
-                )?;
-                budget.spend(64);
-                (filling, at) = (true, 0);
-                if budget.full() {
-                    return Ok(resume(id, filling, at));
-                }
-            }
+            };
             match self.fill_from(index, at, budget)? {
-                Some(next) => return Ok(resume(id, true, next)),
+                Some(next) => return Ok(Some(Rebuild::Filling { at: next }.encode(id))),
                 None => match id.checked_add(1) {
-                    Some(next) => (id, filling, at) = (next, false, 0),
+                    Some(next) => (id, rebuild) = (next, Rebuild::start(next)),
                     None => return Ok(None),
                 },
             }
             if budget.full() {
-                return Ok(resume(id, filling, at));
+                return Ok(Some(rebuild.encode(id)));
             }
         }
     }
@@ -1564,32 +1628,47 @@ impl<T: WriteTransaction> GraphTx<T> {
     fn clear_from(
         &mut self,
         index: &Index,
+        table: u8,
+        mut from: Vec<u8>,
         budget: &mut UpgradeBudget,
-    ) -> Result<bool, GraphError> {
+    ) -> Result<Option<Rebuild>, GraphError> {
         let prefix = keys::index_prefix(index.id);
+        let end = index.id.checked_add(1).map(keys::index_prefix);
         self.postings.forget(&prefix);
-        for table in ENTRY_TABLES {
+        for (at, table) in (0u8..).zip(ENTRY_TABLES).skip(usize::from(table)) {
             let mut doomed = Vec::new();
-            let complete = finished(self.transaction.visit_prefix_peek(
-                table,
-                &prefix,
-                |key, _| {
-                    if budget.full() {
-                        return Err(Scan::Full);
-                    }
-                    budget.spend(key.len().saturating_add(DELETE_BYTES));
-                    doomed.push(key.to_vec());
-                    Ok(())
-                },
-            ))?;
-            for key in doomed {
-                self.transaction.delete(table, &key)?;
+            let mut visit = |key: &[u8]| {
+                if budget.full() {
+                    return Err(Scan::Full);
+                }
+                budget.spend(key.len().saturating_add(DELETE_BYTES));
+                doomed.push(key.to_vec());
+                Ok(())
+            };
+            let scanned = match &end {
+                Some(end) => self
+                    .transaction
+                    .visit_range_peek(table, &from, end, |key, _| visit(key)),
+                None => self
+                    .transaction
+                    .visit_prefix_peek(table, &prefix, |key, _| {
+                        if key < from.as_slice() {
+                            return Ok(());
+                        }
+                        visit(key)
+                    }),
+            };
+            let complete = finished(scanned)?;
+            for key in &doomed {
+                self.transaction.delete(table, key)?;
             }
             if !complete {
-                return Ok(false);
+                let from = doomed.pop().unwrap_or(from);
+                return Ok(Some(Rebuild::Clearing { table: at, from }));
             }
+            from = prefix.to_vec();
         }
-        Ok(true)
+        Ok(None)
     }
 
     /// Brings every index in line with the element with ID `element` that changed from
