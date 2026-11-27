@@ -461,6 +461,109 @@ fn opening_a_database_from_another_tokenizer_rebuilds_its_keyword_indexes() {
 }
 
 #[test]
+fn a_rebuild_cursor_of_the_clear_from_its_start_decodes_and_an_unknown_phase_is_refused() {
+    let mut cursor = 7u32.to_be_bytes().to_vec();
+    cursor.extend_from_slice(&[0; 9]);
+    assert_eq!(Rebuild::decode(&cursor).unwrap(), (7, Rebuild::start(7)));
+    for rebuild in [
+        Rebuild::start(7),
+        Rebuild::Clearing {
+            table: 4,
+            from: keys::index_entry_key(7, 9).to_vec(),
+        },
+        Rebuild::Filling { at: 9 },
+    ] {
+        assert_eq!(Rebuild::decode(&rebuild.encode(7)).unwrap(), (7, rebuild));
+    }
+    let outside = Rebuild::Clearing {
+        table: 0,
+        from: keys::index_prefix(8).to_vec(),
+    };
+    let beyond = Rebuild::Clearing {
+        table: 5,
+        from: keys::index_prefix(7).to_vec(),
+    };
+    let mut from_an_element = 7u32.to_be_bytes().to_vec();
+    from_an_element.push(0);
+    from_an_element.extend_from_slice(&9u64.to_be_bytes());
+    let mut unknown = 7u32.to_be_bytes().to_vec();
+    unknown.push(3);
+    for cursor in [
+        outside.encode(7),
+        beyond.encode(7),
+        from_an_element,
+        unknown,
+    ] {
+        assert!(
+            matches!(Rebuild::decode(&cursor), Err(GraphError::Corrupt(_))),
+            "{cursor:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rebuild_a_build_before_the_resumable_clear_left_midway_restarts_its_clear() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("midway.rhizodb");
+    {
+        let graph = Graph::open(test_engine::open(&path)).unwrap();
+        let mut write = graph.write().unwrap();
+        write
+            .create_keyword_index("words", IndexTarget::Label("Doc"), &["text"])
+            .unwrap();
+        let label = write.intern_token("Doc").unwrap();
+        let text = write.intern_token("text").unwrap();
+        for k in 0..50 {
+            write
+                .create_node(NodeRecord {
+                    labels: [label].into(),
+                    properties: Properties::from([(
+                        text,
+                        PropertyValue::String(format!("river t{k}")),
+                    )]),
+                })
+                .unwrap();
+        }
+        write.commit().unwrap();
+
+        let mut midway = graph.storage.begin_write().unwrap();
+        let rows = midway
+            .scan_prefix(Table::KeywordPostings, &keys::index_prefix(0))
+            .unwrap();
+        for (key, _) in &rows[..rows.len() / 2] {
+            midway.delete(Table::KeywordPostings, key).unwrap();
+        }
+        midway
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"an older tokenizer")
+            .unwrap();
+        midway
+            .put(
+                Table::Metadata,
+                keys::FORMAT_VERSION_KEY,
+                &(super::super::FORMAT_VERSION | super::super::UPGRADING).to_be_bytes(),
+            )
+            .unwrap();
+        let mut progress = super::super::FORMAT_VERSION.to_be_bytes().to_vec();
+        progress.extend_from_slice(&[super::super::upgrade::UpgradeStep::Tokenizer.code(), 1]);
+        progress.extend_from_slice(&0u32.to_be_bytes());
+        progress.extend_from_slice(&[0; 9]);
+        midway
+            .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)
+            .unwrap();
+        midway.commit().unwrap();
+    }
+    let graph = Graph::open(test_engine::open(&path)).unwrap();
+    let read = graph.read().unwrap();
+    assert_eq!(read.check_integrity().unwrap(), vec![]);
+    assert_eq!(
+        read.keyword_search("words", ElementKind::Node, "river", 100)
+            .unwrap()
+            .len(),
+        50
+    );
+}
+
+#[test]
 fn indexes_created_and_dropped_in_a_transaction_are_seen_by_its_later_reads_and_writes() {
     let graph = Graph::open(test_engine::in_memory()).unwrap();
     let mut write = graph.write().unwrap();

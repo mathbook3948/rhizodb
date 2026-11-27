@@ -1169,6 +1169,197 @@ mod crash {
         }
 
         #[test]
+        fn a_tokenizer_rebuild_reloads_a_posting_block_past_the_budget_within_its_bounds() {
+            let text = |k: usize| {
+                let words: Vec<String> = (0..700)
+                    .map(|i| match i % 35 {
+                        0 => format!("river t{k}x{i}"),
+                        _ => "river".to_owned(),
+                    })
+                    .collect();
+                Value::String(words.join(" "))
+            };
+            let insert = |db: &Database, texts: Vec<Value>| {
+                db.execute(
+                    "UNWIND $texts AS text INSERT (:N {text: text})",
+                    &Parameters::new().with("texts", Value::List(texts)),
+                )
+                .unwrap();
+            };
+            let fs = SimFs::new();
+            let writer = open_on(&fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                .unwrap();
+            let indexed = [
+                TableId::of(Table::KeywordDocuments),
+                TableId::of(Table::KeywordPostings),
+                TableId::of(Table::KeywordTotals),
+            ];
+            let written = |body: &Body, counted: &dyn Fn(TableId) -> bool| {
+                let Body::Batch(ops) = body else {
+                    return (0, 0);
+                };
+                let mut documents = 0;
+                let bytes = ops
+                    .iter()
+                    .map(|op| match op {
+                        Op::Put { table, key, value } if counted(*table) => {
+                            documents += usize::from(indexed[0] == *table);
+                            key.len() + value.len()
+                        }
+                        Op::Delete { table, key } if counted(*table) => key.len(),
+                        _ => 0,
+                    })
+                    .sum();
+                (bytes, documents)
+            };
+            let before = writer.position();
+            insert(&writer, vec![text(0)]);
+            let (unit, _) = written(
+                &writer
+                    .changes_since(&before, usize::MAX)
+                    .unwrap()
+                    .decoded
+                    .records[0]
+                    .record
+                    .body,
+                &|table| indexed.contains(&table),
+            );
+            insert(&writer, (1..260).map(text).collect());
+            let expected = search(&writer);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            drop(writer);
+            let writer = open_on(&fs, false);
+            let before = writer.position();
+            writer.promote(1, b"w").unwrap();
+            assert_eq!(search(&writer), expected);
+            integrity(&writer);
+            let commits: Vec<(usize, usize)> = writer
+                .changes_since(&before, usize::MAX)
+                .unwrap()
+                .decoded
+                .records
+                .iter()
+                .map(|change| written(&change.record.body, &|_| true))
+                .collect();
+            let budget = crate::graph::TEST_UPGRADE_BATCH_BYTES;
+            assert!(
+                commits
+                    .iter()
+                    .filter(|(_, documents)| *documents != 1)
+                    .all(|(bytes, _)| *bytes <= budget + unit),
+                "unit {unit}: {commits:?}"
+            );
+            assert!(
+                commits
+                    .iter()
+                    .any(|(bytes, documents)| *documents == 1 && *bytes > budget + unit),
+                "no commit reloaded a block past the budget: {commits:?}"
+            );
+            assert_eq!(stored(&writer, b"upgrade_progress"), None);
+        }
+
+        #[test]
+        fn a_tokenizer_rebuild_resumes_its_clear_from_the_last_key_it_deleted() {
+            let base = SimFs::new();
+            let replica = open_on(&base, true);
+            let fs = SimFs::new();
+            let writer = open_on(&fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                .unwrap();
+            let texts = (0..200)
+                .map(|k| {
+                    let words: Vec<String> = (0..100).map(|i| format!("t{k}x{i}")).collect();
+                    Value::String(format!("river {}", words.join(" ")))
+                })
+                .collect();
+            writer
+                .execute(
+                    "UNWIND $texts AS text INSERT (:N {text: text})",
+                    &Parameters::new().with("texts", Value::List(texts)),
+                )
+                .unwrap();
+            let expected = search(&writer);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            sync(&writer, &replica).unwrap();
+            drop(writer);
+            let writer = open_on(&fs, false);
+            let before = writer.position();
+            writer.promote(1, b"w").unwrap();
+            let postings = TableId::of(Table::KeywordPostings);
+            let metadata = TableId::of(Table::Metadata);
+            let ops = |changes: &Changes| -> Vec<Op> {
+                changes
+                    .decoded
+                    .records
+                    .iter()
+                    .flat_map(|change| match &change.record.body {
+                        Body::Batch(ops) => ops.clone(),
+                        _ => Vec::new(),
+                    })
+                    .collect()
+            };
+            let deleted = |ops: &[Op]| -> Vec<Vec<u8>> {
+                ops.iter()
+                    .filter_map(|op| match op {
+                        Op::Delete { table, key } if *table == postings => Some(key.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let mut clears = Vec::new();
+            for change in &writer
+                .changes_since(&before, usize::MAX)
+                .unwrap()
+                .decoded
+                .records
+            {
+                let Body::Batch(ops) = &change.record.body else {
+                    continue;
+                };
+                let keys = deleted(ops);
+                if keys.is_empty() {
+                    break;
+                }
+                let progress = ops.iter().find_map(|op| match op {
+                    Op::Put { table, key, value }
+                        if *table == metadata && key.as_slice() == b"upgrade_progress" =>
+                    {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                });
+                clears.push((keys, progress.unwrap()));
+            }
+            assert!(clears.len() >= 3, "{}", clears.len());
+            for pair in clears.windows(2) {
+                let ((keys, progress), (next, _)) = (&pair[0], &pair[1]);
+                assert!(progress.ends_with(keys.last().unwrap()), "{progress:?}");
+                assert!(keys.last() < next.first(), "a clear walked back");
+            }
+            for _ in 0..2 {
+                let changes = writer.changes_since(&replica.position(), 1).unwrap();
+                assert!(!deleted(&ops(&changes)).is_empty());
+                replica.apply(&changes).unwrap();
+            }
+            drop(writer);
+            drop(replica);
+
+            let fs = base.crash(Crash::KeepUnsynced);
+            let writer = open_on(&fs, false);
+            let before = writer.position();
+            writer.promote(2, b"w").unwrap();
+            assert_eq!(search(&writer), expected);
+            integrity(&writer);
+            let resumed = deleted(&ops(&writer.changes_since(&before, usize::MAX).unwrap()));
+            assert_eq!(resumed.first(), clears[2].0.first());
+        }
+
+        #[test]
         #[ignore = "left out of mise run check, run by mise run random"]
         fn a_crash_at_any_write_of_a_chunked_upgrade_resumes_to_the_same_graph() {
             let (base, expected, exported) = large_older_file();
