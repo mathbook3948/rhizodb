@@ -53,7 +53,7 @@ pub(crate) fn ran<P>(helpers: usize, finished: &[(usize, Result<Option<P>, Error
 const GROUPS: usize = 20;
 const NODES: usize = GROUPS * crate::graph::SLOTS;
 
-fn databases(setup: &[String]) -> (crate::Database, crate::Database) {
+fn databases(threshold: usize, setup: &[String]) -> (crate::Database, crate::Database) {
     let open = |options: crate::OpenOptions| {
         let db = options.in_memory().unwrap();
         for statement in setup {
@@ -63,15 +63,22 @@ fn databases(setup: &[String]) -> (crate::Database, crate::Database) {
     };
     (
         open(crate::OpenOptions::new().threads(1)),
-        open(crate::OpenOptions::new().threads(4).parallel_threshold(2)),
+        open(
+            crate::OpenOptions::new()
+                .threads(4)
+                .parallel_threshold(threshold),
+        ),
     )
 }
 
-fn numbered() -> (crate::Database, crate::Database) {
-    databases(&[format!(
-        "UNWIND range(0, {}) AS i INSERT (:P {{id: i}})",
-        NODES - 1
-    )])
+fn numbered(threshold: usize) -> (crate::Database, crate::Database) {
+    databases(
+        threshold,
+        &[format!(
+            "UNWIND range(0, {}) AS i INSERT (:P {{id: i}})",
+            NODES - 1
+        )],
+    )
 }
 
 fn outcome(db: &crate::Database, query: &str) -> String {
@@ -94,7 +101,7 @@ fn split_run(
 
 #[test]
 fn a_limit_whose_rows_come_late_reads_row_groups_on_several_threads() {
-    let dbs = numbered();
+    let dbs = numbered(2);
     let late = NODES - 2;
 
     let (rows, ran) = split_run(
@@ -113,7 +120,7 @@ fn a_limit_whose_rows_come_late_reads_row_groups_on_several_threads() {
 
 #[test]
 fn a_limit_its_first_row_group_fills_takes_no_helpers() {
-    let dbs = numbered();
+    let dbs = numbered(2);
 
     let (rows, ran) = split_run(&dbs, "MATCH (n:P) RETURN n.id SKIP 1 LIMIT 2");
 
@@ -122,9 +129,9 @@ fn a_limit_its_first_row_group_fills_takes_no_helpers() {
 }
 
 #[test]
-fn a_limit_stops_reading_row_groups_once_its_rows_are_found() {
-    let dbs = numbered();
+fn a_limit_found_by_the_caller_alone_stops_reading_row_groups() {
     let second = crate::graph::SLOTS;
+    let dbs = numbered(3 * second);
 
     let (rows, ran) = split_run(
         &dbs,
@@ -138,13 +145,12 @@ fn a_limit_stops_reading_row_groups_once_its_rows_are_found() {
         rows,
         format!("[[Integer({second})], [Integer({})]]", second + 1)
     );
-    let (_, read) = ran.expect("the match split");
-    assert!(read < GROUPS, "read all {read} row groups");
+    assert_eq!(ran, Some((0, 2)));
 }
 
 #[test]
 fn a_limit_over_rows_that_may_fail_still_fails_on_a_late_row() {
-    let dbs = numbered();
+    let dbs = numbered(2);
     let late = NODES - 2;
 
     let (outcome, _) = split_run(
@@ -158,14 +164,17 @@ fn a_limit_over_rows_that_may_fail_still_fails_on_a_late_row() {
 #[test]
 fn a_split_limit_skips_row_groups_without_start_nodes() {
     let slots = crate::graph::SLOTS;
-    let dbs = databases(&[
-        format!("UNWIND range(0, {}) AS i INSERT (:Q {{id: i}})", NODES - 1),
-        format!(
-            "MATCH (n:Q) WHERE n.id % {slots} < 2 AND (n.id / {slots}) IN [3, 11, 12, 19] \
-             SET n:P REMOVE n:Q"
-        ),
-        format!("MATCH (n) WHERE n.id / {slots} = 12 DETACH DELETE n"),
-    ]);
+    let dbs = databases(
+        2,
+        &[
+            format!("UNWIND range(0, {}) AS i INSERT (:Q {{id: i}})", NODES - 1),
+            format!(
+                "MATCH (n:Q) WHERE n.id % {slots} < 2 AND (n.id / {slots}) IN [3, 11, 12, 19] \
+                 SET n:P REMOVE n:Q"
+            ),
+            format!("MATCH (n) WHERE n.id / {slots} = 12 DETACH DELETE n"),
+        ],
+    );
 
     let (rows, ran) = split_run(
         &dbs,
