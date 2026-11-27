@@ -130,6 +130,12 @@ impl From<EngineError> for StorageError {
             StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
         } else if matches!(&error, EngineError::Unsupported(_)) {
             StorageError::of_kind(ErrorKind::UnsupportedFormatVersion, error)
+        } else if let EngineError::Io(error) = error {
+            StorageError::io(
+                ErrorKind::Storage,
+                "the storage engine cannot read or write its files",
+                error,
+            )
         } else {
             StorageError::new(error)
         }

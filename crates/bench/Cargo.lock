@@ -2528,6 +2528,7 @@ dependencies = [
  "memchr",
  "regex-automata",
  "regex-syntax",
+ "rustix",
  "twox-hash 2.1.5",
  "unicode-normalization",
  "unicode-segmentation",

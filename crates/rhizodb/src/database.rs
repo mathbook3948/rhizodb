@@ -29,7 +29,11 @@ use crate::transaction::WriteTransaction;
 pub(crate) type Backend = Engine<AnyFs>;
 
 fn open_backend(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
-    Ok(any_fs::open_path(path, options).map_err(StorageError::from)?)
+    any_fs::open_path(path, options).map_err(|error| {
+        StorageError::from(error)
+            .in_context(|| format!("cannot open the database at {}", path.display()))
+            .into()
+    })
 }
 
 fn in_memory_backend(options: EngineOptions) -> Result<Backend, Error> {
@@ -492,13 +496,16 @@ impl Database {
     /// and commits made meanwhile stay out of the copy. The copy is written under a staging name
     /// that starts with `.` and the file name of `path`, in the same directory, synced, and then
     /// linked to `path`, so after a crash or a failure `path` holds either nothing or the whole
-    /// copy. A crash can leave the staging file behind, and removing it is safe. An in-memory
-    /// database backs up to a file the same way.
+    /// copy. On a file system without hard links, the staging file is renamed to `path` by a
+    /// rename that fails when `path` exists, on Linux, Android, and Apple platforms. A crash can
+    /// leave the staging file behind, and removing it is safe. An in-memory database backs up to
+    /// a file the same way.
     ///
     /// Fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when a
     /// file or directory already exists at `path`, which is never replaced. A `path` that names
-    /// no file, or one on a file system that cannot hard-link the staging file to it, fails with
-    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage).
+    /// no file, one whose directory cannot be written, or, on other platforms, one on a file
+    /// system without hard links fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage),
+    /// and the I/O error behind it is the error's [`source`](std::error::Error::source).
     ///
     /// ```
     /// use rhizodb::Database;

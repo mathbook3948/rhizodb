@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 use crate::storage::StorageError;
 use crate::storage::copy_tables;
@@ -250,7 +251,17 @@ pub(crate) fn write_copy_on<F: FileSystem + 'static>(
             copy_tables(snapshot, &copy)?;
             copy.close().map_err(StorageError::from)
         });
-    let left = segment_files(&*fs, name).map_err(StorageError::new)?;
+    let left = match segment_files(&*fs, name) {
+        Ok(left) => left,
+        Err(error) => {
+            copied?;
+            return Err(StorageError::io(
+                ErrorKind::Storage,
+                "cannot list the log segments of the backup",
+                error,
+            ));
+        }
+    };
     if copied.is_ok() && left.is_empty() {
         return Ok(());
     }
