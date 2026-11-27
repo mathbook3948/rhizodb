@@ -1264,6 +1264,165 @@ fn an_upgrade_an_older_build_began_runs_the_steps_that_build_lacked_before_resum
     }
 }
 
+fn keyword_database(path: &std::path::Path, ghost: bool) {
+    let db = crate::Database::open(path).unwrap();
+    db.create_keyword_index("text", IndexTarget::Label("Doc"), &["text"])
+        .unwrap();
+    let run = |query: &str| {
+        db.execute(query, &crate::Parameters::new()).unwrap();
+    };
+    run(
+        "UNWIND range(0, 49) AS i CREATE (:Doc {i: i, text: 'river ' + toString(i)})-[:R {k: i}]->(:Doc {i: i + 100, text: 'ocean'})",
+    );
+    if ghost {
+        run("CREATE (:Doc {i: 999, text: 'ghost'})");
+    }
+}
+
+fn keyword_index_id(write: &impl WriteTransaction) -> u32 {
+    let (key, _) = write
+        .scan_prefix(Table::KeywordTotals, &[])
+        .unwrap()
+        .remove(0);
+    u32::from_be_bytes(key[..4].try_into().unwrap())
+}
+
+fn index_entries(write: &impl WriteTransaction, id: u32) -> Vec<(Table, Vec<u8>, Vec<u8>)> {
+    [
+        Table::KeywordPostings,
+        Table::KeywordDocuments,
+        Table::KeywordTotals,
+    ]
+    .into_iter()
+    .flat_map(|table| {
+        write
+            .scan_prefix(table, &keys::index_prefix(id))
+            .unwrap()
+            .into_iter()
+            .map(move |(key, value)| (table, key, value))
+    })
+    .collect()
+}
+
+fn mark_upgrading(write: &mut impl WriteTransaction, from: u32, step: UpgradeStep, cursor: &[u8]) {
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &(from | UPGRADING).to_be_bytes(),
+        )
+        .unwrap();
+    let mut progress = 14u32.to_be_bytes().to_vec();
+    progress.push(step.code());
+    if !cursor.is_empty() {
+        progress.push(1);
+        progress.extend_from_slice(cursor);
+    }
+    write
+        .put(Table::Metadata, keys::UPGRADE_PROGRESS_KEY, &progress)
+        .unwrap();
+}
+
+fn assert_upgraded_whole(path: &std::path::Path, context: &str) {
+    let db = crate::Database::open(path).unwrap();
+    let count = |text: &str| {
+        db.execute(
+            &format!(
+                "CALL db.index.keyword.queryNodes('text', '{text}', 1000) YIELD node RETURN count(*)"
+            ),
+            &crate::Parameters::new(),
+        )
+        .unwrap()
+        .rows()
+        .to_vec()
+    };
+    let integer = |value: i64| vec![vec![crate::Value::Integer(value)]];
+    assert_eq!(count("river"), integer(50), "{context}");
+    assert_eq!(count("ghost"), integer(0), "{context}");
+    assert_eq!(
+        db.execute(
+            "MATCH ()-[r:R]->() RETURN sum(r.k)",
+            &crate::Parameters::new()
+        )
+        .unwrap()
+        .rows(),
+        integer(1225),
+        "{context}"
+    );
+    db.check().unwrap();
+}
+
+#[test]
+fn a_resumed_rebuild_of_an_older_build_rebuilds_every_keyword_index_whole() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("filling.db");
+    keyword_database(&path, false);
+    {
+        let storage = test_engine::open(&path);
+        let mut write = storage.begin_write().unwrap();
+        let id = keyword_index_id(&write);
+        for (table, key, _) in index_entries(&write, id) {
+            write.delete(table, &key).unwrap();
+        }
+        store_as_format_fourteen(&mut write);
+        let mut filling = id.to_be_bytes().to_vec();
+        filling.push(1);
+        filling.extend_from_slice(&(1u64 << 40).to_be_bytes());
+        mark_upgrading(&mut write, 14, UpgradeStep::Tokenizer, &filling);
+        write
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+            .unwrap();
+        write.commit().unwrap();
+    }
+    assert_upgraded_whole(&path, "an older build's cursor past every element");
+
+    let path = directory.path().join("clearing.db");
+    keyword_database(&path, true);
+    let (id, stale) = {
+        let storage = test_engine::open(&path);
+        let write = storage.begin_write().unwrap();
+        let id = keyword_index_id(&write);
+        (id, index_entries(&write, id))
+    };
+    crate::Database::open(&path)
+        .unwrap()
+        .execute("MATCH (d:Doc {i: 999}) DELETE d", &crate::Parameters::new())
+        .unwrap();
+    {
+        let storage = test_engine::open(&path);
+        let mut write = storage.begin_write().unwrap();
+        for (table, key, value) in stale {
+            write.put(table, &key, &value).unwrap();
+        }
+        store_as_format_fourteen(&mut write);
+        let mut clearing = id.to_be_bytes().to_vec();
+        clearing.extend_from_slice(&[2, 3]);
+        clearing.extend_from_slice(&keys::index_prefix(id));
+        clearing.push(0x42);
+        mark_upgrading(&mut write, 14, UpgradeStep::Tokenizer, &clearing);
+        write
+            .put(Table::Metadata, keys::TOKENIZER_KEY, b"another tokenizer")
+            .unwrap();
+        write.commit().unwrap();
+    }
+    assert_upgraded_whole(&path, "an older build's cursor past the posting tables");
+}
+
+#[test]
+fn a_resumed_upgrade_of_an_older_build_keeps_the_steps_that_build_had_not_finished() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("postings.db");
+    keyword_database(&path, false);
+    {
+        let storage = test_engine::open(&path);
+        let mut write = storage.begin_write().unwrap();
+        store_as_format_thirteen(&mut write);
+        mark_upgrading(&mut write, 13, UpgradeStep::PostingBlocks, &[]);
+        write.commit().unwrap();
+    }
+    assert_upgraded_whole(&path, "an older build's posting blocks step");
+}
+
 #[test]
 fn an_upgrade_a_newer_build_began_is_refused_as_a_newer_format() {
     let storage = test_engine::in_memory();
