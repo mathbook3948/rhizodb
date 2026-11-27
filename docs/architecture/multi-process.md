@@ -142,6 +142,10 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A write transaction in a session adds the write lock, its release, and a few atomic stores after the sync, which is small beside the sync itself.
 - Each process of a session holds its own memtable and block cache, so a session's memory grows with its processes.
 - The engine benchmarks of a single-process open must not regress at any phase.
+- The side file's mapping and the byte-range locks live in a small workspace crate of their own that allows audited unsafe code, over `windows-sys` on Windows and `nix` or `libc` on Unix.
+- That crate exposes only mapping a file, atomic access to the words of a mapping, and locking and unlocking a byte range.
+- `rhizodb` keeps `#![forbid(unsafe_code)]` and reaches the side file and its locks only through that crate.
+- That crate's tests run under Miri where Miri can run them, such as the atomic word access over memory it owns, and on the CI jobs of every platform for the mappings and locks, while the simulated side file implements the same trait.
 - The side file and its locks are reached through a trait, with an implementation over the operating system and a simulated one, as files are.
 - The simulation runs each process of a session as an engine in one test process, on the simulated file system and a simulated side file, and is deterministic for a seed.
 - A simulated kill drops a process's locks, memory, and slot owner, and keeps the files, the page cache, and the side file.
@@ -153,7 +157,6 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 
 ## Open
 
-- Where the code that maps the side file and takes byte-range locks lives, since `rhizodb` forbids unsafe code and the standard library offers neither, and the owner decides among four options: a separate small crate of audited unsafe code over `windows-sys` and `nix` or `libc`; off-the-shelf crates for mappings and range locks, which still need a wrapper of our own; relaxing `forbid(unsafe_code)` to `deny` with one module allowed; or no unsafe code at all, reading the side file with positioned reads and locking through one lock file per lock with the standard library's whole-file locks, which costs a system call per transaction, needs a checksummed double copy of each record in place of atomic stores, and leaves Windows without a lock on the database file that lets the session write.
 - What `OpenOptions` calls the setting, and whether multi-process access becomes the default once its cost on one process is measured to be nothing, which the phase 4 benchmarks decide.
 - How a read-only open of a phase 1 build is kept out of a session, since it shares the database file's lock with the session's processes, and on Windows its whole-file shared lock denies the session writer's writes to the file; a header flag that every header of a session carries refuses it once the session writes a header, or phase 1 ships only beside phase 3, and the release plan decides.
 - Whether macOS gives programs open-file-description locks, which a run on the macOS CI runner decides.
