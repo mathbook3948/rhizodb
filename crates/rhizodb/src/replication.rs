@@ -18,6 +18,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::graph::GraphError;
 use crate::graph::newer_format_put;
+use crate::graph::older_format_put;
 use crate::storage::StorageError;
 use crate::storage::Table;
 
@@ -684,7 +685,7 @@ impl Database {
     /// format newer than this build reads. A failure leaves every change before it applied.
     pub fn apply(&self, changes: &Changes) -> Result<Position, Error> {
         let _roles = self.roles();
-        let unreadable = first_newer_format(&changes.decoded);
+        let unreadable = first_metadata_put(&changes.decoded, newer_format_put);
         let readable = match unreadable {
             Some((index, _)) => &Decoded {
                 records: changes.decoded.records[..index].to_vec(),
@@ -692,6 +693,9 @@ impl Database {
             },
             None => &changes.decoded,
         };
+        if let Some(found) = first_metadata_put(readable, older_format_put) {
+            self.graph.wait_for_upgrade(found.1);
+        }
         let indexes = readable.touches(TableId::of(Table::Indexes));
         self.graph
             .apply_outside(indexes, |engine| engine.apply_changes(readable))?
@@ -858,7 +862,10 @@ pub(crate) fn check_epoch(term: u64, writer_id: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn first_newer_format(decoded: &Decoded) -> Option<(usize, u32)> {
+fn first_metadata_put(
+    decoded: &Decoded,
+    matches: fn(&[u8], &[u8]) -> Option<u32>,
+) -> Option<(usize, u32)> {
     let metadata = TableId::of(Table::Metadata);
     decoded
         .records
@@ -868,9 +875,7 @@ fn first_newer_format(decoded: &Decoded) -> Option<(usize, u32)> {
             Body::Batch(ops) => ops
                 .iter()
                 .find_map(|op| match op {
-                    Op::Put { table, key, value } if *table == metadata => {
-                        newer_format_put(key, value)
-                    }
+                    Op::Put { table, key, value } if *table == metadata => matches(key, value),
                     _ => None,
                 })
                 .map(|version| (index, version)),

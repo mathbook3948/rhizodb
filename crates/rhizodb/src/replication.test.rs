@@ -920,6 +920,31 @@ mod crash {
         }
 
         #[test]
+        fn a_new_replica_that_follows_a_writer_of_an_older_format_waits_without_a_restart() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            insert(&writer, 2);
+            let replica = open_on(&SimFs::new(), true);
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(0)]]);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            insert(&writer, 3);
+            sync(&writer, &replica).unwrap();
+            assert_eq!(
+                count(&replica).unwrap_err().kind(),
+                ErrorKind::FormatUpgradePending
+            );
+            store(&writer, b"format_version", &14u32.to_be_bytes());
+            sync(&writer, &replica).unwrap();
+            assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
+        }
+
+        #[test]
         fn a_replica_of_an_older_tokenizer_waits_for_the_rebuilt_keyword_indexes() {
             let (writer_fs, replica_fs) = older_pair(true);
             let replica = open_on(&replica_fs, false);

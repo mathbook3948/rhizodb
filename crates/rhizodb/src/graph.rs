@@ -106,6 +106,17 @@ pub(crate) fn newer_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
     let version = u32::from_be_bytes(value.try_into().ok()?);
     (version > FORMAT_VERSION).then_some(version)
 }
+
+/// The graph format a write of `value` under `key` of the metadata table leaves for its writer
+/// to upgrade: an older format version, or this build's for another tokenizer.
+pub(crate) fn older_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
+    if key == keys::FORMAT_VERSION_KEY {
+        let version = u32::from_be_bytes(value.try_into().ok()?);
+        return (version < FORMAT_VERSION).then_some(version);
+    }
+    (key == keys::TOKENIZER_KEY && value != tokenize::fingerprint().as_slice())
+        .then_some(FORMAT_VERSION)
+}
 const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
@@ -373,6 +384,12 @@ impl<S: Storage> Graph<S> {
             0 => Ok(()),
             found => Err(GraphError::UpgradePending(found)),
         }
+    }
+
+    /// Makes the graph wait for its writer's upgrade of the graph format `found` before it
+    /// serves reads, ahead of changes that leave it in that format.
+    pub(crate) fn wait_for_upgrade(&self, found: u32) {
+        self.pending.store(found, Ordering::Release);
     }
 
     /// Whether the graph waits for its writer's upgrade before it serves reads.

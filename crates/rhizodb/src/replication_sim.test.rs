@@ -66,9 +66,36 @@ fn open(fs: &SimFs, replica: bool) -> Result<Database, Error> {
 }
 
 fn export(db: &Database) -> Vec<u8> {
+    readable_export(db).expect("a database waiting for an upgrade has no export")
+}
+
+fn readable_export(db: &Database) -> Option<Vec<u8>> {
+    let pending = db.graph.upgrade_pending();
     let mut out = Vec::new();
-    db.export(&mut out).unwrap();
-    out
+    match db.export(&mut out) {
+        Ok(()) => {
+            assert!(!pending, "a database waiting for an upgrade served a read");
+            Some(out)
+        }
+        Err(error) if error.kind() == ErrorKind::FormatUpgradePending => {
+            assert!(pending, "a ready database refused a read: {error}");
+            None
+        }
+        Err(error) => panic!("an export failed with {error}"),
+    }
+}
+
+const OLDER_FORMAT: u32 = 13;
+
+fn stored_format(db: &Database) -> Option<Vec<u8>> {
+    use crate::storage::ReadTransaction;
+    use crate::storage::Storage;
+    db.graph
+        .storage()
+        .begin_read()
+        .unwrap()
+        .get(crate::storage::Table::Metadata, b"format_version")
+        .unwrap()
 }
 
 fn writer_id(node: usize) -> Vec<u8> {
@@ -89,6 +116,7 @@ struct Delayed {
 
 struct Sim {
     seed: u64,
+    rolling: bool,
     rng: Rng,
     nodes: Vec<Node>,
     term: u64,
@@ -101,7 +129,7 @@ struct Sim {
 }
 
 impl Sim {
-    fn new(seed: u64) -> Self {
+    fn new(seed: u64, rolling: bool) -> Self {
         let nodes = (0..NODES)
             .map(|index| {
                 let fs = SimFs::new();
@@ -116,6 +144,7 @@ impl Sim {
             .collect();
         let mut sim = Self {
             seed,
+            rolling,
             rng: Rng(seed),
             nodes,
             term: 1,
@@ -133,6 +162,20 @@ impl Sim {
         sim.note(0);
         sim.nodes[0].db.promote(1, &writer_id(0)).unwrap();
         sim.note(0);
+        if rolling {
+            use crate::storage::Storage;
+            use crate::storage::WriteTransaction;
+            let mut write = sim.nodes[0].db.graph.storage().begin_write().unwrap();
+            write
+                .put(
+                    crate::storage::Table::Metadata,
+                    b"format_version",
+                    &OLDER_FORMAT.to_be_bytes(),
+                )
+                .unwrap();
+            write.commit().unwrap();
+            sim.note(0);
+        }
         sim
     }
 
@@ -152,7 +195,10 @@ impl Sim {
     fn note(&mut self, node: usize) {
         let db = &self.nodes[node].db;
         let position = db.position();
-        let exported = export(db);
+        let Some(exported) = readable_export(db) else {
+            self.count("pending read");
+            return;
+        };
         if let Some(known) = self.seen.get(&position) {
             assert!(
                 known == &exported,
@@ -166,6 +212,17 @@ impl Sim {
     fn check_replica(&mut self, node: usize, before: &Position) {
         let db = &self.nodes[node].db;
         let position = db.position();
+        assert!(
+            position.term() >= before.term(),
+            "{}: node {node} went from term {} to term {}",
+            self.context(),
+            before.term(),
+            position.term()
+        );
+        let Some(exported) = readable_export(db) else {
+            self.count("pending read");
+            return;
+        };
         let expected = self.seen.get(&position).unwrap_or_else(|| {
             panic!(
                 "{}: node {node} reached {position:?}, which no writer passed",
@@ -173,16 +230,9 @@ impl Sim {
             )
         });
         assert!(
-            &export(db) == expected,
+            &exported == expected,
             "{}: node {node} at {position:?} holds another graph than its writer did",
             self.context()
-        );
-        assert!(
-            position.term() >= before.term(),
-            "{}: node {node} went from term {} to term {}",
-            self.context(),
-            before.term(),
-            position.term()
         );
     }
 
@@ -212,8 +262,11 @@ impl Sim {
                 0 => db
                     .create_property_index("by_k", IndexTarget::Label("N"), "k")
                     .map(drop),
-                1 => db
+                1 if !self.rolling => db
                     .create_keyword_index("text", IndexTarget::Label("N"), &["text"])
+                    .map(drop),
+                1 => db
+                    .create_property_index("by_v", IndexTarget::Label("N"), "v")
                     .map(drop),
                 _ => db.drop_index("text").map(drop),
             }
@@ -446,10 +499,12 @@ impl Sim {
 
     fn promote(&mut self, node: usize) -> Result<(), Error> {
         let before = self.nodes[node].db.position();
-        let held = export(&self.nodes[node].db);
+        let held = readable_export(&self.nodes[node].db);
         self.nodes[node].db.promote(self.term, &writer_id(node))?;
         let begun = self.nodes[node].db.changes_since(&before, 1).unwrap();
-        self.seen.insert(begun.last().clone(), held);
+        if let Some(held) = held {
+            self.seen.insert(begun.last().clone(), held);
+        }
         self.note(node);
         Ok(())
     }
@@ -499,6 +554,22 @@ impl Sim {
     fn heal_and_converge(&mut self) {
         self.steps.push("heal".to_owned());
         self.fence_stale();
+        if stored_format(&self.nodes[self.holder].db) == Some(OLDER_FORMAT.to_be_bytes().to_vec()) {
+            self.steps
+                .push(format!("restart {} on the new build", self.holder));
+            self.count("upgrade at heal");
+            let holder = self.holder;
+            let fs = self.nodes[holder].fs.clone();
+            let placeholder = open(&SimFs::new(), true).unwrap();
+            drop(std::mem::replace(&mut self.nodes[holder].db, placeholder));
+            self.nodes[holder].db = open(&fs, false).unwrap();
+            let term = self.nodes[holder].db.position().term();
+            self.nodes[holder]
+                .db
+                .promote(term, &writer_id(holder))
+                .unwrap();
+            self.note(holder);
+        }
         for node in &mut self.nodes {
             node.cut_off = false;
         }
@@ -542,20 +613,22 @@ impl Sim {
     }
 
     fn check_pairs(&self) {
-        let held: Vec<(Position, Vec<u8>)> = self
+        let held: Vec<(Position, Option<Vec<u8>>)> = self
             .nodes
             .iter()
-            .map(|node| (node.db.position(), export(&node.db)))
+            .map(|node| (node.db.position(), readable_export(&node.db)))
             .collect();
         for (left, (a, a_export)) in held.iter().enumerate() {
             for (b, b_export) in &held[left + 1..] {
                 if (a.term(), a.writer_id(), a.lsn()) == (b.term(), b.writer_id(), b.lsn()) {
                     assert_eq!(a.chain(), b.chain(), "{}", self.context());
-                    assert!(
-                        a_export == b_export,
-                        "{}: {a:?} holds two graphs",
-                        self.context()
-                    );
+                    if let (Some(a_export), Some(b_export)) = (a_export, b_export) {
+                        assert!(
+                            a_export == b_export,
+                            "{}: {a:?} holds two graphs",
+                            self.context()
+                        );
+                    }
                 }
             }
         }
@@ -598,10 +671,47 @@ fn replicas_converge_on_their_writer_under_random_faults() {
     for seed in seeds {
         eprintln!("replication simulation seed {seed}");
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let mut sim = Sim::new(seed);
+            let mut sim = Sim::new(seed, false);
             sim.run(300);
             let rebuilt = sim.nodes.iter().map(|node| node.rebuilt).sum::<u32>();
             sim.counts.insert("rebuild", rebuilt);
+            sim.counts
+        }));
+        match outcome {
+            Ok(counts) => eprintln!("seed {seed} converged: {counts:?}"),
+            Err(panic) => {
+                eprintln!("rerun with RHIZODB_REPLICATION_SEED={seed}");
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn replicas_converge_through_a_rolling_upgrade_under_random_faults() {
+    let first = std::env::var("RHIZODB_REPLICATION_SEED")
+        .ok()
+        .and_then(|seed| seed.parse::<u64>().ok());
+    let seeds: Vec<u64> = match first {
+        Some(seed) => vec![seed],
+        None => (0..u64::from(test_scale::cases(6)))
+            .map(|seed| 0x5EED_1000 + seed)
+            .collect(),
+    };
+    for seed in seeds {
+        eprintln!("rolling upgrade simulation seed {seed}");
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let mut sim = Sim::new(seed, true);
+            sim.run(300);
+            for node in &sim.nodes {
+                assert_ne!(
+                    stored_format(&node.db),
+                    Some(OLDER_FORMAT.to_be_bytes().to_vec()),
+                    "{}",
+                    sim.context()
+                );
+            }
             sim.counts
         }));
         match outcome {
