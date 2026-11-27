@@ -29,7 +29,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A chunk stays one value however long its records make it, and a chunk longer than 1 KiB but no longer than a quarter of a block cache shard is read from the block cache once a read has loaded its run, until the cache evicts it, so chunks need no cut into parts the way columns and adjacency segments have.
 - A write transaction loads a chunk the first time it changes it and writes the chunks it changed at commit, or all of them earlier once they hold more than 4 MiB of records.
 - Opening a database written before relationship chunks moves every relationship record into its chunk, in the opening write transaction.
-- Opening a database written before relationship chunk checksums rewrites each chunk with its checksum in the opening write transaction, and leaves a chunk that already carries one as it is.
+- Opening a database written before relationship chunk checksums rewrites each chunk with its checksum as a step of the upgrade, and leaves a chunk that already carries one as it is.
 - That upgrade fails on a chunk whose records do not decode instead of sealing damage under a valid checksum.
 - `Database::check` checks every relationship chunk against its checksum, except while the database waits for its writer's upgrade.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.

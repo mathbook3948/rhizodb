@@ -16,7 +16,11 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - Opening a path with no file, or an empty one, writes the new database under a staging name in the same directory, syncs it, and links it into place, so a power loss during creation leaves either no database or a whole empty one.
 - The staging file's own lock decides which of several concurrent opens creates the database, and the others wait for it instead of replacing it.
 - Opening an existing file that the engine cannot read never rewrites it, since it may be a damaged database.
-- Opening a database written in an older format version records the current version in the same write transaction, before anything else reads it.
+- Opening a database written in an older format version as its writer upgrades it before anything else reads it, in a sequence of steps that each run in commits of bounded size, so a file of any size upgrades within bounded memory and log records.
+- Each commit of an upgrade records the step and the cursor it reached, so an upgrade cut off by a crash resumes there at the next open.
+- While an upgrade is under way the format version holds a mark of the version it started from, which no build reads as a graph, so no build ever reads a graph half moved to a newer layout.
+- The last commit of an upgrade removes its progress and records the current format version and tokenizer.
+- A step is a function from a cursor and a byte budget to the next cursor, so a later format adds its migration as one more step.
 - Opening a database written in a newer format version fails.
 - Opening a database written in a format version older than the first one RhizoDB's own engine wrote fails the same way.
 - Opening a database whose keyword indexes another tokenizer built rebuilds them in the same write transaction, before anything else reads them.

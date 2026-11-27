@@ -31,6 +31,7 @@ pub(crate) fn element_key(id: u64) -> [u8; 8] {
 
 pub(crate) const NEXT_INDEX_ID_KEY: &[u8] = b"next_index_id";
 pub(crate) const TOKENIZER_KEY: &[u8] = b"tokenizer";
+pub(crate) const UPGRADE_PROGRESS_KEY: &[u8] = b"upgrade_progress";
 
 pub(crate) fn index_prefix(index: u32) -> [u8; 4] {
     index.to_be_bytes()

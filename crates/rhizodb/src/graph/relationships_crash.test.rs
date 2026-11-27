@@ -15,6 +15,7 @@ fn prepare(fs: &SimFs) -> Expected {
     let mut write = graph.write().unwrap();
     let rel_type = write.intern_token::<RelationshipType>("R").unwrap();
     let key = write.intern_token::<PropertyKey>("k").unwrap();
+    let text = write.intern_token::<PropertyKey>("s").unwrap();
     let nodes: Vec<NodeId> = (0..20)
         .map(|_| {
             write
@@ -25,7 +26,7 @@ fn prepare(fs: &SimFs) -> Expected {
                 .unwrap()
         })
         .collect();
-    for index in 0..400usize {
+    for index in 0..4000usize {
         let mut record = RelationshipRecord {
             rel_type,
             source: nodes[index % nodes.len()],
@@ -37,6 +38,10 @@ fn prepare(fs: &SimFs) -> Expected {
                 .properties
                 .insert(key, PropertyValue::Integer(index as i64));
         }
+        record.properties.insert(
+            text,
+            PropertyValue::String(format!("relationship {index:08}")),
+        );
         let id = write.create_relationship(&record).unwrap();
         if index % 11 == 4 || (100..140).contains(&index) {
             write.delete_relationship(id).unwrap();
@@ -84,7 +89,7 @@ fn assert_holds(graph: &Graph<TestStorage>, expected: &Expected, context: &str) 
 
 #[test]
 #[ignore = "left out of mise run check, run by mise run random"]
-fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_leaves_it_undone_or_done() {
+fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_resumes_to_every_relationship() {
     let prepared = SimFs::new();
     let expected = prepare(&prepared);
     let operations = {
@@ -110,7 +115,10 @@ fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_leaves_it_undone_or_
                 let context = format!("{failure:?} at {at} of {operations}, {mode:?}");
                 let recovered = fs.crash(mode);
                 let format = stored_format(&recovered);
-                assert!([14, FORMAT_VERSION].contains(&format), "{context}");
+                assert!(
+                    [14, 14 | UPGRADING, FORMAT_VERSION].contains(&format),
+                    "{context}"
+                );
                 if upgraded {
                     assert_eq!(
                         format, FORMAT_VERSION,
@@ -131,7 +139,7 @@ fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_leaves_it_undone_or_
     }
     assert_eq!(
         outcomes,
-        [14, FORMAT_VERSION].into(),
-        "the crashes land both before and after the upgrade"
+        [14, 14 | UPGRADING, FORMAT_VERSION].into(),
+        "the crashes land before, inside, and after the upgrade"
     );
 }

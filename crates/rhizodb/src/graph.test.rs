@@ -1132,6 +1132,11 @@ fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
         &(FORMAT_VERSION - 1).to_be_bytes(),
     );
     assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+    rewrite(
+        keys::FORMAT_VERSION_KEY,
+        &(FORMAT_VERSION | UPGRADING).to_be_bytes(),
+    );
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
     rewrite(keys::FORMAT_VERSION_KEY, &99u32.to_be_bytes());
     assert!(matches!(
         read_only(),
