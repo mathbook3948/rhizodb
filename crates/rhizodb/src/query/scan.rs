@@ -829,9 +829,6 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     fn scanned_ids(&self, scan: &NodeScan<'_>) -> Result<Vec<NodeId>, Error> {
-        if let Some(ids) = self.morsel_of(scan.part) {
-            return Ok(ids.to_vec());
-        }
         Ok(match scan.label {
             Some(label) => match self.label_token(label)? {
                 Some(token) => self.tx.node_ids_with_label(token)?,
@@ -854,7 +851,8 @@ impl<T: ReadTransaction> Env<'_, T> {
         if rows.is_empty() {
             return Ok(());
         }
-        if let ([row], None) = (rows, self.morsel_of(scan.part)) {
+        let morsel = self.morsel_of(scan.part);
+        if let ([row], None) = (rows, &morsel) {
             let label = match scan.label {
                 Some(label) => match self.label_token(label)? {
                     Some(token) => Some(token),
@@ -884,7 +882,14 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Ok(true)
             });
         }
-        let ids = self.scanned_ids(scan)?;
+        let listed;
+        let ids = match &morsel {
+            Some(ids) => ids,
+            None => {
+                listed = self.scanned_ids(scan)?;
+                listed.as_slice()
+            }
+        };
         let mut groups: Vec<(ScanGroup<'_>, usize)> = Vec::new();
         for (input, row) in rows.iter().enumerate() {
             let mut start = 0;

@@ -62,6 +62,8 @@ pub use index::IndexTarget;
 pub(crate) use index::Target;
 pub use index::VectorMetric;
 pub(crate) use meta::LabelReader;
+#[cfg(test)]
+pub(crate) use meta::SLOTS;
 pub(crate) use meta::row_group;
 pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
@@ -1365,6 +1367,16 @@ impl<T: ReadTransaction> GraphTx<T> {
             }
         }
         Ok(())
+    }
+
+    /// Whether a row group that holds IDs from `node` on keeps node meta. When none does, no node
+    /// has an ID of `node` or above.
+    pub(crate) fn may_hold_from(&self, node: NodeId) -> Result<bool, GraphError> {
+        match self.visit_meta_from(false, row_group(node), |_| Err(Flow::<GraphError>::Stop)) {
+            Ok(()) => Ok(false),
+            Err(Flow::Stop) => Ok(true),
+            Err(Flow::Failed(error)) => Err(error),
+        }
     }
 
     /// How many nodes there are, from the live count each group keeps. Like a label count, it
