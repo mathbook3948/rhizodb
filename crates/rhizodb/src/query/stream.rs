@@ -1,8 +1,11 @@
 use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use crate::error::Error;
 use crate::gql::ast::BinaryOp;
+use crate::gql::ast::SortDirection;
 use crate::storage::ReadTransaction;
 
 use super::aggregate::Groups;
@@ -10,18 +13,20 @@ use super::datum::Datum;
 use super::eval::Env;
 use super::eval::Row;
 use super::eval::set;
+use super::exec::rank;
 use super::functions::Function;
 use super::functions::range_items;
 use super::keys::KeySet;
+use super::plan::AggregateFunction;
 use super::plan::CallClause;
 use super::plan::CallSubquery;
 use super::plan::Clause;
 use super::plan::Expr;
+use super::plan::Holds;
 use super::plan::Items;
 use super::plan::MatchClause;
 use super::plan::NodePattern;
 use super::plan::PatternPart;
-use super::plan::Program;
 use super::plan::Projection;
 use super::plan::ReadClause;
 use super::plan::Slot;
@@ -39,6 +44,8 @@ pub(crate) enum Streamed {
 pub(crate) struct Stage<'c> {
     clause: &'c ReadClause,
     state: State<'c>,
+    /// Whether an error it raises is the one applying the clauses in turn raises.
+    pub(crate) exact: bool,
 }
 
 enum State<'c> {
@@ -48,8 +55,8 @@ enum State<'c> {
     Match { scans: bool },
     /// A projection without `ORDER BY` or aggregates.
     Plain(Plain),
-    /// A projection with `ORDER BY`, holding its rows until its input ends.
-    Sorted(Vec<Row>),
+    /// A projection with `ORDER BY`, holding the rows it may give until its input ends.
+    Sorted(Sorted<'c>),
     /// An aggregating projection, holding its groups until its input ends.
     Grouped(Groups<'c>),
 }
@@ -69,11 +76,102 @@ struct Plain {
     pub(crate) stops: bool,
 }
 
+/// What a projection with `ORDER BY` holds while its input lasts: with a `LIMIT`, only the
+/// `SKIP` plus `LIMIT` rows that rank first so far, in a heap whose top ranks last.
+pub(crate) struct Sorted<'c> {
+    skip: usize,
+    limit: Option<usize>,
+    /// How many rows it holds at most.
+    pub(crate) kept: usize,
+    seen: Option<KeySet>,
+    heap: BinaryHeap<Ranked<'c>>,
+    /// The sort keys of the row it reads, reused from row to row.
+    pub(crate) keys: Vec<Datum>,
+    /// How many rows it ranked, which gives each the position that breaks ties.
+    pub(crate) ranked: usize,
+    /// The first error a sort key raised. Applying the clauses in turn evaluates the items of
+    /// every row before any sort key, so it is raised only once the input ends.
+    pub(crate) failed: Option<Error>,
+}
+
+/// A row with its sort keys and its position among the rows ranked, which ranks after every
+/// row before it with the same keys.
+pub(crate) struct Ranked<'c> {
+    order_by: &'c [(Expr, SortDirection)],
+    keys: Vec<Datum>,
+    position: usize,
+    row: Row,
+}
+
+impl Ord for Ranked<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        rank(
+            self.order_by,
+            (&self.keys, self.position),
+            (&other.keys, other.position),
+        )
+    }
+}
+
+impl PartialOrd for Ranked<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Ranked<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Ranked<'_> {}
+
+impl<'c> Sorted<'c> {
+    /// Ranks `row`, whose sort keys are in [`Sorted::keys`], keeping it while it is among the
+    /// first [`Sorted::kept`] rows.
+    pub(crate) fn offer(&mut self, order_by: &'c [(Expr, SortDirection)], row: Row) {
+        let position = self.ranked;
+        self.ranked += 1;
+        if self.heap.len() < self.kept {
+            self.heap.push(Ranked {
+                order_by,
+                keys: std::mem::take(&mut self.keys),
+                position,
+                row,
+            });
+        } else if let Some(mut last) = self.heap.peek_mut()
+            && rank(
+                order_by,
+                (&self.keys, position),
+                (&last.keys, last.position),
+            ) == Ordering::Less
+        {
+            std::mem::swap(&mut last.keys, &mut self.keys);
+            last.position = position;
+            last.row = row;
+        }
+    }
+
+    /// The rows it holds, in order, or the first error a sort key raised.
+    pub(crate) fn finish(&mut self) -> Result<Vec<Row>, Error> {
+        if let Some(error) = self.failed.take() {
+            return Err(error);
+        }
+        let heap = std::mem::take(&mut self.heap);
+        Ok(heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|ranked| ranked.row)
+            .collect())
+    }
+}
+
 struct Stream<'s, 'e, T: ReadTransaction> {
     env: &'s Env<'e, T>,
     stages: Vec<Stage<'s>>,
-    /// Per stage, whether an error it raises is the one applying the clauses in turn raises.
-    pub(crate) exact: Vec<bool>,
+    /// Whether an error the sink raises is the one applying the clauses in turn raises.
+    pub(crate) exact: bool,
     /// The stage the first error came from.
     pub(crate) failed: Option<usize>,
     sink: &'s mut dyn FnMut(Row) -> Result<bool, Error>,
@@ -115,16 +213,16 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some(count) = streamed else {
             return false;
         };
-        let clauses = &clauses[..count];
-        let sure = Sure::new(self, clauses);
-        let settled = self.settled(&sure, clauses, true);
-        let exact = exact(clauses, &settled);
-        clauses.iter().zip(&exact).any(|(clause, exact)| {
-            *exact
+        let sure = Sure::new(self);
+        let mut stops = false;
+        sure.exactly(&clauses[..count], true, |clause, exact| {
+            stops |= exact
                 && matches!(clause, ReadClause::Project(projection)
                     if projection.order_by.is_empty() && projection.limit.is_some()
-                        && sure.plain(projection))
-        })
+                        && sure.plain(projection));
+            Some(())
+        });
+        stops
     }
 
     /// Applies `clauses`, which [`Env::streamed`] took, passing each row from one clause to
@@ -169,8 +267,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         let Some((stages, exact)) = self.stages(clauses, rows.len() == 1) else {
             return Ok(Streamed::Redo);
         };
-        let may_stop = exact.last() == Some(&true);
-        let mut sink = |row| sink(row, may_stop);
+        let mut sink = |row| sink(row, exact);
         let mut stream = Stream {
             env: self,
             stages,
@@ -181,29 +278,28 @@ impl<T: ReadTransaction> Env<'_, T> {
         match stream.run(rows) {
             Ok(()) => Ok(Streamed::Done),
             Err(error) => match stream.failed {
-                Some(at) if stream.exact.get(at) == Some(&true) => Err(error),
+                Some(at) if stream.exact(at) => Err(error),
                 _ => Ok(Streamed::Redo),
             },
         }
     }
 
-    /// The stages of a streamed run of `clauses` and, per stage, whether an error it raises is
-    /// exact. `None` when a stage cannot start, as when its `LIMIT` fails, so the clauses run in
-    /// turn instead. Kept out of [`Env::each_row`], whose frame stays on the stack while a
-    /// subquery nested in the run's expressions runs.
+    /// The stages of a streamed run of `clauses` and whether an error the sink raises is exact.
+    /// `None` when a stage cannot start, as when its `LIMIT` fails, so the clauses run in turn
+    /// instead. Kept out of [`Env::each_row`], whose frame stays on the stack while a subquery
+    /// nested in the run's expressions runs.
     #[inline(never)]
     pub(crate) fn stages<'c>(
         &self,
         clauses: &[&'c ReadClause],
         single: bool,
-    ) -> Option<(Vec<Stage<'c>>, Vec<bool>)> {
-        let sure = Sure::new(self, clauses);
-        let settled = self.settled(&sure, clauses, single);
-        let exact = exact(clauses, &settled);
+    ) -> Option<(Vec<Stage<'c>>, bool)> {
+        let sure = Sure::new(self);
         let mut stages = Vec::with_capacity(clauses.len());
-        for (at, clause) in clauses.iter().enumerate() {
-            stages.push(self.stage(&sure, clause, exact[at]).ok()?);
-        }
+        let exact = sure.exactly(clauses, single, |clause, exact| {
+            stages.push(self.stage(&sure, clause, exact).ok()?);
+            Some(())
+        })?;
         if stages
             .iter()
             .any(|stage| matches!(&stage.state, State::Plain(plain) if plain.stops))
@@ -224,19 +320,22 @@ impl<T: ReadTransaction> Env<'_, T> {
                 Items::Aggregate {
                     keys, aggregates, ..
                 } => State::Grouped(Groups::new(keys, aggregates, self.limits)),
-                Items::Plain(_) if !projection.order_by.is_empty() => State::Sorted(Vec::new()),
+                Items::Plain(_) if !projection.order_by.is_empty() => {
+                    let (skip, limit) = self.window(projection)?;
+                    State::Sorted(Sorted {
+                        skip,
+                        limit,
+                        kept: limit.map_or(usize::MAX, |limit| skip.saturating_add(limit)),
+                        seen: projection.distinct.then(KeySet::default),
+                        heap: BinaryHeap::new(),
+                        keys: Vec::new(),
+                        ranked: 0,
+                        failed: None,
+                    })
+                }
                 Items::Plain(_) => {
-                    let empty = vec![Datum::Null; self.slots];
-                    let skip = match &projection.skip {
-                        Some(skip) => self.count(skip, &empty, "SKIP")?,
-                        None => 0,
-                    };
-                    let kept = match &projection.limit {
-                        Some(limit) => {
-                            Some(skip.saturating_add(self.count(limit, &empty, "LIMIT")?))
-                        }
-                        None => None,
-                    };
+                    let (skip, limit) = self.window(projection)?;
+                    let kept = limit.map(|limit| skip.saturating_add(limit));
                     let sure = sure.plain(projection);
                     State::Plain(Plain {
                         skip,
@@ -254,57 +353,12 @@ impl<T: ReadTransaction> Env<'_, T> {
             },
             _ => State::Pass,
         };
-        Ok(Stage { clause, state })
+        Ok(Stage {
+            clause,
+            state,
+            exact,
+        })
     }
-
-    /// Per clause, whether its work on the rows it has not read yet cannot fail, once one row
-    /// has passed it. `single` says the first clause reads a single row.
-    pub(crate) fn settled(
-        &self,
-        sure: &Sure<'_, '_, T>,
-        clauses: &[&ReadClause],
-        single: bool,
-    ) -> Vec<bool> {
-        clauses
-            .iter()
-            .enumerate()
-            .map(|(at, clause)| match clause {
-                ReadClause::Match(found) => sure.matching(found),
-                _ if at == 0 && single => match clause {
-                    ReadClause::Call(call) => call
-                        .filter
-                        .as_ref()
-                        .is_none_or(|filter| sure.condition(filter, true)),
-                    _ => true,
-                },
-                ReadClause::Unwind { expr, .. } => sure.value(expr, true),
-                ReadClause::Filter(condition) => sure.condition(condition, true),
-                ReadClause::Let(bindings) => {
-                    bindings.iter().all(|(expr, _)| sure.value(expr, true))
-                }
-                ReadClause::Project(projection) => !breaks(clause) && sure.plain(projection),
-                ReadClause::Call(_) | ReadClause::CallSubquery(_) => false,
-            })
-            .collect()
-    }
-}
-
-/// Per clause, whether an error it raises is the first error applying the clauses in turn
-/// raises: every clause since the last one that holds its rows is settled, so none of them
-/// fails on a row it has not read yet.
-pub(crate) fn exact(clauses: &[&ReadClause], settled: &[bool]) -> Vec<bool> {
-    let mut exact = Vec::with_capacity(clauses.len());
-    let mut clean = true;
-    for (clause, settled) in clauses.iter().zip(settled) {
-        exact.push(clean);
-        clean = if breaks(clause) {
-            true
-        } else {
-            clean && *settled
-        };
-    }
-    exact.push(clean);
-    exact
 }
 
 /// Whether a clause holds every row it reads before it gives any.
@@ -313,7 +367,7 @@ pub(crate) fn breaks(clause: &ReadClause) -> bool {
         if !projection.order_by.is_empty() || matches!(projection.items, Items::Aggregate { .. }))
 }
 
-impl<T: ReadTransaction> Stream<'_, '_, T> {
+impl<'s, T: ReadTransaction> Stream<'s, '_, T> {
     fn run(&mut self, rows: &[Row]) -> Result<(), Error> {
         if self.scan_first(rows)? {
             return self.finish();
@@ -331,6 +385,7 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
         if let Some(Stage {
             clause: ReadClause::Match(found),
             state: State::Match { scans: true },
+            ..
         }) = self.stages.first()
         {
             let found: &MatchClause = found;
@@ -355,30 +410,17 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
         self.failed.get_or_insert(at);
     }
 
+    /// Whether an error stage `at`, or the sink past the last stage, raises is exact.
+    pub(crate) fn exact(&self, at: usize) -> bool {
+        self.stages.get(at).map_or(self.exact, |stage| stage.exact)
+    }
+
     /// Passes the rows each holding stage held to the stages after it, in order.
     pub(crate) fn finish(&mut self) -> Result<(), Error> {
         for at in 0..self.stages.len() {
-            let stage = &mut self.stages[at];
-            let ReadClause::Project(projection) = stage.clause else {
+            let Some(rows) = self.held(at).inspect_err(|_| self.fail(at))? else {
                 continue;
             };
-            let rows = match &mut stage.state {
-                State::Sorted(rows) => std::mem::take(rows),
-                State::Grouped(groups) => {
-                    let Items::Aggregate { finals, .. } = &projection.items else {
-                        continue;
-                    };
-                    let groups = std::mem::replace(groups, Groups::new(&[], &[], self.env.limits));
-                    groups
-                        .finish(self.env, finals)
-                        .inspect_err(|_| self.fail(at))?
-                }
-                State::Pass | State::Match { .. } | State::Plain(_) => continue,
-            };
-            let rows = self
-                .env
-                .arrange(projection, rows)
-                .inspect_err(|_| self.fail(at))?;
             for row in rows {
                 if !self.push(at + 1, Cow::Owned(row))? {
                     break;
@@ -386,6 +428,32 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
             }
         }
         Ok(())
+    }
+
+    /// The rows stage `at` gives once its input ends, when it holds them until then.
+    #[inline(never)]
+    pub(crate) fn held(&mut self, at: usize) -> Result<Option<Vec<Row>>, Error> {
+        let env = self.env;
+        let stage = &mut self.stages[at];
+        let ReadClause::Project(projection) = stage.clause else {
+            return Ok(None);
+        };
+        match &mut stage.state {
+            State::Sorted(sorted) => {
+                let rows = sorted.finish()?;
+                env.page(projection, rows, sorted.skip, sorted.limit)
+                    .map(Some)
+            }
+            State::Grouped(groups) => {
+                let Items::Aggregate { finals, .. } = &projection.items else {
+                    return Ok(None);
+                };
+                let groups = std::mem::replace(groups, Groups::new(&[], &[], env.limits));
+                let rows = groups.finish(env, finals)?;
+                env.arrange(projection, rows).map(Some)
+            }
+            State::Pass | State::Match { .. } | State::Plain(_) => Ok(None),
+        }
     }
 
     /// Passes `row` to stage `at`, and says whether the stages from `at` on want more rows.
@@ -533,7 +601,7 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
     fn project(
         &mut self,
         at: usize,
-        projection: &Projection,
+        projection: &'s Projection,
         row: Cow<'_, Row>,
     ) -> Result<bool, Error> {
         let env = self.env;
@@ -553,10 +621,10 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
             Ok(())
         };
         let plain = match state {
-            State::Sorted(rows) => {
+            State::Sorted(sorted) => {
                 let mut row = row.into_owned();
                 evaluate(&mut row)?;
-                rows.push(row);
+                sort_row(env, projection, sorted, row);
                 return Ok(true);
             }
             State::Plain(plain) => plain,
@@ -598,33 +666,112 @@ impl<T: ReadTransaction> Stream<'_, '_, T> {
     }
 }
 
+/// Ranks a row whose items `projection` evaluated, unless `DISTINCT` drops it or a sort key
+/// failed on an earlier row.
+#[inline(never)]
+pub(crate) fn sort_row<'c, T: ReadTransaction>(
+    env: &Env<'_, T>,
+    projection: &'c Projection,
+    sorted: &mut Sorted<'c>,
+    row: Row,
+) {
+    if let Some(seen) = &mut sorted.seen {
+        let outputs: Vec<Datum> = projection
+            .outputs
+            .iter()
+            .map(|slot| row.get(*slot).cloned().unwrap_or(Datum::Null))
+            .collect();
+        if !seen.insert(&outputs) {
+            return;
+        }
+    }
+    if sorted.failed.is_some() {
+        return;
+    }
+    sorted.keys.clear();
+    for (expr, _) in &projection.order_by {
+        match env.eval(expr, &row) {
+            Ok(key) => sorted.keys.push(key),
+            Err(error) => {
+                sorted.failed = Some(error);
+                sorted.heap.clear();
+                return;
+            }
+        }
+    }
+    sorted.offer(&projection.order_by, row);
+}
+
+/// The kind of number an expression gives on every row, or null.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Number {
+    Integer,
+    /// A float, or null alone, since no arithmetic on either fails.
+    Float,
+}
+
+impl Number {
+    fn of(value: &Datum) -> Option<Self> {
+        match value {
+            Datum::Integer(_) => Some(Self::Integer),
+            Datum::Float(_) | Datum::Null => Some(Self::Float),
+            _ => None,
+        }
+    }
+}
+
 /// What the plan and the parameters prove about which expressions cannot fail.
 pub(crate) struct Sure<'q, 'e, T: ReadTransaction> {
     env: &'q Env<'e, T>,
-    /// The slots that only ever hold a graph element or null, in ascending order: those of
-    /// the query, and those the clauses bind, which differ in a subquery.
-    pub(crate) elements: Vec<Slot>,
-    every_slot: Vec<Slot>,
     /// Whether the query deleted a graph element, so reading one may fail.
     pub(crate) deleted: bool,
 }
 
 impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
-    fn new(env: &'q Env<'e, T>, clauses: &[&ReadClause]) -> Self {
+    fn new(env: &'q Env<'e, T>) -> Self {
         let graveyard = env.graveyard;
-        let mut elements = env.elements.to_vec();
-        for clause in clauses {
-            read_elements(clause, &mut elements);
-        }
-        elements.sort_unstable();
-        elements.dedup();
         Self {
             env,
-            elements,
-            every_slot: (0..env.slots).collect(),
             deleted: !graveyard.deleted_nodes.is_empty()
                 || !graveyard.nodes.is_empty()
                 || !graveyard.relationships.is_empty(),
+        }
+    }
+
+    /// Passes each of `clauses` to `each` with whether an error it raises is the first error
+    /// applying the clauses in turn raises: every clause since the last one that holds its rows
+    /// is settled, so none of them fails on a row it has not read yet. Gives the same for the
+    /// rows the last clause passes on, or `None` once `each` does. `single` says the first
+    /// clause reads a single row.
+    pub(crate) fn exactly<'c>(
+        &self,
+        clauses: &[&'c ReadClause],
+        single: bool,
+        mut each: impl FnMut(&'c ReadClause, bool) -> Option<()>,
+    ) -> Option<bool> {
+        let mut clean = true;
+        for (at, clause) in clauses.iter().enumerate() {
+            each(clause, clean)?;
+            clean = breaks(clause) || (clean && self.settled(clause, at == 0 && single));
+        }
+        Some(clean)
+    }
+
+    /// Whether the work of `clause` on the rows it has not read yet cannot fail, once one row
+    /// has passed it. `only` says it reads a single row.
+    pub(crate) fn settled(&self, clause: &ReadClause, only: bool) -> bool {
+        match clause {
+            ReadClause::Match(found) => self.matching(found),
+            ReadClause::Call(call) if only => call
+                .filter
+                .as_ref()
+                .is_none_or(|filter| self.condition(filter, true)),
+            _ if only => true,
+            ReadClause::Unwind { expr, .. } => self.value(expr, true),
+            ReadClause::Filter(condition) => self.condition(condition, true),
+            ReadClause::Let(bindings) => bindings.iter().all(|(expr, _)| self.value(expr, true)),
+            ReadClause::Project(projection) => !breaks(clause) && self.plain(projection),
+            ReadClause::Call(_) | ReadClause::CallSubquery(_) => false,
         }
     }
 
@@ -643,7 +790,7 @@ impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
     /// Whether the expression reads nothing that differs between rows, so it gives the same
     /// value or error on every row.
     pub(crate) fn fixed(&self, expr: &Expr) -> bool {
-        seek::independent(expr, &self.every_slot)
+        seek::fixed(expr)
     }
 
     /// Whether evaluating `expr` cannot fail on any row. With `fixed_fails`, an expression that
@@ -656,7 +803,70 @@ impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
         match expr {
             Expr::Constant(_) | Expr::Parameter(_) | Expr::Slot(_) => true,
             Expr::Property(base, _) => self.element(base) || self.map_like(base),
+            Expr::Binary(
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Modulo
+                | BinaryOp::Power,
+                _,
+                _,
+            )
+            | Expr::Negate(_)
+            | Expr::UnaryPlus(_) => self.number(expr).is_some(),
             _ => self.condition(expr, fixed_fails),
+        }
+    }
+
+    /// The kind of number `expr` gives on every row, when it cannot fail and gives a number of
+    /// one kind or null. Integer arithmetic fails where it overflows or divides by zero, so it qualifies
+    /// only where neither can happen whatever the integers.
+    pub(crate) fn number(&self, expr: &Expr) -> Option<Number> {
+        match expr {
+            Expr::Constant(value) => Number::of(value),
+            Expr::Parameter(index) => Number::of(self.env.parameters.get(*index)?),
+            Expr::Slot(slot) => {
+                (self.env.holds.get(*slot) == Some(&Holds::Integer)).then_some(Number::Integer)
+            }
+            Expr::UnaryPlus(operand) => self.number(operand),
+            Expr::Negate(operand) => match self.number(operand)? {
+                Number::Float => Some(Number::Float),
+                Number::Integer => self.integer(expr).map(|_| Number::Integer),
+            },
+            Expr::Binary(op, lhs, rhs) => {
+                let (left, right) = (self.number(lhs)?, self.number(rhs)?);
+                let float = left == Number::Float || right == Number::Float;
+                match op {
+                    BinaryOp::Power => Some(Number::Float),
+                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply if float => {
+                        Some(Number::Float)
+                    }
+                    BinaryOp::Divide | BinaryOp::Modulo if float => Some(Number::Float),
+                    BinaryOp::Divide | BinaryOp::Modulo => {
+                        let divisor = self.integer(rhs)?;
+                        let fails = divisor == 0 || (*op == BinaryOp::Divide && divisor == -1);
+                        (!fails).then_some(left)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The integer `expr` gives on every row, when it is a literal or a parameter, maybe
+    /// negated, that is an integer.
+    pub(crate) fn integer(&self, expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Constant(Datum::Integer(value)) => Some(*value),
+            Expr::Parameter(index) => match self.env.parameters.get(*index)? {
+                Datum::Integer(value) => Some(*value),
+                _ => None,
+            },
+            Expr::UnaryPlus(operand) => self.integer(operand),
+            Expr::Negate(operand) => self.integer(operand)?.checked_neg(),
+            _ => None,
         }
     }
 
@@ -703,7 +913,7 @@ impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
 
     /// Whether `expr` is a variable that holds a live graph element or null.
     pub(crate) fn element(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Slot(slot) if !self.deleted && self.elements.binary_search(slot).is_ok())
+        matches!(expr, Expr::Slot(slot) if !self.deleted && self.env.holds.get(*slot) == Some(&Holds::Element))
     }
 
     fn map_like(&self, expr: &Expr) -> bool {
@@ -775,85 +985,131 @@ impl<'q, 'e, T: ReadTransaction> Sure<'q, 'e, T> {
     }
 }
 
-/// The slots that only ever hold a graph element or null: the nodes and single relationships
-/// that a pattern binds, and the variables a projection or `LET` copies from them. Each
-/// binding has a slot of its own, so a slot never holds anything else.
-pub(crate) fn elements<C>(program: &Program<C>, each: impl Fn(&C, &mut Vec<Slot>)) -> Vec<Slot> {
-    let mut slots = Vec::new();
-    for part in &program.parts {
-        for clause in &part.clauses {
-            each(clause, &mut slots);
-        }
-    }
-    slots.sort_unstable();
-    slots.dedup();
-    slots
+/// What the clauses of a plan bind slots to, which [`Bindings::holds`] turns into what each
+/// slot holds.
+#[derive(Default)]
+pub(crate) struct Bindings {
+    holds: Vec<(Slot, Holds)>,
+    /// Pairs of a slot and the slot a projection or `LET` copies it to.
+    pub(crate) copies: Vec<(Slot, Slot)>,
 }
 
-pub(crate) fn read_elements(clause: &ReadClause, slots: &mut Vec<Slot>) {
-    let copies = |pairs: &mut dyn Iterator<Item = &(Expr, Slot)>, slots: &mut Vec<Slot>| {
-        for (expr, slot) in pairs {
-            if let Expr::Slot(from) = expr
-                && slots.contains(from)
-            {
-                slots.push(*slot);
-            }
-        }
-    };
-    match clause {
-        ReadClause::Match(found) => {
-            pattern_elements(&found.patterns, slots);
-            if let Some(by_id) = &found.by_id {
-                pattern_elements(&by_id.clause.patterns, slots);
-            }
-        }
-        ReadClause::Project(projection) => match &projection.items {
-            Items::Plain(items) => copies(&mut items.iter(), slots),
-            Items::Aggregate { keys, .. } => copies(&mut keys.iter(), slots),
-        },
-        ReadClause::Let(bindings) => copies(&mut bindings.iter(), slots),
-        ReadClause::CallSubquery(call) => {
-            for branch in &call.branches {
-                for clause in &branch.clauses {
-                    read_elements(clause, slots);
+impl Bindings {
+    pub(crate) fn read(&mut self, clause: &ReadClause) {
+        match clause {
+            ReadClause::Match(found) => {
+                self.patterns(&found.patterns);
+                if let Some(by_id) = &found.by_id {
+                    self.patterns(&by_id.clause.patterns);
                 }
             }
-        }
-        ReadClause::Unwind { .. } | ReadClause::Call(_) | ReadClause::Filter(_) => {}
-    }
-}
-
-pub(crate) fn update_elements(clause: &UpdateClause, slots: &mut Vec<Slot>) {
-    match clause {
-        UpdateClause::Create(parts) => pattern_elements(parts, slots),
-        UpdateClause::Merge(merge) => pattern_elements(std::slice::from_ref(&merge.pattern), slots),
-        UpdateClause::CallSubquery(call) => {
-            for branch in &call.branches {
-                for clause in &branch.clauses {
-                    match clause {
-                        Clause::Read(clause) => read_elements(clause, slots),
-                        Clause::Update(clause) => update_elements(clause, slots),
+            ReadClause::Unwind { expr, slot } => {
+                let integers = match expr {
+                    Expr::Call(Function::Range, _) => true,
+                    Expr::Constant(Datum::List(items)) => items
+                        .iter()
+                        .all(|item| matches!(item, Datum::Integer(_) | Datum::Null)),
+                    Expr::List(items) => items.iter().all(|item| match item {
+                        Expr::Negate(operand) => {
+                            matches!(**operand, Expr::Constant(Datum::Integer(_)))
+                        }
+                        _ => matches!(item, Expr::Constant(Datum::Integer(_) | Datum::Null)),
+                    }),
+                    _ => false,
+                };
+                if integers {
+                    self.holds.push((*slot, Holds::Integer));
+                }
+            }
+            ReadClause::Project(projection) => match &projection.items {
+                Items::Plain(items) => self.copies(items),
+                Items::Aggregate {
+                    keys,
+                    aggregates,
+                    finals,
+                } => {
+                    self.copies(keys);
+                    self.copies(finals);
+                    for (aggregate, slot) in aggregates {
+                        if aggregate.function == AggregateFunction::Count {
+                            self.holds.push((*slot, Holds::Integer));
+                        }
+                    }
+                }
+            },
+            ReadClause::Let(bindings) => self.copies(bindings),
+            ReadClause::CallSubquery(call) => {
+                for branch in &call.branches {
+                    for clause in &branch.clauses {
+                        self.read(clause);
                     }
                 }
             }
+            ReadClause::Call(_) | ReadClause::Filter(_) => {}
         }
-        UpdateClause::Set(_) | UpdateClause::Remove(_) | UpdateClause::Delete { .. } => {}
     }
-}
 
-fn pattern_elements(parts: &[PatternPart], slots: &mut Vec<Slot>) {
-    for part in parts {
-        if !part.start.bound {
-            slots.push(part.start.slot);
-        }
-        for step in &part.steps {
-            if !step.node.bound {
-                slots.push(step.node.slot);
+    pub(crate) fn update(&mut self, clause: &UpdateClause) {
+        match clause {
+            UpdateClause::Create(parts) => self.patterns(parts),
+            UpdateClause::Merge(merge) => self.patterns(std::slice::from_ref(&merge.pattern)),
+            UpdateClause::CallSubquery(call) => {
+                for branch in &call.branches {
+                    for clause in &branch.clauses {
+                        match clause {
+                            Clause::Read(clause) => self.read(clause),
+                            Clause::Update(clause) => self.update(clause),
+                        }
+                    }
+                }
             }
-            if !step.relationship.bound && step.relationship.length.is_none() {
-                slots.push(step.relationship.slot);
+            UpdateClause::Set(_) | UpdateClause::Remove(_) | UpdateClause::Delete { .. } => {}
+        }
+    }
+
+    fn patterns(&mut self, parts: &[PatternPart]) {
+        for part in parts {
+            if !part.start.bound {
+                self.holds.push((part.start.slot, Holds::Element));
+            }
+            for step in &part.steps {
+                if !step.node.bound {
+                    self.holds.push((step.node.slot, Holds::Element));
+                }
+                if !step.relationship.bound && step.relationship.length.is_none() {
+                    self.holds.push((step.relationship.slot, Holds::Element));
+                }
             }
         }
+    }
+
+    fn copies(&mut self, pairs: &[(Expr, Slot)]) {
+        for (expr, slot) in pairs {
+            if let Expr::Slot(from) = expr {
+                self.copies.push((*from, *slot));
+            }
+        }
+    }
+
+    /// Per slot of `slots`, what it holds. A copy is bound after the slot it copies, which
+    /// therefore has the lower number, so following the copies in order of their sources
+    /// reaches the end of every chain of copies.
+    pub(crate) fn holds(mut self, slots: usize) -> Vec<Holds> {
+        let mut holds = vec![Holds::Any; slots];
+        for (slot, held) in self.holds {
+            if let Some(entry) = holds.get_mut(slot) {
+                *entry = held;
+            }
+        }
+        self.copies.sort_unstable();
+        for (from, to) in self.copies {
+            if let Some(&held) = holds.get(from)
+                && let Some(entry) = holds.get_mut(to)
+            {
+                *entry = held;
+            }
+        }
+        holds
     }
 }
 

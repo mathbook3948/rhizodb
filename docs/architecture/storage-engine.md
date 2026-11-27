@@ -31,6 +31,10 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - A read-only database reports through `Database::role` the role an open that writes would find in the file, such as `Writer` for a file without a replication history, though it refuses every write.
 - A snapshot of a read-only database whose last checkpoint a crash cut between its stages fails with `ReadOnly`, since only an open that writes finishes that checkpoint.
 - On a file system without locks the engine opens a database unlocked.
+- An open that asks for multi-process access replaces the exclusive lock with the session locks that `multi-process.md` decides.
+- In such a session a checkpoint reuses no block that a tree in any process reaches, as `multi-process.md` decides.
+- In such a session the process that writes a header removes the log segments it released, as `multi-process.md` decides.
+- In such a session only the last process to close checkpoints the whole log and removes its segments, as `multi-process.md` decides.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.

@@ -322,6 +322,8 @@ fn an_exists_subquery_stops_at_its_first_row() {
     for text in [
         "RETURN EXISTS { MATCH (a)-[:R]->(b) RETURN a } AS found",
         "MATCH (n:N {k: 0}) RETURN EXISTS { MATCH (a)-[:R]->(b) WHERE b.k > n.k RETURN b } AS found",
+        "MATCH (n:N {k: 0}) RETURN EXISTS { MATCH (a)-[:R]->(b) WITH b AS c WHERE c.k > n.k \
+         RETURN c } AS found",
     ] {
         let (read, all) = matches_produced(&db, text);
         assert!(read <= 2, "{text} produced {read} matches");
@@ -349,4 +351,252 @@ fn a_write_before_a_limit_applies_to_every_row() {
         .execute("MATCH (n) WHERE n.seen RETURN count(*)", &none())
         .unwrap();
     assert_eq!(seen.rows()[0], vec![Value::Integer(50)]);
+}
+
+const ORDER_KEYS: &[&str] = &[
+    "a.a",
+    "a.a DESC, b.k",
+    "b.a, a.k DESC",
+    "a.b",
+    "a.b DESC",
+    "b.b ASC NULLS FIRST, a.k",
+    "a.k % 3, b.a DESC NULLS LAST",
+    "1 / (a.k - 4)",
+    "toInteger(a.b), a.k",
+    "EXISTS { MATCH (a)-[:S]->() }, b.k",
+];
+
+const SORTED_ITEMS: &[&str] = &["a.k, b.k", "a.a AS g, b.k", "a.k / (b.k - 3) AS q", "a, b"];
+
+fn sorted_query(rng: &mut Rng) -> (String, String, usize, Option<usize>) {
+    let mut parts = vec![
+        match rng.below(3) {
+            0 => "MATCH (a)-[:R]->(b)",
+            1 => "MATCH (a) OPTIONAL MATCH (a)-[:S]->(b)",
+            _ => "UNWIND range(0, 30) AS i MATCH (a {k: i}) MATCH (b) WHERE b.k = a.k % 7",
+        }
+        .to_owned(),
+    ];
+    if rng.below(3) == 0 {
+        parts.push(format!("WITH a, b WHERE {}", rng.pick(CONDITIONS)));
+    }
+    let distinct = if rng.below(4) == 0 { "DISTINCT " } else { "" };
+    let items = if distinct.is_empty() {
+        rng.pick(SORTED_ITEMS)
+    } else {
+        "a.a AS g, b.a AS h"
+    };
+    parts.push(format!("RETURN {distinct}{items}"));
+    let keys = if distinct.is_empty() {
+        rng.pick(ORDER_KEYS)
+    } else {
+        "g DESC, h"
+    };
+    parts.push(format!("ORDER BY {keys}"));
+    let plain = parts.join(" ");
+    let skip = rng.below(4) as usize;
+    let limit = (rng.below(4) != 0).then(|| rng.below(12) as usize);
+    if skip > 0 {
+        parts.push(format!("SKIP {skip}"));
+    }
+    if let Some(limit) = limit {
+        parts.push(format!("LIMIT {limit}"));
+    }
+    (parts.join(" "), plain, skip, limit)
+}
+
+#[test]
+fn an_order_by_with_a_limit_keeps_the_rows_and_the_first_error_of_a_full_sort() {
+    let mut rng = Rng(test_scale::seed());
+    let (mut found, mut failed) = (0, 0);
+    for _ in 0..test_scale::cases(12) {
+        let writes = graph_writes(&mut rng);
+        let serial = build(&writes, OpenOptions::new().threads(1));
+        let split = build(&writes, OpenOptions::new().threads(4).parallel_threshold(2));
+        for _ in 0..30 {
+            let (text, plain, skip, limit) = sorted_query(&mut rng);
+            let (in_turn, _) = counted(true, || serial.execute(&text, &none()));
+            let (streamed, _) = counted(false, || serial.execute(&text, &none()));
+            let (parallel, _) = counted(false, || split.execute(&text, &none()));
+            let (sorted, _) = counted(false, || serial.execute(&plain, &none()));
+            let sliced = sorted.map(|rows| {
+                rows.into_iter()
+                    .skip(skip)
+                    .take(limit.unwrap_or(usize::MAX))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(in_turn, sliced, "{text}\n{writes:#?}");
+            assert_eq!(streamed, in_turn, "{text}\n{writes:#?}");
+            assert_eq!(parallel, in_turn, "{text} split\n{writes:#?}");
+            match &in_turn {
+                Ok(_) => found += 1,
+                Err(_) => failed += 1,
+            }
+        }
+    }
+    assert!(
+        found > 0 && failed > 0,
+        "{found} queries found rows, {failed} failed"
+    );
+}
+
+#[test]
+fn an_order_by_with_a_limit_raises_an_error_of_its_last_row() {
+    let db = chain(500);
+    for (text, error) in [
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.k ORDER BY 1 / (b.k - 480) LIMIT 2",
+            ErrorKind::DivisionByZero,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN b.k ORDER BY CASE b.k WHEN 480 THEN b.k + true END LIMIT 2",
+            ErrorKind::TypeMismatch,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) RETURN 1 / (b.k - 480) AS q \
+             ORDER BY CASE b.k WHEN 5 THEN b.k + true END LIMIT 2",
+            ErrorKind::DivisionByZero,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WITH b ORDER BY b.k SKIP 1 LIMIT 1 WHERE 1 / (b.k - 2) > 0 \
+             RETURN b.k",
+            ErrorKind::DivisionByZero,
+        ),
+    ] {
+        let (in_turn, _) = counted(true, || db.execute(text, &none()));
+        let (streamed, _) = counted(false, || db.execute(text, &none()));
+        assert_eq!(in_turn, Err(error), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
+}
+
+#[test]
+fn a_limit_stops_early_on_arithmetic_that_cannot_fail() {
+    let db = chain(500);
+    for (text, most) in [
+        (
+            "MATCH (a)-[:R]->(b) UNWIND range(1, 2) AS i WITH a, i WHERE i % 2 = 1 \
+             RETURN a.k, i LIMIT 3",
+            3,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) UNWIND [1, -2, null] AS i \
+             RETURN i ^ 2, i * 1.5, i / 2, i / 2.0, i % -3, +i, -(i * 1.0), i - 0.5, $f * i, i % $n \
+             LIMIT 3",
+            1,
+        ),
+        (
+            "MATCH (a)-[:R]->(b) WITH count(*) AS c MATCH (x)-[:R]->(y) WHERE c % 2 = 0 \
+             RETURN y.k LIMIT 2",
+            503,
+        ),
+    ] {
+        let parameters = Parameters::new().with("f", 0.5).with("n", 7);
+        let (in_turn, all) = counted(true, || db.execute(text, &parameters));
+        let (streamed, read) = counted(false, || db.execute(text, &parameters));
+        assert_eq!(streamed, in_turn, "{text}");
+        assert!(
+            read <= most,
+            "{text} produced {read} matches, more than {most}"
+        );
+        assert!(all > 400, "{text} produced only {all} matches in turn");
+    }
+}
+
+#[test]
+fn arithmetic_that_could_fail_on_a_later_row_raises_its_error_under_a_limit() {
+    let db = chain(500);
+    db.execute(
+        "MATCH (n:N) SET n.s = CASE n.k WHEN 450 THEN 'x' ELSE n.k END",
+        &none(),
+    )
+    .unwrap();
+    let grouped = "MATCH (a)-[:R]->(b) UNWIND range(coalesce(b.m, b.k), coalesce(b.m, b.k)) AS i \
+                   WITH i, b.s AS s, count(*) AS c";
+    for (late, expr, error) in [
+        (i64::MIN, "i / -1", ErrorKind::IntegerOverflow),
+        (i64::MIN, "-i", ErrorKind::IntegerOverflow),
+        (i64::MIN, "i - 1", ErrorKind::IntegerOverflow),
+        (i64::MAX, "i + 1", ErrorKind::IntegerOverflow),
+        (1 << 62, "i * 2", ErrorKind::IntegerOverflow),
+        (1 << 62, "2 * i", ErrorKind::IntegerOverflow),
+        (0, "7 % i", ErrorKind::DivisionByZero),
+        (0, "7 / i", ErrorKind::DivisionByZero),
+        (0, "s % 7", ErrorKind::TypeMismatch),
+        (0, "i - s", ErrorKind::TypeMismatch),
+    ] {
+        db.execute(
+            "MATCH (n:N {k: 450}) SET n.m = $late",
+            &Parameters::new().with("late", late),
+        )
+        .unwrap();
+        for text in [
+            format!("{grouped} RETURN {expr} AS q LIMIT 3"),
+            format!("{grouped} WITH i, s WHERE {expr} <> 3 RETURN i LIMIT 3"),
+            format!("{grouped} WITH i, s ORDER BY c, i DESC LIMIT 1000 RETURN {expr} AS q LIMIT 3"),
+        ] {
+            let (in_turn, _) = counted(true, || db.execute(&text, &none()));
+            let (streamed, _) = counted(false, || db.execute(&text, &none()));
+            assert_eq!(in_turn, Err(error), "{text} with {late}");
+            assert_eq!(streamed, in_turn, "{text} with {late}");
+        }
+    }
+    let text = format!("{grouped} RETURN i % $zero AS q LIMIT 3");
+    let parameters = Parameters::new().with("zero", 0);
+    assert_eq!(
+        counted(false, || db.execute(&text, &parameters)).0,
+        Err(ErrorKind::DivisionByZero)
+    );
+}
+
+#[test]
+fn arithmetic_with_a_fixed_operand_that_fails_raises_its_error_under_a_limit() {
+    let db = chain(500);
+    let parameters = Parameters::new().with("zero", 0).with("text", "x");
+    for (expr, error) in [
+        ("j % 0", ErrorKind::DivisionByZero),
+        ("j / 0", ErrorKind::DivisionByZero),
+        ("j % $zero", ErrorKind::DivisionByZero),
+        ("j / -0", ErrorKind::DivisionByZero),
+        ("j - 'x'", ErrorKind::TypeMismatch),
+        ("j * $text", ErrorKind::TypeMismatch),
+        ("'x' % j", ErrorKind::TypeMismatch),
+        ("-j - 'x'", ErrorKind::TypeMismatch),
+    ] {
+        let text = format!("MATCH (a)-[:R]->(b) UNWIND [null, 1] AS j RETURN {expr} AS q LIMIT 1");
+        let (in_turn, _) = counted(true, || db.execute(&text, &parameters));
+        let (streamed, _) = counted(false, || db.execute(&text, &parameters));
+        assert_eq!(in_turn, Err(error), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
+}
+
+#[test]
+fn a_sort_raises_its_first_key_error_and_not_a_later_one() {
+    let db = chain(2);
+    let text = "UNWIND [1, 2, 3] AS i RETURN i \
+                ORDER BY CASE i WHEN 2 THEN 1 / (i - 2) WHEN 3 THEN $s - 1 ELSE i END LIMIT 1";
+    let parameters = Parameters::new().with("s", "x");
+    let (in_turn, _) = counted(true, || db.execute(text, &parameters));
+    let (streamed, _) = counted(false, || db.execute(text, &parameters));
+    assert_eq!(in_turn, Err(ErrorKind::DivisionByZero));
+    assert_eq!(streamed, in_turn);
+}
+
+#[test]
+fn a_variable_counts_as_an_integer_only_when_every_value_it_takes_is_one() {
+    let db = chain(500);
+    db.execute("MATCH (n:N) SET n.i = n.k, n.s = 'x'", &none())
+        .unwrap();
+    for text in [
+        "MATCH (n:N) UNWIND [n.i, n.s] AS x RETURN x / 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, min(v) AS c RETURN c / 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, max(v) AS c RETURN c % 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, collect(v) AS c RETURN c / 2 LIMIT 1",
+    ] {
+        let (in_turn, _) = counted(true, || db.execute(text, &none()));
+        let (streamed, _) = counted(false, || db.execute(text, &none()));
+        assert_eq!(in_turn, Err(ErrorKind::TypeMismatch), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
 }

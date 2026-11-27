@@ -280,7 +280,11 @@ fn input_error(error: io::Error) -> EngineError {
     if error.kind() == io::ErrorKind::UnexpectedEof {
         return EngineError::corrupt("the snapshot ends before its last chunk");
     }
-    EngineError::Storage(StorageError::of_kind(ErrorKind::Io, error))
+    EngineError::Storage(StorageError::io(
+        ErrorKind::Io,
+        "cannot read the snapshot stream",
+        error,
+    ))
 }
 
 struct Frames<R> {

@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::io;
 use std::path::Path;
 
 use crate::error::ErrorKind;
@@ -81,6 +82,24 @@ pub(crate) struct StorageError {
     kind: ErrorKind,
 }
 
+#[derive(Debug)]
+struct IoContextError {
+    context: String,
+    error: io::Error,
+}
+
+impl fmt::Display for IoContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.context, self.error)
+    }
+}
+
+impl Error for IoContextError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 impl StorageError {
     pub(crate) fn new(source: impl Error + Send + Sync + 'static) -> Self {
         Self::of_kind(ErrorKind::Storage, source)
@@ -92,6 +111,27 @@ impl StorageError {
             source: Box::new(source),
             kind,
         }
+    }
+
+    /// A failure of `kind` because an I/O operation failed with `error`, where `context` says
+    /// what the operation was for.
+    pub(crate) fn io(kind: ErrorKind, context: impl Into<String>, error: io::Error) -> Self {
+        Self::of_kind(
+            kind,
+            IoContextError {
+                context: context.into(),
+                error,
+            },
+        )
+    }
+
+    /// The same failure, with `context` in place of what it said the failed I/O was for. A
+    /// failure with no I/O cause is returned as it is.
+    pub(crate) fn in_context(mut self, context: impl FnOnce() -> String) -> Self {
+        if let Some(cause) = self.source.downcast_mut::<IoContextError>() {
+            cause.context = context();
+        }
+        self
     }
 
     /// A failure the engine raised on damaged stored data, which is reported as corrupt data.
@@ -106,6 +146,13 @@ impl StorageError {
     /// The kind the public error reports for this failure.
     pub(crate) fn kind(&self) -> ErrorKind {
         self.kind
+    }
+
+    /// What failed and the I/O error that failed it, for a failure built by
+    /// [`StorageError::io`].
+    pub(crate) fn io_cause(&self) -> Option<(&str, &io::Error)> {
+        let cause = self.source.downcast_ref::<IoContextError>()?;
+        Some((&cause.context, &cause.error))
     }
 }
 

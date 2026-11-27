@@ -239,8 +239,8 @@ fn diverged(
     refuse(
         ErrorKind::Diverged,
         format!(
-            "LSN {} of term {} is not part of this database's history, which differs from LSN \
-             {fork_lsn} on",
+            "LSN {} of term {} is not part of this database's history, which holds other changes \
+             from LSN {fork_lsn} onward",
             remote.1, remote.0.term
         ),
         Some(Failure::Diverged {

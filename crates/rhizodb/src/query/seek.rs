@@ -250,11 +250,22 @@ fn is_point(test: &SeekTest) -> bool {
 }
 
 pub(crate) fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
-    let all = |items: &[Expr]| items.iter().all(|item| independent(item, bound_later));
-    let maybe = |item: Option<&Expr>| item.is_none_or(|item| independent(item, bound_later));
+    reads_only(expr, &|slot| !bound_later.contains(&slot))
+}
+
+/// Whether `expr` reads no slot, so it gives the same value or error on every row.
+pub(crate) fn fixed(expr: &Expr) -> bool {
+    reads_only(expr, &|_| false)
+}
+
+/// Whether `expr` reads only slots that `readable` holds for, and nothing else that differs
+/// between evaluations.
+pub(crate) fn reads_only(expr: &Expr, readable: &dyn Fn(Slot) -> bool) -> bool {
+    let all = |items: &[Expr]| items.iter().all(|item| reads_only(item, readable));
+    let maybe = |item: Option<&Expr>| item.is_none_or(|item| reads_only(item, readable));
     match expr {
         Expr::Constant(_) | Expr::Parameter(_) => true,
-        Expr::Slot(slot) => !bound_later.contains(slot),
+        Expr::Slot(slot) => readable(*slot),
         Expr::Property(inner, _)
         | Expr::Not(inner)
         | Expr::Negate(inner)
@@ -264,45 +275,40 @@ pub(crate) fn independent(expr: &Expr, bound_later: &[Slot]) -> bool {
         | Expr::Typed(inner, _)
         | Expr::Cast(inner, _)
         | Expr::Truth(inner, _)
-        | Expr::Normalized(inner, _) => independent(inner, bound_later),
-        Expr::Distinct(left, right) => {
-            independent(left, bound_later) && independent(right, bound_later)
-        }
+        | Expr::Normalized(inner, _) => reads_only(inner, readable),
+        Expr::Distinct(left, right) => reads_only(left, readable) && reads_only(right, readable),
         Expr::Index(left, right) | Expr::Binary(_, left, right) => {
-            independent(left, bound_later) && independent(right, bound_later)
+            reads_only(left, readable) && reads_only(right, readable)
         }
         Expr::Slice(list, from, to) => {
-            independent(list, bound_later) && maybe(from.as_deref()) && maybe(to.as_deref())
+            reads_only(list, readable) && maybe(from.as_deref()) && maybe(to.as_deref())
         }
         Expr::Comparison(first, rest) => {
-            independent(first, bound_later)
-                && rest.iter().all(|(_, item)| independent(item, bound_later))
+            reads_only(first, readable) && rest.iter().all(|(_, item)| reads_only(item, readable))
         }
         Expr::List(items) => all(items),
-        Expr::Map(entries) => entries
-            .iter()
-            .all(|(_, value)| independent(value, bound_later)),
+        Expr::Map(entries) => entries.iter().all(|(_, value)| reads_only(value, readable)),
         Expr::Call(function, args) => deterministic(*function) && all(args),
         Expr::Case(case) => {
             maybe(case.scrutinee.as_ref())
                 && maybe(case.otherwise.as_ref())
-                && case.branches.iter().all(|(when, then)| {
-                    independent(when, bound_later) && independent(then, bound_later)
-                })
+                && case
+                    .branches
+                    .iter()
+                    .all(|(when, then)| reads_only(when, readable) && reads_only(then, readable))
         }
         Expr::ListComprehension(comprehension) => {
-            independent(&comprehension.source, bound_later)
+            reads_only(&comprehension.source, readable)
                 && maybe(comprehension.filter.as_ref())
                 && maybe(comprehension.projection.as_ref())
         }
         Expr::Quantified(quantified) => {
-            independent(&quantified.source, bound_later)
-                && independent(&quantified.predicate, bound_later)
+            reads_only(&quantified.source, readable) && reads_only(&quantified.predicate, readable)
         }
         Expr::Reduce(reduce) => {
-            independent(&reduce.init, bound_later)
-                && independent(&reduce.source, bound_later)
-                && independent(&reduce.body, bound_later)
+            reads_only(&reduce.init, readable)
+                && reads_only(&reduce.source, readable)
+                && reads_only(&reduce.body, readable)
         }
         Expr::Admit(..)
         | Expr::Exists(_)
