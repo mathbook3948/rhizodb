@@ -93,6 +93,7 @@ Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-
 | File size after bulk load | 14.3 MiB | 13.0 MiB | LadybugDB 1.1x smaller |
 <!-- bench-table:end -->
 
+The table is measured again on whatever machine runs it, so a later table may come from a different host than an earlier one.
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
 LadybugDB keeps a slightly smaller file, and the two engines are within noise on the filtered scan and the bulk update.
