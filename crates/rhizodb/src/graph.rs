@@ -444,6 +444,7 @@ impl<S: Storage> Graph<S> {
         let committed = &self.committed_index_definitions;
         let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
+        self.ready()?;
         let definitions = Arc::clone(&lock(&committed.definitions));
         let index_definitions =
             if before.is_multiple_of(2) && committed.changes.load(Ordering::SeqCst) == before {
@@ -795,6 +796,15 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
+    #[cfg(test)]
+    /// The stored graph format version this transaction sees.
+    pub(crate) fn stored_format_version(&self) -> Option<Vec<u8>> {
+        self.transaction
+            .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+            .ok()
+            .flatten()
+    }
+
     #[cfg(test)]
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
         let Some(labels) = self.node_labels(id)? else {

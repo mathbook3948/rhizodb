@@ -115,7 +115,7 @@ impl OpenOptions {
     /// format version, until it applies its writer's first change. A file that already holds a
     /// writer's changes fails to open with [`ErrorKind::NotReplica`](crate::ErrorKind::NotReplica)
     /// unless that writer was demoted, and a file written in an older format opens as a replica
-    /// that waits for its writer's upgrade, refusing graph reads and writes with
+    /// that waits for its writer's upgrade, refusing graph reads with
     /// [`ErrorKind::FormatUpgradePending`](crate::ErrorKind::FormatUpgradePending) until it
     /// applies that upgrade, since the upgrade is a write. Data that belongs to the node itself
     /// goes in a database file of its own.
