@@ -176,17 +176,26 @@ pub(crate) fn fork_lsn(epochs: &[Epoch], remote: &EpochId, lsn: u64) -> u64 {
 }
 
 /// The role a file opens in: a writer that began the newest term and never stepped down opens
-/// fenced until the host promotes it again, and a file with no history follows its flag.
+/// fenced until the host promotes it again, unless it stepped aside for a higher term it heard
+/// of, and a file with no history follows its flag.
 pub(super) fn role_at_open(header: &Header, epochs: &[Epoch]) -> Role {
     let replication = &header.replication;
     match epochs.last() {
         None if replication.replica => Role::Replica,
         None => Role::Writer,
-        Some(top) if top.incarnation == replication.incarnation && top.ended_lsn == 0 => {
+        Some(top)
+            if top.incarnation == replication.incarnation
+                && top.ended_lsn == 0
+                && !stepped_aside(replication, top) =>
+        {
             Role::Fenced
         }
         Some(_) => Role::Replica,
     }
+}
+
+fn stepped_aside(replication: &Replication, top: &Epoch) -> bool {
+    replication.replica && replication.seen_term > top.term
 }
 
 fn refuse(kind: ErrorKind, message: String, failure: Option<Failure>) -> EngineError {
@@ -538,10 +547,9 @@ impl<F: FileSystem + 'static> Engine<F> {
                     ..
                 }
             );
-            let newer = if begins { newest.term.max(seen) } else { seen };
             if offered.term < newest.term
-                || offered.term < newer
-                || (begins && offered.term == newer)
+                || offered.term < seen
+                || (begins && offered.term <= newest.term)
             {
                 return Err(self.conflict(&epochs, &writer, seen, (offered, record.lsn, chain)));
             }
@@ -691,6 +699,9 @@ impl<F: FileSystem + 'static> Engine<F> {
                 && newest.ended_lsn == 0
                 && replication.seen_term <= term
             {
+                if replication.replica {
+                    self.write_replication(|replication| replication.replica = false)?;
+                }
                 self.set_role(Role::Writer);
                 return Ok(());
             }
@@ -703,6 +714,9 @@ impl<F: FileSystem + 'static> Engine<F> {
             return Err(self.conflict(&epochs, &writer, 0, (offered, writer.last_lsn + 1, 0)));
         }
         self.write_config(&mut writer, term, writer_id, Step::Begin)?;
+        if replication.replica {
+            self.write_replication(|replication| replication.replica = false)?;
+        }
         self.set_role(Role::Writer);
         Ok(())
     }
@@ -746,7 +760,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         if shared.is_poisoned() {
             return Err(shared.refusal());
         }
+        let seen = lock(&shared.identity).replication.seen_term;
         match self.epochs().last() {
+            Some(newest) if newest.ended_lsn == 0 && seen > newest.term => {
+                self.write_replication(|replication| replication.replica = true)?;
+            }
             Some(newest) if newest.ended_lsn == 0 => {
                 let (term, writer_id) = (newest.term, newest.writer_id.clone());
                 self.write_config(&mut writer, term, &writer_id, Step::StepDown)?;

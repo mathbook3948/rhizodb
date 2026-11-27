@@ -259,6 +259,11 @@ impl ErrorKind {
 /// A failed query or database operation. Its `Display` is a message for people, and
 /// [`Error::kind`] is what code branches on.
 ///
+/// The message states each cause once. A cause the host can name, such as the error a
+/// procedure body returned or an I/O error, is left out of the message and returned from
+/// [`source`](std::error::Error::source). A failure inside the database has no source, and its message
+/// carries the whole account.
+///
 /// A method's docs name the [`ErrorKind`]s it adds to the ones every call can fail with, which
 /// the [Errors section of the crate guide](crate#errors) lists.
 ///
@@ -280,6 +285,7 @@ pub struct Error {
     source: Option<Box<dyn StdError + Send + Sync>>,
     rejects_type: bool,
     byte_offset: Option<usize>,
+    storage: Option<StorageError>,
 }
 
 impl Error {
@@ -290,6 +296,7 @@ impl Error {
             source: None,
             rejects_type: false,
             byte_offset: None,
+            storage: None,
         }
     }
 
@@ -318,6 +325,12 @@ impl Error {
     /// [`ErrorKind::is_type_error`] describes.
     pub(crate) fn is_type_error(&self) -> bool {
         self.rejects_type || self.kind.is_type_error()
+    }
+
+    /// The storage failure behind this one, which `source` leaves out since
+    /// the message already holds it.
+    pub(crate) fn storage(&self) -> Option<&StorageError> {
+        self.storage.as_ref()
     }
 
     /// The condition that caused the failure.
@@ -385,12 +398,10 @@ impl From<SyntaxError> for Error {
 
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
+        let failure = Self::new(error.kind(), error.to_string());
         Self {
-            kind: error.kind(),
-            message: error.to_string(),
-            source: Some(Box::new(error)),
-            rejects_type: false,
-            byte_offset: None,
+            storage: Some(error),
+            ..failure
         }
     }
 }
@@ -414,12 +425,6 @@ impl From<GraphError> for Error {
             GraphError::NotWriter(_) => ErrorKind::NotWriter,
             GraphError::ReadOnly(_) => ErrorKind::ReadOnly,
         };
-        Self {
-            kind,
-            message: error.to_string(),
-            source: Some(Box::new(error)),
-            rejects_type: false,
-            byte_offset: None,
-        }
+        Self::new(kind, error.to_string())
     }
 }

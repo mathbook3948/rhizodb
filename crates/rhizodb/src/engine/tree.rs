@@ -36,6 +36,9 @@ pub(crate) struct Tree {
     pub(crate) roots: BTreeMap<TableId, Root>,
     pub(crate) source: Arc<dyn PageSource>,
     pinned: BTreeMap<TableId, OnceLock<Pinned>>,
+    /// How many point lookups have read this tree, for tests that bound what a commit reads.
+    #[cfg(test)]
+    pub(crate) lookups: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -196,6 +199,8 @@ impl Tree {
             roots,
             source,
             pinned,
+            #[cfg(test)]
+            lookups: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -260,6 +265,9 @@ impl Tree {
         key: &[u8],
         read: impl FnOnce(&[u8]) -> T,
     ) -> Result<Option<T>, EngineError> {
+        #[cfg(test)]
+        self.lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Some(root) = self.roots.get(&table) else {
             return Ok(None);
         };

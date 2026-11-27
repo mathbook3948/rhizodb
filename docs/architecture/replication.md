@@ -32,7 +32,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - These header fields, the log kept for peers, and the replication history come with engine format minor 4, and a file of an earlier minor opens as a writer with no history and no peers and draws its incarnation when it starts its next log.
 - Every header that holds any of these fields records minor 4, so a build before it refuses a file this build only opened as an unsupported format instead of reading the fields as a damaged reserved area.
 - A new file and an installed copy get a new random incarnation, so a copy of a file never passes as the file that began a term.
-- A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer, and every other file is a replica.
+- A file's role follows from its history and header: a file with no history is a writer unless marked a replica, the incarnation that began the newest term and never stepped down is a fenced writer unless it stepped aside for a higher term it heard of, and every other file is a replica.
 - A writer opens fenced after every restart and takes writes again only once the host promotes it with its own newest term and writer id.
 - A replica opened on a missing or empty file writes nothing and stays a replica, so it holds no change until it applies its writer's first one.
 - `OpenOptions::replica` makes a file that holds no change a replica and refuses a file that holds a writer's changes with `NotReplica`.
@@ -58,6 +58,7 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - `apply` skips a record the replica holds in the same term under the same writer, and compares the chain hash at the replica's last record, so applying changes twice is safe and a reused epoch is caught.
 - `apply` fails with `Gap` when changes follow an LSN the replica does not hold yet.
 - `apply` fails with `Fenced` for a record of a term lower than the highest the replica has seen, and with `Diverged` for another writer in the newest term or for different changes where the replica holds some.
+- `apply` takes the first record of a term equal to the highest term the replica has heard of, since a file hears of a term from a peer before it receives that term's first record, and refuses one of a term no higher than its newest term.
 - A failed `apply` keeps every record before the one it refused.
 - `apply` on a writer or a fenced writer fails with `NotReplica`.
 - `promote` with a term higher than every term seen writes a configuration record and makes the database the writer.
@@ -66,6 +67,10 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 - The engine never picks a winner between two writers of one term, and the host settles it by resyncing the side that does not hold its lease and promoting the winner with a higher term.
 - A replica promoted before it holds the graph's format version records it and the tokenizer as a new database does.
 - `demote` refuses new writes and the commit of an open write transaction at once, waits up to a deadline for that transaction to end, records the step down, and returns the final position.
+- A `demote` of a writer that has heard of a term above its own writes no step down, since a step down at the next LSN would conflict with the new writer's first record there, and instead marks the header so the file opens as a replica.
+- A host passes the new writer's position to `changes_since` or `acknowledge` before it demotes a writer that lost its lease without a handover, so the old writer has heard of the new term, and `acknowledge` also keeps the log for that position as a peer's.
+- An old writer that stepped aside holds a prefix of the new writer's history exactly when the new writer holds the same term, writer id, and chain hash at the old writer's last LSN, which `apply` and `changes_since` already compare, so a caught-up old writer applies the new writer's changes and one with changes the new writer never received fails with `Diverged`.
+- `promote` clears the mark of a file that stepped aside once its configuration record is durable, and the mark counts only while the file has heard of a term above its newest one, so a crash between the two leaves a fenced writer that the same promotion finishes.
 - A `demote` that runs out of time fails with `WriterBusy` and leaves the database fenced, and a later `demote` finishes it.
 - `compare_lineage` finds the first LSN where two histories differ, comparing each term's writer id, first LSN, and the incarnation that began it, and tells whether this database is the same as, behind, ahead of, or diverged from another one.
 - Errors of the replication kinds carry the positions and LSNs behind them, which `Error::replication_failure` returns.
@@ -77,4 +82,3 @@ A host that runs RhizoDB on several machines needs copies of one graph that serv
 ## Open
 
 - How a replica or a fenced writer of a newer build follows a writer that has not upgraded the graph's format yet, since opening it as anything but a writer refuses the upgrade with `NotWriter`.
-- How a writer fenced by an unplanned failover rejoins without a snapshot when it holds every change the new writer began from, since its step down at the next LSN conflicts with the new writer's first record there.

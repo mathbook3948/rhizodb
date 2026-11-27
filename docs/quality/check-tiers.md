@@ -21,6 +21,9 @@ The randomized, crash, and stress tests took most of the time of the check that 
 - An issue title names the test binary with the test, and more than five failing tests in one run share one issue whose title names no count.
 - A test binary that exits without naming a failed test, as a crash or abort does, gets an issue of its own, and a failed job whose log names no test binary at all opens an issue for the job.
 - An issue body is cut to fit GitHub's limit, and it says how much output it left out.
+- A nightly job that times out or is cancelled counts as failed, so its log is uploaded and reported as a failed job's is.
+- A nightly storage job uploads only the log of the step that failed or was cut off, so a step that passed never opens an issue.
+- The nightly storage job on Windows gets a longer timeout than on Linux and macOS, sized to how much slower its runners run the deep tests, and runs the same case counts.
 - A failure found on `main` is fixed in a new pull request.
 - Nothing is published unless a `v*` tag is pushed, and a release runs `mise run random` before it publishes.
 

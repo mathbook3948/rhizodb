@@ -1048,6 +1048,13 @@ impl<F: FileSystem + 'static> Engine<F> {
             .sum()
     }
 
+    /// How many point lookups have read the tree the published view reads.
+    #[cfg(test)]
+    pub(crate) fn tree_lookups(&self) -> u64 {
+        let layers = Arc::clone(&lock(&self.shared.published).view.layers);
+        layers.tree.lookups.load(Ordering::Relaxed)
+    }
+
     fn deregister(&self, snapshot: u64) {
         let mut published = lock(&self.shared.published);
         if let Some(count) = published.readers.get_mut(&snapshot) {
@@ -1112,12 +1119,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
+        let graves = staged.graves(&layers);
         let changes: Vec<(TableId, Bytes, Slot)> = staged.into_changes().collect();
-        let graves: Vec<(TableId, Bytes)> = changes
-            .iter()
-            .filter(|(table, key, slot)| slot.is_none() && !layers.below_may_hold(*table, key))
-            .map(|(table, key, _)| (*table, Arc::clone(key)))
-            .collect();
         layers.active.apply(lsn, changes, horizon);
         layers.active.bury(lsn, graves);
         {
