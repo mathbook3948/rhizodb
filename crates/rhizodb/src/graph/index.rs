@@ -690,8 +690,9 @@ fn best(mut scored: Vec<(u64, f64)>, limit: usize) -> Vec<(u64, f64)> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
-    /// Whether the keyword indexes follow this build's tokenizer.
-    pub(crate) fn holds_current_tokenizer(&self) -> Result<bool, GraphError> {
+    /// Whether the keyword indexes were built by this build's tokenizer, as the stored
+    /// fingerprint records.
+    pub(crate) fn tokenizer_is_current(&self) -> Result<bool, GraphError> {
         let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
         Ok(stored.as_deref() == Some(tokenize::fingerprint().as_slice()))
     }
@@ -880,37 +881,89 @@ impl<T: ReadTransaction> GraphTx<T> {
         })
     }
 
+    fn posting_blocks(&self, index: u32, term: &str) -> Result<usize, GraphError> {
+        let prefix = keys::posting_prefix(index, term);
+        let mut blocks = self.postings.under(&prefix).count();
+        self.transaction
+            .visit_prefix_peek(Table::KeywordPostings, &prefix, |_, _| {
+                blocks += 1;
+                Ok::<(), GraphError>(())
+            })?;
+        Ok(blocks)
+    }
+
+    fn postings_of<V>(
+        &self,
+        index: u32,
+        term: &str,
+        elements: &BTreeMap<u64, V>,
+    ) -> Result<BTreeMap<u64, Posting>, GraphError> {
+        let mut postings = BTreeMap::new();
+        let mut keep = |block: u64, bytes: &[u8]| -> Result<(), GraphError> {
+            for posting in Entries::new(block, bytes) {
+                let posting = posting?;
+                if elements.contains_key(&posting.element) {
+                    postings.insert(posting.element, posting);
+                }
+            }
+            Ok(())
+        };
+        let mut key = Vec::new();
+        let mut blocks: Vec<u64> = elements
+            .keys()
+            .map(|element| postings::block_of(*element))
+            .collect();
+        blocks.dedup();
+        for block in blocks {
+            keys::put_posting_key(&mut key, index, term, block);
+            match self.postings.get(&key, block) {
+                Some(held) => {
+                    if let Some(bytes) = held.bytes() {
+                        keep(block, bytes)?;
+                    }
+                }
+                None => {
+                    self.transaction
+                        .get_with(Table::KeywordPostings, &key, |bytes| keep(block, bytes))?;
+                }
+            }
+        }
+        Ok(postings)
+    }
+
     fn phrase_matches(
         &self,
         index: u32,
         terms: &[Term],
     ) -> Result<BTreeMap<u64, (u32, u32)>, GraphError> {
-        let mut lists = Vec::new();
-        for term in terms {
-            lists.push((term.position, self.postings(index, &term.text)?));
-        }
         let mut matches = BTreeMap::new();
-        let Some((rarest, (rarest_offset, anchor))) = lists
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, (_, postings))| postings.len())
-        else {
+        let mut sizes = Vec::with_capacity(terms.len());
+        for term in terms {
+            sizes.push(self.posting_blocks(index, &term.text)?);
+        }
+        let Some((rarest, _)) = sizes.iter().enumerate().min_by_key(|(_, size)| **size) else {
             return Ok(matches);
         };
-        for (element, posting) in anchor {
-            let Some(others) = lists
-                .iter()
-                .enumerate()
-                .filter(|(position, _)| *position != rarest)
-                .map(|(_, (offset, postings))| Some((*offset, postings.get(element)?)))
-                .collect::<Option<Vec<_>>>()
-            else {
+        let rarest_offset = terms[rarest].position;
+        let mut anchor = self.postings(index, &terms[rarest].text)?;
+        let mut lists = Vec::with_capacity(terms.len() - 1);
+        for (position, term) in terms.iter().enumerate() {
+            if position == rarest {
                 continue;
-            };
+            }
+            let postings = self.postings_of(index, &term.text, &anchor)?;
+            anchor.retain(|element, _| postings.contains_key(element));
+            lists.push((term.position, postings));
+        }
+        for (element, posting) in &anchor {
+            let others: Vec<_> = lists
+                .iter()
+                .map(|(offset, postings)| (*offset, &postings[element]))
+                .collect();
             let occurrences = posting
                 .positions
                 .iter()
-                .filter_map(|start| start.checked_sub(*rarest_offset))
+                .filter_map(|start| start.checked_sub(rarest_offset))
                 .filter(|base| {
                     others.iter().all(|(offset, other)| {
                         base.checked_add(*offset)
@@ -1242,9 +1295,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     /// covers when the stored entries came from another tokenizer. Returns whether anything was
     /// written.
     pub(crate) fn adopt_current_tokenizer(&mut self) -> Result<bool, GraphError> {
-        let fingerprint = tokenize::fingerprint();
-        let stored = self.transaction.get(Table::Metadata, keys::TOKENIZER_KEY)?;
-        if stored.as_deref() == Some(fingerprint.as_slice()) {
+        if self.tokenizer_is_current()? {
             return Ok(false);
         }
         for (_, index) in self.indexes()? {
@@ -1254,8 +1305,11 @@ impl<T: WriteTransaction> GraphTx<T> {
             self.clear(&index)?;
             self.fill(&index)?;
         }
-        self.transaction
-            .put(Table::Metadata, keys::TOKENIZER_KEY, &fingerprint)?;
+        self.transaction.put(
+            Table::Metadata,
+            keys::TOKENIZER_KEY,
+            &tokenize::fingerprint(),
+        )?;
         Ok(true)
     }
 

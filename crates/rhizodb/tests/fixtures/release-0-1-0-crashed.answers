@@ -1,0 +1,28 @@
+MATCH (n) RETURN count(*), min(id(n)), max(id(n))
+  [[Integer(137), Integer(0), Integer(150)]]
+MATCH ()-[r]->() RETURN count(*), min(id(r)), max(id(r))
+  [[Integer(71), Integer(0), Integer(93)]]
+MATCH (p:Person {name: 'person 17'}) RETURN id(p), p.age
+  [[Integer(17), Integer(37)]]
+MATCH (p:Person) WHERE p.age >= 30 AND p.age < 33 RETURN p.name, p.age ORDER BY p.name
+  [[String("person 10"), Integer(30)], [String("person 11"), Integer(31)], [String("person 12"), Integer(32)], [String("person 50"), Integer(30)], [String("person 51"), Integer(31)], [String("person 52"), Integer(32)], [String("person 60"), Integer(30)], [String("person 62"), Integer(32)]]
+MATCH (p:Person) WHERE p.age IN [20, 44, 59] RETURN count(*), sum(p.age)
+  [[Integer(4), Integer(143)]]
+MATCH ()-[k:KNOWS]->() WHERE k.since > 2015 RETURN count(*), sum(k.since)
+  [[Integer(5), Integer(10110)]]
+CALL db.index.keyword.queryNodes('doc text', 'graph', 10) YIELD node, score RETURN id(node), node.i, score
+  [[Integer(83), Integer(23), Float(1.494928095521405)], [Integer(128), Integer(68), Float(1.3844137602412876)], [Integer(99), Integer(39), Float(1.3350656048622045)], [Integer(119), Integer(59), Float(1.3350656048622045)], [Integer(65), Integer(5), Float(1.221201450678777)], [Integer(105), Integer(45), Float(1.221201450678777)], [Integer(110), Integer(50), Float(1.221201450678777)], [Integer(63), Integer(3), Float(1.146441078450166)], [Integer(66), Integer(6), Float(1.146441078450166)], [Integer(96), Integer(36), Float(1.146441078450166)]]
+CALL db.index.keyword.queryNodes('doc text', 'stor*', 1000) YIELD node RETURN count(*), sum(node.i)
+  [[Integer(38), Integer(1565)]]
+CALL db.index.keyword.queryNodes('doc text', '"river bridge"', 10) YIELD node, score RETURN node.i, score
+  [[Integer(2), Float(2.1457149832575872)], [Integer(20), Float(2.1457149832575872)], [Integer(29), Float(2.1457149832575872)], [Integer(38), Float(2.1457149832575872)], [Integer(47), Float(2.1457149832575872)], [Integer(56), Float(2.1457149832575872)], [Integer(65), Float(2.1457149832575872)], [Integer(74), Float(2.1457149832575872)], [Integer(9), Float(1.9237621842870525)], [Integer(54), Float(1.9237621842870525)]]
+CALL db.index.keyword.queryNodes('doc text', '그래프', 10) YIELD node, score RETURN node.i, score
+  [[Integer(35), Float(2.4966120459784067)], [Integer(70), Float(2.4966120459784067)], [Integer(21), Float(2.419400925575886)], [Integer(63), Float(2.419400925575886)], [Integer(7), Float(2.346822257932111)], [Integer(42), Float(2.346822257932111)], [Integer(28), Float(2.2784712838146226)], [Integer(14), Float(2.2139890637896467)], [Integer(49), Float(2.2139890637896467)]]
+CALL db.index.keyword.queryNodes('doc text', 'gone', 10) YIELD node RETURN count(*)
+  [[Integer(0)]]
+CALL db.index.keyword.queryRelationships('knows note', 'conference', 10) YIELD relationship, score RETURN id(relationship), score
+  [[Integer(0), Float(0.4302583559001231)], [Integer(1), Float(0.4302583559001231)], [Integer(4), Float(0.4302583559001231)], [Integer(5), Float(0.4302583559001231)], [Integer(8), Float(0.4302583559001231)], [Integer(9), Float(0.4302583559001231)], [Integer(15), Float(0.4302583559001231)], [Integer(19), Float(0.4302583559001231)], [Integer(24), Float(0.4302583559001231)], [Integer(25), Float(0.4302583559001231)]]
+CALL db.index.vector.queryNodes('doc vec', [1.0, 0.5, 0.25], 5) YIELD node, score RETURN node.i, score
+  [[Integer(71), Float(0.9941037221861875)], [Integer(17), Float(0.9903735018402732)], [Integer(2), Float(0.9883173560569457)], [Integer(32), Float(0.9869275424396536)], [Integer(47), Float(0.9786656005941753)]]
+CALL db.index.vector.queryRelationships('knows weight', [1.0, 2.0], 5) YIELD relationship, score RETURN id(relationship), score
+  [[Integer(10), Float(10.0)], [Integer(11), Float(10.0)], [Integer(0), Float(9.0)], [Integer(1), Float(9.0)], [Integer(4), Float(8.0)]]

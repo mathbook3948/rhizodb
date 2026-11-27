@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::error::ErrorKind;
 use crate::storage::ReadTransaction;
 use crate::storage::StorageError;
 use crate::storage::copy_tables;
@@ -143,6 +144,15 @@ impl BlockFile for AnyFile {
         }
     }
 
+    fn lock_shared(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.lock_shared(),
+            AnyFile::Memory(file) => file.lock_shared(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.lock_shared(),
+        }
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         match self {
             AnyFile::Os(file) => file.set_block_count(count),
@@ -190,6 +200,17 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
     Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
 }
 
+/// Opens the existing database file at `path` with the engine read-only, as
+/// [`Engine::open_read_only`] does.
+pub(crate) fn open_path_read_only(
+    path: &Path,
+    options: EngineOptions,
+) -> Result<Engine<AnyFs>, EngineError> {
+    let (directory, name) = split(path)?;
+    let fs = OsFs::read_only(directory, name)?;
+    Engine::open_read_only(Arc::new(AnyFs::Os(fs)), name, options)
+}
+
 /// Installs the snapshot `input` streams as the database file at `path`, as
 /// [`super::snapshot::install`] does, and opens it.
 pub(crate) fn install_path(
@@ -225,10 +246,14 @@ pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            StorageError::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("the backup path {} names no file in UTF-8", path.display()),
-            ))
+            StorageError::io(
+                ErrorKind::Storage,
+                format!("cannot back up to {}", path.display()),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the backup path names no file in UTF-8",
+                ),
+            )
         })?;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
@@ -250,7 +275,17 @@ pub(crate) fn write_copy_on<F: FileSystem + 'static>(
             copy_tables(snapshot, &copy)?;
             copy.close().map_err(StorageError::from)
         });
-    let left = segment_files(&*fs, name).map_err(StorageError::new)?;
+    let left = match segment_files(&*fs, name) {
+        Ok(left) => left,
+        Err(error) => {
+            copied?;
+            return Err(StorageError::io(
+                ErrorKind::Storage,
+                "cannot list the log segments of the backup",
+                error,
+            ));
+        }
+    };
     if copied.is_ok() && left.is_empty() {
         return Ok(());
     }

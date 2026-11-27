@@ -1034,6 +1034,39 @@ fn creating_relationships_between_committed_nodes_reads_their_node_meta_once() {
 }
 
 #[test]
+fn labels_that_change_nothing_on_a_committed_node_read_its_node_meta_once() {
+    let gate = Arc::new(Gate::default());
+    let graph = Graph::open(GatedStorage {
+        inner: test_engine::in_memory(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    let mut write = graph.write().unwrap();
+    let label = write.intern_token("A").unwrap();
+    let other = write.intern_token("B").unwrap();
+    let node = write
+        .create_node(NodeRecord {
+            labels: BTreeSet::from([label]),
+            properties: Properties::new(),
+        })
+        .unwrap();
+    write.commit().unwrap();
+    let mut write = graph.write().unwrap();
+    gate.node_chunk_reads
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..100 {
+        write.add_labels(node, &[label]).unwrap();
+        write.remove_labels(node, &[other]).unwrap();
+    }
+    let reads = gate
+        .node_chunk_reads
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(reads <= 4, "{reads} node meta reads");
+    write.commit().unwrap();
+    assert_eq!(graph.read().unwrap().check_integrity().unwrap(), vec![]);
+}
+
+#[test]
 fn opening_a_database_of_an_older_format_as_its_writer_checkpoints_the_upgrade() {
     let storage = test_engine::in_memory();
     let mut write = storage.begin_write().unwrap();
@@ -1072,6 +1105,42 @@ fn opening_a_new_or_current_database_checkpoints_nothing() {
     let before = storage.header();
     let graph = Graph::open(storage).unwrap();
     assert_eq!(graph.storage.header().generation, before.generation);
+}
+
+#[test]
+fn a_read_only_graph_opens_only_the_current_format_and_tokenizer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    drop(Graph::open(test_engine::open(&path)).unwrap());
+    let read_only = || {
+        let storage = crate::engine::any_fs::open_path_read_only(
+            &path,
+            crate::engine::store::EngineOptions::default(),
+        )
+        .unwrap();
+        Graph::open_as(storage, Access::ReadOnly)
+    };
+    assert!(read_only().is_ok());
+    let rewrite = |key: &[u8], value: &[u8]| {
+        let storage = test_engine::open(&path);
+        let mut write = storage.begin_write().unwrap();
+        write.put(Table::Metadata, key, value).unwrap();
+        write.commit().unwrap();
+    };
+    rewrite(
+        keys::FORMAT_VERSION_KEY,
+        &(FORMAT_VERSION - 1).to_be_bytes(),
+    );
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
+    rewrite(keys::FORMAT_VERSION_KEY, &99u32.to_be_bytes());
+    assert!(matches!(
+        read_only(),
+        Err(GraphError::UnsupportedFormatVersion(99))
+    ));
+    rewrite(keys::FORMAT_VERSION_KEY, &FORMAT_VERSION.to_be_bytes());
+    assert!(read_only().is_ok());
+    rewrite(keys::TOKENIZER_KEY, b"another tokenizer");
+    assert!(matches!(read_only(), Err(GraphError::ReadOnly(_))));
 }
 
 #[test]

@@ -144,6 +144,18 @@ pub(crate) enum GraphError {
     InvalidIndex(&'static str),
     InvalidQueryVector(String),
     NotWriter(&'static str),
+    ReadOnly(&'static str),
+}
+
+/// What a graph may write as it opens its storage and afterwards.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// Records the format version and upgrades an older format, and takes local writes.
+    Writer,
+    /// Refuses every local write, and so fails instead of writing an upgrade.
+    Replica,
+    /// Over storage that takes no write at all, which fails instead of writing an upgrade.
+    ReadOnly,
 }
 
 impl fmt::Display for GraphError {
@@ -189,6 +201,10 @@ impl fmt::Display for GraphError {
             Self::NotWriter(what) => {
                 write!(formatter, "a database that is not the writer cannot {what}")
             }
+            Self::ReadOnly(what) => write!(
+                formatter,
+                "a database opened read-only cannot {what}; open it once for writing to do so"
+            ),
         }
     }
 }
@@ -229,12 +245,25 @@ pub(crate) struct Adjacent {
     pub(crate) other: NodeId,
 }
 
+#[cfg(test)]
+pub(crate) struct ReadHook(Option<Arc<dyn Fn(u8) + Send + Sync>>);
+
+#[cfg(test)]
+impl fmt::Debug for ReadHook {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReadHook")
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Graph<S> {
     storage: S,
     writers: Arc<Writers>,
     replica: AtomicBool,
     pending: AtomicU32,
+    upgrades: AtomicU64,
+    #[cfg(test)]
+    read_hook: Mutex<ReadHook>,
     committed_index_definitions: Arc<CommittedCatalog>,
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
@@ -291,17 +320,36 @@ impl<S: Storage> Graph<S> {
     /// in the same write transaction.
     #[cfg(test)]
     pub(crate) fn open(storage: S) -> Result<Self, GraphError> {
-        Self::open_as(storage, false)
+        Self::open_as(storage, Access::Writer)
     }
 
-    /// Opens the graph as [`Graph::open`] does, or as a replica that refuses every local write
-    /// and so fails instead of writing the format version or an upgrade.
-    pub(crate) fn open_as(storage: S, replica: bool) -> Result<Self, GraphError> {
-        let pending = if replica {
-            Self::pending_format(&storage)?
-        } else {
-            Self::upgrade(&storage)?;
-            None
+    /// Opens the graph as [`Graph::open`] does, or, for any `access` but a writer's, without
+    /// writing the format version or an upgrade: a replica of an older format or tokenizer opens
+    /// waiting for its writer's upgrade, and a graph opened read-only reads the current format
+    /// and tokenizer only, since the graph reads no older layout as it is.
+    pub(crate) fn open_as(storage: S, access: Access) -> Result<Self, GraphError> {
+        if access == Access::ReadOnly {
+            let tx = GraphTx::bare(storage.begin_read()?);
+            let found = Self::stored_format(&tx)?;
+            if found.is_some_and(|found| found != FORMAT_VERSION) {
+                return Err(GraphError::ReadOnly(
+                    "upgrade a database written in an older format",
+                ));
+            }
+            if found.is_some() && !tx.tokenizer_is_current()? {
+                return Err(GraphError::ReadOnly(
+                    "rebuild keyword indexes for this build's tokenizer",
+                ));
+            }
+        }
+        let replica = access == Access::Replica;
+        let pending = match access {
+            Access::Replica => Self::pending_format(&storage)?,
+            Access::Writer => {
+                Self::upgrade(&storage)?;
+                None
+            }
+            Access::ReadOnly => None,
         };
         let definitions = match pending {
             Some(_) => Arc::from(Vec::new()),
@@ -312,6 +360,9 @@ impl<S: Storage> Graph<S> {
             writers: Arc::default(),
             replica: AtomicBool::new(replica),
             pending: AtomicU32::new(pending.unwrap_or(0)),
+            upgrades: AtomicU64::new(0),
+            #[cfg(test)]
+            read_hook: Mutex::new(ReadHook(None)),
             committed_index_definitions: Arc::new(CommittedCatalog {
                 definitions: Mutex::new(definitions),
                 changes: AtomicU64::new(0),
@@ -343,11 +394,14 @@ impl<S: Storage> Graph<S> {
     }
 
     fn pending_format(storage: &S) -> Result<Option<u32>, GraphError> {
-        let tx = GraphTx::bare(storage.begin_read()?);
-        let Some(found) = Self::stored_format(&tx)? else {
+        Self::pending_in(&GraphTx::bare(storage.begin_read()?))
+    }
+
+    fn pending_in(tx: &GraphTx<impl ReadTransaction>) -> Result<Option<u32>, GraphError> {
+        let Some(found) = Self::stored_format(tx)? else {
             return Ok(None);
         };
-        Ok((found != FORMAT_VERSION || !tx.holds_current_tokenizer()?).then_some(found))
+        Ok((found != FORMAT_VERSION || !tx.tokenizer_is_current()?).then_some(found))
     }
 
     fn upgrade(storage: &S) -> Result<(), GraphError> {
@@ -397,8 +451,32 @@ impl<S: Storage> Graph<S> {
 
     /// Makes the graph wait for its writer's upgrade of the graph format `found` before it
     /// serves reads, ahead of changes that leave it in that format.
+    ///
+    /// It marks the graph pending before it counts the wait, both before the apply publishes the
+    /// format, so a read that loads the count after it changed finds the graph pending at its
+    /// first check, and a read that loaded it before finds it changed once its snapshot holds the
+    /// format and checks that snapshot.
     pub(crate) fn wait_for_upgrade(&self, found: u32) {
-        self.pending.store(found, Ordering::Release);
+        self.pending.store(found, Ordering::SeqCst);
+        #[cfg(test)]
+        self.reached(2);
+        self.upgrades.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    /// Calls `hook` with 0 after a read checks that the graph is ready, with 1 after it begins
+    /// its snapshot, and with 2 between the two steps of `wait_for_upgrade`, so a test can run
+    /// an apply or a read between them.
+    pub(crate) fn hook_reads(&self, hook: Arc<dyn Fn(u8) + Send + Sync>) {
+        lock(&self.read_hook).0 = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn reached(&self, point: u8) {
+        let hook = lock(&self.read_hook).0.clone();
+        if let Some(hook) = hook {
+            hook(point);
+        }
     }
 
     /// Whether the graph waits for its writer's upgrade before it serves reads.
@@ -468,10 +546,17 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        let upgrades = self.upgrades.load(Ordering::SeqCst);
         self.ready()?;
+        #[cfg(test)]
+        self.reached(0);
         let committed = &self.committed_index_definitions;
         let before = committed.changes.load(Ordering::SeqCst);
         let transaction = self.storage.begin_read()?;
+        #[cfg(test)]
+        self.reached(1);
+        self.ready()?;
+        let waited = self.upgrades.load(Ordering::SeqCst) != upgrades;
         let definitions = Arc::clone(&lock(&committed.definitions));
         let index_definitions =
             if before.is_multiple_of(2) && committed.changes.load(Ordering::SeqCst) == before {
@@ -479,7 +564,7 @@ impl<S: Storage> Graph<S> {
             } else {
                 OnceLock::new()
             };
-        Ok(GraphTx {
+        let tx = GraphTx {
             transaction,
             _writer: None,
             index_definitions,
@@ -502,7 +587,11 @@ impl<S: Storage> Graph<S> {
             record_buffer: Vec::new(),
             postings: postings::Held::default(),
             counters: Vec::new(),
-        })
+        };
+        if waited && let Some(found) = Self::pending_in(&tx)? {
+            return Err(GraphError::UpgradePending(found));
+        }
+        Ok(tx)
     }
 
     /// Records the format version and the tokenizer in a graph that holds neither, as a
@@ -823,6 +912,15 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, DecodeError> {
 }
 
 impl<T: ReadTransaction> GraphTx<T> {
+    #[cfg(test)]
+    /// The stored graph format version this transaction sees.
+    pub(crate) fn stored_format_version(&self) -> Option<Vec<u8>> {
+        self.transaction
+            .get(Table::Metadata, keys::FORMAT_VERSION_KEY)
+            .ok()
+            .flatten()
+    }
+
     #[cfg(test)]
     pub(crate) fn node(&self, id: NodeId) -> Result<Option<NodeRecord>, GraphError> {
         let Some(labels) = self.node_labels(id)? else {
@@ -2190,7 +2288,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         labels: &[Token<Label>],
         add: bool,
     ) -> Result<(), GraphError> {
-        let current = self.node_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
+        let current = self.read_labels(id)?.ok_or(GraphError::NodeNotFound(id))?;
         let changed: BTreeSet<Token<Label>> = labels
             .iter()
             .copied()

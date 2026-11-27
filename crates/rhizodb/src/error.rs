@@ -161,7 +161,8 @@ pub enum ErrorKind {
     /// Stored data does not decode, breaks an invariant, or makes the storage engine fail.
     CorruptData,
     /// The database was written in a format version this build cannot read, of the graph layer
-    /// or of the storage engine.
+    /// or of the storage engine, or [`Database::apply`](crate::Database::apply) refused a change
+    /// that records a graph format newer than this build reads.
     UnsupportedFormatVersion,
     /// No node, relationship, or token identifiers are left.
     IdSpaceExhausted,
@@ -172,6 +173,11 @@ pub enum ErrorKind {
     /// again until that `Database` is dropped. A file system that does not support file locks
     /// gives no such check, and a second open of a file there succeeds.
     DatabaseAlreadyOpen,
+    /// A database opened with [`OpenOptions::read_only`](crate::OpenOptions::read_only) was
+    /// asked to change its file: a query that updates the graph, a write transaction, an index
+    /// change, an import, a compaction, a call that writes for replication, or an upgrade of a
+    /// file written in an older format, which a database opened for writing makes once.
+    ReadOnly,
     /// [`Database::backup_to`](crate::Database::backup_to) found a file or directory at the
     /// path, which a backup never replaces.
     BackupTargetExists,
@@ -196,9 +202,11 @@ pub enum ErrorKind {
     /// [fenced](crate::Role::Fenced) writer takes writes again only once the host promotes it.
     NotWriter,
     /// A database that is not the writer holds a graph format or keyword index tokenizer older
-    /// than this build's, which only its writer can upgrade, so it serves no read or write of
-    /// the graph yet. It still applies and serves changes, and it serves reads again once it
-    /// applies its writer's upgrade, or once the host promotes it, which upgrades it.
+    /// than this build's, which only its writer can upgrade, so it serves no read of the graph
+    /// yet, and refuses writes with [`ErrorKind::NotWriter`] as any database that is not the
+    /// writer does. It still applies and serves changes, takes snapshots and backups, and runs
+    /// [`Database::check`](crate::Database::check), and it serves reads again once it applies
+    /// its writer's upgrade, or once the host promotes it, which upgrades it.
     FormatUpgradePending,
     /// A change or a promotion carries a term lower than the highest term this database has
     /// seen, so it comes from a writer that a later one replaced.
@@ -258,6 +266,11 @@ impl ErrorKind {
 /// A failed query or database operation. Its `Display` is a message for people, and
 /// [`Error::kind`] is what code branches on.
 ///
+/// The message states each cause once. A cause the host can name, such as the error a
+/// procedure body returned or an I/O error, is left out of the message and returned from
+/// [`source`](std::error::Error::source). A failure inside the database has no source, and its message
+/// carries the whole account.
+///
 /// A method's docs name the [`ErrorKind`]s it adds to the ones every call can fail with, which
 /// the [Errors section of the crate guide](crate#errors) lists.
 ///
@@ -279,6 +292,7 @@ pub struct Error {
     source: Option<Box<dyn StdError + Send + Sync>>,
     rejects_type: bool,
     byte_offset: Option<usize>,
+    storage: Option<StorageError>,
 }
 
 impl Error {
@@ -289,6 +303,7 @@ impl Error {
             source: None,
             rejects_type: false,
             byte_offset: None,
+            storage: None,
         }
     }
 
@@ -317,6 +332,12 @@ impl Error {
     /// [`ErrorKind::is_type_error`] describes.
     pub(crate) fn is_type_error(&self) -> bool {
         self.rejects_type || self.kind.is_type_error()
+    }
+
+    /// The storage failure behind this one. `source` returns only the I/O error inside it,
+    /// when there is one, and the message holds the rest.
+    pub(crate) fn storage(&self) -> Option<&StorageError> {
+        self.storage.as_ref()
     }
 
     /// The condition that caused the failure.
@@ -367,9 +388,13 @@ impl fmt::Display for Error {
 
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn StdError + 'static))
+        match (&self.source, &self.storage) {
+            (Some(source), _) => Some(source.as_ref()),
+            (None, Some(storage)) => storage
+                .io_cause()
+                .map(|(_, io)| io as &(dyn StdError + 'static)),
+            (None, None) => None,
+        }
     }
 }
 
@@ -384,20 +409,22 @@ impl From<SyntaxError> for Error {
 
 impl From<StorageError> for Error {
     fn from(error: StorageError) -> Self {
+        let message = match error.io_cause() {
+            Some((context, _)) => context.to_owned(),
+            None => error.to_string(),
+        };
+        let failure = Self::new(error.kind(), message);
         Self {
-            kind: error.kind(),
-            message: error.to_string(),
-            source: Some(Box::new(error)),
-            rejects_type: false,
-            byte_offset: None,
+            storage: Some(error),
+            ..failure
         }
     }
 }
 
 impl From<GraphError> for Error {
     fn from(error: GraphError) -> Self {
-        let kind = match &error {
-            GraphError::Storage(error) => error.kind(),
+        let kind = match error {
+            GraphError::Storage(error) => return error.into(),
             GraphError::Decode(_) | GraphError::Corrupt(_) => ErrorKind::CorruptData,
             GraphError::UnsupportedFormatVersion(_) => ErrorKind::UnsupportedFormatVersion,
             GraphError::UpgradePending(_) => ErrorKind::FormatUpgradePending,
@@ -412,13 +439,8 @@ impl From<GraphError> for Error {
             GraphError::InvalidIndex(_) => ErrorKind::InvalidIndexDefinition,
             GraphError::InvalidQueryVector(_) => ErrorKind::InvalidArgumentValue,
             GraphError::NotWriter(_) => ErrorKind::NotWriter,
+            GraphError::ReadOnly(_) => ErrorKind::ReadOnly,
         };
-        Self {
-            kind,
-            message: error.to_string(),
-            source: Some(Box::new(error)),
-            rejects_type: false,
-            byte_offset: None,
-        }
+        Self::new(kind, error.to_string())
     }
 }

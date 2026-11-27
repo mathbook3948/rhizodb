@@ -322,15 +322,7 @@ fn prefix_reaching(counts: &[Option<usize>], enough: usize) -> Option<usize> {
 }
 
 fn per_morsel<T: ReadTransaction>(env: &Env<'_, T>, projection: &Projection) -> Option<Projection> {
-    let empty = vec![Datum::Null; env.slots];
-    let skip = match &projection.skip {
-        Some(skip) => env.count(skip, &empty, "SKIP").ok()?,
-        None => 0,
-    };
-    let limit = match &projection.limit {
-        Some(limit) => Some(env.count(limit, &empty, "LIMIT").ok()?),
-        None => None,
-    };
+    let (skip, limit) = env.window(projection).ok()?;
     let kept = limit.and_then(|limit| i64::try_from(skip.saturating_add(limit)).ok());
     Some(Projection {
         skip: None,
@@ -354,13 +346,13 @@ impl<'q> Split<'q, '_> {
         let failed = AtomicBool::new(false);
         let last = AtomicUsize::new(usize::MAX);
         let counts = Mutex::new(vec![None; morsels.len()]);
-        let (tx, slots, parameters, now, limits, elements) = (
+        let (tx, slots, parameters, now, limits, holds) = (
             env.tx,
             env.slots,
             env.parameters,
             env.now,
             env.limits,
-            env.elements,
+            env.holds,
         );
         let work = || {
             let graveyard = Graveyard::default();
@@ -374,7 +366,7 @@ impl<'q> Split<'q, '_> {
             let worker = Env {
                 morsel: Some(&morsel),
                 ..Env::new(tx, slots, parameters, now, &graveyard, &patterns, limits)
-                    .with_elements(elements)
+                    .with_holds(holds)
             };
             let mut done = Vec::new();
             while !failed.load(Ordering::Relaxed) {

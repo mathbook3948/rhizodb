@@ -1,7 +1,14 @@
 use proptest::prelude::*;
 
 use super::Position;
+use super::ReplicationFailure;
+use crate::engine::error::EngineError;
+use crate::engine::error::Failure;
+use crate::engine::error::Refusal;
+use crate::error::Error;
 use crate::error::ErrorKind;
+use crate::graph::GraphError;
+use crate::storage::StorageError;
 
 proptest! {
     #[test]
@@ -988,6 +995,263 @@ mod crash {
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
         }
 
+        fn apply_through(writer: &Database, replica: &Database, lsn: u64) {
+            while replica.position().lsn() < lsn {
+                let changes = writer.changes_since(&replica.position(), 1).unwrap();
+                replica.apply(&changes).unwrap();
+            }
+        }
+
+        const READER: u8 = 0;
+        const APPLIER: u8 = 1;
+        const DONE: u8 = u8::MAX;
+
+        type Event = (u8, u8);
+
+        struct Pauses {
+            roles: std::sync::Mutex<HashMap<std::thread::ThreadId, u8>>,
+            events: std::sync::Mutex<std::sync::mpsc::Sender<Event>>,
+            resumes: HashMap<u8, std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        }
+
+        fn pause(
+            db: &Database,
+        ) -> (
+            Arc<Pauses>,
+            std::sync::mpsc::Receiver<Event>,
+            HashMap<u8, std::sync::mpsc::Sender<()>>,
+        ) {
+            let (events, at) = std::sync::mpsc::channel();
+            let mut resumes = HashMap::new();
+            let mut resume = HashMap::new();
+            for role in [READER, APPLIER] {
+                let (send, receive) = std::sync::mpsc::channel();
+                resume.insert(role, send);
+                resumes.insert(role, std::sync::Mutex::new(receive));
+            }
+            let pauses = Arc::new(Pauses {
+                roles: std::sync::Mutex::new(HashMap::new()),
+                events: std::sync::Mutex::new(events),
+                resumes,
+            });
+            let hooked = Arc::clone(&pauses);
+            db.graph.hook_reads(Arc::new(move |point| {
+                let role = hooked
+                    .roles
+                    .lock()
+                    .unwrap()
+                    .get(&std::thread::current().id())
+                    .copied();
+                if let Some(role) = role {
+                    hooked.events.lock().unwrap().send((role, point)).unwrap();
+                    hooked.resumes[&role].lock().unwrap().recv().unwrap();
+                }
+            }));
+            (pauses, at, resume)
+        }
+
+        fn as_role(pauses: &Pauses, role: u8) {
+            pauses
+                .roles
+                .lock()
+                .unwrap()
+                .insert(std::thread::current().id(), role);
+        }
+
+        fn finish(pauses: &Pauses, role: u8) {
+            pauses.events.lock().unwrap().send((role, DONE)).unwrap();
+        }
+
+        #[test]
+        fn a_read_that_begins_while_an_apply_marks_the_graph_pending_refuses_the_older_snapshot() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(
+                &writer,
+                b"format_version",
+                &crate::graph::FORMAT_VERSION.to_be_bytes(),
+            );
+            let (pauses, at, resume) = pause(&replica);
+            let timeout = std::time::Duration::from_secs(10);
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let applier = scope.spawn(|| {
+                    as_role(&pauses, APPLIER);
+                    apply_through(&writer, &replica, older_at);
+                    finish(&pauses, APPLIER);
+                });
+                assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, 2));
+                let reader = scope.spawn(|| {
+                    as_role(&pauses, READER);
+                    let read = replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind());
+                    finish(&pauses, READER);
+                    read
+                });
+                match at.recv_timeout(timeout).unwrap() {
+                    (READER, 0) => {
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, 1));
+                        sync(&writer, &replica).unwrap();
+                        assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                        resume[&READER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (READER, DONE));
+                    }
+                    event => {
+                        assert_eq!(event, (READER, DONE));
+                        resume[&APPLIER].send(()).unwrap();
+                        assert_eq!(at.recv_timeout(timeout).unwrap(), (APPLIER, DONE));
+                    }
+                }
+                applier.join().unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began between the two steps of a wait and served format 13"
+                );
+            });
+        }
+
+        #[test]
+        fn a_read_that_spans_a_wait_and_its_end_refuses_the_older_snapshot_it_began() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            let older_at = writer.position().lsn();
+            insert(&writer, 2);
+            store(
+                &writer,
+                b"format_version",
+                &crate::graph::FORMAT_VERSION.to_be_bytes(),
+            );
+            let reader_thread = Arc::new(std::sync::Mutex::new(None));
+            let (reached, at) = std::sync::mpsc::channel::<u8>();
+            let (resume, resumed) = std::sync::mpsc::channel::<()>();
+            let hook_state = (
+                Arc::clone(&reader_thread),
+                std::sync::Mutex::new(reached),
+                std::sync::Mutex::new(resumed),
+            );
+            replica.graph.hook_reads(Arc::new(move |point| {
+                let (thread, reached, resumed) = &hook_state;
+                if *thread.lock().unwrap() == Some(std::thread::current().id()) {
+                    reached.lock().unwrap().send(point).unwrap();
+                    resumed.lock().unwrap().recv().unwrap();
+                }
+            }));
+            std::thread::scope(|scope| {
+                let resume = resume;
+                let reader = scope.spawn(|| {
+                    *reader_thread.lock().unwrap() = Some(std::thread::current().id());
+                    replica
+                        .graph
+                        .read()
+                        .map(|read| read.stored_format_version())
+                        .map_err(|error| crate::Error::from(error).kind())
+                });
+                assert_eq!(at.recv().unwrap(), 0);
+                apply_through(&writer, &replica, older_at);
+                resume.send(()).unwrap();
+                assert_eq!(at.recv().unwrap(), 1);
+                sync(&writer, &replica).unwrap();
+                assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(2)]]);
+                resume.send(()).unwrap();
+                assert_eq!(
+                    reader.join().unwrap(),
+                    Err(ErrorKind::FormatUpgradePending),
+                    "a read began over format 13 and served it once the wait ended"
+                );
+            });
+        }
+
+        #[test]
+        #[ignore = "left out of mise run check, run by mise run random"]
+        fn no_read_begins_over_an_older_format_that_an_apply_is_about_to_publish() {
+            let older = OLDER.to_be_bytes().to_vec();
+            let mut hits = 0;
+            for _ in 0..3000 {
+                let writer = open_on(&SimFs::new(), false);
+                writer.promote(1, b"w").unwrap();
+                insert(&writer, 1);
+                store(&writer, b"format_version", &older);
+                insert(&writer, 2);
+                let replica = open_on(&SimFs::new(), true);
+                let done = std::sync::atomic::AtomicBool::new(false);
+                std::thread::scope(|scope| {
+                    let reader = scope.spawn(|| {
+                        let mut seen = 0;
+                        while !done.load(std::sync::atomic::Ordering::Acquire) {
+                            if let Ok(read) = replica.graph.read()
+                                && read.stored_format_version().as_deref() == Some(older.as_slice())
+                            {
+                                seen += 1;
+                            }
+                        }
+                        seen
+                    });
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                    sync(&writer, &replica).unwrap();
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                    hits += reader.join().unwrap();
+                });
+            }
+            assert_eq!(hits, 0, "reads began over the older format");
+        }
+
+        #[test]
+        fn a_promoted_file_that_waited_keeps_its_property_index_whole_for_new_writes() {
+            let writer_fs = SimFs::new();
+            let replica_fs = SimFs::new();
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            writer
+                .create_property_index("by_k", IndexTarget::Label("N"), "k")
+                .unwrap();
+            insert(&writer, 1);
+            let replica = open_on(&replica_fs, true);
+            sync(&writer, &replica).unwrap();
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            sync(&writer, &replica).unwrap();
+            drop(writer);
+            let writer = open_on(&writer_fs, false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 2);
+            integrity(&writer);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            insert(&writer, 3);
+            sync(&writer, &replica).unwrap();
+            integrity(&replica);
+            assert_eq!(export(&replica), export(&writer));
+        }
+
+        #[test]
+        fn a_new_replica_that_receives_another_tokenizer_waits_without_a_restart() {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"tokenizer", b"another tokenizer");
+            let replica = open_on(&SimFs::new(), true);
+            sync(&writer, &replica).unwrap();
+            let error = count(&replica).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::FormatUpgradePending);
+            assert!(error.to_string().contains("tokenizer"), "{error}");
+        }
+
         #[test]
         fn a_replica_of_an_older_tokenizer_waits_for_the_rebuilt_keyword_indexes() {
             let (writer_fs, replica_fs) = older_pair(true);
@@ -1090,4 +1354,19 @@ mod crash {
             }
         }
     }
+}
+
+#[test]
+fn a_refusal_raised_under_the_graph_layer_keeps_its_facts() {
+    let refusal = EngineError::Replication(Box::new(Refusal {
+        kind: ErrorKind::Gap,
+        message: "the changes start after LSN 7".to_owned(),
+        failure: Some(Failure::Gap { expected_lsn: 7 }),
+    }));
+    let error = Error::from(GraphError::Storage(StorageError::from(refusal)));
+    assert_eq!(error.kind(), ErrorKind::Gap);
+    assert_eq!(
+        error.replication_failure(),
+        Some(ReplicationFailure::Gap { expected_lsn: 7 })
+    );
 }

@@ -51,9 +51,6 @@ use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
-use super::stream::elements;
-use super::stream::read_elements;
-use super::stream::update_elements;
 use super::update::Graveyard;
 use super::update::Writer;
 
@@ -79,6 +76,22 @@ pub(crate) fn run_read<T: ReadTransaction>(
     )
 }
 
+/// How row `a` ranks against row `b`, each given by its sort keys and its position: by the keys
+/// in the directions of `order_by`, then by position, so rows with equal keys keep their order.
+pub(crate) fn rank(
+    order_by: &[(Expr, SortDirection)],
+    a: (&[Datum], usize),
+    b: (&[Datum], usize),
+) -> Ordering {
+    for ((x, y), (_, direction)) in a.0.iter().zip(b.0).zip(order_by) {
+        let ordering = sort_order(*direction, x, y);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    a.1.cmp(&b.1)
+}
+
 /// Runs a read-only program whose clauses `read` applies, as [`Env::read_clauses`] does, given
 /// the clauses left in the pipeline.
 pub(crate) fn read_program<T: ReadTransaction>(
@@ -91,19 +104,16 @@ pub(crate) fn read_program<T: ReadTransaction>(
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    let elements = elements(program, read_elements);
-    let env = Env {
-        elements: &elements,
-        ..Env::new(
-            tx,
-            program.slot_count,
-            parameters,
-            now,
-            &graveyard,
-            &patterns,
-            limits,
-        )
-    };
+    let env = Env::new(
+        tx,
+        program.slot_count,
+        parameters,
+        now,
+        &graveyard,
+        &patterns,
+        limits,
+    )
+    .with_holds(&program.holds);
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| {
         read(&env, &clauses.iter().collect::<Vec<_>>(), rows)
@@ -120,10 +130,6 @@ pub(crate) fn run_write<W: WriteTransaction>(
     limits: Limits,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
-    let elements = elements(program, |clause, out| match clause {
-        Clause::Read(clause) => read_elements(clause, out),
-        Clause::Update(clause) => update_elements(clause, out),
-    });
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
     Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits)
@@ -137,7 +143,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         graveyard: &mut graveyard,
         limits,
         tokens: Vec::new(),
-        elements: &elements,
+        holds: &program.holds,
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
@@ -638,7 +644,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             .map_err(|source| {
                 Error::caused_by(
                     ErrorKind::ProcedureFailed,
-                    format!("procedure `{}` failed: {source}", procedure.signature.name),
+                    format!("procedure `{}` failed", procedure.signature.name),
                     source,
                 )
             })?
@@ -784,19 +790,23 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )
             });
         }
-        let empty = || vec![Datum::Null; self.slots];
-        let skip = match &projection.skip {
-            Some(skip) => self.count(skip, &empty(), "SKIP")?,
-            None => 0,
-        };
-        let limit = match &projection.limit {
-            Some(limit) => Some(self.count(limit, &empty(), "LIMIT")?),
-            None => None,
-        };
+        let (skip, limit) = self.window(projection)?;
         if !projection.order_by.is_empty() {
             let kept = limit.map(|limit| skip.saturating_add(limit));
             rows = self.sort(rows, &projection.order_by, kept)?;
         }
+        self.page(projection, rows, skip, limit)
+    }
+
+    /// The rows of a projection from its sorted `rows`, past the first `skip` and up to
+    /// `limit` of them, that its `WHERE` keeps.
+    pub(crate) fn page(
+        &self,
+        projection: &Projection,
+        mut rows: Vec<Row>,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<Row>, Error> {
         if skip > 0 {
             rows = rows.into_iter().skip(skip).collect();
         }
@@ -841,6 +851,23 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok(())
     }
 
+    /// The `SKIP` and `LIMIT` of a projection, which read no row.
+    pub(crate) fn window(&self, projection: &Projection) -> Result<(usize, Option<usize>), Error> {
+        let count = |expr: &Expr, clause| match expr {
+            Expr::Constant(_) | Expr::Parameter(_) => self.count(expr, &Vec::new(), clause),
+            _ => self.count(expr, &vec![Datum::Null; self.slots], clause),
+        };
+        let skip = match &projection.skip {
+            Some(skip) => count(skip, "SKIP")?,
+            None => 0,
+        };
+        let limit = match &projection.limit {
+            Some(limit) => Some(count(limit, "LIMIT")?),
+            None => None,
+        };
+        Ok((skip, limit))
+    }
+
     pub(crate) fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {
         match self.eval(expr, row)? {
             Datum::Integer(value) if value < 0 => Err(Error::new(
@@ -871,13 +898,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         }
         let compare = |(a, a_position, _): &(Vec<Datum>, usize, Row),
                        (b, b_position, _): &(Vec<Datum>, usize, Row)| {
-            for ((x, y), (_, direction)) in a.iter().zip(b).zip(order_by) {
-                let ordering = sort_order(*direction, x, y);
-                if ordering != Ordering::Equal {
-                    return ordering;
-                }
-            }
-            a_position.cmp(b_position)
+            rank(order_by, (a, *a_position), (b, *b_position))
         };
         if let Some(kept) = kept
             && kept < keyed.len()

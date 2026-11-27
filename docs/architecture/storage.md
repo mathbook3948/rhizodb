@@ -30,6 +30,7 @@ The graph layer needs ordered key-value tables that survive a crash. A storage t
 - A backup takes no write lock, so writers carry on while it runs and their commits stay out of the copy.
 - A backup is written under a staging name that holds the target's file name, the process, and a counter, in the target's directory, synced, and hard-linked into place, so the target holds nothing or the whole copy.
 - A backup never replaces an existing file or directory, and fails as a storage error instead.
+- A backup on a file system without hard links is renamed into place with a rename that fails when the target exists, and fails as a storage error on platforms or file systems without such a rename.
 - A failed backup removes its staging file, and a crashed one leaves it behind for the host to delete.
 - The own engine closes its copy before linking it, which checkpoints the whole log into the file, and fails the backup when a log segment is left.
 - When the own engine fails its copy, it removes the copy's log segments too, since they belong to a staging file that no later open finds.

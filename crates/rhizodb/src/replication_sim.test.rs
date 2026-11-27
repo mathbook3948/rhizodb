@@ -66,26 +66,36 @@ fn open(fs: &SimFs, replica: bool) -> Result<Database, Error> {
 }
 
 fn export(db: &Database) -> Vec<u8> {
-    readable_export(db).expect("a database waiting for an upgrade has no export")
+    readable_export(db, false).expect("a database waiting for an upgrade has no export")
 }
 
-fn readable_export(db: &Database) -> Option<Vec<u8>> {
-    let pending = db.graph.upgrade_pending();
+fn readable_export(db: &Database, old_build: bool) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     match db.export(&mut out) {
         Ok(()) => {
-            assert!(!pending, "a database waiting for an upgrade served a read");
+            let stored = stored_format(db);
+            assert!(
+                old_build || stored.is_none() || stored == Some(current_format()),
+                "a database served a read over graph format {stored:?}"
+            );
             Some(out)
         }
-        Err(error) if error.kind() == ErrorKind::FormatUpgradePending => {
-            assert!(pending, "a ready database refused a read: {error}");
-            None
-        }
+        Err(error) if error.kind() == ErrorKind::FormatUpgradePending => None,
         Err(error) => panic!("an export failed with {error}"),
     }
 }
 
 const OLDER_FORMAT: u32 = 13;
+
+fn current_format() -> Vec<u8> {
+    static CURRENT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    CURRENT
+        .get_or_init(|| {
+            stored_format(&open(&SimFs::new(), false).unwrap())
+                .expect("a new database records its format")
+        })
+        .clone()
+}
 
 fn stored_format(db: &Database) -> Option<Vec<u8>> {
     use crate::storage::ReadTransaction;
@@ -104,6 +114,7 @@ fn writer_id(node: usize) -> Vec<u8> {
 
 struct Node {
     fs: SimFs,
+    old_build: bool,
     db: Database,
     cut_off: bool,
     rebuilt: u32,
@@ -139,6 +150,7 @@ impl Sim {
                     db,
                     cut_off: false,
                     rebuilt: 0,
+                    old_build: false,
                 }
             })
             .collect();
@@ -174,6 +186,7 @@ impl Sim {
                 )
                 .unwrap();
             write.commit().unwrap();
+            sim.nodes[0].old_build = true;
             sim.note(0);
         }
         sim
@@ -195,7 +208,7 @@ impl Sim {
     fn note(&mut self, node: usize) {
         let db = &self.nodes[node].db;
         let position = db.position();
-        let Some(exported) = readable_export(db) else {
+        let Some(exported) = readable_export(db, self.nodes[node].old_build) else {
             self.count("pending read");
             return;
         };
@@ -219,7 +232,7 @@ impl Sim {
             before.term(),
             position.term()
         );
-        let Some(exported) = readable_export(db) else {
+        let Some(exported) = readable_export(db, self.nodes[node].old_build) else {
             self.count("pending read");
             return;
         };
@@ -412,6 +425,7 @@ impl Sim {
         self.nodes[node].db = open(&fs, true).unwrap();
         self.nodes[node].fs = fs;
         self.nodes[node].rebuilt += 1;
+        self.nodes[node].old_build = false;
     }
 
     fn crash(&mut self, node: usize) {
@@ -434,6 +448,7 @@ impl Sim {
             .unwrap_or_else(|error| panic!("{}: reopening failed with {error}", self.context()));
         self.nodes[node].db = db;
         self.nodes[node].fs = recovered;
+        self.nodes[node].old_build = false;
         let after = self.nodes[node].db.position();
         assert!(
             after.term() >= before.term() || writer,
@@ -499,7 +514,7 @@ impl Sim {
 
     fn promote(&mut self, node: usize) -> Result<(), Error> {
         let before = self.nodes[node].db.position();
-        let held = readable_export(&self.nodes[node].db);
+        let held = readable_export(&self.nodes[node].db, self.nodes[node].old_build);
         self.nodes[node].db.promote(self.term, &writer_id(node))?;
         let begun = self.nodes[node].db.changes_since(&before, 1).unwrap();
         if let Some(held) = held {
@@ -554,22 +569,6 @@ impl Sim {
     fn heal_and_converge(&mut self) {
         self.steps.push("heal".to_owned());
         self.fence_stale();
-        if stored_format(&self.nodes[self.holder].db) == Some(OLDER_FORMAT.to_be_bytes().to_vec()) {
-            self.steps
-                .push(format!("restart {} on the new build", self.holder));
-            self.count("upgrade at heal");
-            let holder = self.holder;
-            let fs = self.nodes[holder].fs.clone();
-            let placeholder = open(&SimFs::new(), true).unwrap();
-            drop(std::mem::replace(&mut self.nodes[holder].db, placeholder));
-            self.nodes[holder].db = open(&fs, false).unwrap();
-            let term = self.nodes[holder].db.position().term();
-            self.nodes[holder]
-                .db
-                .promote(term, &writer_id(holder))
-                .unwrap();
-            self.note(holder);
-        }
         for node in &mut self.nodes {
             node.cut_off = false;
         }
@@ -616,7 +615,12 @@ impl Sim {
         let held: Vec<(Position, Option<Vec<u8>>)> = self
             .nodes
             .iter()
-            .map(|node| (node.db.position(), readable_export(&node.db)))
+            .map(|node| {
+                (
+                    node.db.position(),
+                    readable_export(&node.db, node.old_build),
+                )
+            })
             .collect();
         for (left, (a, a_export)) in held.iter().enumerate() {
             for (b, b_export) in &held[left + 1..] {

@@ -371,7 +371,7 @@ impl Error {
     /// [`ErrorKind::TooFarBehind`], [`ErrorKind::Gap`], or [`ErrorKind::DifferentDatabase`],
     /// and `None` for every other error.
     pub fn replication_failure(&self) -> Option<ReplicationFailure> {
-        let storage = std::error::Error::source(self)?.downcast_ref::<StorageError>()?;
+        let storage = self.storage()?;
         let engine = std::error::Error::source(storage)?.downcast_ref::<EngineError>()?;
         let EngineError::Replication(refusal) = engine else {
             return None;
@@ -500,8 +500,8 @@ fn diverged(local: Position, remote: &Position, fork_lsn: u64) -> Error {
     let refusal = crate::engine::error::Refusal {
         kind: ErrorKind::Diverged,
         message: format!(
-            "LSN {} of term {} is not part of this database's history, which differs from LSN \
-             {fork_lsn} on",
+            "LSN {} of term {} is not part of this database's history, which holds other changes \
+             from LSN {fork_lsn} onward",
             remote.lsn, remote.term
         ),
         failure: Some(Failure::Diverged {
@@ -754,6 +754,10 @@ impl Database {
     /// [`ErrorKind::Diverged`] when it does, as any replica would.
     pub fn demote(&self, wait: Duration) -> Result<Position, Error> {
         let _roles = self.roles();
+        self.graph
+            .storage()
+            .writable("step down")
+            .map_err(engine_error)?;
         self.graph.set_replica(true);
         self.graph
             .maintain(|engine| engine.demote(wait))?

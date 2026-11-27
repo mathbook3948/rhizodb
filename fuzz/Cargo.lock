@@ -240,6 +240,7 @@ dependencies = [
  "memchr",
  "regex-automata",
  "regex-syntax",
+ "rustix",
  "twox-hash",
  "unicode-normalization",
  "unicode-segmentation",

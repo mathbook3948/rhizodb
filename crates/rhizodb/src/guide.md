@@ -38,6 +38,12 @@ mounts, a second open succeeds and the host must keep to one `Database` per file
 [`ErrorKind::DatabaseNotFound`] instead of creating a missing file.
 [`Database::in_memory`] makes a database that is gone when dropped.
 
+[`OpenOptions::read_only`] opens an existing file for reading without ever writing a file, so
+any number of processes read one file at once while none of them writes it. A read-only open
+waits for no writer: it fails with [`ErrorKind::DatabaseAlreadyOpen`] while a `Database` that
+writes holds the file, and an open that writes fails the same way while a read-only one holds
+it. Every call that would change the file fails with [`ErrorKind::ReadOnly`].
+
 A damaged file fails with [`ErrorKind::CorruptData`] when it is opened or when an operation
 reads the damage, since every page of the file carries a checksum.
 
@@ -275,9 +281,40 @@ them and decides which node writes.
 - [`Database::promote`] makes a node the writer of a term the host chose, higher than every term
   before it. [`Database::demote`] stops a writer and returns its final position, which the next
   writer applies before it promotes, so a planned handover loses no write.
-- Changes of an older term fail with [`ErrorKind::Fenced`]. Two databases with other changes at
-  one place fail with [`ErrorKind::Diverged`], and the host keeps only the side of the node that
-  holds its lease.
+- A writer that a promotion made reopens fenced after every restart, as [`Database::role`]
+  reports, and refuses writes until the host promotes it again with its own newest term and
+  writer id, which writes nothing, or demotes it. Once it has heard of a higher term, which it
+  remembers across restarts, only a promotion with a higher term or a demotion remains. A
+  database that never took part in replication reopens as a writer.
+- A writer that lost its lease to a failover, once it has heard of the new term from
+  [`Database::changes_since`] or [`Database::acknowledge`] with the new writer's position,
+  steps aside when demoted and reopens as a replica. It then applies the new writer's changes
+  without a snapshot, unless it holds changes the new writer lacks, which fail with
+  [`ErrorKind::Diverged`].
+- Changes of an older term fail with [`ErrorKind::Fenced`], and changes of an unrelated database
+  fail with [`ErrorKind::DifferentDatabase`]. Two databases with other changes at one place fail
+  with [`ErrorKind::Diverged`], and the host keeps only the side of the node that holds its lease.
+  [`Database::compare_lineage`] takes the [`History`] and the [`Position`] of another node and
+  tells whether the two are the same, which side is behind, whether they diverged, or whether
+  they belong to different databases. [`Error::replication_failure`] gives the terms, positions,
+  LSNs, or database ids behind each of these errors.
+- A new replica, or one that fails with [`ErrorKind::TooFarBehind`] or
+  [`ErrorKind::Diverged`], installs a copy of another node. [`Database::snapshot`] pins one, the
+  host streams its bytes with [`Snapshot::read_at`], and [`Database::install_snapshot`] writes
+  them to a file and opens it as a replica, which then follows the log from
+  [`Snapshot::position`]. Before the source drops the snapshot, the host passes that position
+  to [`Database::acknowledge`] for the receiver, or a checkpoint can remove the log after it
+  and the new replica fails with [`ErrorKind::TooFarBehind`].
+- A node that installs over its own path drops its `Database` first, or the install fails with
+  [`ErrorKind::DatabaseAlreadyOpen`]. Unless [`OpenOptions::force_install`] is set, an install
+  refuses to replace a file that has seen a newer term than the snapshot holds, with
+  [`ErrorKind::Fenced`], one that holds another database's changes, with
+  [`ErrorKind::DifferentDatabase`], and one whose history of terms cannot be read, with
+  [`ErrorKind::CorruptData`].
+- Checkpoints remove the log a node no longer needs for itself. The host passes each peer's
+  position to [`Database::acknowledge`], and the node then keeps the log after it, up to
+  [`OpenOptions::max_retained_bytes`], so a peer that falls behind or restarts catches up from
+  the log instead of a snapshot.
 
 The host routes every write to the current writer and keeps data that belongs to one node in a
 database file of its own. Replication is asynchronous, so a write that no replica applied yet can

@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 
@@ -419,4 +422,246 @@ fn a_hub_of_every_kind_reads_back_after_many_small_commits_and_one_large_one() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[derive(Debug, Default)]
+struct Visits {
+    asked: Cell<u32>,
+    walks: Cell<usize>,
+    passed_apart_of_others: Cell<usize>,
+    loaded_of_others: Cell<usize>,
+}
+
+impl Visits {
+    fn of_others(&self, table: Table, key: &[u8]) -> Option<bool> {
+        if table != Table::Adjacency {
+            return None;
+        }
+        let (id, _) = adjacency::parse_key(key).ok()?;
+        Some(id.rel_type != self.asked.get())
+    }
+
+    fn walk(&self, table: Table) {
+        if table == Table::Adjacency {
+            add(&self.walks, 1);
+        }
+    }
+
+    fn pass(&self, table: Table, key: &[u8], value: Peek<'_>) {
+        if matches!(value, Peek::Apart(_)) && self.of_others(table, key) == Some(true) {
+            add(&self.passed_apart_of_others, 1);
+        }
+    }
+
+    fn load(&self, table: Table, key: &[u8]) {
+        if self.of_others(table, key) == Some(true) {
+            add(&self.loaded_of_others, 1);
+        }
+    }
+
+    fn take(&self) -> (usize, usize, usize) {
+        (
+            self.walks.take(),
+            self.passed_apart_of_others.take(),
+            self.loaded_of_others.take(),
+        )
+    }
+}
+
+fn add(counter: &Cell<usize>, count: usize) {
+    counter.set(counter.get() + count);
+}
+
+struct CountingStorage {
+    inner: TestStorage,
+    visits: Rc<Visits>,
+}
+
+struct CountingRead<'a> {
+    inner: <TestStorage as Storage>::Read<'a>,
+    visits: Rc<Visits>,
+}
+
+impl Storage for CountingStorage {
+    type Read<'a> = CountingRead<'a>;
+    type Write<'a> = <TestStorage as Storage>::Write<'a>;
+
+    fn begin_read(&self) -> Result<CountingRead<'_>, StorageError> {
+        Ok(CountingRead {
+            inner: self.inner.begin_read()?,
+            visits: Rc::clone(&self.visits),
+        })
+    }
+
+    fn begin_write(&self) -> Result<Self::Write<'_>, StorageError> {
+        self.inner.begin_write()
+    }
+
+    fn write_copy(snapshot: &CountingRead<'_>, path: &std::path::Path) -> Result<(), StorageError> {
+        TestStorage::write_copy(&snapshot.inner, path)
+    }
+}
+
+impl ReadTransaction for CountingRead<'_> {
+    fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        self.visits.load(table, key);
+        self.inner.get(table, key)
+    }
+
+    fn scan_prefix(
+        &self,
+        table: Table,
+        prefix: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        let entries = self.inner.scan_prefix(table, prefix)?;
+        for (key, _) in &entries {
+            self.visits.load(table, key);
+        }
+        Ok(entries)
+    }
+
+    fn scan_range(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<crate::storage::Entry>, StorageError> {
+        let entries = self.inner.scan_range(table, start, end)?;
+        for (key, _) in &entries {
+            self.visits.load(table, key);
+        }
+        Ok(entries)
+    }
+
+    fn get_with<R, E: From<StorageError>>(
+        &self,
+        table: Table,
+        key: &[u8],
+        read: impl FnOnce(&[u8]) -> Result<R, E>,
+    ) -> Result<Option<R>, E> {
+        self.visits.load(table, key);
+        self.inner.get_with(table, key, read)
+    }
+
+    fn visit_prefix<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_prefix(table, prefix, |key, value| {
+            self.visits.load(table, key);
+            visit(key, value)
+        })
+    }
+
+    fn visit_range<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        mut visit: impl FnMut(&[u8], &[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.inner.visit_range(table, start, end, |key, value| {
+            self.visits.load(table, key);
+            visit(key, value)
+        })
+    }
+
+    fn visit_prefix_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        prefix: &[u8],
+        mut visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.visits.walk(table);
+        self.inner.visit_prefix_peek(table, prefix, |key, value| {
+            self.visits.pass(table, key, value);
+            visit(key, value)
+        })
+    }
+
+    fn visit_range_peek<E: From<StorageError>>(
+        &self,
+        table: Table,
+        start: &[u8],
+        end: &[u8],
+        mut visit: impl FnMut(&[u8], Peek<'_>) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.visits.walk(table);
+        self.inner
+            .visit_range_peek(table, start, end, |key, value| {
+                self.visits.pass(table, key, value);
+                visit(key, value)
+            })
+    }
+}
+
+#[test]
+fn a_typed_scan_beside_a_heavy_type_reads_no_value_of_the_other_type() {
+    let visits = Rc::new(Visits::default());
+    let graph = Graph::open(CountingStorage {
+        inner: test_engine::in_memory(),
+        visits: Rc::clone(&visits),
+    })
+    .unwrap();
+    let mut model = Model::default();
+    let mut write = graph.write().unwrap();
+    for name in TYPES {
+        write.intern_token::<RelationshipType>(name).unwrap();
+    }
+    let nodes: Vec<u64> = (0..64)
+        .map(|at| create_node(&mut write, &mut model, 1024 + at))
+        .collect();
+    for (at, node) in nodes.iter().enumerate() {
+        create_rel(
+            &mut write,
+            &mut model,
+            *node,
+            nodes[(at + 1) % nodes.len()],
+            0,
+        );
+        for far in nodes.iter().cycle().skip(at).take(600) {
+            create_rel(&mut write, &mut model, *node, *far, 2);
+        }
+    }
+    write.commit().unwrap();
+    graph.storage.inner.checkpoint().unwrap();
+    let read = graph.read().unwrap();
+    for (asked, other) in [(0, 2), (2, 0)] {
+        for direction in [Direction::Outgoing, Direction::Both] {
+            visits.asked.set(rel_type(asked).id());
+            let alone: Vec<_> = nodes
+                .iter()
+                .map(|node| {
+                    read.adjacent(NodeId(*node), direction, Some(rel_type(asked)))
+                        .unwrap()
+                })
+                .collect();
+            let (walks_alone, _, loaded_alone) = visits.take();
+            let mut reader = AdjacencyReader::default();
+            let scanned: Vec<_> = nodes
+                .iter()
+                .map(|node| {
+                    read.adjacent_with(&mut reader, NodeId(*node), direction, Some(rel_type(asked)))
+                        .unwrap()
+                })
+                .collect();
+            let (walks, passed_apart, loaded) = visits.take();
+            let case = format!("type {asked} {direction:?}");
+            assert_eq!(scanned, alone, "{case}");
+            assert_eq!(loaded_alone, 0, "{case}");
+            assert_eq!(loaded, 0, "{case} read values of type {other}");
+            assert!(
+                walks * 8 <= walks_alone,
+                "{case}: {walks} walks, {walks_alone} alone"
+            );
+            if asked == 0 {
+                assert!(
+                    passed_apart > 0,
+                    "{case} passed no part of type {other} kept apart"
+                );
+            }
+        }
+    }
 }

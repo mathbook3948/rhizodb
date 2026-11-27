@@ -325,3 +325,272 @@ fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {
         int(0)
     );
 }
+
+/// The databases that release 0.1.0 wrote, one closed and one aborted after its last commit.
+const RELEASE_ZERO_ONE: [&str; 2] = ["release-0-1-0-clean", "release-0-1-0-crashed"];
+
+/// Copies the database file of a release fixture and its log segments, under their own names,
+/// into `directory`, and returns the path of the database file.
+fn copy_of_release_fixture(fixture: &str, directory: &Path) -> PathBuf {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let file_name = format!("{fixture}.rhizodb");
+    for entry in std::fs::read_dir(&fixtures).unwrap() {
+        let name = entry.unwrap().file_name();
+        if name.to_str().unwrap().starts_with(&file_name) {
+            std::fs::copy(fixtures.join(&name), directory.join(&name)).unwrap();
+        }
+    }
+    directory.join(file_name)
+}
+
+fn release_dump(fixture: &str) -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(format!("{fixture}.dump")),
+    )
+    .unwrap()
+}
+
+fn exported(db: &Database) -> String {
+    let mut out = Vec::new();
+    db.export(&mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn the_crashed_release_fixture_needs_its_log_and_replays_it_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_release_fixture("release-0-1-0-crashed", directory.path());
+    let log = directory
+        .path()
+        .join("release-0-1-0-crashed.rhizodb-wal-0000000000000001");
+    let kept = std::fs::read(&log).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    assert_eq!(
+        Database::open(&path).err().map(|error| error.kind()),
+        Some(rhizodb::ErrorKind::CorruptData),
+        "the file was left open, so it refuses to open without its log"
+    );
+    std::fs::write(&log, kept).unwrap();
+    assert_eq!(
+        single(
+            &Database::open(&path).unwrap(),
+            "MATCH (p:Late) RETURN count(*)"
+        ),
+        int(9),
+        "the commits after the last checkpoint replay from the log"
+    );
+}
+
+#[test]
+fn a_database_of_release_zero_one_keeps_every_element_and_index_answer_after_the_upgrade() {
+    for fixture in RELEASE_ZERO_ONE {
+        let directory = tempfile::tempdir().unwrap();
+        let path = copy_of_release_fixture(fixture, directory.path());
+        let dump = release_dump(fixture);
+        let answers = answers_in(&format!("{fixture}.answers"));
+        assert_eq!(answers.len(), 14);
+        for _ in 0..2 {
+            let db = Database::open(&path).unwrap();
+            db.check().unwrap();
+            let upgraded = exported(&db);
+            for (at, (line, expected)) in upgraded.lines().zip(dump.lines()).enumerate() {
+                assert_eq!(line, expected, "{fixture}: line {} of the dump", at + 1);
+            }
+            assert_eq!(upgraded.len(), dump.len(), "{fixture}");
+            for (query, expected) in &answers {
+                assert_eq!(
+                    format!("{:?}", run(&db, query)),
+                    *expected,
+                    "{fixture}: {query}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_database_of_release_zero_one_takes_writes_after_the_upgrade_and_exports_dump_version_one() {
+    for fixture in RELEASE_ZERO_ONE {
+        let directory = tempfile::tempdir().unwrap();
+        let path = copy_of_release_fixture(fixture, directory.path());
+        {
+            let db = Database::open(&path).unwrap();
+            run(&db, "MATCH (p:Person {name: 'person 17'}) SET p.age = 99");
+            run(
+                &db,
+                "CREATE (:Person {name: 'person 200', age: 31})-[:KNOWS {since: 2030, note: 'conference again', weight: [3.0, 4.0]}]->(:Doc {i: 200, title: 'doc 200', text: 'graph quokka', vec: [1.0, 0.5, 0.25]})",
+            );
+            run(&db, "MATCH (d:Doc) WHERE d.i % 8 = 1 DETACH DELETE d");
+            run(&db, "MATCH ()-[k:KNOWS]->() WHERE k.since % 5 = 0 DELETE k");
+            run(&db, "MATCH (v:Values) SET v.again = v.zoned_datetime");
+        }
+        let db = Database::open(&path).unwrap();
+        db.check().unwrap();
+        assert_eq!(
+            run(
+                &db,
+                "MATCH (p:Person) WHERE p.age = 99 OR p.name = 'person 200' RETURN p.name ORDER BY p.name"
+            ),
+            [vec![string("person 17")], vec![string("person 200")]]
+        );
+        assert_eq!(
+            single(
+                &db,
+                "CALL db.index.keyword.queryNodes('doc text', 'quokka', 10) YIELD node RETURN node.i"
+            ),
+            int(200)
+        );
+        assert_eq!(
+            single(&db, "MATCH (v:Values) RETURN v.again = v.zoned_datetime"),
+            Value::Boolean(true)
+        );
+        db.create_keyword_index(
+            "doc text again",
+            rhizodb::IndexTarget::Label("Doc"),
+            &["title", "text"],
+        )
+        .unwrap();
+        db.create_keyword_index(
+            "knows note again",
+            rhizodb::IndexTarget::RelationshipType("KNOWS"),
+            &["note"],
+        )
+        .unwrap();
+        db.create_vector_index(
+            "doc vec again",
+            rhizodb::IndexTarget::Label("Doc"),
+            "vec",
+            3,
+            rhizodb::VectorMetric::Cosine,
+        )
+        .unwrap();
+        db.create_vector_index(
+            "knows weight again",
+            rhizodb::IndexTarget::RelationshipType("KNOWS"),
+            "weight",
+            2,
+            rhizodb::VectorMetric::DotProduct,
+        )
+        .unwrap();
+        for search in [
+            "CALL db.index.keyword.queryNodes('doc text{again}', 'graph', 1000) YIELD node, score RETURN id(node), score",
+            "CALL db.index.keyword.queryNodes('doc text{again}', 'stor*', 1000) YIELD node, score RETURN id(node), score",
+            "CALL db.index.keyword.queryRelationships('knows note{again}', 'conference', 1000) YIELD relationship, score RETURN id(relationship), score",
+            "CALL db.index.vector.queryNodes('doc vec{again}', [1.0, 0.5, 0.25], 1000) YIELD node, score RETURN id(node), score",
+            "CALL db.index.vector.queryRelationships('knows weight{again}', [1.0, 2.0], 1000) YIELD relationship, score RETURN id(relationship), score",
+        ] {
+            let upgraded = run(&db, &search.replace("{again}", ""));
+            assert!(!upgraded.is_empty(), "{fixture}: {search}");
+            assert_eq!(
+                upgraded,
+                run(&db, &search.replace("{again}", " again")),
+                "{fixture}: {search}"
+            );
+        }
+        let dump = exported(&db);
+        let header = dump.lines().next().unwrap();
+        assert!(
+            header.starts_with("{\"type\":\"header\",\"format\":\"rhizodb-dump\",\"version\":1,"),
+            "{header}"
+        );
+    }
+}
+
+/// The engine format `(major, minor)` that each of the two header slots at the start of a
+/// database file records, as little-endian `u16`s after the eight-byte magic.
+fn engine_formats(path: &Path) -> Vec<(u16, u16)> {
+    let bytes = std::fs::read(path).unwrap();
+    bytes
+        .chunks(4096)
+        .take(2)
+        .map(|slot| {
+            assert_eq!(&slot[..8], b"RHIZODB\0");
+            (
+                u16::from_le_bytes([slot[8], slot[9]]),
+                u16::from_le_bytes([slot[10], slot[11]]),
+            )
+        })
+        .collect()
+}
+
+/// Whether release 0.1.0 opens a file of engine format `(major, minor)`. Its header decoder
+/// writes 1.3, reads 1.0 to 1.3, and refuses another major or a newer minor.
+fn release_zero_one_reads((major, minor): (u16, u16)) -> bool {
+    major == 1 && minor <= 3
+}
+
+/// Each file of a release fixture, by name, with its bytes.
+fn release_fixture_files(fixture: &str) -> Vec<(String, Vec<u8>)> {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut files: Vec<_> = std::fs::read_dir(&fixtures)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with(&format!("{fixture}.rhizodb")))
+        .map(|name| {
+            let bytes = std::fs::read(fixtures.join(&name)).unwrap();
+            (name, bytes)
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn a_database_of_release_zero_one_moves_to_engine_minor_four_and_the_current_graph_format() {
+    for fixture in RELEASE_ZERO_ONE {
+        let originals = release_fixture_files(fixture);
+        let directory = tempfile::tempdir().unwrap();
+        let path = copy_of_release_fixture(fixture, directory.path());
+        let formats = engine_formats(&path);
+        assert_eq!(formats, [(1, 3), (1, 3)], "{fixture}");
+        assert!(
+            formats.iter().all(|format| release_zero_one_reads(*format)),
+            "{fixture}"
+        );
+
+        let db = Database::open(&path).unwrap();
+        db.check().unwrap();
+        drop(db);
+        let formats = engine_formats(&path);
+        assert_eq!(formats, [(1, 4), (1, 4)], "{fixture}");
+        assert!(
+            formats
+                .iter()
+                .all(|format| !release_zero_one_reads(*format)),
+            "{fixture}: release 0.1.0 refuses the upgraded file"
+        );
+        // Release 0.1.0 already wrote graph format 14, this build's, so only the engine minor
+        // moves. A replica opens without writing and refuses a graph format that needs an
+        // upgrade, so a replica of the upgraded file opens only when its format is current.
+        let db = Database::open(&path).unwrap();
+        let snapshot = db.snapshot().unwrap();
+        let mut stream = vec![0; usize::try_from(snapshot.len()).unwrap()];
+        let mut offset = 0;
+        while offset < stream.len() {
+            offset += snapshot
+                .read_at(offset as u64, &mut stream[offset..])
+                .unwrap();
+        }
+        let replica =
+            Database::install_snapshot(directory.path().join("replica.rhizodb"), stream.as_slice())
+                .unwrap();
+        assert_eq!(
+            single(&replica, "MATCH (n) RETURN count(n)"),
+            single(&db, "MATCH (n) RETURN count(n)"),
+            "{fixture}"
+        );
+        drop(snapshot);
+        drop(db);
+        assert_eq!(engine_formats(&path), [(1, 4), (1, 4)], "{fixture}");
+
+        let original = &originals
+            .iter()
+            .find(|(name, _)| path.ends_with(name))
+            .unwrap()
+            .1;
+        assert_ne!(&std::fs::read(&path).unwrap(), original, "{fixture}");
+        assert_eq!(release_fixture_files(fixture), originals, "{fixture}");
+    }
+}

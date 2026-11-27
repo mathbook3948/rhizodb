@@ -6,6 +6,7 @@ use rhizodb::ErrorKind;
 use rhizodb::OpenOptions;
 use rhizodb::Parameters;
 use rhizodb::Position;
+use rhizodb::ReplicationFailure;
 use rhizodb::Snapshot;
 use rhizodb::Value;
 
@@ -250,6 +251,13 @@ fn a_restarted_writer_still_serves_a_peer_that_lags_behind() {
     let other = Database::open(unpinned.path().join("other.rhizodb")).unwrap();
     let error = other.changes_since(&behind, 1 << 30).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::TooFarBehind);
+    assert!(
+        matches!(
+            error.replication_failure(),
+            Some(ReplicationFailure::TooFarBehind { oldest_lsn, .. }) if oldest_lsn > behind.lsn() + 1
+        ),
+        "{error}"
+    );
 }
 
 #[test]

@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc fe5dfcccad50da5be1449babae37bdbd0c9f42d10bc8d89c61cde0fcb54adedc # shrinks to steps = [(Create { labelled: false, text: 0 }, false), (Create { labelled: false, text: 0 }, false), (Create { labelled: false, text: 0 }, false), (Create { labelled: false, text: 0 }, false), (Create { labelled: true, text: 0 }, true), (DetachDelete { node: 0 }, true)], indexed_after = 0
+cc 8d7e7868243d35759764e6102bf6b84a9dfc6dcee67b7f8ff0ddffb78dab2877 # shrinks to committed = [(0, [0, 2])], written = [(7, []), (119, []), (0, []), (0, [])], changes = [(Index(0), SetText([0]))], phrase = [0, 2]
+cc 96c5efea61b9ef698aced935c5f52959cbaec8e18e858d1d1e0c1b6556299a0e # shrinks to committed = [(13, []), (50, [0]), (0, [2])], written = [(0, [])], changes = [(Index(9223372036854775808), SetText([]))], phrase = [2]

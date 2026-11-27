@@ -25,6 +25,9 @@ pub(crate) enum EngineError {
     Storage(StorageError),
     /// Changes, a promotion, or a write that replication refuses.
     Replication(Box<Refusal>),
+    /// A write, a checkpoint, or another change asked of a database opened read-only, naming
+    /// what was asked.
+    ReadOnly(&'static str),
 }
 
 /// Why replication refused something, as the kind the host branches on, a message, and the
@@ -91,6 +94,9 @@ impl fmt::Display for EngineError {
             Self::TooLarge => formatter.write_str("a key, value, or transaction is too large"),
             Self::Storage(error) => write!(formatter, "{error}"),
             Self::Replication(refusal) => formatter.write_str(&refusal.message),
+            Self::ReadOnly(what) => {
+                write!(formatter, "a database opened read-only cannot {what}")
+            }
         }
     }
 }
@@ -128,8 +134,16 @@ impl From<EngineError> for StorageError {
             StorageError::corrupt(error)
         } else if matches!(&error, EngineError::Io(io) if io.kind() == io::ErrorKind::WouldBlock) {
             StorageError::of_kind(ErrorKind::DatabaseAlreadyOpen, error)
+        } else if matches!(&error, EngineError::ReadOnly(_)) {
+            StorageError::of_kind(ErrorKind::ReadOnly, error)
         } else if matches!(&error, EngineError::Unsupported(_)) {
             StorageError::of_kind(ErrorKind::UnsupportedFormatVersion, error)
+        } else if let EngineError::Io(error) = error {
+            StorageError::io(
+                ErrorKind::Storage,
+                "the storage engine cannot read or write its files",
+                error,
+            )
         } else {
             StorageError::new(error)
         }
