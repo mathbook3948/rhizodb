@@ -570,3 +570,33 @@ fn arithmetic_with_a_fixed_operand_that_fails_raises_its_error_under_a_limit() {
         assert_eq!(streamed, in_turn, "{text}");
     }
 }
+
+#[test]
+fn a_sort_raises_its_first_key_error_and_not_a_later_one() {
+    let db = chain(2);
+    let text = "UNWIND [1, 2, 3] AS i RETURN i \
+                ORDER BY CASE i WHEN 2 THEN 1 / (i - 2) WHEN 3 THEN $s - 1 ELSE i END LIMIT 1";
+    let parameters = Parameters::new().with("s", "x");
+    let (in_turn, _) = counted(true, || db.execute(text, &parameters));
+    let (streamed, _) = counted(false, || db.execute(text, &parameters));
+    assert_eq!(in_turn, Err(ErrorKind::DivisionByZero));
+    assert_eq!(streamed, in_turn);
+}
+
+#[test]
+fn a_variable_counts_as_an_integer_only_when_every_value_it_takes_is_one() {
+    let db = chain(500);
+    db.execute("MATCH (n:N) SET n.i = n.k, n.s = 'x'", &none())
+        .unwrap();
+    for text in [
+        "MATCH (n:N) UNWIND [n.i, n.s] AS x RETURN x / 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, min(v) AS c RETURN c / 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, max(v) AS c RETURN c % 2 LIMIT 1",
+        "UNWIND [1, 'a'] AS v WITH v, collect(v) AS c RETURN c / 2 LIMIT 1",
+    ] {
+        let (in_turn, _) = counted(true, || db.execute(text, &none()));
+        let (streamed, _) = counted(false, || db.execute(text, &none()));
+        assert_eq!(in_turn, Err(ErrorKind::TypeMismatch), "{text}");
+        assert_eq!(streamed, in_turn, "{text}");
+    }
+}
