@@ -32,6 +32,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 - `min()` and `max()`, with or without `DISTINCT`, keep one value per group as rows arrive instead of holding every value of the group until the end, so `MATCH (n:N) RETURN min(n.x), max(n.x)` uses memory per group instead of per row and no longer slows down when it splits across threads. The results are unchanged, ties between equivalent values such as `1` and `1.0` included.
 - Joining the `collect()` lists of a query split across threads checks the value limits once per list instead of once per item, and `percentileCont()` and `percentileDisc()` sort their values once instead of twice.
 - A `LIMIT` stops the clauses before it once it has its rows, so `MATCH (a)-[:R]->(b)-[:R]->(c) RETURN a, b, c LIMIT 10` and `MATCH (a) WITH a LIMIT 10` read only the matches they return instead of every match, and a match reads its start nodes one row group at a time instead of listing them all first. `EXISTS { ... }` stops at its first inner row. A `LIMIT` keeps reading when a later row could still raise an error, such as a division by zero, so every query returns the same rows and errors as before, and a write before a `LIMIT` still applies to every row. A query that stops early this way no longer splits across threads.
+- A commit that range-deletes keys already in the database file no longer looks each of them up in the file again before it becomes visible, while it holds the writer lock.
 
 ### Fixed
 

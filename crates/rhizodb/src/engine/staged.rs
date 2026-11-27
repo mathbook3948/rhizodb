@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use super::layout::TableId;
 use super::memtable::Bytes;
 use super::memtable::Slot;
 use super::memtable::bounds_are_ordered;
+use super::view::Layers;
 use super::view::View;
 use super::view::Visit;
 use super::view::merge_over;
@@ -54,6 +56,7 @@ impl StagedOp {
 pub(crate) struct Staged {
     pub(crate) view: View,
     overlay: BTreeMap<TableId, BTreeMap<Bytes, Slot>>,
+    held_below: BTreeMap<TableId, BTreeSet<Bytes>>,
     pub(crate) ops: Vec<StagedOp>,
 }
 
@@ -62,6 +65,7 @@ impl Staged {
         Self {
             view,
             overlay: BTreeMap::new(),
+            held_below: BTreeMap::new(),
             ops: Vec::new(),
         }
     }
@@ -101,7 +105,24 @@ impl Staged {
             Ok::<_, StorageError>(())
         })?;
         let overlay = self.overlay.entry(table).or_default();
+        let held_below = self.held_below.entry(table).or_default();
+        let mut active = self
+            .view
+            .layers
+            .active
+            .range(table, bounds.0, bounds.1, self.view.snapshot)
+            .peekable();
         for key in doomed {
+            while active
+                .next_if(|(active_key, _)| *active_key < key)
+                .is_some()
+            {}
+            let in_active = active
+                .next_if(|(active_key, _)| *active_key == key)
+                .is_some();
+            if !in_active && !overlay.contains_key(&key) {
+                held_below.insert(Arc::clone(&key));
+            }
             overlay.insert(key, None);
         }
         self.ops.push(StagedOp::DeleteRange {
@@ -162,6 +183,24 @@ impl Staged {
             |lower| self.view.scan(table, start, end, lower),
             visit,
         )
+    }
+
+    /// The keys this transaction deletes that no layer below the active memtable of `layers`
+    /// holds, so their tombstones hide nothing.
+    pub(crate) fn graves(&self, layers: &Layers) -> Vec<(TableId, Bytes)> {
+        self.overlay
+            .iter()
+            .flat_map(|(table, keys)| keys.iter().map(move |(key, slot)| (*table, key, slot)))
+            .filter(|(table, key, slot)| {
+                slot.is_none()
+                    && !self
+                        .held_below
+                        .get(table)
+                        .is_some_and(|keys| keys.contains(*key))
+                    && !layers.below_may_hold(*table, key)
+            })
+            .map(|(table, key, _)| (table, Arc::clone(key)))
+            .collect()
     }
 
     pub(crate) fn into_changes(self) -> impl Iterator<Item = (TableId, Bytes, Slot)> {

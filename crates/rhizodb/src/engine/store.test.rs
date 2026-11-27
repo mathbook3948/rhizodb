@@ -421,6 +421,52 @@ fn deleted_keys_stay_deleted_whether_or_not_the_file_holds_them() {
     assert_eq!(reread.scan_prefix(Table::Nodes, &[]).unwrap().len(), 8);
 }
 
+#[test]
+fn a_range_delete_looks_up_at_commit_only_the_keys_it_found_in_the_memtable() {
+    let engine =
+        Engine::open(Arc::new(SimFs::new()), NAME, manual(CheckpointMode::Inline)).unwrap();
+    let key = |prefix: u8, index: u32| [&[prefix][..], &index.to_be_bytes()].concat();
+    let mut write = engine.begin_write().unwrap();
+    for index in 0..200 {
+        write.put(Table::Nodes, &key(b'f', index), b"v").unwrap();
+    }
+    write.commit().unwrap();
+    engine.checkpoint().unwrap();
+    let mut write = engine.begin_write().unwrap();
+    for index in 0..50 {
+        write.put(Table::Nodes, &key(b'g', index), b"v").unwrap();
+    }
+    write.commit().unwrap();
+    let before = engine.begin_read().unwrap();
+
+    let mut write = engine.begin_write().unwrap();
+    write.delete_range(Table::Nodes, b"f", b"h").unwrap();
+    let lookups = engine.tree_lookups();
+    write.commit().unwrap();
+
+    assert_eq!(engine.tree_lookups() - lookups, 50);
+    assert_eq!(before.scan_prefix(Table::Nodes, &[]).unwrap().len(), 250);
+    drop(before);
+    for round in 0..2u8 {
+        let mut write = engine.begin_write().unwrap();
+        write.put(Table::Nodes, &[round], b"v").unwrap();
+        write.commit().unwrap();
+    }
+    let now = engine.begin_read().unwrap();
+    let copied = |prefix: &[u8]| {
+        let before = engine.memtable_copied();
+        assert_eq!(now.scan_prefix(Table::Nodes, prefix).unwrap(), []);
+        engine.memtable_copied() - before
+    };
+    assert_eq!(copied(b"f"), 200);
+    assert_eq!(copied(b"g"), 0);
+    assert_eq!(now.get(Table::Nodes, &key(b'f', 0)).unwrap(), None);
+    drop(now);
+    engine.checkpoint().unwrap();
+    let reread = engine.begin_read().unwrap();
+    assert_eq!(reread.scan_prefix(Table::Nodes, &[]).unwrap().len(), 2);
+}
+
 #[derive(Clone, Debug)]
 struct RemovalThreads {
     fs: SimFs,
