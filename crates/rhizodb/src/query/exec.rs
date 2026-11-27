@@ -51,9 +51,6 @@ use super::seek;
 use super::shape::Shape;
 use super::shape::admits;
 use super::shape::procedure_parameter;
-use super::stream::elements;
-use super::stream::read_elements;
-use super::stream::update_elements;
 use super::update::Graveyard;
 use super::update::Writer;
 
@@ -91,19 +88,16 @@ pub(crate) fn read_program<T: ReadTransaction>(
 ) -> Result<QueryResult, Error> {
     let graveyard = Graveyard::default();
     let patterns = Patterns::default();
-    let elements = elements(program, read_elements);
-    let env = Env {
-        elements: &elements,
-        ..Env::new(
-            tx,
-            program.slot_count,
-            parameters,
-            now,
-            &graveyard,
-            &patterns,
-            limits,
-        )
-    };
+    let env = Env::new(
+        tx,
+        program.slot_count,
+        parameters,
+        now,
+        &graveyard,
+        &patterns,
+        limits,
+    )
+    .with_holds(&program.holds);
     env.check_closed(&program.closed)?;
     let rows = run(program, |clauses, rows| {
         read(&env, &clauses.iter().collect::<Vec<_>>(), rows)
@@ -120,10 +114,6 @@ pub(crate) fn run_write<W: WriteTransaction>(
     limits: Limits,
 ) -> Result<QueryResult, Error> {
     let slots = program.slot_count;
-    let elements = elements(program, |clause, out| match clause {
-        Clause::Read(clause) => read_elements(clause, out),
-        Clause::Update(clause) => update_elements(clause, out),
-    });
     let mut graveyard = Graveyard::default();
     let patterns = Patterns::default();
     Env::new(&*tx, slots, parameters, now, &graveyard, &patterns, limits)
@@ -137,7 +127,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         graveyard: &mut graveyard,
         limits,
         tokens: Vec::new(),
-        elements: &elements,
+        holds: &program.holds,
     };
     let rows = run(program, |clauses, rows| writer.step(clauses, rows))?;
     for node in &graveyard.deleted_nodes {
@@ -784,15 +774,7 @@ impl<T: ReadTransaction> Env<'_, T> {
                 )
             });
         }
-        let empty = || vec![Datum::Null; self.slots];
-        let skip = match &projection.skip {
-            Some(skip) => self.count(skip, &empty(), "SKIP")?,
-            None => 0,
-        };
-        let limit = match &projection.limit {
-            Some(limit) => Some(self.count(limit, &empty(), "LIMIT")?),
-            None => None,
-        };
+        let (skip, limit) = self.window(projection)?;
         if !projection.order_by.is_empty() {
             let kept = limit.map(|limit| skip.saturating_add(limit));
             rows = self.sort(rows, &projection.order_by, kept)?;
@@ -839,6 +821,23 @@ impl<T: ReadTransaction> Env<'_, T> {
             }
         }
         Ok(())
+    }
+
+    /// The `SKIP` and `LIMIT` of a projection, which read no row.
+    pub(crate) fn window(&self, projection: &Projection) -> Result<(usize, Option<usize>), Error> {
+        let count = |expr: &Expr, clause| match expr {
+            Expr::Constant(_) | Expr::Parameter(_) => self.count(expr, &Vec::new(), clause),
+            _ => self.count(expr, &vec![Datum::Null; self.slots], clause),
+        };
+        let skip = match &projection.skip {
+            Some(skip) => count(skip, "SKIP")?,
+            None => 0,
+        };
+        let limit = match &projection.limit {
+            Some(limit) => Some(count(limit, "LIMIT")?),
+            None => None,
+        };
+        Ok((skip, limit))
     }
 
     pub(crate) fn count(&self, expr: &Expr, row: &Row, clause: &str) -> Result<usize, Error> {

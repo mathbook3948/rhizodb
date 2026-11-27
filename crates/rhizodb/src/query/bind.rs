@@ -56,6 +56,7 @@ use super::shape::procedure_parameter;
 use super::shape::slice_bound_error;
 use super::shape::slice_error;
 use super::shape::unary_error;
+use super::stream::Bindings;
 use super::temporals::TemporalFunction;
 
 /// Resolves every variable of `query` to a row slot and rejects queries that are malformed by
@@ -78,6 +79,7 @@ pub(crate) fn bind(
         type_error: None,
         calls_host: false,
         updates_allowed: true,
+        bindings: Bindings::default(),
     };
     let BoundQuery {
         mut parts,
@@ -96,6 +98,14 @@ pub(crate) fn bind(
         return Err(type_error);
     }
     let slot_count = binder.slot_count;
+    let mut bindings = binder.bindings;
+    for clause in parts.iter().flat_map(|part| &part.clauses) {
+        match clause {
+            Clause::Read(clause) => bindings.read(clause),
+            Clause::Update(clause) => bindings.update(clause),
+        }
+    }
+    let holds = bindings.holds(slot_count);
     let closed = binder.closed;
     let parameters = binder.parameter_names;
     let calls_host = binder.calls_host;
@@ -113,6 +123,7 @@ pub(crate) fn bind(
             closed,
             parameters,
             calls_host,
+            holds,
         }));
     }
     let parts = parts
@@ -137,6 +148,7 @@ pub(crate) fn bind(
         closed,
         parameters,
         calls_host,
+        holds,
     }))
 }
 
@@ -332,6 +344,8 @@ struct Binder<'a> {
     type_error: Option<Error>,
     calls_host: bool,
     updates_allowed: bool,
+    /// What the clauses of each subquery expression bind, which no clause of the query holds.
+    pub(crate) bindings: Bindings,
 }
 
 struct BoundQuery {
@@ -2253,7 +2267,10 @@ impl Binder<'_> {
                 Clause::Read(clause) => Some(clause),
                 Clause::Update(_) => None,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        for clause in &clauses {
+            self.bindings.read(clause);
+        }
         Ok((clauses, pipeline.output))
     }
 

@@ -44,6 +44,7 @@ use super::parallel::Morsel;
 use super::plan::AggregateFunction;
 use super::plan::Case;
 use super::plan::Expr;
+use super::plan::Holds;
 use super::plan::ListComprehension;
 use super::plan::PatternQuery;
 use super::plan::Quantified;
@@ -103,14 +104,14 @@ pub(crate) struct Env<'a, T: ReadTransaction> {
     pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
     /// Set on a worker of a parallel read, which starts its first pattern from these nodes only.
     pub(crate) morsel: Option<&'a Morsel<'a>>,
-    /// The slots that only ever hold a graph element or null, in ascending order.
-    pub(crate) elements: &'a [Slot],
+    /// Per slot, what every value it holds is known to be.
+    pub(crate) holds: &'a [Holds],
 }
 
 impl<'a, T: ReadTransaction> Env<'a, T> {
-    /// This environment, taking `elements` as the slots that only hold graph elements.
-    pub(crate) fn with_elements(self, elements: &'a [Slot]) -> Self {
-        Self { elements, ..self }
+    /// This environment, taking `holds` as what each slot holds.
+    pub(crate) fn with_holds(self, holds: &'a [Holds]) -> Self {
+        Self { holds, ..self }
     }
 
     pub(crate) fn new(
@@ -140,7 +141,7 @@ impl<'a, T: ReadTransaction> Env<'a, T> {
             adjacency: RefCell::default(),
             rel_type_tokens: RefCell::default(),
             morsel: None,
-            elements: &[],
+            holds: &[],
         }
     }
 }

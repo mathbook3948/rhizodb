@@ -322,6 +322,8 @@ fn an_exists_subquery_stops_at_its_first_row() {
     for text in [
         "RETURN EXISTS { MATCH (a)-[:R]->(b) RETURN a } AS found",
         "MATCH (n:N {k: 0}) RETURN EXISTS { MATCH (a)-[:R]->(b) WHERE b.k > n.k RETURN b } AS found",
+        "MATCH (n:N {k: 0}) RETURN EXISTS { MATCH (a)-[:R]->(b) WITH b AS c WHERE c.k > n.k \
+         RETURN c } AS found",
     ] {
         let (read, all) = matches_produced(&db, text);
         assert!(read <= 2, "{text} produced {read} matches");
