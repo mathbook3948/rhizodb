@@ -769,10 +769,13 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<RelationshipRecord>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::RelationshipDecode);
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
     }
 
-    fn with_relationship<R>(
+    /// Calls `read` with the stored record of a relationship, if it exists.
+    pub(crate) fn with_relationship<R>(
         &self,
         id: RelationshipId,
         read: impl FnOnce(&[u8]) -> Result<R, GraphError>,
@@ -1475,6 +1478,8 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<K>>, GraphError> {
+        #[cfg(test)]
+        tests::note(tests::Read::TokenLookup);
         if let Some(token) = self.tokens.get(name).or_else(|| self.own_tokens.get(name)) {
             return Ok(Some(token));
         }
@@ -2129,6 +2134,8 @@ impl<T: WriteTransaction> GraphTx<T> {
 #[cfg(test)]
 #[path = "graph.test.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::counted;
 
 #[cfg(test)]
 #[path = "graph/crash.test.rs"]

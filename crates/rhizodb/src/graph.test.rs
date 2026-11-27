@@ -3,6 +3,56 @@ use super::*;
 use crate::storage::test_engine;
 use crate::storage::test_engine::TestStorage;
 
+thread_local! {
+    static READS: std::cell::Cell<Reads> = const { std::cell::Cell::new(Reads::NONE) };
+}
+
+/// A read whose count on one thread a test checks.
+#[derive(Clone, Copy)]
+pub(crate) enum Read {
+    TokenLookup,
+    RelationshipDecode,
+}
+
+/// How many reads of each [`Read`] a thread made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reads {
+    /// Tokens looked up in the tokens every transaction shares.
+    pub(crate) token_lookups: usize,
+    /// Relationship records decoded whole.
+    pub(crate) relationship_decodes: usize,
+}
+
+impl Reads {
+    const NONE: Self = Self {
+        token_lookups: 0,
+        relationship_decodes: 0,
+    };
+}
+
+pub(crate) fn note(read: Read) {
+    READS.with(|reads| {
+        let mut counts = reads.get();
+        match read {
+            Read::TokenLookup => counts.token_lookups += 1,
+            Read::RelationshipDecode => counts.relationship_decodes += 1,
+        }
+        reads.set(counts);
+    });
+}
+
+/// What `run` returns, with the reads it made on this thread.
+pub(crate) fn counted<R>(run: impl FnOnce() -> R) -> (R, Reads) {
+    let before = READS.with(std::cell::Cell::get);
+    let result = run();
+    let after = READS.with(std::cell::Cell::get);
+    let reads = Reads {
+        token_lookups: after.token_lookups - before.token_lookups,
+        relationship_decodes: after.relationship_decodes - before.relationship_decodes,
+    };
+    (result, reads)
+}
+
 fn memory_graph() -> Graph<TestStorage> {
     Graph::open(test_engine::in_memory()).unwrap()
 }
