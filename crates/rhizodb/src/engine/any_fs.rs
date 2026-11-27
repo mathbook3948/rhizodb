@@ -226,10 +226,14 @@ pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            StorageError::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("the backup path {} names no file in UTF-8", path.display()),
-            ))
+            StorageError::io(
+                ErrorKind::Storage,
+                format!("cannot back up to {}", path.display()),
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the backup path names no file in UTF-8",
+                ),
+            )
         })?;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),

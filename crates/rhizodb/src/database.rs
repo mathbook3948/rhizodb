@@ -503,9 +503,10 @@ impl Database {
     ///
     /// Fails with [`ErrorKind::BackupTargetExists`](crate::ErrorKind::BackupTargetExists) when a
     /// file or directory already exists at `path`, which is never replaced. A `path` that names
-    /// no file, one whose directory cannot be written, or, on other platforms, one on a file
-    /// system without hard links fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage),
-    /// and the I/O error behind it is the error's [`source`](std::error::Error::source).
+    /// no file, one whose directory cannot be written, or one on a file system with neither hard
+    /// links nor such a rename, as on other platforms or many FUSE servers, fails with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage), and the I/O error behind it is the
+    /// error's [`source`](std::error::Error::source).
     ///
     /// ```
     /// use rhizodb::Database;

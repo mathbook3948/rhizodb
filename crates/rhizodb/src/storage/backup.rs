@@ -29,7 +29,13 @@ pub(crate) fn write<S: Storage>(storage: &S, path: &Path) -> Result<(), StorageE
     if checked? {
         return Err(target_exists(path));
     }
-    let staging = staging_path(path).map_err(StorageError::new)?;
+    let staging = staging_path(path).map_err(|error| {
+        StorageError::io(
+            ErrorKind::Storage,
+            format!("cannot back up to {}", path.display()),
+            error,
+        )
+    })?;
     let copied = storage
         .begin_read()
         .and_then(|snapshot| S::write_copy(&snapshot, &staging))

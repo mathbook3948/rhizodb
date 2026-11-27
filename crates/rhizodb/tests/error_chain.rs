@@ -149,6 +149,20 @@ fn a_backup_into_a_missing_directory_leaves_the_io_error_to_its_source() {
 }
 
 #[test]
+fn a_backup_path_that_names_no_file_leaves_the_io_error_to_its_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let error = Database::in_memory()
+        .unwrap()
+        .backup_to(directory.path().join("missing").join(".."))
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage);
+    let messages = chain(&error);
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].starts_with("cannot back up to"), "{messages:?}");
+    assert_eq!(io_source(&error).kind(), io::ErrorKind::InvalidInput);
+}
+
+#[test]
 fn a_path_that_cannot_be_checked_states_its_cause_once() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("file");
