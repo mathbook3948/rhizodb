@@ -1059,13 +1059,24 @@ impl<F: FileSystem + 'static> Engine<F> {
             }
             Err(error) => return Err(error.into()),
         };
-        let Joined::Session(elected) = session::join(&*fs, name, &file)? else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "multi-process access needs a local file system that takes byte-range locks and \
-                 shared mappings, and a directory that takes the -shm file",
-            )
-            .into());
+        let elected = match session::join(&*fs, name, &file)? {
+            Joined::Session(elected) => elected,
+            Joined::Alone { recheck: true } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another open holds the database file outside this path's session, as an \
+                     open through another path or link does",
+                )
+                .into());
+            }
+            Joined::Alone { recheck: false } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "multi-process access needs a local file system that takes byte-range locks \
+                     and shared mappings, and a directory that takes the -shm file",
+                )
+                .into());
+            }
         };
         elected.take_write_lock()?;
         file.sync()?;
