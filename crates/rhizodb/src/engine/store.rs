@@ -2304,8 +2304,10 @@ fn get_with<R: Reads, T, E: From<StorageError>>(
 }
 
 macro_rules! read_transaction {
-    ($type:ident) => {
+    ($type:ident, $sees_only_committed:literal) => {
         impl<F: FileSystem + 'static> ReadTransaction for $type<'_, F> {
+            const SEES_ONLY_COMMITTED: bool = $sees_only_committed;
+
             fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
                 get(self, table, key)
             }
@@ -2387,8 +2389,8 @@ macro_rules! read_transaction {
     };
 }
 
-read_transaction!(EngineRead);
-read_transaction!(EngineWrite);
+read_transaction!(EngineRead, true);
+read_transaction!(EngineWrite, false);
 
 impl<F: FileSystem + 'static> WriteTransaction for EngineWrite<'_, F> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<(), StorageError> {

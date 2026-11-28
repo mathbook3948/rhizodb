@@ -86,6 +86,30 @@ pub fn open_damaged_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> 
     engine::fuzz::open_damaged_file(bytes)
 }
 
+/// Damages a database file of RhizoDB's own engine by `bytes`, writes every page's checksum
+/// again, opens it, reads every entry, and checks it, for the fuzzer. A panic is the failure.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn open_resealed_engine_file_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    engine::fuzz::open_resealed_file(bytes)
+}
+
+/// Damages one stored entry of a small graph by `bytes`, writes its checksum again, and reads,
+/// writes, and checks the graph, for the fuzzer. A panic is the failure.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn read_resealed_graph_entries_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    graph::fuzz::read_resealed_entries(bytes)
+}
+
+/// Runs a fixed set of queries over a small graph with two parameters built from `bytes`, for
+/// the fuzzer. A panic is the failure.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn run_with_parameters_for_fuzzing(bytes: &[u8]) -> Result<(), String> {
+    query::fuzz::run_with_parameters(bytes)
+}
+
 /// Damages a snapshot stream by `bytes`, seals it again, installs it, and reads every entry,
 /// for the fuzzer. Fails when the damage changed what reads return without an error.
 #[cfg(fuzzing)]

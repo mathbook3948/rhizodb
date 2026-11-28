@@ -4,10 +4,15 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Added
+
+- `OpenOptions::max_dump_line_bytes` caps the bytes of one dump line that `Database::import` reads. A longer line fails with `ErrorKind::InvalidDump` once that many bytes are read, so a host that imports dumps it did not write can bound the memory one line takes. No cap is set by default.
+
 ### Fixed
 
 - Opening a database through a symlink to its file, or through a second hard link, looked for the write-ahead log segments and staging file beside that path and under its name instead of beside the file itself. After an unclean shutdown, an open through another path then failed with `ErrorKind::CorruptData` (write-ahead log missing) although every commit sat in segments named after the first path, and two read-only opens in one process through two hard links both succeeded. An open now resolves every symlink and `..` in the path once and names every side file after the resolved file, so every path to a file finds one log and counts as one open. On Unix an open of a file with more than one hard link now fails with `ErrorKind::Storage`, since each name would find its own log, so copy a database file instead of linking it.
 - `Database::apply` on a writer or a fenced writer could leave it refusing reads and writes with `ErrorKind::FormatUpgradePending`. This happened when the changes carried an older graph format or an upgrade, as a new writer's first changes after a rolling upgrade do. The apply failed with `ErrorKind::NotReplica` or `ErrorKind::WriteTransactionOnThisThread` but still marked the graph as waiting for an upgrade. The mark stayed when the call came from a thread holding a write transaction, or when the database's file held an older format, and otherwise cleared once the call returned. Only a replica now starts waiting for an upgrade.
+- An aggregate argument that called `rand()` only inside a pattern's property map or the clauses of a subquery was accepted, as in `sum(VALUE { RETURN rand() })` or `count(EXISTS { MATCH (n)-->(m) WHERE rand() < 0.5 })`, and returned a random result. It now fails with `ErrorKind::NonConstantExpression`, as `rand()` directly in the argument does.
 
 ## 0.2.0
 

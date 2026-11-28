@@ -1002,6 +1002,9 @@ impl Storage for CountingStorage {
 }
 
 impl ReadTransaction for CountingWrite<'_> {
+    const SEES_ONLY_COMMITTED: bool =
+        <<TestStorage as Storage>::Write<'static> as ReadTransaction>::SEES_ONLY_COMMITTED;
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(table, key)
     }

@@ -653,31 +653,15 @@ impl<S: Storage> Graph<S> {
             } else {
                 OnceLock::new()
             };
-        let tx = GraphTx {
+        let tx = GraphTx::new(
             transaction,
-            _writer: None,
-            index_definitions,
-            catalog: None,
-            tokens: Arc::clone(&self.committed_tokens),
-            reads_committed_tokens: true,
-            own_tokens: CommittedTokens::default(),
-            label_sets: Arc::clone(&self.committed_label_sets),
-            own_label_sets: LabelSetCache::default(),
-            new_label_sets: BTreeMap::new(),
-            meta: BTreeMap::new(),
-            columns: BTreeMap::new(),
-            reader: ColumnReader::default(),
-            labels: LabelReader::default(),
-            column_deltas: None,
-            own_column_deltas: BTreeMap::new(),
-            adjacency: BTreeMap::new(),
-            relationship_chunks: BTreeMap::new(),
-            relationship_bytes: 0,
-            record_buffer: Vec::new(),
-            committing: false,
-            postings: postings::Held::default(),
-            counters: Vec::new(),
-        };
+            Shared {
+                index_definitions,
+                tokens: Arc::clone(&self.committed_tokens),
+                label_sets: Arc::clone(&self.committed_label_sets),
+                ..Shared::default()
+            },
+        );
         if waited && let Some(found) = Self::pending_in(&tx)? {
             return Err(GraphError::UpgradePending(found));
         }
@@ -824,37 +808,23 @@ impl<S: Storage> Graph<S> {
         } else {
             OnceLock::new()
         };
-        Ok(GraphTx {
+        Ok(GraphTx::new(
             transaction,
-            _writer: Some(WriterClaim {
-                writers: Arc::clone(&self.writers),
-                owner: current,
-            }),
-            index_definitions,
-            catalog: Some(Catalog {
-                shared: Arc::clone(&self.committed_index_definitions),
-                changed: false,
-            }),
-            tokens: Arc::clone(&self.committed_tokens),
-            reads_committed_tokens: false,
-            own_tokens: CommittedTokens::default(),
-            label_sets: Arc::clone(&self.committed_label_sets),
-            own_label_sets: LabelSetCache::default(),
-            new_label_sets: BTreeMap::new(),
-            meta: BTreeMap::new(),
-            columns: BTreeMap::new(),
-            reader: ColumnReader::default(),
-            labels: LabelReader::default(),
-            column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
-            own_column_deltas: BTreeMap::new(),
-            adjacency: BTreeMap::new(),
-            relationship_chunks: BTreeMap::new(),
-            relationship_bytes: 0,
-            record_buffer: Vec::new(),
-            committing: false,
-            postings: postings::Held::default(),
-            counters: Vec::new(),
-        })
+            Shared {
+                writer: Some(WriterClaim {
+                    writers: Arc::clone(&self.writers),
+                    owner: current,
+                }),
+                index_definitions,
+                catalog: Some(Catalog {
+                    shared: Arc::clone(&self.committed_index_definitions),
+                    changed: false,
+                }),
+                tokens: Arc::clone(&self.committed_tokens),
+                label_sets: Arc::clone(&self.committed_label_sets),
+                column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
+            },
+        ))
     }
 }
 
@@ -866,7 +836,6 @@ pub(crate) struct GraphTx<T> {
     index_definitions: OnceLock<Arc<[Vec<u8>]>>,
     catalog: Option<Catalog>,
     tokens: Arc<CommittedTokens>,
-    reads_committed_tokens: bool,
     own_tokens: CommittedTokens,
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
@@ -886,24 +855,41 @@ pub(crate) struct GraphTx<T> {
     counters: Vec<(Vec<u8>, u64)>,
 }
 
+#[derive(Debug, Default)]
+struct Shared {
+    writer: Option<WriterClaim>,
+    index_definitions: OnceLock<Arc<[Vec<u8>]>>,
+    catalog: Option<Catalog>,
+    tokens: Arc<CommittedTokens>,
+    label_sets: Arc<LabelSetCache>,
+    column_deltas: Option<Arc<ColumnDeltas>>,
+}
+
 impl<T> GraphTx<T> {
-    fn bare(transaction: T) -> Self {
+    fn new(transaction: T, shared: Shared) -> Self {
+        let Shared {
+            writer,
+            index_definitions,
+            catalog,
+            tokens,
+            label_sets,
+            column_deltas,
+        } = shared;
         Self {
             transaction,
-            _writer: None,
-            index_definitions: OnceLock::new(),
-            catalog: None,
-            tokens: Arc::default(),
-            reads_committed_tokens: false,
+            _writer: writer,
+            index_definitions,
+            catalog,
+            tokens,
             own_tokens: CommittedTokens::default(),
-            label_sets: Arc::default(),
+            label_sets,
             own_label_sets: LabelSetCache::default(),
             new_label_sets: BTreeMap::new(),
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
             labels: LabelReader::default(),
-            column_deltas: None,
+            column_deltas,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
@@ -913,6 +899,10 @@ impl<T> GraphTx<T> {
             postings: postings::Held::default(),
             counters: Vec::new(),
         }
+    }
+
+    fn bare(transaction: T) -> Self {
+        Self::new(transaction, Shared::default())
     }
 }
 
@@ -1132,7 +1122,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .ok_or(GraphError::Corrupt(
                 "a node has a label set that does not exist",
             ))?;
-        if self.reads_committed_tokens {
+        if T::SEES_ONLY_COMMITTED {
             self.label_sets.insert(set, Arc::clone(&labels));
         } else {
             self.own_label_sets.insert(set, Arc::clone(&labels));
@@ -1824,7 +1814,7 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn remember_token<K: TokenKind>(&self, name: Arc<str>, token: Token<K>) {
-        if self.reads_committed_tokens {
+        if T::SEES_ONLY_COMMITTED {
             self.tokens.insert(name, token);
         } else {
             self.own_tokens.insert(name, token);
