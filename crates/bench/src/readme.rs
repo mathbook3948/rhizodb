@@ -90,7 +90,7 @@ pub const ROWS: [(&str, &str); 15] = [
 /// The workload whose on-disk size the size row shows.
 pub const SIZE_FROM: &str = "load/bulk";
 
-fn result<'a>(document: &'a Value, workload: &str, engine: &str) -> Option<&'a Value> {
+pub(crate) fn result<'a>(document: &'a Value, workload: &str, engine: &str) -> Option<&'a Value> {
     document["results"].as_array()?.iter().find(|row| {
         row["workload"].as_str() == Some(workload) && row["engine"].as_str() == Some(engine)
     })
@@ -109,13 +109,13 @@ fn milliseconds(value: f64) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Timing {
-    median: f64,
-    min: f64,
-    max: f64,
+pub(crate) struct Timing {
+    pub(crate) median: f64,
+    pub(crate) min: f64,
+    pub(crate) max: f64,
 }
 
-fn cell(row: Option<&Value>, language: Language) -> (String, Option<Timing>) {
+pub(crate) fn cell(row: Option<&Value>, language: Language) -> (String, Option<Timing>) {
     let Some(row) = row else {
         let text = match language {
             Language::English => "not run",
@@ -180,7 +180,7 @@ fn faster(rhizodb: Option<Timing>, other: Option<Timing>, language: Language) ->
     }
 }
 
-fn mebibytes(row: Option<&Value>, language: Language) -> (String, Option<f64>) {
+pub(crate) fn mebibytes(row: Option<&Value>, language: Language) -> (String, Option<f64>) {
     match row.and_then(|row| row["bytes"].as_f64()) {
         Some(bytes) => (format!("{:.1} MiB", bytes / 1_048_576.0), Some(bytes)),
         None => (not_applicable(language), None),
@@ -210,6 +210,32 @@ pub fn render(document: &Value, machine: &str, date: &str) -> Result<String, Str
     render_in(document, machine, date, Language::English)
 }
 
+fn run_shape(document: &Value) -> (&str, u64, u64, u64, u64) {
+    (
+        document["scale"].as_str().unwrap_or("unknown"),
+        document["reps"].as_u64().unwrap_or(0),
+        document["persons"].as_u64().unwrap_or(0),
+        document["knows"].as_u64().unwrap_or(0),
+        document["cities"].as_u64().unwrap_or(0),
+    )
+}
+
+/// The English sentence above a table that names the machine, the date, the scale, and the
+/// repetitions of the run the report holds.
+pub(crate) fn english_heading(document: &Value, machine: &str, date: &str) -> String {
+    let (scale, reps, persons, knows, cities) = run_shape(document);
+    format!(
+        "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
+    )
+}
+
+fn korean_heading(document: &Value, machine: &str, date: &str) -> String {
+    let (scale, reps, persons, knows, cities) = run_shape(document);
+    format!(
+        "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
+    )
+}
+
 /// Renders the README table in `language` from the JSON report the benchmark binary writes
 /// with `--out`, naming the machine and the date of the run.
 pub fn render_in(
@@ -221,18 +247,9 @@ pub fn render_in(
     if !document["results"].is_array() {
         return Err("the report has no results".to_owned());
     }
-    let scale = document["scale"].as_str().unwrap_or("unknown");
-    let reps = document["reps"].as_u64().unwrap_or(0);
-    let persons = document["persons"].as_u64().unwrap_or(0);
-    let knows = document["knows"].as_u64().unwrap_or(0);
-    let cities = document["cities"].as_u64().unwrap_or(0);
     let mut text = match language {
-        Language::English => format!(
-            "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
-        ),
-        Language::Korean => format!(
-            "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
-        ),
+        Language::English => english_heading(document, machine, date),
+        Language::Korean => korean_heading(document, machine, date),
     };
     text.push_str(match language {
         Language::English => "| Workload | RhizoDB | LadybugDB | Faster |\n",
@@ -256,17 +273,27 @@ pub fn render_in(
 
 /// Replaces the text between [`START`] and [`END`] in `readme` with `table`.
 pub fn splice(readme: &str, table: &str) -> Result<String, String> {
-    let start = readme
-        .find(START)
-        .ok_or_else(|| format!("README.md has no `{START}` line"))?;
-    let end = readme
-        .find(END)
-        .filter(|end| *end > start)
-        .ok_or_else(|| format!("README.md has no `{END}` line after `{START}`"))?;
+    splice_between(readme, table, START, END)
+}
+
+/// Replaces the text between the lines `start` and `end` in `document` with `table`.
+pub(crate) fn splice_between(
+    document: &str,
+    table: &str,
+    start: &str,
+    end: &str,
+) -> Result<String, String> {
+    let from = document
+        .find(start)
+        .ok_or_else(|| format!("the document has no `{start}` line"))?;
+    let to = document
+        .find(end)
+        .filter(|to| *to > from)
+        .ok_or_else(|| format!("the document has no `{end}` line after `{start}`"))?;
     Ok(format!(
-        "{}{START}\n{table}{}",
-        &readme[..start],
-        &readme[end..]
+        "{}{start}\n{table}{}",
+        &document[..from],
+        &document[to..]
     ))
 }
 

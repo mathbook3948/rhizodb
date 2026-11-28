@@ -72,6 +72,10 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - Reopening is measured with a warm page cache.
 - The README's table compares RhizoDB with LadybugDB at the medium scale with five repetitions, shows every chosen workload whichever engine wins, and names the machine and the date.
 - `mise run bench-readme` measures again and rewrites the README's table, and given a saved report it only rewrites the table.
+- Every other engine goes to its own table in `crates/bench/ENGINES.md`, which `mise run bench-engines` measures again and rewrites, and given a saved report it only rewrites the table.
+- That table has a column for each engine the report holds, and its last column names the fastest engine and how far ahead of the next one it is, or that the two are within noise.
+- `mise run bench-engines` runs every embedded engine at the medium scale with five repetitions, and each server whose URL the environment gives.
+- `mise run bench-servers start` runs Neo4j, Memgraph, and FalkorDB in Docker from images pinned by version and digest, on loopback ports, waits until each answers, and prints the variables that give their URLs.
 - The benchmark builds in release with one codegen unit, so a change to unrelated code cannot move a measurement through how the compiler splits the crate.
 
 ## Open

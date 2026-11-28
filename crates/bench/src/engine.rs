@@ -80,6 +80,20 @@ impl EngineKind {
         }
     }
 
+    /// The engine's name as its project writes it, for tables people read.
+    pub fn title(self) -> &'static str {
+        match self {
+            EngineKind::Rhizodb => "RhizoDB",
+            EngineKind::Ladybugdb => "LadybugDB",
+            EngineKind::Sqlite => "SQLite",
+            EngineKind::Duckdb => "DuckDB",
+            EngineKind::Cozodb => "CozoDB",
+            EngineKind::Neo4j => "Neo4j",
+            EngineKind::Memgraph => "Memgraph",
+            EngineKind::Falkordb => "FalkorDB",
+        }
+    }
+
     /// Reads the name [`EngineKind::name`] gives.
     pub fn parse(text: &str) -> Option<EngineKind> {
         EngineKind::ALL.into_iter().find(|kind| kind.name() == text)
