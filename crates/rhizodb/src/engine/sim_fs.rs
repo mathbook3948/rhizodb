@@ -327,6 +327,14 @@ impl SimFs {
         lock(&self.state).fault = None;
     }
 
+    /// Stops failing and forgets a failed sync of names, as a process that dies takes the
+    /// errors it met with it and the processes after it see none.
+    pub(crate) fn heal(&self) {
+        let mut state = lock(&self.state);
+        state.fault = None;
+        state.names_sync_failed = false;
+    }
+
     /// The number of operations called so far, failed ones included.
     pub(crate) fn operations(&self) -> u64 {
         lock(&self.state).operations

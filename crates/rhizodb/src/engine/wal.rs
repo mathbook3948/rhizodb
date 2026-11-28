@@ -162,6 +162,9 @@ impl<F: FileSystem> Detached<F> {
         for name in &self.names {
             let _ = self.fs.remove(name);
         }
+        if !self.names.is_empty() {
+            super::crash_point::reached("segments-removed");
+        }
     }
 }
 
@@ -175,9 +178,16 @@ pub(crate) struct Wal<F: FileSystem> {
     active: F::File,
     active_header: SegmentHeader,
     next_lsn: u64,
+    shared: bool,
 }
 
 impl<F: FileSystem> Wal<F> {
+    /// Marks this log as the session's, which other writers append to as well, so a segment
+    /// past its end is one a writer that died started and never published.
+    pub(crate) fn share(&mut self) {
+        self.shared = true;
+    }
+
     /// Starts a new log whose first segment is `sequence` and whose first record will be
     /// `next_lsn`. The segment is durable, name included, when this returns.
     #[expect(
@@ -211,6 +221,7 @@ impl<F: FileSystem> Wal<F> {
             active,
             active_header,
             next_lsn,
+            shared: false,
         })
     }
 
@@ -453,7 +464,135 @@ impl<F: FileSystem> Wal<F> {
             active,
             active_header,
             next_lsn,
+            shared: false,
         })
+    }
+
+    /// Opens the log of a session's writer that joins after another writer appended to it, at
+    /// the end `tail` names, and removes any segment past that end, which a writer that died
+    /// started and never published. Segments another process removes meanwhile are skipped.
+    pub(crate) fn join(
+        fs: Arc<F>,
+        base: &str,
+        header: &Header,
+        tail: (u64, u64, u64),
+        segment_target: u64,
+    ) -> Result<Self, EngineError> {
+        let identity = LogIdentity {
+            database_id: header.database_id,
+            shard_id: header.shard_id,
+            salt: header.wal.salt,
+        };
+        let (segment, _, _) = tail;
+        let first = segment_files(&*fs, base)?
+            .into_iter()
+            .next()
+            .unwrap_or(segment)
+            .min(segment);
+        let (active, active_header, last) = open_segment(&*fs, base, identity, segment)?;
+        let mut wal = Self {
+            fs,
+            base: base.to_owned(),
+            identity,
+            segment_target,
+            segments_oldest_first: Vec::new(),
+            active,
+            active_header,
+            next_lsn: 0,
+            shared: true,
+        };
+        for sequence in first..segment {
+            match open_segment(&*wal.fs, base, identity, sequence) {
+                Ok((_, _, found)) => wal.segments_oldest_first.push(found),
+                Err(EngineError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                    wal.segments_oldest_first.clear();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        wal.segments_oldest_first.push(last);
+        wal.settle(tail)?;
+        Ok(wal)
+    }
+
+    /// The segment records are appended to, the block after its last record, and the LSN the
+    /// next record must carry, which a session publishes as its log's tail.
+    pub(crate) fn tail(&self) -> Result<(u64, u64, u64), EngineError> {
+        let active = self.active_segment()?;
+        Ok((active.sequence, active.blocks, self.next_lsn))
+    }
+
+    /// Moves this log to the end `tail` that another writer of the session published, opening
+    /// the segments it started, and removes any segment past that end, which a writer that died
+    /// started and never published.
+    pub(crate) fn follow(&mut self, tail: (u64, u64, u64)) -> Result<(), EngineError> {
+        if self.tail()? == tail {
+            return Ok(());
+        }
+        let (segment, _, _) = tail;
+        let last = self.last_sequence();
+        if segment < last {
+            return Err(EngineError::corrupt(format!(
+                "the session's log ends in segment {segment} before segment {last} that this \
+                 process appended to"
+            )));
+        }
+        if segment > last {
+            self.segments_oldest_first.pop();
+            for sequence in last..segment {
+                match open_segment(&*self.fs, &self.base, self.identity, sequence) {
+                    Ok((_, _, found)) => self.segments_oldest_first.push(found),
+                    Err(EngineError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let (active, header, found) =
+                open_segment(&*self.fs, &self.base, self.identity, segment)?;
+            self.active = active;
+            self.active_header = header;
+            self.segments_oldest_first.push(found);
+        }
+        self.settle(tail)
+    }
+
+    fn settle(
+        &mut self,
+        (segment, end_block, next_lsn): (u64, u64, u64),
+    ) -> Result<(), EngineError> {
+        let allocated = self.active.block_count()?;
+        let active = self.active_segment_mut()?;
+        if end_block < HEADER_BLOCKS || end_block > allocated {
+            return Err(EngineError::corrupt(format!(
+                "the session's log ends at block {end_block} of segment {segment}, which holds \
+                 {allocated}"
+            )));
+        }
+        active.blocks = end_block;
+        active.allocated = allocated;
+        self.next_lsn = next_lsn;
+        let mut removed = false;
+        for later in segment_files(&*self.fs, &self.base)?
+            .into_iter()
+            .filter(|later| *later > segment)
+        {
+            ignore_missing(self.fs.remove(&segment_name(&self.base, later)))?;
+            removed = true;
+        }
+        if removed {
+            self.fs.sync_names()?;
+        }
+        Ok(())
+    }
+
+    /// Forgets the segments before `sequence` that another process of the session removed.
+    pub(crate) fn forget_removed_before(&mut self, sequence: u64) -> Result<(), EngineError> {
+        let last = self.last_sequence();
+        let present = segment_files(&*self.fs, &self.base)?;
+        self.segments_oldest_first.retain(|segment| {
+            segment.sequence >= sequence.min(last)
+                || present.binary_search(&segment.sequence).is_ok()
+        });
+        Ok(())
     }
 
     #[cfg(test)]
@@ -549,6 +688,9 @@ impl<F: FileSystem> Wal<F> {
 
     fn roll_over(&mut self, hlc: u64) -> Result<(), EngineError> {
         let sequence = self.active_segment()?.sequence + 1;
+        if self.shared {
+            ignore_missing(self.fs.remove(&segment_name(&self.base, sequence)))?;
+        }
         let (file, header) = new_segment(
             &*self.fs,
             &self.base,
@@ -565,6 +707,7 @@ impl<F: FileSystem> Wal<F> {
             blocks: HEADER_BLOCKS,
             allocated: HEADER_BLOCKS,
         });
+        super::crash_point::reached("segment-started");
         Ok(())
     }
 
@@ -675,6 +818,41 @@ fn check_segment(
         )));
     }
     Ok(())
+}
+
+fn ignore_missing(outcome: io::Result<()>) -> io::Result<()> {
+    match outcome {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        outcome => outcome,
+    }
+}
+
+// ast-grep-ignore
+// A segment another writer of the session appended to, read only for its header and length.
+fn open_segment<F: FileSystem>(
+    fs: &F,
+    base: &str,
+    identity: LogIdentity,
+    sequence: u64,
+) -> Result<(F::File, SegmentHeader, Segment), EngineError> {
+    let file = fs.open(&segment_name(base, sequence), wal_block()?)?;
+    let blocks = file.block_count()?;
+    let mut first = vec![0; WAL_BLOCK];
+    if blocks == 0 {
+        return Err(EngineError::corrupt(format!(
+            "log segment {sequence} is empty"
+        )));
+    }
+    file.read(0, &mut first)?;
+    let header = SegmentHeader::decode(&first)?;
+    check_segment(&header, identity, sequence)?;
+    let segment = Segment {
+        sequence,
+        first_lsn: header.first_lsn,
+        blocks,
+        allocated: blocks,
+    };
+    Ok((file, header, segment))
 }
 
 fn new_segment<F: FileSystem>(

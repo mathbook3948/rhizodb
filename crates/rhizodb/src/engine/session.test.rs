@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::engine::layout::BLOCK;
+use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
@@ -284,11 +285,18 @@ fn a_writer_joins_readers_and_its_commits_reach_the_readers_that_join_after() {
 }
 
 #[test]
-fn a_session_takes_one_writer_and_keeps_out_an_exclusive_open() {
+fn a_session_takes_a_second_writer_and_keeps_out_an_exclusive_open() {
     let fs = SimFs::new();
-    let _writer = writer(&fs, EngineOptions::default()).unwrap();
-    let error = writer(&fs, EngineOptions::default()).unwrap_err();
-    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
+    let first = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&first, 1, 4);
+    let second = writer(&fs, EngineOptions::default()).unwrap();
+    assert_eq!(round_seen(&second, 4), 1);
+    put_round(&second, 2, 4);
+    first.catch_up().unwrap();
+    assert_eq!(round_seen(&first, 4), 2);
+    put_round(&first, 3, 4);
+    second.catch_up().unwrap();
+    assert_eq!(round_seen(&second, 4), 3);
     let error = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap_err();
     assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
 }
@@ -992,6 +1000,7 @@ fn a_writer_that_dies_while_it_publishes_the_tail_leaves_the_last_one_for_every_
         chain: 0xfeed,
         hlc: 99,
     };
+    session.lock_write().unwrap();
     session.publish_tail(first);
     assert_eq!(session.published_tail(), Some(first));
     let version = session
@@ -1026,6 +1035,7 @@ fn a_writer_that_dies_while_it_publishes_the_tail_leaves_the_last_one_for_every_
 fn readers_never_see_a_tail_or_header_that_mixes_two_publishes() {
     let fs = written(1);
     let (session, _file) = first_session(&fs);
+    session.lock_write().unwrap();
     let session = Arc::new(session);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let readers: Vec<_> = (0..3)
@@ -1139,9 +1149,11 @@ fn the_side_file_layout_is_pinned_to_its_version() {
 
 // ast-grep-ignore
 // Words that run `writer` before each access a reader makes, so a test places a writer's steps between a reader's loads.
+type WriterStep = dyn FnMut(usize, &[AtomicU64]) + Send;
+
 struct Interleaved {
     words: Vec<AtomicU64>,
-    writer: std::sync::Mutex<Box<dyn FnMut(usize, &[AtomicU64]) + Send>>,
+    writer: std::sync::Mutex<Box<WriterStep>>,
 }
 
 impl fmt::Debug for Interleaved {
@@ -1220,4 +1232,147 @@ fn a_reader_waits_out_a_copy_whose_writer_is_still_writing_it() {
     let mut read = [0; TAIL_WORDS];
     assert!(TAIL.read(&words, &mut read));
     assert_eq!(read, [9; TAIL_WORDS]);
+}
+
+fn try_round(engine: &Engine<SimFs>, round: u8, keys: u64) -> Result<(), EngineError> {
+    let mut write = engine.begin_write()?;
+    for key in 0..keys {
+        write.put(Table::Nodes, &key.to_be_bytes(), &[round; 200])?;
+    }
+    write.put(Table::Metadata, &[b'r', round], &[round])?;
+    write.commit()?;
+    Ok(())
+}
+
+fn rounds_held(engine: &Engine<SimFs>) -> Vec<u8> {
+    let read = engine.begin_read().unwrap();
+    (0..=u8::MAX)
+        .filter(|round| {
+            read.get(Table::Metadata, &[b'r', *round])
+                .unwrap()
+                .is_some()
+        })
+        .collect()
+}
+
+// ast-grep-ignore
+// A bound on work that a lock left by a dead writer would hang, so the test fails and names the step.
+fn within<T: Send + 'static>(what: String, run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(run());
+    });
+    match finished.recv_timeout(Duration::from_secs(30)) {
+        Ok(done) => done,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what} hung, as a lock a dead writer kept would leave it")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what} failed"),
+    }
+}
+
+fn dying_step(fs: &SimFs, first: &Engine<SimFs>) -> bool {
+    let acked = try_round(first, 5, 64).is_ok();
+    let _ = first.checkpoint();
+    let _ = try_round(first, 6, 64);
+    let _ = fs;
+    acked
+}
+
+#[test]
+fn a_writer_that_dies_at_any_step_of_a_commit_or_checkpoint_loses_no_acknowledged_commit() {
+    let steps = {
+        let fs = SimFs::new();
+        let first = writer(&fs, churning()).unwrap();
+        let before = fs.operations();
+        assert!(dying_step(&fs, &first));
+        fs.operations() - before
+    };
+    assert!(steps > 20, "the step took {steps} operations");
+    for step in 0..=steps {
+        let fs = SimFs::new();
+        let first = writer(&fs, churning()).unwrap();
+        for round in 1..5 {
+            try_round(&first, round, 64).unwrap();
+        }
+        let second = writer(&fs, churning()).unwrap();
+        let reader = reader(&fs, 0).unwrap();
+        fs.fail_after(step, Failure::FromThenOn);
+        let mut acked: Vec<u8> = (1..5).collect();
+        if dying_step(&fs, &first) {
+            acked.push(5);
+        }
+        let sixth = first.begin_read().is_ok() && rounds_held(&first).contains(&6);
+        drop(first);
+        fs.heal();
+        let checked = within(
+            format!("the writer after a death at step {step}"),
+            move || {
+                try_round(&second, 7, 64).unwrap();
+                let held = rounds_held(&second);
+                reader.catch_up().unwrap();
+                assert_eq!(rounds_held(&reader), held, "step {step}");
+                assert_eq!(round_seen(&reader, 64), 7, "step {step}");
+                second.checkpoint().unwrap();
+                second.check().unwrap();
+                drop(reader);
+                second.close().unwrap();
+                held
+            },
+        );
+        for round in &acked {
+            assert!(
+                checked.contains(round),
+                "step {step} lost acknowledged round {round}: {checked:?}"
+            );
+        }
+        if sixth {
+            assert!(checked.contains(&6), "step {step}: {checked:?}");
+        }
+        let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+        assert_eq!(rounds_held(&alone), checked, "step {step}");
+        alone.check().unwrap();
+        alone.close().unwrap();
+    }
+}
+
+#[test]
+fn two_writers_that_take_turns_checkpointing_reuse_no_block_a_reader_still_reads() {
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    put_round(&first, 1, 512);
+    first.checkpoint().unwrap();
+    let second = writer(&fs, churning()).unwrap();
+    let options = EngineOptions {
+        cache_bytes: 4 * BLOCK,
+        ..EngineOptions::default()
+    };
+    let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    let read = held.begin_read().unwrap();
+    for round in 2..80 {
+        let turn = if round % 3 == 0 { &second } else { &first };
+        put_round(turn, round, 512);
+        if round % 7 == 0 {
+            turn.checkpoint().unwrap();
+        }
+        if round % 19 == 0 {
+            turn.compact().unwrap();
+        }
+        assert_eq!(round_seen(turn, 512), round as u8, "round {round}");
+    }
+    assert_eq!(round_in(&read, 512), 1);
+    drop(read);
+    for engine in [&first, &second] {
+        engine.catch_up().unwrap();
+        assert_eq!(round_seen(engine, 512), 79);
+        engine.check().unwrap();
+    }
+    held.catch_up().unwrap();
+    assert_eq!(round_seen(&held, 512), 79);
+    drop(held);
+    first.close().unwrap();
+    second.close().unwrap();
+    let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+    assert_eq!(round_seen(&alone, 512), 79);
+    alone.check().unwrap();
 }

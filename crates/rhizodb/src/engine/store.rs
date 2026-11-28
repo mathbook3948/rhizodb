@@ -34,6 +34,7 @@ use super::check::CheckReport;
 use super::checkpoint::Checkpointer;
 use super::checkpoint::Finished;
 use super::checkpoint::load_catalog;
+use super::crash_point;
 use super::error::EngineError;
 use super::extent::Blocks;
 use super::extent::ExtentTable;
@@ -59,6 +60,7 @@ use super::session;
 use super::session::Identity as SessionIdentity;
 use super::session::Joined;
 use super::session::Session;
+use super::session::Tail;
 use super::session::side_name;
 use super::staged::Staged;
 use super::staged::StagedOp;
@@ -212,6 +214,36 @@ struct Writer<F: FileSystem> {
     chain: u64,
 }
 
+// ast-grep-ignore
+// The writer mutex and, in a session, the session's write lock, caught up with every process's commits.
+#[derive(Debug)]
+struct Writing<'a, F: FileSystem> {
+    writer: MutexGuard<'a, Writer<F>>,
+    session: Option<&'a Session>,
+}
+
+impl<F: FileSystem> std::ops::Deref for Writing<'_, F> {
+    type Target = Writer<F>;
+
+    fn deref(&self) -> &Writer<F> {
+        &self.writer
+    }
+}
+
+impl<F: FileSystem> std::ops::DerefMut for Writing<'_, F> {
+    fn deref_mut(&mut self) -> &mut Writer<F> {
+        &mut self.writer
+    }
+}
+
+impl<F: FileSystem> Drop for Writing<'_, F> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            let _ = session.unlock_write();
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Durable {
     header: Header,
@@ -278,6 +310,7 @@ struct Shared<F: FileSystem> {
     follow_failed: AtomicBool,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
+    took_checkpoint_lock: AtomicBool,
     #[cfg(test)]
     keeping_retired: AtomicBool,
 }
@@ -509,10 +542,13 @@ enum Log {
     Replayed {
         layers: Arc<Layers>,
         replayed: Replayed,
+        tail: Option<Tail>,
     },
 }
 
 const JOIN_TRIES: usize = 1000;
+
+type PublishedReplay<B> = (Loaded<B>, Arc<Layers>, Replayed);
 
 const FOLLOW_POLL: Duration = Duration::from_millis(100);
 
@@ -858,7 +894,7 @@ fn make_recovery_durable<F: FileSystem + 'static>(
         if lock(&shared.durable).header.clean {
             break;
         }
-        if let Some(job) = shared.freeze(&mut writer) {
+        if let Some(job) = shared.freeze(&mut writer, true) {
             shared.run_checkpoint(job, true);
         }
         if shared.is_poisoned() {
@@ -901,6 +937,10 @@ fn make_recovery_durable<F: FileSystem + 'static>(
     shared
         .log_first
         .store(wal.first_sequence(), Ordering::Relaxed);
+    let mut wal = wal;
+    if shared.session.is_some() {
+        wal.share();
+    }
     writer.wal = Some(wal);
     if shared.holds_too_much_free_space() {
         shared.compact_unless_held();
@@ -1030,11 +1070,28 @@ impl<F: FileSystem + 'static> Engine<F> {
             page_seed(header.database_id),
             options.cache_bytes,
         ));
+        let (loaded, layers, replayed) = Self::replay_published(&fs, name, &session, &pages)?;
+        let log = Log::Replayed {
+            layers,
+            replayed,
+            tail: None,
+        };
+        Self::start(fs, name, loaded, options, true, Some(session), log)
+    }
+
+    // ast-grep-ignore
+    // Loads the header the session published and replays its log up to the published end, again when a checkpoint released that log meanwhile.
+    fn replay_published(
+        fs: &Arc<F>,
+        name: &str,
+        session: &Session,
+        pages: &Arc<Pages<F::File>>,
+    ) -> Result<PublishedReplay<F::File>, EngineError> {
         for _ in 0..JOIN_TRIES {
-            let header = held_header(&session)?;
+            let header = held_header(session)?;
             let until = session.log_end();
             pages.forget_cached();
-            let loaded = load_pages(Arc::clone(&pages), header, Retained::default())?;
+            let loaded = load_pages(Arc::clone(pages), header, Retained::default())?;
             let layers = Arc::new(Layers {
                 active: Arc::new(Memtable::default()),
                 frozen: None,
@@ -1045,12 +1102,11 @@ impl<F: FileSystem + 'static> Engine<F> {
                 hlc: header.checkpoint_hlc,
                 chain: header.replication.checkpoint_chain,
             };
-            let complete = replica::replay_published(&*fs, name, &header, until, &mut |record| {
+            let complete = replica::replay_published(&**fs, name, &header, until, &mut |record| {
                 replay_into(&layers, &mut replayed, record)
             })?;
             if complete {
-                let log = Log::Replayed { layers, replayed };
-                return Self::start(fs, name, loaded, options, true, Some(session), log);
+                return Ok((loaded, layers, replayed));
             }
             thread::sleep(Duration::from_millis(1));
         }
@@ -1059,8 +1115,10 @@ impl<F: FileSystem + 'static> Engine<F> {
         ))
     }
 
-    /// Opens the database file `name` on `fs` as the one process of its multi-process session
-    /// that writes, creating it when there is none, beside any number of read-only processes.
+    /// Opens the database file `name` on `fs` as a writing process of its multi-process session,
+    /// creating it when there is none, beside any number of other writing and read-only
+    /// processes. The first writer of a session recovers the log, and a later one appends where
+    /// the last writer stopped.
     pub(crate) fn open_shared(
         fs: Arc<F>,
         name: &str,
@@ -1080,7 +1138,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             }
             Err(error) => return Err(error.into()),
         };
-        let elected = match session::join(&*fs, name, &file)? {
+        let mut elected = match session::join(&*fs, name, &file)? {
             Joined::Session(elected) => elected,
             Joined::Alone { recheck: true } => {
                 return Err(io::Error::new(
@@ -1099,16 +1157,60 @@ impl<F: FileSystem + 'static> Engine<F> {
                 .into());
             }
         };
-        elected.take_write_lock()?;
-        file.sync()?;
-        let (header, _) = read_header(&file)?;
-        let session = elected.finish(
-            &file,
-            identity(&options, &header, &file)?,
-            header.generation,
-        )?;
-        let loaded = load(file, &options)?;
-        Self::start(fs, name, loaded, options, false, Some(session), Log::Own)
+        elected.lock_write()?;
+        crash_point::reached("write-lock-taken-at-open");
+        let tail = if elected.is_first() {
+            None
+        } else {
+            elected.published_tail()
+        };
+        let engine = if let Some(tail) = tail {
+            let header = elected.published_header()?.ok_or_else(|| {
+                EngineError::corrupt("a multi-process session published no header")
+            })?;
+            let session = elected.finish(
+                &file,
+                identity(&options, &header, &file)?,
+                header.generation,
+            )?;
+            let pages = Arc::new(Pages::new(
+                file,
+                page_seed(header.database_id),
+                options.cache_bytes,
+            ));
+            let (loaded, layers, replayed) = Self::replay_published(&fs, name, &session, &pages)?;
+            if replayed.lsn + 1 != tail.next_lsn || replayed.chain != tail.chain {
+                return Err(EngineError::corrupt(format!(
+                    "the session's log ends before LSN {} but its published records end at LSN {}",
+                    tail.next_lsn, replayed.lsn
+                )));
+            }
+            let log = Log::Replayed {
+                layers,
+                replayed,
+                tail: Some(tail),
+            };
+            Self::start(fs, name, loaded, options, false, Some(session), log)?
+        } else {
+            file.sync()?;
+            let (header, _) = read_header(&file)?;
+            let session = elected.finish(
+                &file,
+                identity(&options, &header, &file)?,
+                header.generation,
+            )?;
+            session.lock_checkpoint(true)?;
+            let loaded = load(file, &options)?;
+            let engine = Self::start(fs, name, loaded, options, false, Some(session), Log::Own)?;
+            if let Some(session) = &engine.shared.session {
+                session.unlock_checkpoint()?;
+            }
+            engine
+        };
+        if let Some(session) = &engine.shared.session {
+            session.unlock_write()?;
+        }
+        Ok(engine)
     }
 
     /// Opens the database `loaded` read from the locked file named `name`, as [`Engine::open`]
@@ -1141,8 +1243,16 @@ impl<F: FileSystem + 'static> Engine<F> {
         } = loaded;
         let loaded_generation = header.generation;
         let published = matches!(log, Log::Replayed { .. });
+        let mut joined_tail = None;
         let (layers, mut replayed) = match log {
-            Log::Replayed { layers, replayed } => (layers, replayed),
+            Log::Replayed {
+                layers,
+                replayed,
+                tail,
+            } => {
+                joined_tail = tail;
+                (layers, replayed)
+            }
             Log::Own => (
                 Arc::new(Layers {
                     active: Arc::new(Memtable::default()),
@@ -1156,9 +1266,21 @@ impl<F: FileSystem + 'static> Engine<F> {
                 },
             ),
         };
-        let recovered = !header.clean;
+        let recovered = !header.clean && !published;
         let (wal, header) = if published {
-            (None, header)
+            let wal = joined_tail
+                .map(|tail| {
+                    Wal::join(
+                        Arc::clone(&fs),
+                        name,
+                        &header,
+                        (tail.segment, tail.end_block, tail.next_lsn),
+                        options.segment_target,
+                    )
+                })
+                .transpose()?;
+            replayed.hlc = replayed.hlc.max(joined_tail.map_or(0, |tail| tail.hlc));
+            (wal, header)
         } else if read_only {
             let wal = if header.clean {
                 None
@@ -1206,7 +1328,12 @@ impl<F: FileSystem + 'static> Engine<F> {
         let needed = header.wal.first_segment;
         let log_first = wal.as_ref().map_or(needed, Wal::first_sequence);
         let wal_bytes = wal.as_ref().map_or(0, Wal::size);
-        let wal = wal.filter(|_| !read_only);
+        let mut wal = wal.filter(|_| !read_only);
+        if session.is_some()
+            && let Some(wal) = wal.as_mut()
+        {
+            wal.share();
+        }
         let epochs = replica::load_epochs(&layers)?;
         let term = epochs.last().map_or(0, |epoch| epoch.term);
         let role = replica::role_at_open(&header, &epochs);
@@ -1274,6 +1401,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             follow_failed: AtomicBool::new(false),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
+            took_checkpoint_lock: AtomicBool::new(false),
             #[cfg(test)]
             keeping_retired: AtomicBool::new(false),
         });
@@ -1281,9 +1409,22 @@ impl<F: FileSystem + 'static> Engine<F> {
             make_recovery_durable(&shared, &fs, name)?;
         }
         if let Some(session) = &shared.session {
-            if !read_only || session.is_getting_ready() {
+            if read_only && session.is_getting_ready() {
                 session.publish_header(&lock(&shared.durable).header);
-                session.publish_log_end(lock(&shared.writer).last_lsn);
+                session.publish_replayed_end(lock(&shared.writer).last_lsn);
+            } else if !read_only && !published {
+                session.publish_header(&lock(&shared.durable).header);
+                let writer = lock(&shared.writer);
+                if let Some(wal) = &writer.wal {
+                    let (segment, end_block, next_lsn) = wal.tail()?;
+                    session.publish_tail(Tail {
+                        segment,
+                        end_block,
+                        next_lsn,
+                        chain: writer.chain,
+                        hlc: writer.last_hlc,
+                    });
+                }
             }
             session.ready()?;
         }
@@ -1300,7 +1441,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 (Some(sender), Some(worker))
             }
         };
-        let follower = if read_only && shared.session.is_some() {
+        let follower = if shared.session.is_some() {
             let (stop, stopped) = mpsc::channel::<()>();
             let follower_shared = Arc::clone(&shared);
             let follower = thread::Builder::new()
@@ -1312,6 +1453,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                         if follower_shared.needs_follow() {
                             let _ = follower_shared.catch_up();
                         }
+                        follower_shared.hold_own_trees();
                     }
                 })?;
             Some((stop, follower))
@@ -1326,20 +1468,36 @@ impl<F: FileSystem + 'static> Engine<F> {
         })
     }
 
-    /// Whether another process of the session committed after the newest commit this read-only
-    /// process reads, or its last catch-up failed, so the next read catches up and reports why.
+    // ast-grep-ignore
+    // In a session it waits for the write lock and catches up, so a write begins on the newest commit of every process.
+    fn lock_writer(&self) -> Result<Writing<'_, F>, EngineError> {
+        let shared = &*self.shared;
+        let mut writing = Writing {
+            writer: lock(&shared.writer),
+            session: None,
+        };
+        if let Some(session) = shared.session.as_ref().filter(|_| !shared.read_only) {
+            session.lock_write()?;
+            writing.session = Some(session);
+            shared.catch_up_writer(&mut writing.writer)?;
+        }
+        Ok(writing)
+    }
+
+    /// Whether another process of the session committed after the newest commit this process
+    /// reads, or its last catch-up failed, so the next read catches up and reports why.
     pub(crate) fn is_behind(&self) -> bool {
         let shared = &*self.shared;
         match &shared.session {
-            Some(session) if shared.read_only => {
+            Some(session) => {
                 shared.follow_failed.load(Ordering::SeqCst)
                     || session.log_end() > lock(&shared.published).view.snapshot
             }
-            _ => false,
+            None => false,
         }
     }
 
-    /// Reads the commits that the session's writer published since this read-only process last
+    /// Reads the commits that the session's writers published since this process last
     /// caught up, and adopts the newest checkpoint the writer published once it holds every
     /// commit that checkpoint does, so new readers read its tree and a smaller memtable.
     pub(crate) fn catch_up(&self) -> Result<(), EngineError> {
@@ -1425,6 +1583,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             staged.ops.iter().map(StagedOp::borrowed),
         )?;
         self.append(writer, record, lsn, hlc)?;
+        crash_point::reached("commit-durable");
         self.publish(writer, lsn, staged);
         Ok(())
     }
@@ -1445,21 +1604,38 @@ impl<F: FileSystem + 'static> Engine<F> {
         writer.chain = chain;
         writer.last_lsn = lsn;
         writer.last_hlc = writer.last_hlc.max(hlc);
-        if let Some(session) = &self.shared.session {
-            session.publish_log_end(lsn);
-        }
         Ok(())
     }
 
+    // ast-grep-ignore
+    // The follow cursor keeps this process's own readers from replaying the record from the log.
     fn publish(&self, writer: &mut Writer<F>, lsn: u64, staged: Staged) {
         let shared = &*self.shared;
+        let following = shared.session.as_ref().map(|session| {
+            let cursor = lock(&shared.follow);
+            if let Some(Ok((segment, end_block, next_lsn))) = writer.wal.as_ref().map(Wal::tail) {
+                session.publish_tail(Tail {
+                    segment,
+                    end_block,
+                    next_lsn,
+                    chain: writer.chain,
+                    hlc: writer.last_hlc,
+                });
+                crash_point::reached("tail-published");
+            }
+            cursor
+        });
         let (layers, horizon) = {
             let published = lock(&shared.published);
             let snapshot = published.view.snapshot;
             let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
             (Arc::clone(&published.view.layers), oldest.min(snapshot))
         };
-        let graves = staged.graves(&layers);
+        let graves = if shared.session.is_none() {
+            staged.graves(&layers)
+        } else {
+            Vec::new()
+        };
         let changes: Vec<(TableId, Bytes, Slot)> = staged.into_changes().collect();
         layers.active.apply(lsn, changes, horizon);
         layers.active.bury(lsn, graves);
@@ -1468,6 +1644,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             published.view.snapshot = lsn;
             published.chain = writer.chain;
         }
+        drop(following);
         let (wal_bytes, wal_size) = writer.wal.as_ref().map_or((0, 0), |wal| {
             (
                 wal.size(),
@@ -1478,8 +1655,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         let memtable = layers.active.bytes();
         drop(layers);
         if memtable > shared.options.memtable_limit || wal_size > shared.options.wal_limit {
-            self.start_checkpoint(writer);
+            let started = self.start_checkpoint(writer);
             if memtable > shared.options.memtable_limit.saturating_mul(2) {
+                if !started && shared.session.is_some() {
+                    shared.wait_for_another_checkpoint();
+                }
                 shared.wait_for_checkpoint();
             }
         }
@@ -1513,9 +1693,9 @@ impl<F: FileSystem + 'static> Engine<F> {
         }
     }
 
-    fn start_checkpoint(&self, writer: &mut Writer<F>) {
-        let Some(job) = self.shared.freeze(writer) else {
-            return;
+    fn start_checkpoint(&self, writer: &mut Writer<F>) -> bool {
+        let Some(job) = self.shared.freeze(writer, false) else {
+            return false;
         };
         match &self.jobs {
             Some(jobs) => {
@@ -1530,18 +1710,18 @@ impl<F: FileSystem + 'static> Engine<F> {
                 self.shared.drop_segments(writer);
             }
         }
+        true
     }
 
     /// Writes every commit so far into the database file and keeps the log, which the next
     /// checkpoint releases as any checkpoint does.
     pub(crate) fn checkpoint_keeping_log(&self) -> Result<(), EngineError> {
         self.writable("checkpoint")?;
-        let mut writer = lock(&self.shared.writer);
-        self.shared.wait_for_checkpoint();
+        let mut writer = self.lock_writer()?;
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal());
         }
-        if let Some(job) = self.shared.freeze(&mut writer) {
+        if let Some(job) = self.shared.freeze(&mut writer, true) {
             self.shared.run_checkpoint(job, false);
         }
         lock(&self.shared.droppable).take();
@@ -1556,12 +1736,11 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// longer needs.
     pub(crate) fn checkpoint(&self) -> Result<(), EngineError> {
         self.writable("checkpoint")?;
-        let mut writer = lock(&self.shared.writer);
-        self.shared.wait_for_checkpoint();
+        let mut writer = self.lock_writer()?;
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal());
         }
-        if let Some(job) = self.shared.freeze(&mut writer) {
+        if let Some(job) = self.shared.freeze(&mut writer, true) {
             self.shared.run_checkpoint(job, false);
         }
         self.shared.drop_segments(&mut writer);
@@ -1630,19 +1809,28 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// they need, and cuts the file after them.
     pub(crate) fn compact(&self) -> Result<(), EngineError> {
         self.writable("compact the file")?;
-        let mut writer = lock(&self.shared.writer);
-        self.shared.wait_for_checkpoint();
+        let mut writer = self.lock_writer()?;
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal());
         }
-        if let Some(job) = self.shared.freeze(&mut writer) {
+        if let Some(job) = self.shared.freeze(&mut writer, true) {
             self.shared.run_checkpoint(job, false);
         }
         self.shared.drop_segments(&mut writer);
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal());
         }
-        if let Err(error) = self.shared.compact() {
+        if !self.shared.begin_checkpoint(true)? {
+            return Err(self.shared.refusal());
+        }
+        let mut finish = EndCheckpointOnDrop {
+            shared: &self.shared,
+            completed: false,
+        };
+        let compacted = self.shared.compact();
+        finish.completed = true;
+        drop(finish);
+        if let Err(error) = compacted {
             self.shared.poison_with(&error);
             return Err(error);
         }
@@ -1796,12 +1984,10 @@ impl<F: FileSystem + 'static> Engine<F> {
 }
 
 impl<F: FileSystem + 'static> Shared<F> {
-    /// Records in this read-only process's slot the oldest LSN its pins need the log after, so
-    /// the session's writer keeps that log.
+    /// Records in this process's slot the oldest LSN its pins need the log after, so every
+    /// writer of the session keeps that log.
     pub(crate) fn publish_pins(&self) {
-        if let Some(session) = &self.session
-            && self.read_only
-        {
+        if let Some(session) = &self.session {
             let mut retention = lock(&self.retention);
             retention.expire(self.now());
             session.hold_pin(retention.oldest_pin());
@@ -1809,7 +1995,7 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn needs_follow(&self) -> bool {
-        let Some(session) = self.session.as_ref().filter(|_| self.read_only) else {
+        let Some(session) = self.session.as_ref() else {
             return false;
         };
         self.follow_failed.load(Ordering::SeqCst)
@@ -1825,17 +2011,71 @@ impl<F: FileSystem + 'static> Shared<F> {
         if !self.needs_follow() {
             return Ok(());
         }
-        let outcome = self.catch_up_holding(cursor);
+        let outcome = self.catch_up_holding(cursor, false);
         self.follow_failed.store(outcome.is_err(), Ordering::SeqCst);
         outcome
+    }
+
+    // ast-grep-ignore
+    // Under the write lock nothing moves the tail, so this process holds every commit once caught up.
+    fn catch_up_writer(&self, writer: &mut Writer<F>) -> Result<(), EngineError> {
+        let Some(session) = self.session.as_ref() else {
+            return Ok(());
+        };
+        let cursor = lock(&self.follow);
+        if self.needs_follow() {
+            let outcome = self.catch_up_holding(cursor, false);
+            self.follow_failed.store(outcome.is_err(), Ordering::SeqCst);
+            outcome?;
+        } else {
+            drop(cursor);
+        }
+        let Some(tail) = session.published_tail() else {
+            return Ok(());
+        };
+        let (snapshot, chain) = {
+            let published = lock(&self.published);
+            (published.view.snapshot, published.chain)
+        };
+        if tail.next_lsn != snapshot + 1 || tail.chain != chain {
+            return Err(EngineError::corrupt(format!(
+                "the session's log ends before LSN {} but this process caught up to LSN {snapshot}",
+                tail.next_lsn
+            )));
+        }
+        writer.last_lsn = snapshot;
+        writer.chain = chain;
+        writer.last_hlc = writer.last_hlc.max(tail.hlc);
+        if let Some(newest) = lock(&self.epochs).last()
+            && newest.term > writer.term
+        {
+            writer.term = newest.term;
+        }
+        if let Some(wal) = writer.wal.as_mut() {
+            let moved = wal.tail()? != (tail.segment, tail.end_block, tail.next_lsn);
+            if let Err(error) = wal.follow((tail.segment, tail.end_block, tail.next_lsn)) {
+                self.poison_with(&error);
+                return Err(error);
+            }
+            let first = lock(&self.durable).header.wal.first_segment;
+            wal.forget_removed_before(first)?;
+            if moved {
+                crash_point::reached("tail-taken-over");
+            }
+            self.wal_bytes.store(wal.size(), Ordering::Relaxed);
+            self.log_first
+                .store(wal.first_sequence(), Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     fn catch_up_holding(
         &self,
         mut cursor: MutexGuard<'_, replica::Cursor>,
+        checkpointing: bool,
     ) -> Result<(), EngineError> {
         let shared = self;
-        let Some(session) = shared.session.as_ref().filter(|_| shared.read_only) else {
+        let Some(session) = shared.session.as_ref() else {
             return Ok(());
         };
         let _changing = shared
@@ -1860,7 +2100,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                     self.follow_record(record)
                 },
             )?;
-            let adopted = self.adopt(session, !complete)?;
+            let adopted = self.adopt(session, !complete, checkpointing)?;
             changed |= applied || adopted;
             if complete {
                 if changed {
@@ -1870,10 +2110,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                     *lock(&shared.epochs) =
                         replica::load_epochs(&lock(&shared.published).view.layers)?;
                 }
-                let oldest = shared.oldest_tree();
-                if oldest != u64::MAX {
-                    session.hold_generation(oldest);
-                }
+                shared.hold_own_trees();
                 return Ok(());
             }
             if !adopted {
@@ -1905,26 +2142,26 @@ impl<F: FileSystem + 'static> Shared<F> {
             )));
         }
         let chain = chain_after(chain, &encode_record(&record)?);
-        let (lsn, hlc) = (record.lsn, record.hlc);
+        let lsn = record.lsn;
         let mut staged = Staged::new(View::new(snapshot, Arc::clone(&layers)));
         stage_record(&mut staged, record.lsn, record.term, record.body)?;
         layers.active.apply(lsn, staged.into_changes(), horizon);
-        {
-            let mut published = lock(&shared.published);
-            published.view.snapshot = lsn;
-            published.chain = chain;
-        }
-        let mut writer = lock(&shared.writer);
-        writer.last_lsn = lsn;
-        writer.last_hlc = writer.last_hlc.max(hlc);
-        writer.chain = chain;
+        let mut published = lock(&shared.published);
+        published.view.snapshot = lsn;
+        published.chain = chain;
         Ok(())
     }
 
     /// Adopts the newest whole checkpoint the session published, when it is newer than this
     /// process's and this process holds every commit it does or `released` says the log before
-    /// it is gone, and returns whether it did.
-    pub(crate) fn adopt(&self, session: &Session, released: bool) -> Result<bool, EngineError> {
+    /// it is gone, and returns whether it did. A writer adopts none while a checkpoint of its own
+    /// runs, unless `checkpointing` says that checkpoint is the caller, before it freezes.
+    pub(crate) fn adopt(
+        &self,
+        session: &Session,
+        released: bool,
+        checkpointing: bool,
+    ) -> Result<bool, EngineError> {
         let shared = self;
         let Some(header) = session.published_header()? else {
             return Ok(false);
@@ -1936,9 +2173,20 @@ impl<F: FileSystem + 'static> Shared<F> {
         if !released && snapshot < header.checkpoint_lsn {
             return Ok(false);
         }
+        let running = (!shared.read_only && !checkpointing).then(|| lock(&shared.running));
+        if running.as_ref().is_some_and(|running| **running) {
+            return Ok(false);
+        }
         shared.pages.forget_cached();
-        let loaded = load_pages(Arc::clone(&shared.pages), header, Retained::default())?;
+        let mut loaded = load_pages(Arc::clone(&shared.pages), header, Retained::default())?;
         lock(&shared.trees).push(Arc::downgrade(&loaded.tree));
+        if !shared.read_only {
+            loaded
+                .extents
+                .cover_file(shared.pages.file_bytes()? / BLOCK as u64);
+            let durable = lock(&shared.durable);
+            shared.hold_adopted_free_space(&durable, &loaded.extents, header.generation);
+        }
         {
             let mut published = lock(&shared.published);
             let active = Arc::new(published.view.layers.active.after(header.checkpoint_lsn));
@@ -1950,25 +2198,55 @@ impl<F: FileSystem + 'static> Shared<F> {
             if published.view.snapshot < header.checkpoint_lsn {
                 published.view.snapshot = header.checkpoint_lsn;
                 published.chain = header.replication.checkpoint_chain;
-                let mut writer = lock(&shared.writer);
-                writer.last_lsn = header.checkpoint_lsn;
-                writer.last_hlc = writer.last_hlc.max(header.checkpoint_hlc);
-                writer.chain = header.replication.checkpoint_chain;
             }
         }
         *lock(&shared.identity) = Identity {
             database_id: header.database_id,
             replication: header.replication,
         };
+        shared
+            .needed
+            .store(header.wal.first_segment, Ordering::Relaxed);
         *lock(&shared.durable) = Durable {
             header,
             extents: loaded.extents,
             catalog: loaded.catalog,
             tree: loaded.tree,
         };
+        drop(running);
         #[cfg(test)]
         ADOPTED.with(|hook| hook.borrow_mut().take().map(|run| run()));
         Ok(true)
+    }
+
+    // ast-grep-ignore
+    // Rules 118 to 120 of the design: what the adopted generation freed stays held as long as a tree of that generation's parent may reach it.
+    fn hold_adopted_free_space(&self, durable: &Durable, adopted: &ExtentTable, generation: u64) {
+        if generation != durable.header.generation + 1 {
+            let (quarantine, freed) = held_free_space(adopted, generation);
+            lock(&self.quarantine).extend(quarantine);
+            lock(&self.freed).extend(freed);
+            return;
+        }
+        let before = &durable.extents.entries;
+        let mut quarantine = lock(&self.quarantine);
+        for (id, entry) in before {
+            if !adopted.entries.contains_key(id) {
+                quarantine.insert(entry.slot, generation);
+            }
+        }
+        drop(quarantine);
+        let freed: Vec<(ExtentId, Blocks)> = before
+            .iter()
+            .filter_map(|(id, before)| {
+                let after = adopted.entries.get(id)?;
+                let freed = before.used.without(&after.used);
+                (!freed.is_empty()).then_some((*id, freed))
+            })
+            .collect();
+        if !freed.is_empty() {
+            lock(&self.freed).insert(generation, freed);
+        }
     }
 
     /// Publishes `header`, once durable, to the other processes of the session, unless it holds
@@ -2001,6 +2279,16 @@ impl<F: FileSystem + 'static> Shared<F> {
 
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    // ast-grep-ignore
+    // A commit far past the memtable limit waits for the checkpoint another process runs, and adopts it, rather than growing its memtable without bound.
+    fn wait_for_another_checkpoint(&self) {
+        match self.begin_checkpoint(true) {
+            Ok(true) => self.end_checkpoint(),
+            Ok(false) => {}
+            Err(error) => self.poison_with(&error),
+        }
     }
 
     fn wait_for_checkpoint(&self) {
@@ -2097,12 +2385,89 @@ impl<F: FileSystem + 'static> Shared<F> {
         lock(&self.droppable).get_or_insert(needed);
     }
 
-    fn freeze(&self, writer: &mut Writer<F>) -> Option<Job> {
-        let mut running = lock(&self.running);
-        if *running || self.is_poisoned() {
-            return None;
+    // ast-grep-ignore
+    // The in-process checkpoint mutex, then the session's checkpoint lock, then every newer header, so a checkpoint builds on the newest tree of the session.
+    fn begin_checkpoint(&self, wait: bool) -> Result<bool, EngineError> {
+        {
+            let mut running = lock(&self.running);
+            while wait && *running {
+                running = self
+                    .finished
+                    .wait(running)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            if *running || self.is_poisoned() {
+                return Ok(false);
+            }
+            *running = true;
         }
-        let wal = writer.wal.as_ref()?;
+        let Some(session) = self.session.as_ref().filter(|_| !self.read_only) else {
+            return Ok(true);
+        };
+        let ready = (|| {
+            if !session.holds_checkpoint() {
+                if !session.lock_checkpoint(wait)? {
+                    return Ok(false);
+                }
+                self.took_checkpoint_lock.store(true, Ordering::SeqCst);
+            }
+            self.adopt_newest(session)
+        })();
+        if !matches!(ready, Ok(true)) {
+            self.end_checkpoint();
+        } else {
+            crash_point::reached("checkpoint-lock-taken");
+        }
+        ready
+    }
+
+    fn end_checkpoint(&self) {
+        if self.took_checkpoint_lock.swap(false, Ordering::SeqCst)
+            && let Some(session) = &self.session
+            && let Err(error) = session.unlock_checkpoint()
+        {
+            self.poison_with(&error);
+        }
+        *lock(&self.running) = false;
+        self.finished.notify_all();
+    }
+
+    // ast-grep-ignore
+    // A whole header in the file that the session never published was written by a process that died before it published it; a staged one is never adopted, but the next header must outrank it.
+    fn adopt_newest(&self, session: &Session) -> Result<bool, EngineError> {
+        self.catch_up_holding(lock(&self.follow), true)?;
+        let (found, _) = read_header(self.pages.file())?;
+        if found.generation > lock(&self.durable).header.generation && found.staged_lsn == 0 {
+            self.pages.sync()?;
+            session.publish_header(&found);
+            self.catch_up_holding(lock(&self.follow), true)?;
+        }
+        let published = session
+            .published_header()?
+            .map_or(0, |header| header.generation);
+        let mut durable = lock(&self.durable);
+        if durable.header.generation < published {
+            return Ok(false);
+        }
+        if found.generation > durable.header.generation {
+            durable.header.generation = found.generation;
+        }
+        Ok(true)
+    }
+
+    fn freeze(&self, writer: &mut Writer<F>, wait: bool) -> Option<Job> {
+        match self.begin_checkpoint(wait) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                self.poison_with(&error);
+                return None;
+            }
+        }
+        let Some(wal) = writer.wal.as_ref() else {
+            self.end_checkpoint();
+            return None;
+        };
         let mut published = lock(&self.published);
         let layers = &published.view.layers;
         let frozen = Arc::clone(&layers.active);
@@ -2112,7 +2477,6 @@ impl<F: FileSystem + 'static> Shared<F> {
             frozen: Some(Arc::clone(&frozen)),
             tree,
         });
-        *running = true;
         Some(Job {
             frozen,
             lsn: writer.last_lsn,
@@ -2170,16 +2534,14 @@ impl<F: FileSystem + 'static> Shared<F> {
         if !self.compaction_due.load(Ordering::Acquire) {
             return;
         }
-        {
-            let mut running = lock(&self.running);
-            if *running {
-                return;
-            }
-            if self.is_poisoned() {
-                self.compaction_due.store(false, Ordering::Release);
-                return;
-            }
-            *running = true;
+        if self.is_poisoned() {
+            self.compaction_due.store(false, Ordering::Release);
+            return;
+        }
+        match self.begin_checkpoint(false) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => return self.poison_with(&error),
         }
         let mut finish = EndCheckpointOnDrop {
             shared: self,
@@ -2238,7 +2600,9 @@ impl<F: FileSystem + 'static> Shared<F> {
             };
             self.pages
                 .write_header(&header, &self.retained_area(&header))?;
+            crash_point::reached("header-written");
             self.publish_header(&header);
+            crash_point::reached("header-published");
             durable.header = header;
             return Ok(Arc::clone(&durable.tree));
         }
@@ -2346,7 +2710,12 @@ impl<F: FileSystem + 'static> Shared<F> {
         };
         self.pages
             .write_header(&header, &self.retained_area(&header))?;
+        crash_point::reached(match stage {
+            Stage::Partial => "stage-written",
+            Stage::Whole { .. } => "header-written",
+        });
         self.publish_header(&header);
+        crash_point::reached("header-published");
         let tree = Arc::new(Tree::new(
             generation,
             roots,
@@ -2380,18 +2749,32 @@ impl<F: FileSystem + 'static> Shared<F> {
         Ok(tree)
     }
 
+    fn own_oldest_tree(&self) -> u64 {
+        let mut trees = lock(&self.trees);
+        trees.retain(|tree| tree.strong_count() > 0);
+        trees
+            .iter()
+            .filter_map(|tree| tree.upgrade().map(|tree| tree.generation))
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    // ast-grep-ignore
+    // The slot names the oldest tree of this process, so no checkpoint in another process reuses a block it reaches.
+    fn hold_own_trees(&self) {
+        if let Some(session) = &self.session {
+            let oldest = self.own_oldest_tree();
+            if oldest != u64::MAX {
+                session.hold_generation(oldest);
+            }
+        }
+    }
+
     fn oldest_tree(&self) -> u64 {
         if lock(&self.retention).expire(self.now()) {
             self.reconsider_retention();
         }
-        let mut trees = lock(&self.trees);
-        trees.retain(|tree| tree.strong_count() > 0);
-        let own = trees
-            .iter()
-            .filter_map(|tree| tree.upgrade().map(|tree| tree.generation))
-            .min()
-            .unwrap_or(u64::MAX);
-        drop(trees);
+        let own = self.own_oldest_tree();
         match &self.session {
             Some(session) if !self.read_only => own.min(session.oldest_other_generation()),
             _ => own,
@@ -2502,6 +2885,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             drop(durable);
             drop(old);
             self.publish_tree(tree);
+            crash_point::reached("compacted");
         }
         let mut durable = lock(&self.durable);
         self.trim(&mut durable)?;
@@ -2520,7 +2904,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             self.left_to_session.store(true, Ordering::Release);
             return;
         }
-        let mut writer = match self.writer.try_lock() {
+        let writer = match self.writer.try_lock() {
             Ok(writer) => writer,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(TryLockError::WouldBlock) => return self.leave_the_log_to_a_leaked_writer(),
@@ -2529,12 +2913,26 @@ impl<F: FileSystem + 'static> Shared<F> {
         if self.is_poisoned() {
             return;
         }
+        let mut writing = Writing {
+            writer,
+            session: None,
+        };
+        if let Some(session) = &self.session {
+            let caught_up = session.lock_write().and_then(|()| {
+                writing.session = Some(session);
+                self.catch_up_writer(&mut writing)
+            });
+            if let Err(error) = caught_up {
+                return self.poison_with(&error);
+            }
+        }
+        let writer = &mut *writing;
         let keep = writer.wal.as_ref().map_or(u64::MAX, |wal| {
             let keep = self.retained_from(wal, wal.last_sequence() + 1);
             self.log_first.store(keep, Ordering::Relaxed);
             keep
         });
-        let Some(job) = self.freeze(&mut writer) else {
+        let Some(job) = self.freeze(writer, true) else {
             return;
         };
         self.run_checkpoint(job, true);
@@ -2545,7 +2943,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             let durable = lock(&self.durable);
             !durable.header.clean || self.can_move_down(&durable)
         };
-        if unfinished && let Some(job) = self.freeze(&mut writer) {
+        if unfinished && let Some(job) = self.freeze(writer, true) {
             self.run_checkpoint(job, true);
             if self.is_poisoned() {
                 return;
@@ -2572,8 +2970,7 @@ impl<F: FileSystem + 'static> Drop for EndCheckpointOnDrop<'_, F> {
         if !self.completed {
             self.shared.poison();
         }
-        *lock(&self.shared.running) = false;
-        self.shared.finished.notify_all();
+        self.shared.end_checkpoint();
     }
 }
 
@@ -2648,7 +3045,7 @@ impl<F: FileSystem + 'static> Drop for EngineRead<'_, F> {
 #[derive(Debug)]
 pub(crate) struct EngineWrite<'a, F: FileSystem + 'static> {
     engine: &'a Engine<F>,
-    writer: MutexGuard<'a, Writer<F>>,
+    writer: Writing<'a, F>,
     staged: Staged,
 }
 
@@ -2671,7 +3068,7 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
 
     fn begin_write(&self) -> Result<EngineWrite<'_, F>, StorageError> {
         self.writable("write")?;
-        let writer = lock(&self.shared.writer);
+        let writer = self.lock_writer()?;
         if self.shared.is_poisoned() {
             return Err(self.shared.refusal().into());
         }
