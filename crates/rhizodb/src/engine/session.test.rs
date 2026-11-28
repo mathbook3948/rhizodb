@@ -1409,3 +1409,50 @@ fn a_reader_never_reads_a_copy_newer_than_the_version_it_found_so_reads_never_go
     );
     assert_eq!(first, [2; TAIL_WORDS]);
 }
+
+// ast-grep-ignore
+// On Windows a segment of an older log outlives its removal while another process still has it open.
+#[test]
+fn a_writer_joins_beside_a_segment_of_an_older_log_that_is_still_on_disk() {
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    use crate::engine::wal_format::SegmentHeader;
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    for round in 1..40 {
+        put_round(&first, round, 64);
+    }
+    first.checkpoint().unwrap();
+    let oldest = segment_files(&fs, NAME).unwrap()[0];
+    assert!(oldest > 0, "the log kept its first segment");
+    let stale = fs
+        .create(
+            &segment_name(NAME, oldest - 1),
+            crate::engine::block_file::BlockSize::new(crate::engine::layout::WAL_BLOCK).unwrap(),
+        )
+        .unwrap();
+    let header = crate::engine::store::read_header(
+        &fs.open(NAME, crate::engine::store::block_size().unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+    .0;
+    let mut block = SegmentHeader {
+        minor: crate::engine::header::FORMAT_MINOR,
+        record_unit: crate::engine::wal_format::RECORD_UNIT as u32,
+        database_id: header.database_id,
+        sequence: oldest - 1,
+        first_lsn: 1,
+        salt: header.wal.salt.wrapping_add(1),
+        ..SegmentHeader::default()
+    }
+    .encode();
+    block.resize(crate::engine::wal_format::RECORD_UNIT, 0);
+    stale.write(0, &block).unwrap();
+    drop(stale);
+    let second = writer(&fs, churning()).unwrap();
+    put_round(&second, 40, 64);
+    first.catch_up().unwrap();
+    assert_eq!(round_seen(&first, 64), 40);
+    second.check().unwrap();
+}

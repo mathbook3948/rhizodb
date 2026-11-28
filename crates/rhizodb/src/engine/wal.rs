@@ -470,7 +470,9 @@ impl<F: FileSystem> Wal<F> {
 
     /// Opens the log of a session's writer that joins after another writer appended to it, at
     /// the end `tail` names, and removes any segment past that end, which a writer that died
-    /// started and never published. Segments another process removes meanwhile are skipped.
+    /// started and never published. It lists the segments from the first one `header` needs,
+    /// since one before may belong to an older log that is still being removed, and skips any
+    /// that another process removes meanwhile.
     pub(crate) fn join(
         fs: Arc<F>,
         base: &str,
@@ -484,11 +486,7 @@ impl<F: FileSystem> Wal<F> {
             salt: header.wal.salt,
         };
         let (segment, _, _) = tail;
-        let first = segment_files(&*fs, base)?
-            .into_iter()
-            .next()
-            .unwrap_or(segment)
-            .min(segment);
+        let first = header.wal.first_segment.min(segment);
         let (active, active_header, last) = open_segment(&*fs, base, identity, segment)?;
         let mut wal = Self {
             fs,
