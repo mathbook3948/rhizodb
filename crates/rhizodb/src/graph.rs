@@ -298,6 +298,7 @@ pub(crate) struct Graph<S> {
     committed_tokens: Arc<CommittedTokens>,
     committed_label_sets: Arc<LabelSetCache>,
     committed_column_deltas: Arc<ColumnDeltas>,
+    followed: AtomicU64,
 }
 
 type ColumnDeltas = Mutex<BTreeMap<u64, usize>>;
@@ -401,6 +402,7 @@ impl<S: Storage> Graph<S> {
             committed_tokens: Arc::default(),
             committed_label_sets: Arc::default(),
             committed_column_deltas: Arc::default(),
+            followed: AtomicU64::new(0),
         })
     }
 
@@ -644,6 +646,17 @@ impl<S: Storage> Graph<S> {
         if self.storage.is_behind() {
             self.apply_outside(true, Storage::catch_up)??;
         }
+        self.storage.with_follow_held(|| {
+            let epoch = self.storage.follow_epoch();
+            if epoch != self.followed.load(Ordering::SeqCst) {
+                self.apply_outside(true, |_| ())?;
+                self.followed.store(epoch, Ordering::SeqCst);
+            }
+            self.read_followed()
+        })
+    }
+
+    fn read_followed(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
         let upgrades = self.upgrades.load(Ordering::SeqCst);
         self.ready()?;
         #[cfg(test)]

@@ -273,6 +273,8 @@ struct Shared<F: FileSystem> {
     session: Option<Session>,
     left_to_session: AtomicBool,
     follow: Mutex<replica::Cursor>,
+    follow_gate: std::sync::RwLock<()>,
+    follow_epoch: AtomicU64,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
 }
@@ -314,6 +316,7 @@ pub(crate) struct Engine<F: FileSystem + 'static> {
     shared: Arc<Shared<F>>,
     jobs: Option<mpsc::Sender<Task<F>>>,
     worker: Option<thread::JoinHandle<()>>,
+    follower: Option<(mpsc::Sender<()>, thread::JoinHandle<()>)>,
 }
 
 pub(crate) fn read_header(file: &impl BlockFile) -> Result<(Header, Retained), EngineError> {
@@ -508,8 +511,12 @@ enum Log {
 
 const JOIN_TRIES: usize = 1000;
 
+const FOLLOW_POLL: Duration = Duration::from_millis(100);
+
 #[cfg(test)]
 thread_local! {
+    pub(crate) static ADOPTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
     pub(crate) static STAGE_PLACED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
 }
@@ -1230,6 +1237,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             session,
             left_to_session: AtomicBool::new(false),
             follow: Mutex::new(replica::Cursor::default()),
+            follow_gate: std::sync::RwLock::new(()),
+            follow_epoch: AtomicU64::new(0),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
         });
@@ -1256,10 +1265,27 @@ impl<F: FileSystem + 'static> Engine<F> {
                 (Some(sender), Some(worker))
             }
         };
+        let follower = if read_only && shared.session.is_some() {
+            let (stop, stopped) = mpsc::channel::<()>();
+            let follower_shared = Arc::clone(&shared);
+            let follower = thread::Builder::new()
+                .name("rhizodb-follow".to_owned())
+                .spawn(move || {
+                    while let Err(mpsc::RecvTimeoutError::Timeout) =
+                        stopped.recv_timeout(FOLLOW_POLL)
+                    {
+                        let _ = follower_shared.catch_up();
+                    }
+                })?;
+            Some((stop, follower))
+        } else {
+            None
+        };
         Ok(Self {
             shared,
             jobs,
             worker,
+            follower,
         })
     }
 
@@ -1279,131 +1305,23 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// caught up, and adopts the newest checkpoint the writer published once it holds every
     /// commit that checkpoint does, so new readers read its tree and a smaller memtable.
     pub(crate) fn catch_up(&self) -> Result<(), EngineError> {
-        let shared = &*self.shared;
-        let Some(session) = shared.session.as_ref().filter(|_| shared.read_only) else {
-            return Ok(());
-        };
-        let mut cursor = lock(&shared.follow);
-        let mut applied = false;
-        for _ in 0..JOIN_TRIES {
-            let until = session.log_end();
-            let next = lock(&shared.published).view.snapshot + 1;
-            let header = lock(&shared.durable).header;
-            let complete = replica::follow_published(
-                &*shared.fs,
-                &shared.name,
-                &header,
-                &mut cursor,
-                next,
-                until,
-                &mut |record| {
-                    applied = true;
-                    self.follow_record(record)
-                },
-            )?;
-            let adopted = self.adopt(session, !complete)?;
-            if complete {
-                if applied {
-                    *lock(&shared.epochs) =
-                        replica::load_epochs(&lock(&shared.published).view.layers)?;
-                }
-                let oldest = shared.oldest_tree();
-                if oldest != u64::MAX {
-                    session.hold_generation(oldest);
-                }
-                return Ok(());
-            }
-            if !adopted {
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-        Err(EngineError::corrupt(
-            "the log that a multi-process session published kept being released while it was read",
-        ))
+        self.shared.catch_up()
     }
 
-    fn follow_record(&self, record: super::wal_format::Record) -> Result<(), EngineError> {
-        let shared = &*self.shared;
-        let (layers, horizon, snapshot, chain) = {
-            let published = lock(&shared.published);
-            let snapshot = published.view.snapshot;
-            let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
-            (
-                Arc::clone(&published.view.layers),
-                oldest.min(snapshot),
-                snapshot,
-                published.chain,
-            )
-        };
-        if record.prev.is_some_and(|prev| prev != chain) {
-            return Err(EngineError::corrupt(format!(
-                "the published log record at LSN {} does not follow the record before it",
-                record.lsn
-            )));
-        }
-        let chain = chain_after(chain, &encode_record(&record)?);
-        let (lsn, hlc) = (record.lsn, record.hlc);
-        let mut staged = Staged::new(View::new(snapshot, Arc::clone(&layers)));
-        stage_record(&mut staged, record.lsn, record.term, record.body)?;
-        layers.active.apply(lsn, staged.into_changes(), horizon);
-        {
-            let mut published = lock(&shared.published);
-            published.view.snapshot = lsn;
-            published.chain = chain;
-        }
-        let mut writer = lock(&shared.writer);
-        writer.last_lsn = lsn;
-        writer.last_hlc = writer.last_hlc.max(hlc);
-        writer.chain = chain;
-        Ok(())
+    /// A count that grows each time a catch-up changes what a new reader reads, whichever thread
+    /// ran it.
+    pub(crate) fn follow_epoch(&self) -> u64 {
+        self.shared.follow_epoch.load(Ordering::SeqCst)
     }
 
-    /// Adopts the newest whole checkpoint the session published, when it is newer than this
-    /// process's and this process holds every commit it does or `released` says the log before
-    /// it is gone, and returns whether it did.
-    pub(crate) fn adopt(&self, session: &Session, released: bool) -> Result<bool, EngineError> {
-        let shared = &*self.shared;
-        let Some(header) = session.published_header()? else {
-            return Ok(false);
-        };
-        if header.generation <= lock(&shared.durable).header.generation {
-            return Ok(false);
-        }
-        let snapshot = lock(&shared.published).view.snapshot;
-        if !released && snapshot < header.checkpoint_lsn {
-            return Ok(false);
-        }
-        shared.pages.forget_cached();
-        let loaded = load_pages(Arc::clone(&shared.pages), header, Retained::default())?;
-        lock(&shared.trees).push(Arc::downgrade(&loaded.tree));
-        {
-            let mut published = lock(&shared.published);
-            let active = Arc::new(published.view.layers.active.after(header.checkpoint_lsn));
-            published.view.layers = Arc::new(Layers {
-                active,
-                frozen: None,
-                tree: Arc::clone(&loaded.tree),
-            });
-            if published.view.snapshot < header.checkpoint_lsn {
-                published.view.snapshot = header.checkpoint_lsn;
-                published.chain = header.replication.checkpoint_chain;
-                let mut writer = lock(&shared.writer);
-                writer.last_lsn = header.checkpoint_lsn;
-                writer.last_hlc = writer.last_hlc.max(header.checkpoint_hlc);
-                writer.chain = header.replication.checkpoint_chain;
-            }
-        }
-        *lock(&shared.identity) = Identity {
-            database_id: header.database_id,
-            replication: header.replication,
-        };
-        *lock(&shared.durable) = Durable {
-            header,
-            extents: loaded.extents,
-            catalog: loaded.catalog,
-            tree: loaded.tree,
-        };
-        Ok(true)
+    /// Runs `run` while no catch-up changes what a new reader reads.
+    pub(crate) fn with_follow_held<R>(&self, run: impl FnOnce() -> R) -> R {
+        let _held = self
+            .shared
+            .follow_gate
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        run()
     }
 
     fn register(&self) -> View {
@@ -1646,6 +1564,10 @@ impl<F: FileSystem + 'static> Engine<F> {
     }
 
     fn stop_checkpoints(&mut self) {
+        if let Some((stop, follower)) = self.follower.take() {
+            drop(stop);
+            let _ = follower.join();
+        }
         drop(self.jobs.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -1804,6 +1726,145 @@ impl<F: FileSystem + 'static> Engine<F> {
 }
 
 impl<F: FileSystem + 'static> Shared<F> {
+    fn catch_up(&self) -> Result<(), EngineError> {
+        let shared = self;
+        let Some(session) = shared.session.as_ref().filter(|_| shared.read_only) else {
+            return Ok(());
+        };
+        let mut cursor = lock(&shared.follow);
+        let _changing = shared
+            .follow_gate
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut changed = false;
+        let mut applied = false;
+        for _ in 0..JOIN_TRIES {
+            let until = session.log_end();
+            let next = lock(&shared.published).view.snapshot + 1;
+            let header = lock(&shared.durable).header;
+            let complete = replica::follow_published(
+                &*shared.fs,
+                &shared.name,
+                &header,
+                &mut cursor,
+                next,
+                until,
+                &mut |record| {
+                    applied = true;
+                    self.follow_record(record)
+                },
+            )?;
+            let adopted = self.adopt(session, !complete)?;
+            changed |= applied || adopted;
+            if complete {
+                if changed {
+                    shared.follow_epoch.fetch_add(1, Ordering::SeqCst);
+                }
+                if applied {
+                    *lock(&shared.epochs) =
+                        replica::load_epochs(&lock(&shared.published).view.layers)?;
+                }
+                let oldest = shared.oldest_tree();
+                if oldest != u64::MAX {
+                    session.hold_generation(oldest);
+                }
+                return Ok(());
+            }
+            if !adopted {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Err(EngineError::corrupt(
+            "the log that a multi-process session published kept being released while it was read",
+        ))
+    }
+
+    fn follow_record(&self, record: super::wal_format::Record) -> Result<(), EngineError> {
+        let shared = self;
+        let (layers, horizon, snapshot, chain) = {
+            let published = lock(&shared.published);
+            let snapshot = published.view.snapshot;
+            let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
+            (
+                Arc::clone(&published.view.layers),
+                oldest.min(snapshot),
+                snapshot,
+                published.chain,
+            )
+        };
+        if record.prev.is_some_and(|prev| prev != chain) {
+            return Err(EngineError::corrupt(format!(
+                "the published log record at LSN {} does not follow the record before it",
+                record.lsn
+            )));
+        }
+        let chain = chain_after(chain, &encode_record(&record)?);
+        let (lsn, hlc) = (record.lsn, record.hlc);
+        let mut staged = Staged::new(View::new(snapshot, Arc::clone(&layers)));
+        stage_record(&mut staged, record.lsn, record.term, record.body)?;
+        layers.active.apply(lsn, staged.into_changes(), horizon);
+        {
+            let mut published = lock(&shared.published);
+            published.view.snapshot = lsn;
+            published.chain = chain;
+        }
+        let mut writer = lock(&shared.writer);
+        writer.last_lsn = lsn;
+        writer.last_hlc = writer.last_hlc.max(hlc);
+        writer.chain = chain;
+        Ok(())
+    }
+
+    /// Adopts the newest whole checkpoint the session published, when it is newer than this
+    /// process's and this process holds every commit it does or `released` says the log before
+    /// it is gone, and returns whether it did.
+    pub(crate) fn adopt(&self, session: &Session, released: bool) -> Result<bool, EngineError> {
+        let shared = self;
+        let Some(header) = session.published_header()? else {
+            return Ok(false);
+        };
+        if header.generation <= lock(&shared.durable).header.generation {
+            return Ok(false);
+        }
+        let snapshot = lock(&shared.published).view.snapshot;
+        if !released && snapshot < header.checkpoint_lsn {
+            return Ok(false);
+        }
+        shared.pages.forget_cached();
+        let loaded = load_pages(Arc::clone(&shared.pages), header, Retained::default())?;
+        lock(&shared.trees).push(Arc::downgrade(&loaded.tree));
+        {
+            let mut published = lock(&shared.published);
+            let active = Arc::new(published.view.layers.active.after(header.checkpoint_lsn));
+            published.view.layers = Arc::new(Layers {
+                active,
+                frozen: None,
+                tree: Arc::clone(&loaded.tree),
+            });
+            if published.view.snapshot < header.checkpoint_lsn {
+                published.view.snapshot = header.checkpoint_lsn;
+                published.chain = header.replication.checkpoint_chain;
+                let mut writer = lock(&shared.writer);
+                writer.last_lsn = header.checkpoint_lsn;
+                writer.last_hlc = writer.last_hlc.max(header.checkpoint_hlc);
+                writer.chain = header.replication.checkpoint_chain;
+            }
+        }
+        *lock(&shared.identity) = Identity {
+            database_id: header.database_id,
+            replication: header.replication,
+        };
+        *lock(&shared.durable) = Durable {
+            header,
+            extents: loaded.extents,
+            catalog: loaded.catalog,
+            tree: loaded.tree,
+        };
+        #[cfg(test)]
+        ADOPTED.with(|hook| hook.borrow_mut().take().map(|run| run()));
+        Ok(true)
+    }
+
     /// Publishes `header`, once durable, to the other processes of the session, unless it holds
     /// only some stages of a checkpoint, which no other process adopts.
     pub(crate) fn publish_header(&self, header: &Header) {
@@ -2528,6 +2589,14 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
 
     fn catch_up(&self) -> Result<(), StorageError> {
         Ok(Engine::catch_up(self)?)
+    }
+
+    fn follow_epoch(&self) -> u64 {
+        Engine::follow_epoch(self)
+    }
+
+    fn with_follow_held<R>(&self, run: impl FnOnce() -> R) -> R {
+        Engine::with_follow_held(self, run)
     }
 }
 

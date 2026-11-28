@@ -119,7 +119,9 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A read-only process catches up as a graph read begins, through the same path as `apply`, so the graph reloads the index definitions and drops its cached counts before any reader sees the new commits.
 - Catching up with any record another process wrote drops the graph's cached counts of column deltas.
 - Tokens and label sets need no refresh, since a committed one never changes and a miss reads it from the table.
-- A process with no transaction open adopts each new checkpoint from a thread of its own within a bounded time, so an idle process does not hold an old tree.
+- A read-only process runs the same catch-up from a thread of its own every 100 milliseconds, so an idle process adopts each new checkpoint within a bounded time and does not hold an old tree.
+- Every catch-up, on any thread, changes what a new reader reads only under the follow gate held exclusively, and then raises a follow epoch.
+- A graph read holds the follow gate shared from its check of the follow epoch to the start of its storage read, and reloads the index definitions and drops its cached counts first when the epoch moved, so no reader pairs a snapshot with definitions of another commit.
 - Each slot records the oldest checkpoint generation that any tree of its process reaches, which includes the trees of its readers, snapshots, pins, and published view.
 - A checkpoint in any process takes the lowest generation of every live slot, and the generation of the newest header the session published, as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches or that an open joining now may load.
 - The published header bounds the oldest tree too, since a header that holds only some stages of a checkpoint is never published, so a joiner that loads the last published header never meets the store that a Dekker pattern with a stage's header would need.

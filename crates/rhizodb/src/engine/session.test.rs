@@ -246,7 +246,10 @@ fn put_round(engine: &Engine<SimFs>, round: u64, keys: u64) {
 }
 
 fn round_seen(engine: &Engine<SimFs>, keys: u64) -> u8 {
-    let read = engine.begin_read().unwrap();
+    round_in(&engine.begin_read().unwrap(), keys)
+}
+
+fn round_in(read: &impl ReadTransaction, keys: u64) -> u8 {
     let values: Vec<u8> = (0..keys)
         .map(|key| read.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap()[0])
         .collect();
@@ -263,9 +266,10 @@ fn a_reader_that_joins_a_writer_reads_every_commit_made_before_it_joined() {
     let writer = writer(&fs, EngineOptions::default()).unwrap();
     put_round(&writer, 1, 8);
     let first = reader(&fs, 0).unwrap();
-    assert_eq!(round_seen(&first, 8), 1);
+    let before = first.begin_read().unwrap();
+    assert_eq!(round_in(&before, 8), 1);
     put_round(&writer, 2, 8);
-    assert_eq!(round_seen(&first, 8), 1);
+    assert_eq!(round_in(&before, 8), 1);
     assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 8), 2);
 }
 
@@ -295,10 +299,12 @@ fn checkpoints_reuse_no_block_that_a_reader_in_another_process_still_reads() {
     let writer = writer(&fs, churning()).unwrap();
     put_round(&writer, 1, 64);
     let held = reader(&fs, 0).unwrap();
+    let read = held.begin_read().unwrap();
     for round in 2..60 {
         put_round(&writer, round, 64);
-        assert_eq!(round_seen(&held, 64), 1, "after round {round}");
+        assert_eq!(round_in(&read, 64), 1, "after round {round}");
     }
+    drop(read);
     drop(held);
     for round in 60..80 {
         put_round(&writer, round, 64);
@@ -313,9 +319,11 @@ fn a_writer_that_closes_beside_readers_leaves_its_log_to_the_next_writer() {
     let first = writer(&fs, EngineOptions::default()).unwrap();
     put_round(&first, 1, 8);
     let held = reader(&fs, 0).unwrap();
+    let read = held.begin_read().unwrap();
     put_round(&first, 2, 8);
     first.close().unwrap();
-    assert_eq!(round_seen(&held, 8), 1);
+    assert_eq!(round_in(&read, 8), 1);
+    drop(read);
     let next = writer(&fs, EngineOptions::default()).unwrap();
     assert_eq!(round_seen(&next, 8), 2);
     put_round(&next, 3, 8);
@@ -358,7 +366,6 @@ fn a_reader_catches_up_with_commits_and_checkpoints_and_adopts_the_newest_tree()
     let joined_at = follower.header().generation;
     for round in 2..40 {
         put_round(&writer, round, 64);
-        assert!(follower.is_behind());
         follower.catch_up().unwrap();
         assert!(!follower.is_behind());
         assert_eq!(round_seen(&follower, 64), round as u8);
@@ -532,6 +539,7 @@ fn a_writer_that_takes_over_reuses_no_block_a_reader_of_the_writer_before_it_rea
         ..EngineOptions::default()
     };
     let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    let read = held.begin_read().unwrap();
     for round in 2..30 {
         put_round(&first, round, 1024);
     }
@@ -543,8 +551,26 @@ fn a_writer_that_takes_over_reuses_no_block_a_reader_of_the_writer_before_it_rea
             second.compact().unwrap();
         }
     }
+    assert_eq!(round_in(&read, 1024), 1);
+    drop(read);
     held.check().unwrap();
-    assert_eq!(round_seen(&held, 1024), 1);
+}
+
+fn put_odd(engine: &Engine<SimFs>, round: u64, keys: u64) {
+    let mut write = engine.begin_write().unwrap();
+    for key in (1..keys).step_by(2) {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &[round as u8; 200])
+            .unwrap();
+    }
+    write.commit().unwrap();
+}
+
+fn evens_from_the_tree(read: &impl ReadTransaction, keys: u64) {
+    for key in (0..keys).step_by(2) {
+        let value = read.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(value[0], 1, "key {key} lost the value only the tree holds");
+    }
 }
 
 #[test]
@@ -553,38 +579,28 @@ fn a_reader_that_joins_while_a_stage_chose_its_space_reads_its_tree_whole() {
     let writer = writer(&fs, churning()).unwrap();
     put_round(&writer, 1, 1024);
     writer.checkpoint().unwrap();
-    put_round(&writer, 2, 1024);
+    put_odd(&writer, 2, 1024);
     writer.checkpoint().unwrap();
     let joined = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let mut armed = false;
-    for round in 3..40 {
-        if !armed && joined.borrow().is_none() {
-            let joined = std::rc::Rc::clone(&joined);
-            let fs = fs.clone();
-            crate::engine::store::STAGE_PLACED.with(|hook| {
-                *hook.borrow_mut() = Some(Box::new(move || {
-                    *joined.borrow_mut() = Some(reader(&fs, 0).unwrap());
-                }));
-            });
-            armed = true;
-        }
-        put_round(&writer, round, 1024);
-        if joined.borrow().is_some() {
-            armed = true;
-        }
+    {
+        let joined = std::rc::Rc::clone(&joined);
+        let fs = fs.clone();
+        crate::engine::store::STAGE_PLACED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let engine = Box::leak(Box::new(reader(&fs, 0).unwrap()));
+                *joined.borrow_mut() = Some(engine.begin_read().unwrap());
+            }));
+        });
+    }
+    for round in 3..60 {
+        put_odd(&writer, round, 1024);
     }
     let joined = joined
         .borrow_mut()
         .take()
         .expect("no checkpoint ran in stages");
-    let seen = round_seen(&joined, 1024);
-    joined.check().unwrap();
-    for round in 40..60 {
-        put_round(&writer, round, 1024);
-    }
     writer.compact().unwrap();
-    assert_eq!(round_seen(&joined, 1024), seen);
-    joined.check().unwrap();
+    evens_from_the_tree(&joined, 1024);
 }
 
 #[test]
@@ -611,4 +627,103 @@ fn no_second_session_starts_over_a_file_that_a_session_through_another_name_hold
         Ok(Joined::Alone { .. }) => {}
         Ok(Joined::Session(_)) => panic!("a second session started over one file"),
     }
+}
+
+fn file_blocks(fs: &SimFs) -> u64 {
+    fs.open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap()
+        .block_count()
+        .unwrap()
+}
+
+fn churn_in_batches(fs: &SimFs, writer: &Engine<SimFs>) {
+    for batch in 0..10u64 {
+        for round in 0..20 {
+            put_round(writer, batch * 20 + round, 256);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    writer.compact().unwrap();
+    let _ = fs;
+}
+
+#[test]
+fn an_idle_reader_adopts_checkpoints_on_its_own_so_the_file_stays_bounded() {
+    let alone = SimFs::new();
+    let writer_alone = writer(&alone, churning()).unwrap();
+    churn_in_batches(&alone, &writer_alone);
+    let baseline = file_blocks(&alone);
+    let fs = SimFs::new();
+    let busy = writer(&fs, churning()).unwrap();
+    put_round(&busy, 0, 256);
+    let idle = reader(&fs, 0).unwrap();
+    let joined_at = idle.header().generation;
+    churn_in_batches(&fs, &busy);
+    let grown = file_blocks(&fs);
+    assert!(
+        idle.header().generation > joined_at,
+        "the idle reader never adopted a checkpoint"
+    );
+    assert!(
+        grown <= baseline * 2 + 2048,
+        "an idle reader grew the file to {grown} blocks against {baseline} alone"
+    );
+}
+
+#[test]
+fn adopting_a_checkpoint_keeps_every_commit_after_it_and_needs_no_released_log() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&writer, 1, 16);
+    let follower = reader(&fs, 0).unwrap();
+    let joined_at = follower.header().generation;
+    writer.checkpoint_keeping_log().unwrap();
+    put_round(&writer, 2, 16);
+    follower.catch_up().unwrap();
+    assert!(
+        follower.header().generation > joined_at,
+        "a caught-up reader did not adopt a checkpoint whose log is still there"
+    );
+    assert_eq!(
+        round_seen(&follower, 16),
+        2,
+        "the commit after the checkpoint is gone"
+    );
+}
+
+#[test]
+fn a_reader_adopting_while_a_checkpoint_runs_in_stages_reads_one_whole_round() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 1024);
+    writer.checkpoint().unwrap();
+    let follower = std::rc::Rc::new(reader(&fs, 0).unwrap());
+    for round in 2..30 {
+        put_round(&writer, round, 1024);
+    }
+    let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+    {
+        let follower = std::rc::Rc::clone(&follower);
+        let ran = std::rc::Rc::clone(&ran);
+        crate::engine::store::STAGE_PLACED.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let during = std::rc::Rc::clone(&follower);
+                crate::engine::store::ADOPTED.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        round_seen(&during, 1024);
+                    }));
+                });
+                follower.catch_up().unwrap();
+                ran.set(true);
+            }));
+        });
+    }
+    for round in 30..60 {
+        if ran.get() {
+            break;
+        }
+        put_round(&writer, round, 1024);
+    }
+    assert!(ran.get(), "no checkpoint ran in stages");
+    round_seen(&follower, 1024);
 }
