@@ -1010,6 +1010,47 @@ mod crash {
             assert_eq!(count(&replica).unwrap(), [vec![Value::Integer(3)]]);
         }
 
+        fn older_changes() -> crate::replication::Changes {
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            store(&writer, b"format_version", &OLDER.to_be_bytes());
+            writer.changes_since(&Position::start(), 1 << 20).unwrap()
+        }
+
+        #[test]
+        fn a_stale_writer_that_refuses_its_successors_upgrade_keeps_serving_reads_and_writes() {
+            let stale = open_on(&SimFs::new(), false);
+            stale.promote(1, b"old").unwrap();
+            insert(&stale, 1);
+            store(&stale, b"format_version", &OLDER.to_be_bytes());
+            let next = open_on(&SimFs::new(), true);
+            sync(&stale, &next).unwrap();
+            let before = stale.position();
+            next.promote(2, b"new").unwrap();
+            let upgrade = next.changes_since(&before, 1 << 20).unwrap();
+            let error = stale.apply(&upgrade).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NotReplica);
+            assert_eq!(count(&stale).unwrap(), [vec![Value::Integer(1)]]);
+            insert(&stale, 2);
+            assert_eq!(count(&stale).unwrap(), [vec![Value::Integer(2)]]);
+        }
+
+        #[test]
+        fn a_writer_that_refuses_an_older_format_while_its_thread_writes_keeps_serving_reads() {
+            let changes = older_changes();
+            let writer = open_on(&SimFs::new(), false);
+            writer.promote(1, b"w").unwrap();
+            insert(&writer, 1);
+            let open = writer.begin_write().unwrap();
+            let error = writer.apply(&changes).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WriteTransactionOnThisThread);
+            drop(open);
+            assert_eq!(count(&writer).unwrap(), [vec![Value::Integer(1)]]);
+            insert(&writer, 2);
+            assert_eq!(count(&writer).unwrap(), [vec![Value::Integer(2)]]);
+        }
+
         fn large_older_file() -> (SimFs, Vec<Vec<Value>>, Vec<u8>) {
             large_older_file_followed_by(None)
         }
