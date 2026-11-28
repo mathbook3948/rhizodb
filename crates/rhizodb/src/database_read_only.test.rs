@@ -204,3 +204,103 @@ fn a_read_only_open_beside_a_stale_side_file_starts_a_session_over_it_and_change
     assert_eq!((count(&first, "Item"), count(&second, "Item")), (3, 3));
     assert_eq!(image(&fs), before);
 }
+
+fn open_shared_writer(fs: &SimFs) -> Result<Database, Error> {
+    let engine = Engine::open_shared(Arc::new(AnyFs::Sim(fs.clone())), NAME, options())
+        .map_err(StorageError::from)?;
+    Ok(Database::from_parts(
+        graph_on(engine, false)?,
+        Statements::default(),
+    ))
+}
+
+fn fives(db: &Database) -> i64 {
+    let rows = db
+        .execute(
+            "MATCH (n:Item) WHERE n.i = 5 RETURN count(n)",
+            &Parameters::new(),
+        )
+        .unwrap()
+        .rows()
+        .to_vec();
+    match rows[0][..] {
+        [Value::Integer(found)] => found,
+        _ => panic!("expected one count, got {rows:?}"),
+    }
+}
+
+#[test]
+fn a_reader_that_caught_up_in_the_background_reads_with_the_writers_newest_indexes() {
+    let fs = SimFs::new();
+    let writer = open_shared_writer(&fs).unwrap();
+    writer
+        .create_property_index("item_i", IndexTarget::Label("Item"), "i")
+        .unwrap();
+    writer
+        .execute(
+            "UNWIND range(1, 10) AS i INSERT (:Item {i: i})",
+            &Parameters::new(),
+        )
+        .unwrap();
+    let reader = open_read_only(&fs).unwrap();
+    assert_eq!(fives(&reader), 1);
+    writer.drop_index("item_i").unwrap();
+    writer
+        .execute("INSERT (:Item {i: 5}), (:Item {i: 5})", &Parameters::new())
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        fives(&reader),
+        3,
+        "the reader paired new rows with an old index"
+    );
+}
+
+#[test]
+fn reader_threads_keep_reading_beside_a_writer_that_commits_and_compacts() {
+    let fs = SimFs::new();
+    let writer = open_shared_writer(&fs).unwrap();
+    insert_items(&writer, 10);
+    let reader = Arc::new(open_read_only(&fs).unwrap());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let committing = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut round = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                writer
+                    .execute("INSERT (:Item {i: 5})", &Parameters::new())
+                    .unwrap();
+                round += 1;
+                if round % 20 == 0 {
+                    writer.compact().unwrap();
+                }
+            }
+        })
+    };
+    let (done, finished) = std::sync::mpsc::channel();
+    for _ in 0..3 {
+        let reader = Arc::clone(&reader);
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut last = 0;
+            for _ in 0..400 {
+                let seen = count(&reader, "Item");
+                assert!(seen >= last, "a reader went back from {last} to {seen}");
+                assert!(
+                    fives(&reader) >= seen - 9,
+                    "the index lost rows the reader read"
+                );
+                last = seen;
+            }
+            let _ = done.send(last);
+        });
+    }
+    for _ in 0..3 {
+        finished
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the reader threads stalled, as a deadlock leaves them");
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    committing.join().unwrap();
+}

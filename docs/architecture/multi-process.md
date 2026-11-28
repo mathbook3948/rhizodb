@@ -121,16 +121,18 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process that finds a newer whole checkpoint's header in the side file adopts it before it reads the log, by loading that header's catalog and extent table and pointing new readers at its tree.
 - Adopting a whole checkpoint's header moves the process's view to at least the checkpoint's LSN, since its tree holds every commit up to that LSN.
 - Adopting a whole checkpoint's header gives new readers a memtable that holds only the commits after the checkpoint's LSN, and readers that began before keep the old memtable and tree until they end.
-- A stage's tree holds each key it covers at its value as of the stage's frozen LSN, so a process adopts a stage's header only once it has caught up through the `staged_lsn` that header records.
-- Adopting a stage's header replaces only the tree for new readers, and readers whose view lies below the stage's frozen LSN keep the previous tree, since the memtable still holds every commit after the LSN the log replays from.
+- A process adopts only whole checkpoints' headers, which are the only ones the session publishes, so it never loads a stage's tree.
 - A log segment that is gone when a process opens it was released by a checkpoint, so the process adopts the newest header and goes on from its LSN.
-- When that newest header is a stage, the process loads the stage's tree, replays the log from the header's `checkpoint_lsn` through its `staged_lsn` and on into a new memtable, and lets new readers begin only once it has caught up.
 - On Windows, a segment that another process is removing refuses access, and the process treats that refusal as a released segment.
 - In a session, a process keeps every tombstone in its memtable until it adopts a checkpoint that covers it, since a checkpoint another process writes from its own frozen memtable may hold the key's older value.
-- After catching up with records that change index definitions, the graph reloads them before any reader begins, as after `apply`.
+- A read-only process catches up as a graph read begins, through the same path as `apply`, so the graph reloads the index definitions and drops its cached counts before any reader sees the new commits.
 - Catching up with any record another process wrote drops the graph's cached counts of column deltas.
 - Tokens and label sets need no refresh, since a committed one never changes and a miss reads it from the table.
-- A process with no transaction open adopts each new checkpoint from a thread of its own within a bounded time, so an idle process does not hold an old tree.
+- A read-only process runs the same catch-up from a thread of its own every 100 milliseconds, so an idle process adopts each new checkpoint within a bounded time and does not hold an old tree.
+- That thread first checks, without the follow gate, whether the session published a commit or a checkpoint this process lacks, so an idle poll stalls no reader, and a catch-up that fails there makes the next read of the process run it again and fail with its error.
+- Every catch-up, on any thread, changes what a new reader reads only under the follow gate held exclusively, and then raises a follow epoch.
+- A graph read holds the follow gate shared from its check of the follow epoch to the start of its storage read, and reloads the index definitions and drops its cached counts first when the epoch moved, so no reader pairs a snapshot with definitions of another commit.
+- A graph read that finds its process behind runs the catch-up before it takes the follow gate and outside the lock that publishes the index definitions, so the follow gate always comes before that lock and two reader threads of one process never wait for each other.
 - Each slot records the oldest checkpoint generation that any tree of its process reaches, which includes the trees of its readers, snapshots, pins, and published view.
 - A checkpoint in any process takes the lowest generation of every live slot, and the generation of the newest header the session published, as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches or that an open joining now may load.
 - The published header bounds the oldest tree too, since a header that holds only some stages of a checkpoint is never published, so a joiner that loads the last published header never meets the store that a Dekker pattern with a stage's header would need.
@@ -175,7 +177,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - An extent in a reused slot has a new id, so the cached pages of the extent before it are never looked up again.
 - A checkpoint records an extent's id in the side file's journal under its generation before its first write into a free range of that extent, so a checkpoint that dies after the write still leaves the extent named.
 - The journal only appends, so a dead checkpoint's entries and the entries its successor writes under the same generation number both stay, and a process drops the extents of both.
-- A process that adopts a header first drops its cached pages and values in the extents the journal names for every generation after the last one it adopted, and drops its whole cache when the journal no longer reaches back that far.
+- Until the journal lands, a read-only process that adopts a header drops its whole block cache before any reader reads the new tree, which is correct since every block it cached afterwards is one a tree it holds reaches.
 - The first process of a session resets the side file under the session lock, held exclusively, and then opens the file as an open does today.
 - A first process that opened read-write recovers the log, or starts a new log on a clean file, before it lets another process join.
 - A first process that opened read-only replays the log into memory, and the first read-write process that joins later recovers the log under the write and checkpoint locks.
