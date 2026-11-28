@@ -109,6 +109,6 @@ dir = "crates/bench"
 run = "cargo run --release --features duckdb,cozo --"
 
 [tasks.bench-readme]
-description = "Measure RhizoDB and LadybugDB at medium scale with 5 repetitions and rewrite the benchmark table in README.md, or set BENCH_README_REPORT to a saved JSON report to only rewrite the table"
+description = "Measure RhizoDB and LadybugDB at medium scale with 5 repetitions and rewrite the benchmark tables in README.md and README.ko.md, or set BENCH_README_REPORT to a saved JSON report to only rewrite the table"
 depends = ["lbug-extensions"]
 run = "bash crates/bench/scripts/readme-table.sh"

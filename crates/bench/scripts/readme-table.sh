@@ -19,5 +19,7 @@ date="$(date -u -r "$report" +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d)"
 
 cargo run --release --quiet --manifest-path "$here/Cargo.toml" --bin readme-table -- \
   "$report" "$here/../../README.md" "$machine" "$date"
+cargo run --release --quiet --manifest-path "$here/Cargo.toml" --bin readme-table -- \
+  "$report" "$here/../../README.ko.md" "$machine" "$date" ko
 cp "$here/../../README.md" "$here/../rhizodb/README.md"
-echo "rewrote the benchmark table in README.md and its copy in crates/rhizodb from $report"
+echo "rewrote the benchmark tables in README.md, README.ko.md, and the copy in crates/rhizodb from $report"

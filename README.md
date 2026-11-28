@@ -5,6 +5,8 @@
 [![Documentation](https://docs.rs/rhizodb/badge.svg)](https://docs.rs/rhizodb)
 [![License](https://img.shields.io/crates/l/rhizodb)](#license)
 
+English | [한국어](https://github.com/mathbook3948/rhizodb/blob/main/README.ko.md)
+
 An embedded, schemaless property graph database for Rust, queried with GQL.
 
 RhizoDB runs inside your program, with no server: a database is one file and its write-ahead log, or memory.
@@ -71,12 +73,12 @@ Every run checks that both engines return the same rows, and bulk load uses each
 The suite and every query are in [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench), and `mise run bench-readme` measures again and rewrites this table.
 
 <!-- bench-table:start -->
-Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is within noise.
+Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.
 
 | Workload | RhizoDB | LadybugDB | Faster |
 | --- | ---: | ---: | --- |
 | Point lookup by id | 0.398 | 0.844 | RhizoDB 2.1x |
-| Filtered scan | 0.315 | 0.390 | within noise |
+| Filtered scan | 0.315 | 0.390 | similar |
 | `ORDER BY ... LIMIT` | 0.512 | 0.829 | RhizoDB 1.6x |
 | 1-hop neighbours | 0.318 | 0.675 | RhizoDB 2.1x |
 | 2-hop distinct | 0.630 | 9.59 | RhizoDB 15.2x |
@@ -87,7 +89,7 @@ Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-
 | Keyword search | 53.1 | 433 | RhizoDB 8.2x |
 | Vector search | 218 | 389 | RhizoDB 1.8x |
 | Small commits | 73.0 | 214 | RhizoDB 2.9x |
-| Bulk update | 11.7 | 12.1 | within noise |
+| Bulk update | 11.7 | 12.1 | similar |
 | Detach delete | 240 | 378 | RhizoDB 1.6x |
 | Bulk load | 829 | 937 | RhizoDB 1.1x |
 | File size after bulk load | 14.3 MiB | 13.0 MiB | LadybugDB 1.1x smaller |
@@ -96,7 +98,7 @@ Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-
 The table is measured again on whatever machine runs it, so a later table may come from a different host than an earlier one.
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
-LadybugDB keeps a slightly smaller file, and the two engines are within noise on the filtered scan and the bulk update.
+LadybugDB keeps a slightly smaller file, and the two engines are similar on the filtered scan and the bulk update.
 
 ## Development
 
