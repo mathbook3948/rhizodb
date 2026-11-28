@@ -4,6 +4,10 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Fixed
+
+- An aggregate argument that called `rand()` only inside a pattern's property map or the clauses of a subquery was accepted, as in `sum(VALUE { RETURN rand() })` or `count(EXISTS { MATCH (n)-->(m) WHERE rand() < 0.5 })`, and returned a random result. It now fails with `ErrorKind::NonConstantExpression`, as `rand()` directly in the argument does.
+
 ## 0.2.0
 
 Released on 2026-11-28.
