@@ -93,8 +93,10 @@ fn multi_process_child() {
                         std::path::Path::new(&side).exists(),
                         "a session holds the file"
                     );
+                    std::thread::sleep(Duration::from_millis(1));
                     file.unlock().unwrap();
                 }
+                std::thread::sleep(Duration::from_micros(100));
             }
             writeln!(stdout, "held {held}").unwrap();
             stdout.flush().unwrap();
@@ -365,6 +367,11 @@ fn a_writer_checkpoints_while_a_reader_of_an_older_build_keeps_opening_the_file(
     }
     let held: u64 = older.line_starting("held ").parse().unwrap();
     assert!(held > 0, "the older reader never took its lock");
+    #[cfg(windows)]
+    assert!(
+        rhizodb::write_retries_for_testing() > 0,
+        "no write of the writer met the older reader's lock"
+    );
     assert!(
         round >= 10,
         "the writer finished no checkpoint beside the older reader"
