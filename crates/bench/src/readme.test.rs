@@ -47,7 +47,7 @@ fn a_row_whose_ranges_overlap_names_no_winner() {
     let table = render(&report(), "4 CPUs, Linux", "2026-11-25").unwrap_or_default();
 
     assert!(
-        table.contains("| Bulk update | 16.5 | 16.1 | within noise |"),
+        table.contains("| Bulk update | 16.5 | 16.1 | similar |"),
         "{table}"
     );
 }
@@ -104,4 +104,78 @@ fn splicing_a_readme_without_markers_fails() {
 #[test]
 fn a_report_without_results_fails() {
     assert!(render(&json!({}), "machine", "date").is_err());
+}
+
+#[test]
+fn a_korean_table_uses_korean_words_for_every_row() {
+    let table =
+        render_in(&report(), "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+
+    assert!(
+        table.contains("| 작업 | RhizoDB | LadybugDB | 더 빠른 쪽 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| id로 노드 찾기 | 2.00 | 5.00 | RhizoDB 2.5배 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 대량 수정 | 16.5 | 16.1 | 유사 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 벡터 검색 | 4.00 | 지원 안 함 | 해당 없음 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 조건으로 걸러 읽기 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 대량 적재 후 파일 크기 | 1.0 MiB | 3.0 MiB | RhizoDB가 3.0배 작음 |"),
+        "{table}"
+    );
+    assert!(
+        table.starts_with("2026-11-25에 4 CPUs, Linux에서 쟀습니다."),
+        "{table}"
+    );
+}
+
+#[test]
+fn every_row_label_has_a_korean_label() {
+    for (_, label) in ROWS {
+        assert!(
+            KOREAN_LABELS.iter().any(|(english, _)| *english == label),
+            "{label} has no Korean label"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_language_code_fails() {
+    assert!(Language::from_code("fr").is_err());
+    assert_eq!(Language::from_code("ko"), Ok(Language::Korean));
+}
+
+#[test]
+fn files_whose_sizes_round_to_the_same_ratio_are_similar() {
+    let mut document = report();
+    for row in document["results"].as_array_mut().into_iter().flatten() {
+        if row["workload"] == "load/bulk" {
+            row["bytes"] = json!(if row["engine"] == "rhizodb" {
+                13_484_032
+            } else {
+                13_631_488
+            });
+        }
+    }
+    let english = render(&document, "4 CPUs, Linux", "2026-11-25").unwrap_or_default();
+    let korean =
+        render_in(&document, "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+
+    assert!(
+        english.contains("| File size after bulk load | 12.9 MiB | 13.0 MiB | similar |"),
+        "{english}"
+    );
+    assert!(korean.contains("| 유사 |"), "{korean}");
 }

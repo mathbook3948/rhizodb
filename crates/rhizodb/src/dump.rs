@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::io::BufRead;
 use std::io::BufWriter;
+use std::io::Read as _;
 use std::io::Write;
 
 use crate::error::Error;
@@ -861,7 +862,11 @@ fn read_properties<T: WriteTransaction>(
 /// Reads a dump from `input` into `graph`, which must hold no node, relationship, or index and
 /// never have held a node or relationship, in write transactions that each commit a bounded
 /// batch of lines. Write transactions of other threads wait until the import ends.
-pub(crate) fn import<S: Storage>(graph: &Graph<S>, mut input: impl BufRead) -> Result<(), Error> {
+pub(crate) fn import<S: Storage>(
+    graph: &Graph<S>,
+    mut input: impl BufRead,
+    max_line: usize,
+) -> Result<(), Error> {
     let _exclusive = graph.exclusive_writes()?;
     let mut tx = graph.write()?;
     if tx.next_ids()? != (0, 0) || !tx.indexes()?.is_empty() {
@@ -883,13 +888,23 @@ pub(crate) fn import<S: Storage>(graph: &Graph<S>, mut input: impl BufRead) -> R
     let mut line = 0u64;
     let mut pending_lines = 0usize;
     let mut pending_bytes = 0usize;
+    let limit = u64::try_from(max_line).map_or(u64::MAX, |max| max.saturating_add(1));
     loop {
         buffer.clear();
-        let read = input.read_until(b'\n', &mut buffer).map_err(io_error)?;
+        let read = (&mut input)
+            .take(limit)
+            .read_until(b'\n', &mut buffer)
+            .map_err(io_error)?;
         if read == 0 {
             break;
         }
         line += 1;
+        if buffer.len() > max_line && buffer.last() != Some(&b'\n') {
+            return Err(invalid(
+                line,
+                format!("the line is longer than the limit of {max_line} bytes"),
+            ));
+        }
         if state.stage == Stage::Ended {
             return Err(invalid(line, "text follows the end line"));
         }

@@ -442,6 +442,53 @@ fn a_failing_reader_or_writer_fails_as_io() {
     assert_eq!(copy.import(reader).unwrap_err().kind(), ErrorKind::Io);
 }
 
+struct Zeros {
+    left: usize,
+    read: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl io::Read for Zeros {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let taken = buffer.len().min(self.left);
+        buffer[..taken].fill(b'0');
+        self.left -= taken;
+        self.read.fetch_add(taken, Ordering::Relaxed);
+        Ok(taken)
+    }
+}
+
+#[test]
+fn a_line_longer_than_the_cap_fails_before_it_is_read_whole() {
+    let header = r#"{"type":"header","format":"rhizodb-dump","version":1,"next_node_id":0,"next_relationship_id":0}"#;
+    let end = r#"{"type":"end","nodes":0,"relationships":0}"#;
+    let dump = format!("{header}\r\n{end}\n");
+    let at_cap = rhizodb::OpenOptions::new()
+        .max_dump_line_bytes(header.len() + 1)
+        .in_memory()
+        .unwrap();
+    at_cap.import(dump.as_bytes()).unwrap();
+    let below = rhizodb::OpenOptions::new()
+        .max_dump_line_bytes(header.len())
+        .in_memory()
+        .unwrap();
+    let error = below.import(dump.as_bytes()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidDump, "{error}");
+    assert!(error.to_string().contains("dump line 1"), "{error}");
+
+    let read = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cap = 1 << 20;
+    let db = rhizodb::OpenOptions::new()
+        .max_dump_line_bytes(cap)
+        .in_memory()
+        .unwrap();
+    let zeros = io::BufReader::new(Zeros {
+        left: 256 << 20,
+        read: Arc::clone(&read),
+    });
+    assert_eq!(db.import(zeros).unwrap_err().kind(), ErrorKind::InvalidDump);
+    assert!(read.load(Ordering::Relaxed) <= 2 * cap);
+}
+
 #[test]
 fn a_dump_larger_than_one_batch_imports_whole() {
     let db = db();

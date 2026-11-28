@@ -466,6 +466,21 @@ fn crc(parts: &[&[u8]]) -> u32 {
     hasher.finalize()
 }
 
+/// Writes the checksum of a part or delta stored under `key` again over whatever its bytes now
+/// hold, so a fuzzer's damage reaches the parser behind the check.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn reseal_for_fuzzing(key: &[u8], bytes: &mut [u8]) {
+    if key.first() == Some(&SEGMENT_KIND) {
+        if bytes.len() >= KIND_AT {
+            let sum = crc(&[key, &bytes[KIND_AT..]]);
+            bytes[CHECKSUM_AT..KIND_AT].copy_from_slice(&sum.to_le_bytes());
+        }
+    } else if let Some(end) = bytes.len().checked_sub(4) {
+        let sum = crc(&[key, &bytes[..end]]);
+        bytes[end..].copy_from_slice(&sum.to_le_bytes());
+    }
+}
+
 fn u32_le(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }

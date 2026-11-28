@@ -1,0 +1,6 @@
+id: no-comments-yaml
+valid:
+  - "# ast-grep-ignore\nkey: value\n"
+invalid:
+  - "# a note\nkey: value\n"
+  - "key: value # mentions ast-grep-ignore\n"
