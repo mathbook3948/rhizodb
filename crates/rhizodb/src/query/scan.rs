@@ -154,6 +154,8 @@ pub(crate) fn row_at_a_time() -> bool {
 }
 
 #[cfg(test)]
+pub(crate) use tests::on_row_path;
+#[cfg(test)]
 pub(crate) use tests::row_at_a_time;
 
 #[derive(Clone, Debug)]

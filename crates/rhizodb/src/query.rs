@@ -15,6 +15,7 @@ mod orient;
 mod parallel;
 mod plan;
 mod regex;
+mod relationship_scan;
 mod scalars;
 mod scan;
 mod seek;
