@@ -35,6 +35,7 @@ fn two_mappings_of_one_file_share_their_words() {
     rhizodb_shm::reserve(&first, 4096).unwrap();
     let a = Mapping::new(&first, 512).unwrap();
     let b = Mapping::new(&open(&path), 512).unwrap();
+    a.words()[5].store(0, Ordering::Release);
     a.words()[511].store(7, Ordering::Release);
     assert_eq!(b.words()[511].load(Ordering::Acquire), 7);
     assert_eq!(
@@ -93,7 +94,8 @@ fn locks_on_disjoint_ranges_do_not_conflict() {
     let a = open(&path);
     assert!(rhizodb_shm::try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
     assert!(rhizodb_shm::try_lock(&a, 101, 1, Lock::Exclusive).unwrap());
-    rhizodb_shm::unlock(&a, 100, 2).unwrap();
+    rhizodb_shm::unlock(&a, 100, 1).unwrap();
+    rhizodb_shm::unlock(&a, 101, 1).unwrap();
 }
 
 // Open-file-description locks belong to the handle, so two handles of one process conflict,

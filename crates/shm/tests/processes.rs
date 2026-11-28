@@ -258,6 +258,9 @@ fn stores_into_a_mapping_show_in_another_process() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("words");
     let (_file, mapping) = mapped(&path);
+    for word in &mapping.words()[..4] {
+        word.store(0, Ordering::Relaxed);
+    }
     mapping.words()[1].store(42, Ordering::Release);
     for _ in 0..ADDS {
         mapping.words()[3].fetch_add(1, Ordering::Relaxed);
@@ -274,6 +277,9 @@ fn concurrent_adds_from_two_processes_lose_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("words");
     let (_file, mapping) = mapped(&path);
+    for word in &mapping.words()[..4] {
+        word.store(0, Ordering::Relaxed);
+    }
     mapping.words()[1].store(42, Ordering::Release);
     let mut adder = Peer::spawn("adder", &path);
     for _ in 0..ADDS {
