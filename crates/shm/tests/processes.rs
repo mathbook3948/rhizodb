@@ -336,3 +336,77 @@ fn a_test_through_a_read_only_handle_sees_a_shared_lock_of_another_process() {
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+// ast-grep-ignore
+// Linux keeps `flock` and open-file-description locks apart, so a test under a flock sees past it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn under_its_own_exclusive_flock_a_test_sees_only_another_process_s_range_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    drop(open(&path));
+    let reading = File::open(&path).unwrap();
+    reading.try_lock().unwrap();
+    let (offset, len) = RANGE;
+    assert!(
+        !rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap(),
+        "the caller's own flock counted"
+    );
+    let mut holder = Peer::spawn("shared", &path);
+    holder.wait_for("locked");
+    assert!(rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap());
+    holder.kill();
+}
+
+// ast-grep-ignore
+// macOS and the BSDs keep `flock` and `fcntl` locks in one list, and Windows locks the whole file.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[test]
+fn a_range_lock_of_another_process_refuses_an_exclusive_whole_file_lock_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    drop(open(&path));
+    let mut holder = Peer::spawn("shared", &path);
+    holder.wait_for("locked");
+    let reading = File::open(&path).unwrap();
+    assert!(matches!(
+        reading.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    reading.try_lock_shared().unwrap();
+    reading.unlock().unwrap();
+    holder.kill();
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+#[test]
+fn holding_only_its_own_range_lock_a_classic_test_sees_another_process_s() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    drop(open(&path));
+    let reading = File::open(&path).unwrap();
+    let (offset, len) = RANGE;
+    assert!(rhizodb_shm::try_lock(&reading, offset, len, Lock::Shared).unwrap());
+    assert!(
+        !rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap(),
+        "the caller's own range lock counted"
+    );
+    let mut holder = Peer::spawn("shared", &path);
+    holder.wait_for("locked");
+    assert!(rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap());
+    holder.kill();
+}
+
+// ast-grep-ignore
+// So a session on these kernels tests for other owners only while it holds no flock.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+#[test]
+fn a_classic_test_counts_the_caller_s_own_flock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    drop(open(&path));
+    let reading = File::open(&path).unwrap();
+    reading.try_lock_shared().unwrap();
+    let (offset, len) = RANGE;
+    assert!(rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap());
+}
