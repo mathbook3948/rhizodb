@@ -78,8 +78,7 @@ pub(crate) fn upgrade(key: &[u8], bytes: &[u8]) -> Result<Option<Vec<u8>>, Graph
     let (present, records) = present_and_rest(records)?;
     for entry in framed(present, records) {
         let (slot, record) = entry?;
-        RelationshipRecord::decode(record)?;
-        edit.set(slot, Some(record));
+        edit.set(slot, Some(&RelationshipRecord::decode(record)?.encode()));
     }
     edit.encode(key)
 }

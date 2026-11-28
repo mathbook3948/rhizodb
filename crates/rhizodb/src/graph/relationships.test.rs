@@ -320,3 +320,21 @@ fn a_chunk_holding_a_record_that_does_not_decode_fails_to_encode() {
     edit.set(0, Some(&[0xff; 3]));
     assert!(edit.encode(&KEY).is_err());
 }
+
+#[test]
+fn an_older_record_that_repeats_a_key_upgrades_to_the_value_its_decoding_keeps() {
+    for second in [vec![14, 6], vec![14, 200, 1]] {
+        let mut record = vec![1, 2, 3, 2, 5, 14, 2, 5];
+        record.extend_from_slice(&second);
+        let decoded = RelationshipRecord::decode(&record).unwrap();
+        let upgraded = upgrade(&KEY, &unsealed(&KEY, &[(0, record)]))
+            .unwrap()
+            .unwrap();
+        let read = ChunkRef::parse(&KEY, &upgraded)
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(RelationshipRecord::decode(&read).unwrap(), decoded);
+    }
+}
