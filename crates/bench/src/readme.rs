@@ -158,7 +158,7 @@ fn faster(rhizodb: Option<Timing>, other: Option<Timing>, language: Language) ->
     match (rhizodb, other) {
         (Some(ours), Some(theirs)) if ours.min <= theirs.max && theirs.min <= ours.max => {
             match language {
-                Language::English => "within noise",
+                Language::English => "similar",
                 Language::Korean => "유사",
             }
             .to_owned()
@@ -228,7 +228,7 @@ pub fn render_in(
     let cities = document["cities"].as_u64().unwrap_or(0);
     let mut text = match language {
         Language::English => format!(
-            "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is within noise.\n\n"
+            "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
         ),
         Language::Korean => format!(
             "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 유사로 표시합니다.\n\n"

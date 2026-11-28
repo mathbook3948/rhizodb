@@ -47,7 +47,7 @@ fn a_row_whose_ranges_overlap_names_no_winner() {
     let table = render(&report(), "4 CPUs, Linux", "2026-11-25").unwrap_or_default();
 
     assert!(
-        table.contains("| Bulk update | 16.5 | 16.1 | within noise |"),
+        table.contains("| Bulk update | 16.5 | 16.1 | similar |"),
         "{table}"
     );
 }
