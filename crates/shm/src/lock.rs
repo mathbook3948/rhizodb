@@ -26,7 +26,8 @@ pub fn try_lock(file: &File, offset: u64, len: u64, kind: Lock) -> io::Result<bo
     sys::lock(file, offset, len, kind, false)
 }
 
-/// Releases the lock over `len` bytes of `file` from `offset`.
+/// Releases the lock over `len` bytes of `file` from `offset`, which must be exactly the range
+/// of one lock the caller took, since Windows releases no other range.
 pub fn unlock(file: &File, offset: u64, len: u64) -> io::Result<()> {
     check_range(offset, len)?;
     sys::unlock(file, offset, len)

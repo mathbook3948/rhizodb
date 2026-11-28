@@ -12,7 +12,9 @@ pub struct FileId {
 
 /// Grows `file` to at least `len` bytes with every block up to `len` reserved, so a later store
 /// into a mapping of that range never finds the disk full. It never shrinks the file, and it
-/// fails with [`io::ErrorKind::Unsupported`] where the file system cannot reserve blocks.
+/// fails with [`io::ErrorKind::Unsupported`] where the file system cannot reserve blocks. The
+/// bytes it adds read as zeros on Unix and as a non-zero pattern on Windows, so a caller writes
+/// every byte it reads.
 pub fn reserve(file: &File, len: u64) -> io::Result<()> {
     if file.metadata()?.len() >= len {
         return Ok(());
