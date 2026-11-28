@@ -14,11 +14,11 @@ fi
 
 mkdir -p "$work"
 if [[ ! -d "$work/ladybug/.git" ]]; then
-  git clone --quiet --depth 1 --branch "v$version" https://github.com/LadybugDB/ladybug "$work/ladybug"
+  git clone --quiet -c core.autocrlf=false --depth 1 --branch "v$version" https://github.com/LadybugDB/ladybug "$work/ladybug"
 fi
 commit="$(git -C "$work/ladybug" ls-tree HEAD extension | awk '{print $3}')"
 if [[ ! -d "$work/extensions/.git" ]]; then
-  git clone --quiet https://github.com/ladybugdb/extensions.git "$work/extensions"
+  git clone --quiet -c core.autocrlf=false https://github.com/ladybugdb/extensions.git "$work/extensions"
 fi
 git -C "$work/extensions" checkout --quiet "$commit"
 rm -rf "$work/ladybug/extension"
@@ -32,11 +32,15 @@ diff -rq "$work/ladybug/src" "$crate/src" > /dev/null || {
 
 cmake -S "$work/ladybug" -B "$work/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_EXTENSIONS="fts;vector" \
   -DBUILD_SHELL=FALSE -DBUILD_TESTS=FALSE -DBUILD_EXAMPLES=FALSE -DBUILD_BENCHMARK=FALSE > /dev/null
-cmake --build "$work/build" --target lbug_fts_extension lbug_vector_extension -j "$jobs"
+cmake --build "$work/build" --config Release --target lbug_fts_extension lbug_vector_extension -j "$jobs"
 
 for name in fts vector; do
   mkdir -p "$out/$name"
-  cp "$work/extensions/$name/build/lib$name.lbug_extension" "$out/$name/"
+  built="$work/ladybug/extension/$name/build/lib$name.lbug_extension"
+  if [[ ! -f "$built" ]]; then
+    built="$work/ladybug/extension/$name/build/Release/lib$name.lbug_extension"
+  fi
+  cp "$built" "$out/$name/"
 done
 echo "$version" > "$out/version"
 echo "built the extensions for lbug $version from extensions commit $commit into $out"
