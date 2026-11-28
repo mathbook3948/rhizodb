@@ -693,7 +693,9 @@ impl Database {
             },
             None => &changes.decoded,
         };
-        if let Some(found) = first_metadata_put(readable, older_format_put) {
+        if self.role() == Role::Replica
+            && let Some(found) = first_metadata_put(readable, older_format_put)
+        {
             self.graph.wait_for_upgrade(found.1);
         }
         let indexes = readable.touches(TableId::of(Table::Indexes));

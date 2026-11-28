@@ -387,6 +387,16 @@ fn nesting_just_inside_the_parser_limit_runs_on_a_small_stack() {
                     " }".repeat(depth)
                 ),
                 format!(
+                    "RETURN collect({}1{})",
+                    "VALUE { RETURN ".repeat(depth - 1),
+                    " }".repeat(depth - 1)
+                ),
+                format!(
+                    "RETURN collect({}1{})",
+                    "[x IN [".repeat(depth - 1),
+                    "] | x]".repeat(depth - 1)
+                ),
+                format!(
                     "RETURN {}1{}",
                     "CAST(".repeat(depth),
                     " AS INTEGER)".repeat(depth)

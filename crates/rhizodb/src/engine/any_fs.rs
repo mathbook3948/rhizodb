@@ -1,6 +1,5 @@
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::ErrorKind;
@@ -20,6 +19,8 @@ use super::snapshot::install;
 use super::store::Engine;
 use super::store::EngineOptions;
 use super::store::staging_name;
+use super::stray_log::Place;
+use super::stray_log::adopt;
 use super::wal::segment_files;
 use super::wal::segment_name;
 
@@ -174,41 +175,125 @@ impl BlockFile for AnyFile {
 
 const MEMORY_NAME: &str = "memory";
 
-fn split(path: &Path) -> Result<(PathBuf, &str), EngineError> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            EngineError::Io(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "the database path {} names no file in UTF-8",
-                    path.display()
-                ),
-            ))
-        })?;
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
-    };
-    Ok((directory, name))
+const MOST_SYMLINKS: usize = 40;
+
+#[derive(Debug)]
+struct Resolved {
+    real: Place,
+    given: Place,
 }
 
-/// Opens the database file at `path` with the engine, creating it when there is none.
+impl Resolved {
+    fn of(path: &Path) -> io::Result<Self> {
+        let given = Place::of(path)?;
+        let mut at = path.to_path_buf();
+        for _ in 0..MOST_SYMLINKS {
+            match std::fs::symlink_metadata(&at) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let target = std::fs::read_link(&at)?;
+                    at = at.parent().unwrap_or(Path::new("")).join(target);
+                }
+                Ok(_) => {
+                    refuse_hard_links(&at)?;
+                    return Ok(Self {
+                        real: Place::of(&at)?,
+                        given,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Self {
+                        real: Place::of(&at)?,
+                        given,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the database path {} passes through more than {MOST_SYMLINKS} symlinks",
+                path.display()
+            ),
+        ))
+    }
+
+    fn fs(&self) -> Arc<AnyFs> {
+        Arc::new(AnyFs::Os(OsFs::new(&self.real.directory)))
+    }
+
+    fn stray_segments(&self) -> io::Result<Vec<u64>> {
+        if self.given == self.real {
+            return Ok(Vec::new());
+        }
+        self.given.segments()
+    }
+}
+
+#[cfg(unix)]
+fn refuse_hard_links(real: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let links = std::fs::metadata(real)?.nlink();
+    if links > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the database file {} has {links} hard links, and the log segments beside it \
+                 are named after one of them, so copy the file instead of linking it",
+                real.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_hard_links(_real: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Opens the database file at `path` with the engine, creating it when there is none. Log
+/// segments that an older release named after a symlink to the file move beside the file once
+/// the open finds the log missing, or finds that an earlier move stopped part way.
 pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
+    let resolved = Resolved::of(path)?;
+    let open = || Engine::open(resolved.fs(), &resolved.real.name, options);
+    if resolved.stray_segments()?.is_empty() {
+        return open();
+    }
+    if !resolved.real.segments()?.is_empty() {
+        adopt(&resolved.real, &resolved.given, options)?;
+        return open();
+    }
+    match open() {
+        Err(EngineError::WalMissing) => {
+            adopt(&resolved.real, &resolved.given, options)?;
+            open()
+        }
+        opened => opened,
+    }
 }
 
 /// Opens the existing database file at `path` with the engine read-only, as
-/// [`Engine::open_read_only`] does.
+/// [`Engine::open_read_only`] does. Fails where [`open_path`] would move log segments.
 pub(crate) fn open_path_read_only(
     path: &Path,
     options: EngineOptions,
 ) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    let fs = OsFs::read_only(directory, name)?;
-    Engine::open_read_only(Arc::new(AnyFs::Os(fs)), name, options)
+    let resolved = Resolved::of(path)?;
+    const STRAY: EngineError = EngineError::ReadOnly(
+        "move the log that an older release left beside a symlink to the file, under the \
+         symlink's name, to the file, which one open that writes does",
+    );
+    let stray = !resolved.stray_segments()?.is_empty();
+    if stray && !resolved.real.segments()?.is_empty() {
+        return Err(STRAY);
+    }
+    let fs = OsFs::read_only(&resolved.real.directory, &resolved.real.name)?;
+    match Engine::open_read_only(Arc::new(AnyFs::Os(fs)), &resolved.real.name, options) {
+        Err(EngineError::WalMissing) if stray => Err(STRAY),
+        opened => opened,
+    }
 }
 
 /// Installs the snapshot `input` streams as the database file at `path`, as
@@ -219,14 +304,8 @@ pub(crate) fn install_path(
     options: EngineOptions,
     force: bool,
 ) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    install(
-        Arc::new(AnyFs::Os(OsFs::new(directory))),
-        name,
-        input,
-        options,
-        force,
-    )
+    let resolved = Resolved::of(path)?;
+    install(resolved.fs(), &resolved.real.name, input, options, force)
 }
 
 /// A database of the engine that lives in memory and is gone when dropped.
@@ -242,24 +321,14 @@ pub(crate) fn in_memory(options: EngineOptions) -> Result<Engine<AnyFs>, EngineE
 /// checkpoints its whole log into the file and removes the log's segments. Fails when a segment
 /// is left, since the file alone would then miss commits.
 pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result<(), StorageError> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            StorageError::io(
-                ErrorKind::Storage,
-                format!("cannot back up to {}", path.display()),
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "the backup path names no file in UTF-8",
-                ),
-            )
-        })?;
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
-    };
-    write_copy_on(snapshot, Arc::new(AnyFs::Os(OsFs::new(directory))), name)
+    let resolved = Resolved::of(path).map_err(|error| {
+        StorageError::io(
+            ErrorKind::Storage,
+            format!("cannot back up to {}", path.display()),
+            error,
+        )
+    })?;
+    write_copy_on(snapshot, resolved.fs(), &resolved.real.name)
 }
 
 /// [`write_copy`] into the database file `name` on `fs`, removing the copy's log segments and

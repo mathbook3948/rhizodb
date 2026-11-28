@@ -21,7 +21,10 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - A relationship record holds its type, its source and target node IDs, its property count, and each property key as varints, each key followed by its tagged value.
 - An integer property of a relationship takes a tag of its own and a zigzag varint when that fits in eight bytes, and a record written before still reads its fixed-width integers as they are.
 - Relationship records are stored in chunks of 32 consecutive IDs, one entry per chunk under the chunk's number, so a load writes one entry per 32 relationships.
-- A chunk holds a layout byte, a checksum, a bitmap of the slots that hold a relationship, and each of those records in slot order after its length as a varint.
+- A chunk holds a layout byte, a checksum, a bitmap of the slots that hold a relationship, and those relationships in columns: their types, sources, and targets, and one column per property key the chunk's relationships hold.
+- A column of numbers packs each number in the fewest bits that hold its distance from the column's least, so reading one relationship reads one place of each column.
+- A property key's column holds a bitmap of the slots whose relationship holds the key, and its values packed when all are integers or each in its tagged value encoding otherwise.
+- A write transaction holds each changed chunk's records whole, as a relationship record encodes them, and lays out the columns when it writes the chunk.
 - Every read of a relationship chunk checks its checksum, so a damaged chunk fails as corruption instead of reading as other records.
 - A relationship chunk's checksum covers its key, so a chunk read under another key is reported as corruption.
 - Relationship chunk checksums are CRC-32, like the node meta, column, and adjacency checksums of the graph layer.
@@ -31,6 +34,7 @@ Every layer above storage, from the executor to the TCK adapter, depends on how 
 - Opening a database written before relationship chunks moves every relationship record into its chunk, in the opening write transaction.
 - Opening a database written before relationship chunk checksums rewrites each chunk with its checksum as a step of the upgrade, and leaves a chunk that already carries one as it is.
 - That upgrade fails on a chunk whose records do not decode instead of sealing damage under a valid checksum.
+- Opening a database written before chunk columns rewrites each chunk in columns as a step of the upgrade, and that step leaves a chunk already in columns as it is.
 - `Database::check` checks every relationship chunk against its checksum, except while the database waits for its writer's upgrade.
 - Adjacency is stored per row group, side, run of 16 slots, and relationship type, as one segment in compressed sparse row form, so reading one node's adjacency of one type usually meets one part.
 - An adjacency key holds the side, the group, the segment, the relationship type, and the entry, so the segments of one run of slots of every type are one run of keys.

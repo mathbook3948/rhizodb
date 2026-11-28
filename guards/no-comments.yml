@@ -2,7 +2,7 @@ id: no-comments
 language: rust
 severity: error
 message: Comments are not allowed. Make the code say it through names, types, or structure.
-note: Doc comments on public API are allowed, and so is a safety comment above an unsafe block. A comment about an external constraint needs `// ast-grep-ignore` on the line above it.
+note: Doc comments on items with a visibility modifier are allowed, and so is a safety comment above an unsafe block. A comment about an external constraint needs `// ast-grep-ignore` on the line above it.
 files:
   - crates/*/src/**/*.rs
 rule:
@@ -25,7 +25,7 @@ rule:
 id: doc-comments-on-public-api-only
 language: rust
 severity: error
-message: Doc comments are for public API contracts only.
+message: Doc comments state the contract of an item that has a visibility modifier, such as `pub` or `pub(crate)`, and nothing else.
 files:
   - crates/*/src/**/*.rs
 rule:
@@ -67,7 +67,7 @@ rule:
   not:
     any:
       - regex: ^#!
-      - regex: ast-grep-ignore
+      - regex: ^# ast-grep-ignore
 ---
 id: no-comments-yaml
 language: yaml
@@ -81,4 +81,4 @@ ignores:
 rule:
   kind: comment
   not:
-    regex: ast-grep-ignore
+    regex: ^# ast-grep-ignore

@@ -81,6 +81,66 @@ fn a_stream_whose_range_count_or_history_length_is_forged_fails_to_install() {
     }
 }
 
+fn names_a_checksum(image: &[u8]) -> bool {
+    let named = |error: String| error.contains("checksum");
+    match open_image(image) {
+        Err(error) => named(error),
+        Ok(engine) => {
+            everything(&engine).is_err_and(|error| named(error.to_string()))
+                || engine.check().is_err_and(|error| named(error.to_string()))
+        }
+    }
+}
+
+#[test]
+fn the_pages_found_by_their_checksums_are_every_page_the_file_reads() {
+    let (image, expected) = image().unwrap();
+    let (seed, pages) = pages().unwrap();
+    let mut kinds = Vec::new();
+    let mut only_pages = vec![0; image.len()];
+    only_pages[..HEADER_SLOTS as usize * BLOCK]
+        .copy_from_slice(&image[..HEADER_SLOTS as usize * BLOCK]);
+    for (block, count) in pages {
+        let page = &image[block * BLOCK..(block + count) * BLOCK];
+        let at = BlockRef::from_raw(u64::from_le_bytes(page[12..20].try_into().unwrap())).unwrap();
+        kinds.push(PageHeader::open(*seed, page, at).unwrap().kind);
+        only_pages[block * BLOCK..(block + count) * BLOCK].copy_from_slice(page);
+    }
+    for kind in [
+        PageKind::Leaf,
+        PageKind::Branch,
+        PageKind::ValueRun,
+        PageKind::Catalog,
+    ] {
+        assert!(kinds.contains(&kind), "no {kind:?} page");
+    }
+    let engine = open_image(&only_pages).unwrap();
+    assert_eq!(&everything(&engine).unwrap(), expected);
+    engine.check().unwrap();
+}
+
+#[test]
+fn a_damaged_page_passes_its_checksum_once_resealed() {
+    let (image, _) = image().unwrap();
+    let (seed, pages) = pages().unwrap();
+    for (block, count) in pages {
+        let mut damaged = image.clone();
+        let page = &mut damaged[block * BLOCK..(block + count) * BLOCK];
+        *page.last_mut().unwrap() ^= 1;
+        assert!(names_a_checksum(&damaged), "page at block {block}");
+        reseal_for_fuzzing(*seed, &mut damaged[block * BLOCK..(block + count) * BLOCK]);
+        assert!(
+            !names_a_checksum(&damaged),
+            "resealed page at block {block}"
+        );
+    }
+}
+
+#[test]
+fn the_undamaged_file_reads_back_once_resealed() {
+    assert_eq!(open_resealed_file(&[]), Ok(()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(256)))]
 
@@ -88,6 +148,12 @@ proptest! {
     #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_file_never_panics_or_reads_differently(damage in vec(any::<u8>(), 4..64)) {
         prop_assert_eq!(open_damaged_file(&damage), Ok(()));
+    }
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn a_damaged_file_under_valid_checksums_never_panics(damage in vec(any::<u8>(), 4..64)) {
+        prop_assert_eq!(open_resealed_file(&damage), Ok(()));
     }
 
     #[test]

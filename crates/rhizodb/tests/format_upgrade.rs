@@ -269,6 +269,24 @@ fn a_database_of_format_fourteen_takes_relationship_writes_after_the_upgrade() {
     assert_takes_relationship_writes_after_the_upgrade(FORMAT_FOURTEEN);
 }
 
+const FORMAT_FIFTEEN: &str = "tests/fixtures/format-15.db";
+
+#[test]
+fn a_database_of_format_fifteen_answers_and_passes_the_check_after_the_upgrade() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = copy_of_engine_file(FORMAT_FIFTEEN, directory.path());
+    for _ in 0..2 {
+        let db = Database::open(&path).unwrap();
+        assert_relationship_fixture_answers(&db, "format-15.answers");
+        db.check().unwrap();
+    }
+}
+
+#[test]
+fn a_database_of_format_fifteen_takes_relationship_writes_after_the_upgrade() {
+    assert_takes_relationship_writes_after_the_upgrade(FORMAT_FIFTEEN);
+}
+
 fn assert_takes_relationship_writes_after_the_upgrade(fixture: &str) {
     let directory = tempfile::tempdir().unwrap();
     let path = copy_of_engine_file(fixture, directory.path());

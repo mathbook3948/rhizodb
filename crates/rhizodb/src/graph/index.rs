@@ -1487,7 +1487,7 @@ impl<T: WriteTransaction> GraphTx<T> {
                                 let (slot, record) = entry?;
                                 let id = relationships::relationship_at(chunk, slot).0;
                                 if id >= at
-                                    && RelationshipRecord::decode(record)?.rel_type == covered
+                                    && RelationshipRecord::decode(&record)?.rel_type == covered
                                 {
                                     ids.push(id);
                                 }
