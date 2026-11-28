@@ -26,9 +26,24 @@ pub(crate) const SLOTS: usize = 128;
 
 const SLOT_WORDS: usize = 2;
 const SLOT_BASE: usize = WORDS - SLOTS * SLOT_WORDS;
-const HEADER_BASE: usize = 16;
 const MAGIC: u64 = u64::from_le_bytes(*b"rhizoshm");
-const LAYOUT: u64 = 1;
+const LAYOUT: u64 = 2;
+
+const TAIL_WORDS: usize = 8;
+
+const HEADER: Record = Record {
+    version: Field::HeaderVersion,
+    base: 16,
+    len: BLOCK / 8,
+};
+
+const TAIL: Record = Record {
+    version: Field::TailVersion,
+    base: HEADER.end(),
+    len: TAIL_WORDS,
+};
+
+const _: () = assert!(TAIL.end() <= SLOT_BASE);
 
 // ast-grep-ignore
 // Far past any growth of the mapped words, since Windows refuses writes to bytes a lock covers.
@@ -45,8 +60,9 @@ enum Field {
     FileVolume,
     FileLow,
     FileHigh,
-    HeaderSequence,
+    HeaderVersion,
     LogEnd,
+    TailVersion,
 }
 
 impl Field {
@@ -77,6 +93,12 @@ pub(crate) enum SideLock {
     Session,
     /// Held exclusively by the process that writes the session's log and checkpoints.
     Write,
+    /// Held exclusively by a process while it writes a checkpoint or any other header.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 4 takes it around each header")
+    )]
+    Checkpoint,
     /// Held exclusively by a process while its slot is in use.
     Slot(usize),
 }
@@ -89,6 +111,7 @@ impl SideLock {
                 SideLock::Gate => 0,
                 SideLock::Session => 1,
                 SideLock::Write => 2,
+                SideLock::Checkpoint => 3,
                 SideLock::Slot(slot) => 64 + slot as u64,
             }
     }
@@ -395,28 +418,114 @@ impl Elected {
 }
 
 fn published_header(words: &dyn SideWords) -> Result<Option<Header>, EngineError> {
-    let sequence = words.word(Field::HeaderSequence.index());
+    let mut record = [0; BLOCK / 8];
+    if !HEADER.read(words, &mut record) {
+        return Ok(None);
+    }
     let mut block = vec![0; BLOCK];
-    loop {
-        let before = sequence.load(Ordering::Acquire);
-        if before % 2 == 1 {
-            std::hint::spin_loop();
-            continue;
+    for (bytes, word) in block.as_chunks_mut::<8>().0.iter_mut().zip(record) {
+        *bytes = word.to_le_bytes();
+    }
+    Header::decode(&block).map(Some)
+}
+
+/// The end of the session's log, as the process that appended its last record left it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "phase 4 hands the tail between writers")
+)]
+pub(crate) struct Tail {
+    /// The segment that holds the last record.
+    pub(crate) segment: u64,
+    /// The block of that segment after the last record.
+    pub(crate) end_block: u64,
+    /// The LSN the next record takes.
+    pub(crate) next_lsn: u64,
+    /// The chain hash after the last record.
+    pub(crate) chain: u64,
+    /// The hybrid logical clock of the last record.
+    pub(crate) hlc: u64,
+}
+
+impl Tail {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 4 hands the tail between writers")
+    )]
+    fn words(self) -> [u64; TAIL_WORDS] {
+        [
+            self.segment,
+            self.end_block,
+            self.next_lsn,
+            self.chain,
+            self.hlc,
+            0,
+            0,
+            0,
+        ]
+    }
+}
+
+// ast-grep-ignore
+// Two copies, each behind its own sequence word, so a writer that dies mid-write leaves the other whole.
+#[derive(Clone, Copy, Debug)]
+struct Record {
+    version: Field,
+    base: usize,
+    len: usize,
+}
+
+impl Record {
+    const fn end(self) -> usize {
+        self.base + 2 * (self.len + 1)
+    }
+
+    fn copy(self, version: u64) -> usize {
+        self.base + (version % 2) as usize * (self.len + 1)
+    }
+
+    fn write(self, words: &dyn SideWords, data: &[u64]) {
+        let version = words.word(self.version.index());
+        let next = version.load(Ordering::Acquire) + 1;
+        let at = self.copy(next);
+        let sequence = words.word(at);
+        let was = sequence.load(Ordering::Relaxed);
+        let open = if was.is_multiple_of(2) {
+            was + 1
+        } else {
+            was + 2
+        };
+        sequence.store(open, Ordering::Relaxed);
+        fence(Ordering::Release);
+        for (index, value) in data.iter().take(self.len).enumerate() {
+            words.word(at + 1 + index).store(*value, Ordering::Relaxed);
         }
-        for (index, bytes) in block.as_chunks_mut::<8>().0.iter_mut().enumerate() {
-            *bytes = words
-                .word(HEADER_BASE + index)
-                .load(Ordering::Relaxed)
-                .to_le_bytes();
+        sequence.store(open + 1, Ordering::Release);
+        version.store(next, Ordering::Release);
+    }
+
+    fn read(self, words: &dyn SideWords, out: &mut [u64]) -> bool {
+        loop {
+            let version = words.word(self.version.index()).load(Ordering::Acquire);
+            if version == 0 {
+                return false;
+            }
+            let at = self.copy(version);
+            let sequence = words.word(at);
+            let before = sequence.load(Ordering::Acquire);
+            if before % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            for (index, value) in out.iter_mut().take(self.len).enumerate() {
+                *value = words.word(at + 1 + index).load(Ordering::Relaxed);
+            }
+            fence(Ordering::Acquire);
+            if sequence.load(Ordering::Relaxed) == before {
+                return true;
+            }
         }
-        fence(Ordering::Acquire);
-        if sequence.load(Ordering::Relaxed) != before {
-            continue;
-        }
-        if before == 0 {
-            return Ok(None);
-        }
-        return Header::decode(&block).map(Some);
     }
 }
 
@@ -493,15 +602,13 @@ impl Session {
     /// that store before every later load of a slot.
     pub(crate) fn publish_header(&self, header: &Header) {
         let block = header.encode();
-        let sequence = self.words.word(Field::HeaderSequence.index());
-        let before = sequence.fetch_add(1, Ordering::AcqRel);
-        fence(Ordering::Release);
-        for (index, bytes) in block.as_chunks::<8>().0.iter().enumerate() {
-            self.words
-                .word(HEADER_BASE + index)
-                .store(u64::from_le_bytes(*bytes), Ordering::Relaxed);
-        }
-        sequence.store(before + 2, Ordering::Release);
+        let record: Vec<u64> = block
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes))
+            .collect();
+        HEADER.write(&*self.words, &record);
         self.published.store(header.generation, Ordering::SeqCst);
         fence(Ordering::SeqCst);
     }
@@ -521,6 +628,31 @@ impl Session {
         self.words
             .word(Field::LogEnd.index())
             .store(lsn, Ordering::Release);
+    }
+
+    /// Publishes `tail` as the end of the session's log, which is durable up to it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 4 hands the tail between writers")
+    )]
+    pub(crate) fn publish_tail(&self, tail: Tail) {
+        TAIL.write(&*self.words, &tail.words());
+    }
+
+    /// The end of the session's log that its last writer published, or `None` before any.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 4 hands the tail between writers")
+    )]
+    pub(crate) fn published_tail(&self) -> Option<Tail> {
+        let mut words = [0; TAIL_WORDS];
+        TAIL.read(&*self.words, &mut words).then_some(Tail {
+            segment: words[0],
+            end_block: words[1],
+            next_lsn: words[2],
+            chain: words[3],
+            hlc: words[4],
+        })
     }
 
     /// The last durable commit of the session's log.

@@ -935,3 +935,167 @@ fn a_reader_reports_a_torn_log_segment_it_needs_as_corrupt_at_once() {
         "the reader retried a torn segment it needs"
     );
 }
+
+fn first_session(fs: &SimFs) -> (Session, <SimFs as FileSystem>::File) {
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let Joined::Session(elected) = join(fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let header = crate::engine::store::read_header(&file).unwrap().0;
+    let identity = Identity {
+        build: 0,
+        database_id: header.database_id,
+        file: file.identity().unwrap(),
+    };
+    let session = elected.finish(&file, identity, header.generation).unwrap();
+    session.publish_header(&header);
+    session.ready().unwrap();
+    (session, file)
+}
+
+#[test]
+fn a_session_of_another_side_file_layout_refuses_an_open_that_would_join_it() {
+    for layout in [LAYOUT - 1, LAYOUT + 1] {
+        let fs = written(1);
+        let (session, _file) = first_session(&fs);
+        session
+            .words
+            .word(Field::Layout.index())
+            .store(layout, Ordering::SeqCst);
+        let error = reader(&fs, 0).unwrap_err();
+        assert_eq!(
+            kind(error),
+            ErrorKind::DatabaseAlreadyOpen,
+            "layout {layout}"
+        );
+        assert_eq!(
+            session
+                .words
+                .word(Field::Layout.index())
+                .load(Ordering::SeqCst),
+            layout
+        );
+    }
+}
+
+#[test]
+fn a_writer_that_dies_while_it_publishes_the_tail_leaves_the_last_one_for_every_reader() {
+    let fs = written(1);
+    let (session, file) = first_session(&fs);
+    assert_eq!(session.published_tail(), None);
+    let first = Tail {
+        segment: 3,
+        end_block: 17,
+        next_lsn: 40,
+        chain: 0xfeed,
+        hlc: 99,
+    };
+    session.publish_tail(first);
+    assert_eq!(session.published_tail(), Some(first));
+    let version = session
+        .words
+        .word(Field::TailVersion.index())
+        .load(Ordering::SeqCst);
+    let torn = TAIL.copy(version + 1);
+    session.words.word(torn).store(1, Ordering::SeqCst);
+    session.words.word(torn + 1).store(4, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let mut read = [0; TAIL_WORDS];
+    let read = TAIL.read(&*session.words, &mut read).then_some(read[2]);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a reader waited on the copy a dead writer left half written"
+    );
+    assert_eq!(read, Some(first.next_lsn));
+    let next = Tail {
+        segment: 4,
+        end_block: 2,
+        next_lsn: 41,
+        chain: 0xbeef,
+        hlc: 100,
+    };
+    session.publish_tail(next);
+    assert_eq!(session.published_tail(), Some(next));
+    let header = crate::engine::store::read_header(&file).unwrap().0;
+    assert_eq!(session.published_header().unwrap(), Some(header));
+}
+
+#[test]
+fn readers_never_see_a_tail_or_header_that_mixes_two_publishes() {
+    let fs = written(1);
+    let (session, _file) = first_session(&fs);
+    let session = Arc::new(session);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let session = Arc::clone(&session);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                let mut seen = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    if let Some(tail) = session.published_tail() {
+                        assert!(
+                            [tail.end_block, tail.next_lsn, tail.chain, tail.hlc]
+                                .iter()
+                                .all(|word| *word == tail.segment),
+                            "a torn tail: {tail:?}"
+                        );
+                        assert!(tail.segment >= seen, "the tail went back");
+                        seen = tail.segment;
+                    }
+                }
+            })
+        })
+        .collect();
+    for at in 1..20_000 {
+        session.publish_tail(Tail {
+            segment: at,
+            end_block: at,
+            next_lsn: at,
+            chain: at,
+            hlc: at,
+        });
+    }
+    stop.store(true, Ordering::SeqCst);
+    for reader in readers {
+        reader.join().unwrap();
+    }
+}
+
+#[test]
+fn the_checkpoint_lock_is_a_byte_of_its_own_that_one_holder_at_a_time_takes() {
+    let locks = [
+        SideLock::Gate,
+        SideLock::Session,
+        SideLock::Write,
+        SideLock::Checkpoint,
+        SideLock::Slot(0),
+    ];
+    let offsets: std::collections::BTreeSet<u64> = locks.iter().map(|lock| lock.offset()).collect();
+    assert_eq!(offsets.len(), locks.len());
+    let fs = written(1);
+    let (session, _file) = first_session(&fs);
+    let other = reader(&fs, 0).unwrap();
+    let theirs = fs.open_side(&side_name(NAME)).unwrap();
+    assert!(
+        session
+            .side
+            .try_lock(SideLock::Checkpoint, Lock::Exclusive)
+            .unwrap()
+    );
+    assert!(
+        !theirs
+            .try_lock(SideLock::Checkpoint, Lock::Exclusive)
+            .unwrap()
+    );
+    session.side.unlock(SideLock::Checkpoint).unwrap();
+    assert!(
+        theirs
+            .try_lock(SideLock::Checkpoint, Lock::Exclusive)
+            .unwrap()
+    );
+    theirs.unlock(SideLock::Checkpoint).unwrap();
+    drop(other);
+}
