@@ -40,7 +40,14 @@ const HOP_1_SINCE: Texts =
 const SUM_SINCE: Texts =
     Texts::graph("MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(*), sum(k.since)")
         .sql("SELECT count(*), sum(since) FROM knows")
-        .datalog("?[count(src), sum(since)] := *knows{src, dst, since}");
+        .datalog(
+            "totals[count(src), sum(since)] := *knows{src, dst, since}
+             ?[edges, total] := totals[edges, sum], total = to_int(sum)",
+        )
+        .overriding(&[(
+            EngineKind::Falkordb,
+            "MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(*), toInteger(sum(k.since))",
+        )]);
 const HOP_2: Texts = Texts::graph(
     "MATCH (a:Person {id: $id})-[:KNOWS]->(:Person)-[:KNOWS]->(c:Person) RETURN count(DISTINCT c)",
 )

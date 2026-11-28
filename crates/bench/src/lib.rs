@@ -17,6 +17,7 @@ pub mod data;
 #[cfg(feature = "duckdb")]
 pub mod duckdb;
 pub mod engine;
+pub mod engines_table;
 pub mod falkor;
 pub mod fingerprint;
 pub mod ladybug;

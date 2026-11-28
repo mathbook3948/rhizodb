@@ -108,6 +108,14 @@ depends = ["lbug-extensions"]
 dir = "crates/bench"
 run = "cargo run --release --features duckdb,cozo --"
 
+[tasks.bench-servers]
+description = "Start or stop Neo4j, Memgraph, and FalkorDB from pinned images in Docker for the benchmark, for example: eval \"$(mise run bench-servers start)\""
+run = "bash crates/bench/scripts/servers.sh"
+
+[tasks.bench-engines]
+description = "Measure every embedded engine, and each server whose BENCH_*_URL is set, at medium scale with 5 repetitions and rewrite the table in crates/bench/ENGINES.md, or set BENCH_ENGINES_REPORT to a saved JSON report to only rewrite the table"
+depends = ["lbug-extensions"]
+run = "bash crates/bench/scripts/engines-table.sh"
 [tasks.size-report]
 description = "Load the benchmark graph into RhizoDB at a scale (default medium) and report where the bytes of its file go, by table, page fill, and property key, for example: mise run size-report small"
 run = "bash crates/bench/scripts/size-report.sh"
