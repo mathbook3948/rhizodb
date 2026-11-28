@@ -73,7 +73,7 @@ Every run checks that both engines return the same rows, and bulk load uses each
 The suite and every query are in [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench), and `mise run bench-readme` measures again and rewrites this table.
 
 <!-- bench-table:start -->
-Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.
+Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row is marked similar when its ranges of runs overlap, or, for the file size, when the sizes differ by less than 5 percent.
 
 | Workload | RhizoDB | LadybugDB | Faster |
 | --- | ---: | ---: | --- |

@@ -73,7 +73,7 @@ C++로 만든 내장 그래프 데이터베이스 [LadybugDB](https://ladybugdb.
 벤치마크 코드와 모든 질의는 [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench)에 있습니다. `mise run bench-readme`를 실행하면 다시 재서 이 표를 새로 씁니다.
 
 <!-- bench-table:start -->
-2026-11-28에 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880에서 쟀습니다. 규모는 `medium`(사람 20000명, `KNOWS` 관계 200000개, 도시 100개)이고, 작업마다 5번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.
+2026-11-28에 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880에서 쟀습니다. 규모는 `medium`(사람 20000명, `KNOWS` 관계 200000개, 도시 100개)이고, 작업마다 5번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치거나, 파일 크기는 차이가 5% 미만이면 '유사'로 표시합니다.
 
 | 작업 | RhizoDB | LadybugDB | 더 빠른 쪽 |
 | --- | ---: | ---: | --- |
