@@ -253,19 +253,19 @@ fn a_writer_keeps_writing_and_reusing_space_while_readers_come_and_die() {
 }
 
 #[test]
-fn opens_through_another_link_are_refused_while_a_writer_s_session_holds_the_file() {
+fn opens_by_a_new_name_are_refused_while_a_writer_s_session_holds_the_file_by_its_old_one() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.rhizodb");
-    let link = directory.path().join("linked.rhizodb");
+    let renamed = directory.path().join("renamed.rhizodb");
     drop(writer_options().open(&path).unwrap());
-    std::fs::hard_link(&path, &link).unwrap();
     let (mut writer, _) = Peer::spawn(&path, "write");
     writer.wait_for_commits(3);
+    std::fs::rename(&path, &renamed).unwrap();
     for (what, options) in [
         ("a writer", writer_options()),
         ("a reader", reader_options()),
     ] {
-        let error = options.open(&link).unwrap_err();
+        let error = options.open(&renamed).unwrap_err();
         assert_eq!(
             error.kind(),
             ErrorKind::DatabaseAlreadyOpen,
@@ -273,6 +273,7 @@ fn opens_through_another_link_are_refused_while_a_writer_s_session_holds_the_fil
         );
     }
     let committed = writer.kill();
+    std::fs::rename(&renamed, &path).unwrap();
     let db = writer_options().open(&path).unwrap();
     assert!(rounds(&db) >= committed.len() as i64);
 }

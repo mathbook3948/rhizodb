@@ -344,12 +344,13 @@ pub(crate) fn open_path_shared(
     path: &Path,
     options: EngineOptions,
 ) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    if !directory.join(name).exists() {
-        Engine::open(Arc::new(AnyFs::Os(OsFs::new(&directory))), name, options)?.close()?;
+    let resolved = Resolved::of(path)?;
+    let real = &resolved.real;
+    if !real.directory.join(&real.name).exists() || !resolved.stray_segments()?.is_empty() {
+        open_path(path, options)?.close()?;
     }
-    let fs = OsFs::shared(directory, name)?;
-    Engine::open_shared(Arc::new(AnyFs::Os(fs)), name, options)
+    let fs = OsFs::shared(&real.directory, &real.name)?;
+    Engine::open_shared(Arc::new(AnyFs::Os(fs)), &real.name, options)
 }
 
 /// Opens the existing database file at `path` with the engine read-only, as
