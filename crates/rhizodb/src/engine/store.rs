@@ -507,11 +507,16 @@ enum Log {
 
 const JOIN_TRIES: usize = 1000;
 
-fn identity(options: &EngineOptions, header: &Header) -> SessionIdentity {
-    SessionIdentity {
+fn identity(
+    options: &EngineOptions,
+    header: &Header,
+    file: &impl BlockFile,
+) -> Result<SessionIdentity, EngineError> {
+    Ok(SessionIdentity {
         build: options.build,
         database_id: header.database_id,
-    }
+        file: file.identity()?,
+    })
 }
 
 // ast-grep-ignore
@@ -916,9 +921,9 @@ impl<F: FileSystem + 'static> Engine<F> {
     ) -> Result<Self, EngineError> {
         let file = fs.open(name, block_size()?)?;
         let elected = match session::join(&*fs, name, &file)? {
-            Joined::Alone => {
+            Joined::Alone { recheck } => {
                 file.lock_shared()?;
-                if fs.names()?.contains(&side_name(name)) {
+                if recheck && fs.names()?.contains(&side_name(name)) {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "a multi-process session may hold the database file, since its -shm \
@@ -940,14 +945,22 @@ impl<F: FileSystem + 'static> Engine<F> {
         };
         if elected.is_first() {
             let (header, _) = read_header(&file)?;
-            let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+            let session = elected.finish(
+                &file,
+                identity(&options, &header, &file)?,
+                header.generation,
+            )?;
             let loaded = load(file, &options)?;
             return Self::start(fs, name, loaded, options, true, Some(session), Log::Own);
         }
         let header = elected
             .published_header()?
             .ok_or_else(|| EngineError::corrupt("a multi-process session published no header"))?;
-        let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
         let pages = Arc::new(Pages::new(
             file,
             page_seed(header.database_id),
@@ -1014,7 +1027,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         elected.take_write_lock()?;
         file.sync()?;
         let (header, _) = read_header(&file)?;
-        let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
         let loaded = load(file, &options)?;
         Self::start(fs, name, loaded, options, false, Some(session), Log::Own)
     }

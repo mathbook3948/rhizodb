@@ -157,6 +157,7 @@ fn an_open_that_elects_itself_holds_back_every_other_until_it_finishes() {
             .unwrap()
             .0
             .database_id,
+        file: file.identity().unwrap(),
     };
     let session = elected.finish(&file, identity, 1).unwrap();
     assert_eq!(session.slot(), 0);
@@ -201,6 +202,7 @@ fn a_slot_is_dead_once_its_process_is_gone_and_never_while_it_lives() {
             .unwrap()
             .0
             .database_id,
+        file: file.identity().unwrap(),
     };
     let watcher = elected.finish(&file, identity, 4).unwrap();
     watcher.publish_header(&crate::engine::store::read_header(&file).unwrap().0);
@@ -345,4 +347,82 @@ fn readers_that_join_while_a_writer_checkpoints_each_read_one_whole_round() {
     writing.join().unwrap();
     assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
     assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 32), 119);
+}
+
+#[test]
+fn a_read_only_open_where_side_files_cannot_be_shared_opens_alone_and_leaves_none() {
+    let fs = written(2);
+    fs.refuse_side_sharing();
+    let first = reader(&fs, 0).unwrap();
+    assert_eq!(first.session_slot(), None);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "left a side file"
+    );
+    let second = reader(&fs, 0).unwrap();
+    assert_eq!((items(&first), items(&second)), (2, 2));
+}
+
+#[test]
+fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
+    let fs = written(1);
+    fs.create(
+        &side_name(NAME),
+        crate::engine::store::block_size().unwrap(),
+    )
+    .unwrap();
+    fs.refuse_side_sharing();
+    assert_eq!(items(&reader(&fs, 0).unwrap()), 1);
+}
+
+#[test]
+fn the_last_process_of_a_session_removes_the_side_file() {
+    let fs = written(1);
+    let first = reader(&fs, 0).unwrap();
+    let second = reader(&fs, 0).unwrap();
+    drop(first);
+    assert!(fs.names().unwrap().contains(&side_name(NAME)));
+    drop(second);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file stayed"
+    );
+    assert_eq!(reader(&fs, 0).unwrap().session_slot(), Some(0));
+}
+
+#[test]
+fn an_open_holding_a_side_file_the_last_process_removed_opens_the_new_one() {
+    let fs = written(1);
+    let early = fs.open_side(&side_name(NAME));
+    assert!(early.is_err(), "no side file before any open");
+    let first = reader(&fs, 0).unwrap();
+    let stale = fs.open_side(&side_name(NAME)).unwrap();
+    drop(first);
+    assert!(!stale.is_named().unwrap());
+    let next = reader(&fs, 0).unwrap();
+    let held = fs.open_side(&side_name(NAME)).unwrap();
+    assert!(held.is_named().unwrap());
+    assert_eq!(next.session_slot(), Some(0));
+}
+
+#[test]
+fn a_process_whose_database_file_differs_fails_to_join() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let _first = reader(&fs, 0).unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: (0, u128::MAX),
+    };
+    let error = elected.finish(&file, identity, 1).unwrap_err();
+    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
 }
