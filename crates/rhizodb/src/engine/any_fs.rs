@@ -107,6 +107,15 @@ impl FileSystem for AnyFs {
         }
     }
 
+    fn remove_side(&self, name: &str) -> io::Result<()> {
+        match self {
+            AnyFs::Os(fs) => fs.remove_side(name),
+            AnyFs::Memory(fs) => fs.remove_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.remove_side(name),
+        }
+    }
+
     fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
         match self {
             AnyFs::Os(fs) => fs.create_side(name),

@@ -202,12 +202,16 @@ fn open_or_create<F: FileSystem>(
         match fs.open_side(name) {
             Ok(side) => return Ok(Ok(side)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::Unsupported | io::ErrorKind::ReadOnlyFilesystem
-                ) =>
-            {
+            Err(error) if error.kind() == io::ErrorKind::ReadOnlyFilesystem => {
+                return alone_unless_held(file);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                if fs.names()?.iter().any(|existing| existing == name) {
+                    return Err(already_open(
+                        "a -shm file lies beside the database file on a file system where this \
+                         process cannot share it, so a session elsewhere may hold the file",
+                    ));
+                }
                 return alone_unless_held(file);
             }
             Err(error) if being_removed(&error) => {
@@ -231,7 +235,10 @@ fn open_or_create<F: FileSystem>(
         }
         let created = fs.create_side(name);
         if matches!(&created, Err(error) if error.kind() == io::ErrorKind::Unsupported) {
-            let _ = fs.remove(name);
+            match fs.remove_side(name) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
         }
         file.unlock()?;
         match created {

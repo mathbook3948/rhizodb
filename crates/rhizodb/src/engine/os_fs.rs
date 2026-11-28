@@ -289,6 +289,10 @@ impl FileSystem for OsFs {
         fs::remove_file(self.directory.join(name))
     }
 
+    fn remove_side(&self, name: &str) -> io::Result<()> {
+        fs::remove_file(self.directory.join(name))
+    }
+
     fn names(&self) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.directory)? {

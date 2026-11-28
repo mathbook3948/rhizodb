@@ -223,7 +223,7 @@ fn a_read_only_open_where_side_files_cannot_be_shared_opens_alone_and_leaves_non
 }
 
 #[test]
-fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
+fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_refuses_the_file() {
     let fs = written(1);
     fs.create(
         &side_name(NAME),
@@ -231,7 +231,10 @@ fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
     )
     .unwrap();
     fs.refuse_side_sharing();
-    assert_eq!(items(&reader(&fs, 0).unwrap()), 1);
+    assert_eq!(
+        kind(reader(&fs, 0).unwrap_err()),
+        ErrorKind::DatabaseAlreadyOpen
+    );
 }
 
 #[test]
