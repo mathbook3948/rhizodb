@@ -237,6 +237,20 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
     Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
 }
 
+/// Opens the database file at `path` as the process of its multi-process session that writes,
+/// as [`Engine::open_shared`] does.
+pub(crate) fn open_path_shared(
+    path: &Path,
+    options: EngineOptions,
+) -> Result<Engine<AnyFs>, EngineError> {
+    let (directory, name) = split(path)?;
+    if !directory.join(name).exists() {
+        Engine::open(Arc::new(AnyFs::Os(OsFs::new(&directory))), name, options)?.close()?;
+    }
+    let fs = OsFs::shared(directory, name)?;
+    Engine::open_shared(Arc::new(AnyFs::Os(fs)), name, options)
+}
+
 /// Opens the existing database file at `path` with the engine read-only, as
 /// [`Engine::open_read_only`] does.
 pub(crate) fn open_path_read_only(

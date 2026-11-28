@@ -26,7 +26,8 @@ use rhizodb_shm::Mapping;
 #[derive(Debug)]
 pub(crate) struct OsFs {
     directory: PathBuf,
-    read_only: Option<Claim>,
+    _claim: Option<Claim>,
+    read_only: bool,
 }
 
 static OPEN_FILES: Mutex<BTreeSet<FileId>> = Mutex::new(BTreeSet::new());
@@ -63,7 +64,8 @@ impl OsFs {
     pub(crate) fn new(directory: impl Into<PathBuf>) -> Self {
         Self {
             directory: directory.into(),
-            read_only: None,
+            _claim: None,
+            read_only: false,
         }
     }
 
@@ -75,12 +77,25 @@ impl OsFs {
         let claim = Claim::take(directory.join(name))?;
         Ok(Self {
             directory,
-            read_only: Some(claim),
+            _claim: Some(claim),
+            read_only: true,
+        })
+    }
+
+    /// The files of `directory`, for the one open of the database file `name` that this
+    /// process may hold at a time, which takes part in a multi-process session.
+    pub(crate) fn shared(directory: impl Into<PathBuf>, name: &str) -> io::Result<Self> {
+        let directory = directory.into();
+        let claim = Claim::take(directory.join(name))?;
+        Ok(Self {
+            directory,
+            _claim: Some(claim),
+            read_only: false,
         })
     }
 
     fn writable(&self) -> io::Result<()> {
-        if self.read_only.is_some() {
+        if self.read_only {
             Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "the database is open read-only",
@@ -239,12 +254,12 @@ impl FileSystem for OsFs {
     fn open(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         let file = fs::OpenOptions::new()
             .read(true)
-            .write(self.read_only.is_none())
+            .write(!self.read_only)
             .open(self.directory.join(name))?;
         Ok(OsFile {
             file,
             size,
-            read_only: self.read_only.is_some(),
+            read_only: self.read_only,
         })
     }
 

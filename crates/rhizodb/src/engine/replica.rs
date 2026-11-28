@@ -37,6 +37,7 @@ use crate::engine::wal_format::Body;
 use crate::engine::wal_format::NotRecord;
 use crate::engine::wal_format::RECORD_HEADER;
 use crate::engine::wal_format::RECORD_LIMIT;
+use crate::engine::wal_format::Record;
 use crate::engine::wal_format::SegmentHeader;
 use crate::engine::wal_format::Step;
 use crate::engine::wal_format::chain_after;
@@ -319,6 +320,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             shared.poison_with(&error);
             return Err(error);
         }
+        shared.publish_header(&header);
         lock(&shared.identity).replication = header.replication;
         durable.header = header;
         Ok(())
@@ -862,4 +864,51 @@ fn read_segment(
         at += span;
     }
     Ok(lsn > upto)
+}
+
+/// Hands each record of the log that `header` starts, after its checkpoint and up to `until`,
+/// to `apply`, and returns whether it reached `until`. It returns `false` when a segment it
+/// needs is gone or belongs to a newer log, since a checkpoint another process wrote since
+/// released it, so the caller starts again from a newer header.
+pub(crate) fn replay_published<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    header: &Header,
+    until: u64,
+    apply: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+) -> Result<bool, EngineError> {
+    let mut next = header.checkpoint_lsn + 1;
+    if next > until {
+        return Ok(true);
+    }
+    let sequences = segment_files(fs, name)?;
+    for sequence in sequences
+        .into_iter()
+        .filter(|sequence| *sequence >= header.wal.first_segment)
+    {
+        let (file, segment) = match open_segment(fs, name, sequence, header.database_id) {
+            Ok(opened) => opened,
+            Err(error) if is_gone(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if segment.salt != header.wal.salt || segment.first_lsn > next {
+            return Ok(false);
+        }
+        let seed = segment.record_seed();
+        read_segment(&file, &segment, next - 1, until, &mut |bytes, _| {
+            let (record, _) = decode_record(seed, &bytes).map_err(|refused| match refused {
+                NotRecord::Refused(error) => error,
+                NotRecord::End | NotRecord::Invalid(_) => {
+                    EngineError::corrupt("a published log record does not decode")
+                }
+            })?;
+            next = record.lsn + 1;
+            apply(record)?;
+            Ok(false)
+        })?;
+        if next > until {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
