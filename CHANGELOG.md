@@ -6,7 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## 0.2.0
 
-Released on 2026-11-27.
+Released on 2026-11-28.
 
 Embedded replication, read-only opens from many processes, bounded memory for large queries and file upgrades, and checksummed relationship chunks. The file format changes, so read Upgrading from 0.1.x before upgrading.
 
