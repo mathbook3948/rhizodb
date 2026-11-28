@@ -270,3 +270,34 @@ fn a_failed_load_is_remembered_and_never_leaves_a_master_directory_to_reuse() {
             .exists()
     );
 }
+
+#[test]
+fn a_copy_of_a_directory_keeps_its_read_only_files() {
+    let root = std::env::temp_dir().join(format!("bench-copy-{}", std::process::id()));
+    let (from, to) = (root.join("from"), root.join("to"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(from.join("nested")).unwrap();
+    let file = from.join("nested").join("read-only");
+    fs::write(&file, b"kept").unwrap();
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&file, permissions).unwrap();
+
+    let copied = copy_directory(&from, &to);
+
+    let read = fs::read(to.join("nested").join("read-only"));
+    for path in [&file, &to.join("nested").join("read-only")] {
+        if let Ok(metadata) = fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            #[allow(
+                clippy::permissions_set_readonly_false,
+                reason = "the test removes its own files"
+            )]
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    copied.unwrap();
+    assert_eq!(read.unwrap(), b"kept");
+}

@@ -340,7 +340,8 @@ fn copy_directory(from: &Path, to: &Path) -> io::Result<()> {
         } else {
             fs::copy(entry.path(), &target)?;
             fs::OpenOptions::new()
-                .write(true)
+                .read(true)
+                .write(cfg!(windows))
                 .open(&target)?
                 .sync_all()?;
         }

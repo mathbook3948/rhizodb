@@ -2,7 +2,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export LBUG_VERSION="$(sed -n 's/^lbug = "=\(.*\)"/\1/p' "$here/Cargo.toml")"
+LBUG_VERSION="$(sed -n 's/^lbug = "=\(.*\)"/\1/p' "$here/Cargo.toml")"
+export LBUG_VERSION
 report="${BENCH_README_REPORT:-}"
 if [[ -z "$report" ]]; then
   report="$here/target/readme-bench.json"
