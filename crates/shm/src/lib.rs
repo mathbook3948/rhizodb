@@ -18,6 +18,7 @@ mod space;
 
 pub use lock::Lock;
 pub use lock::downgrade;
+pub use lock::held_elsewhere;
 pub use lock::lock;
 pub use lock::try_lock;
 pub use lock::unlock;

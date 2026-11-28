@@ -188,6 +188,20 @@ fn being_removed(error: &io::Error) -> bool {
 const OPEN_TRIES: usize = 200;
 
 // ast-grep-ignore
+// A read-only mount or a file system without sessions may still show a file a writer elsewhere changes.
+fn alone_unless_held(
+    file: &impl BlockFile,
+) -> Result<Result<Box<dyn SideFile>, Joined>, EngineError> {
+    if file.held_elsewhere()? {
+        return Err(already_open(
+            "another process writes the database file or shares it in a session, which this \
+             open cannot join from here",
+        ));
+    }
+    Ok(Err(Joined::Alone { recheck: false }))
+}
+
+// ast-grep-ignore
 // The creator holds the file exclusively, so a phase 1 reader keeps it out or sees the side file.
 fn open_or_create<F: FileSystem>(
     fs: &F,
@@ -204,7 +218,7 @@ fn open_or_create<F: FileSystem>(
                     io::ErrorKind::Unsupported | io::ErrorKind::ReadOnlyFilesystem
                 ) =>
             {
-                return Ok(Err(Joined::Alone { recheck: false }));
+                return alone_unless_held(file);
             }
             Err(error) if being_removed(&error) => {
                 thread::sleep(Duration::from_millis(5));
@@ -234,7 +248,7 @@ fn open_or_create<F: FileSystem>(
             Ok(side) => return Ok(Ok(side)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                return Ok(Err(Joined::Alone { recheck: false }));
+                return alone_unless_held(file);
             }
             Err(error)
                 if matches!(
@@ -275,10 +289,19 @@ pub(crate) fn join<F: FileSystem>(
         side.lock(SideLock::Session, Lock::Shared)?;
         let first = side.try_upgrade(SideLock::Session)?;
         if first {
-            if let Err(error) = file.lock() {
+            let held = file.lock().map_err(EngineError::from).and_then(|()| {
+                if cfg!(not(windows)) && file.held_elsewhere()? {
+                    file.unlock()?;
+                    return Err(already_open(
+                        "a session through another path to the database file holds it",
+                    ));
+                }
+                Ok(())
+            });
+            if let Err(error) = held {
                 side.unlock(SideLock::Session)?;
                 side.unlock(SideLock::Gate)?;
-                return Err(error.into());
+                return Err(error);
             }
         } else {
             side.unlock(SideLock::Gate)?;

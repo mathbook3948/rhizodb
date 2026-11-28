@@ -123,3 +123,17 @@ fn classic_locks_of_one_process_never_conflict() {
     assert!(rhizodb_shm::try_lock(&b, 100, 1, Lock::Exclusive).unwrap());
     rhizodb_shm::unlock(&a, 100, 1).unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn proc_is_not_local_and_dev_shm_is() {
+    let status = File::open("/proc/self/status").unwrap();
+    assert!(
+        !rhizodb_shm::is_local(&status).unwrap(),
+        "procfs counted as local"
+    );
+    if Path::new("/dev/shm").is_dir() {
+        let dir = tempfile::tempdir_in("/dev/shm").unwrap();
+        assert!(rhizodb_shm::is_local(&open(&dir.path().join("here"))).unwrap());
+    }
+}

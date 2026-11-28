@@ -204,6 +204,21 @@ pub(crate) trait Storage {
     fn catch_up(&self) -> Result<(), StorageError> {
         Ok(())
     }
+
+    /// A count that grows each time this store caught up with other processes, on any thread,
+    /// so a reader knows what it caches about the newest commit may be stale.
+    fn follow_epoch(&self) -> u64 {
+        0
+    }
+
+    /// Runs `run` while this store catches up with nothing, so the follow epoch `run` reads still
+    /// holds for a read transaction it begins.
+    fn with_follow_held<R>(&self, run: impl FnOnce() -> R) -> R
+    where
+        Self: Sized,
+    {
+        run()
+    }
 }
 
 const COPY_BATCH_BYTES: usize = 64 << 20;

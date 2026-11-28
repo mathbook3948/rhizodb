@@ -735,6 +735,16 @@ impl BlockFile for SimFile {
         Ok((0, self.inode as u128))
     }
 
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        let state = lock(&self.state);
+        let exclusive = matches!(state.locks.get(&self.inode), Some(Held::Exclusive(holder)) if *holder != self.handle);
+        let session = state
+            .sessions
+            .get(&self.inode)
+            .is_some_and(|holders| holders.iter().any(|holder| *holder != self.handle));
+        Ok(exclusive || session)
+    }
+
     fn unlock(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
         if matches!(state.locks.get(&self.inode), Some(Held::Exclusive(holder)) if *holder == self.handle)
