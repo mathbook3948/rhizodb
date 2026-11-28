@@ -174,30 +174,71 @@ impl BlockFile for AnyFile {
 
 const MEMORY_NAME: &str = "memory";
 
-fn split(path: &Path) -> Result<(PathBuf, &str), EngineError> {
+fn resolve(path: &Path) -> io::Result<(PathBuf, String)> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            EngineError::Io(io::Error::new(
+            io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "the database path {} names no file in UTF-8",
                     path.display()
                 ),
-            ))
+            )
         })?;
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
+    let real = match std::fs::canonicalize(path) {
+        Ok(real) => real,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let directory = match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            return Ok((std::fs::canonicalize(directory)?, name.to_owned()));
+        }
+        Err(error) => return Err(error),
     };
-    Ok((directory, name))
+    refuse_hard_links(&real)?;
+    let (Some(directory), Some(name)) = (real.parent(), real.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the database path {} resolves to {}, which names no file in UTF-8",
+                path.display(),
+                real.display()
+            ),
+        ));
+    };
+    Ok((directory.to_path_buf(), name.to_owned()))
+}
+
+#[cfg(unix)]
+fn refuse_hard_links(real: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let links = std::fs::metadata(real)?.nlink();
+    if links > 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the database file {} has {links} hard links, and the log segments beside it \
+                 are named after one of them, so copy the file instead of linking it",
+                real.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_hard_links(_real: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Opens the database file at `path` with the engine, creating it when there is none.
 pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), name, options)
+    let (directory, name) = resolve(path)?;
+    Engine::open(Arc::new(AnyFs::Os(OsFs::new(directory))), &name, options)
 }
 
 /// Opens the existing database file at `path` with the engine read-only, as
@@ -206,9 +247,9 @@ pub(crate) fn open_path_read_only(
     path: &Path,
     options: EngineOptions,
 ) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
-    let fs = OsFs::read_only(directory, name)?;
-    Engine::open_read_only(Arc::new(AnyFs::Os(fs)), name, options)
+    let (directory, name) = resolve(path)?;
+    let fs = OsFs::read_only(directory, &name)?;
+    Engine::open_read_only(Arc::new(AnyFs::Os(fs)), &name, options)
 }
 
 /// Installs the snapshot `input` streams as the database file at `path`, as
@@ -219,10 +260,10 @@ pub(crate) fn install_path(
     options: EngineOptions,
     force: bool,
 ) -> Result<Engine<AnyFs>, EngineError> {
-    let (directory, name) = split(path)?;
+    let (directory, name) = resolve(path)?;
     install(
         Arc::new(AnyFs::Os(OsFs::new(directory))),
-        name,
+        &name,
         input,
         options,
         force,
@@ -242,24 +283,14 @@ pub(crate) fn in_memory(options: EngineOptions) -> Result<Engine<AnyFs>, EngineE
 /// checkpoints its whole log into the file and removes the log's segments. Fails when a segment
 /// is left, since the file alone would then miss commits.
 pub(crate) fn write_copy(snapshot: &impl ReadTransaction, path: &Path) -> Result<(), StorageError> {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            StorageError::io(
-                ErrorKind::Storage,
-                format!("cannot back up to {}", path.display()),
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "the backup path names no file in UTF-8",
-                ),
-            )
-        })?;
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-        _ => Path::new(".").to_path_buf(),
-    };
-    write_copy_on(snapshot, Arc::new(AnyFs::Os(OsFs::new(directory))), name)
+    let (directory, name) = resolve(path).map_err(|error| {
+        StorageError::io(
+            ErrorKind::Storage,
+            format!("cannot back up to {}", path.display()),
+            error,
+        )
+    })?;
+    write_copy_on(snapshot, Arc::new(AnyFs::Os(OsFs::new(directory))), &name)
 }
 
 /// [`write_copy`] into the database file `name` on `fs`, removing the copy's log segments and

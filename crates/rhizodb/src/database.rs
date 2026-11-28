@@ -471,6 +471,11 @@ impl Database {
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
     /// reads the damage, since every page carries a checksum.
     ///
+    /// The log segments beside the file are named after it, found through `path` with every
+    /// symlink and `..` resolved, so every path to the file finds the same log. On Unix a file
+    /// with more than one hard link fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage),
+    /// since each of its names would find its own log.
+    ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     ///
     /// ```

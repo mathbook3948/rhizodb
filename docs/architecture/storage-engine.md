@@ -37,6 +37,8 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - In such a session only the last process to close checkpoints the whole log and removes its segments, as `multi-process.md` decides.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
+- An open resolves the database path once, following every symlink and `..`, and finds the segments and the staging file beside the resolved file under its name, so every path to one file finds the same log.
+- An open on Unix refuses a database file with more than one hard link, since each name would find its own segments.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.
 - A range delete of the storage trait is logged as one operation of its batch.
 - Every WAL record carries a log sequence number (LSN) and a checksum of its own.
