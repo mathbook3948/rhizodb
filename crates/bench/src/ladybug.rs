@@ -39,6 +39,10 @@ pub fn extension_dir() -> PathBuf {
     )
 }
 
+fn literal_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 fn threads() -> u64 {
     std::thread::available_parallelism().map_or(1, |cores| cores.get() as u64)
 }
@@ -122,7 +126,7 @@ impl LadybugInstance {
                 path.display()
             )));
         }
-        self.execute(&format!("LOAD EXTENSION '{}'", path.display()))
+        self.execute(&format!("LOAD EXTENSION '{}'", literal_path(&path)))
     }
 }
 
@@ -152,10 +156,9 @@ impl Instance for LadybugInstance {
             ("KNOWS", KNOWS_CSV),
             ("LIVES_IN", LIVES_IN_CSV),
         ] {
-            let path = scratch.join(file);
             self.execute(&format!(
                 "COPY {table} FROM '{}' (HEADER=true)",
-                path.display()
+                literal_path(&scratch.join(file))
             ))?;
         }
         Ok(())
