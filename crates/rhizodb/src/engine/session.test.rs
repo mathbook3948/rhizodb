@@ -1099,3 +1099,125 @@ fn the_checkpoint_lock_is_a_byte_of_its_own_that_one_holder_at_a_time_takes() {
     theirs.unlock(SideLock::Checkpoint).unwrap();
     drop(other);
 }
+
+// ast-grep-ignore
+// A build of another layout reads these words where this one wrote others, so any change here must bump LAYOUT too.
+#[test]
+fn the_side_file_layout_is_pinned_to_its_version() {
+    assert_eq!(LAYOUT, 2);
+    let fields = [
+        Field::Magic,
+        Field::Layout,
+        Field::Minor,
+        Field::Build,
+        Field::DatabaseLow,
+        Field::DatabaseHigh,
+        Field::FileVolume,
+        Field::FileLow,
+        Field::FileHigh,
+        Field::HeaderVersion,
+        Field::LogEnd,
+        Field::TailVersion,
+    ];
+    let indexes: Vec<usize> = fields.iter().map(|field| field.index()).collect();
+    assert_eq!(indexes, (0..12).collect::<Vec<_>>());
+    assert_eq!((HEADER.base, HEADER.len, HEADER.end()), (16, 512, 1042));
+    assert_eq!((TAIL.base, TAIL.len, TAIL.end()), (1042, 8, 1060));
+    assert_eq!((SLOT_BASE, SLOT_WORDS, WORDS), (3840, 2, 4096));
+    let offsets = [
+        SideLock::Gate,
+        SideLock::Session,
+        SideLock::Write,
+        SideLock::Checkpoint,
+        SideLock::Slot(0),
+        SideLock::Slot(SLOTS - 1),
+    ]
+    .map(|lock| lock.offset() - LOCKS_FROM);
+    assert_eq!(offsets, [0, 1, 2, 3, 64, 191]);
+    assert_eq!(LOCKS_FROM, 1 << 40);
+}
+
+// ast-grep-ignore
+// Words that run `writer` before each access a reader makes, so a test places a writer's steps between a reader's loads.
+struct Interleaved {
+    words: Vec<AtomicU64>,
+    writer: std::sync::Mutex<Box<dyn FnMut(usize, &[AtomicU64]) + Send>>,
+}
+
+impl fmt::Debug for Interleaved {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Interleaved")
+    }
+}
+
+impl SideWords for Interleaved {
+    fn word(&self, index: usize) -> &AtomicU64 {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writer(index, &self.words);
+        &self.words[index]
+    }
+}
+
+fn interleaved(writer: impl FnMut(usize, &[AtomicU64]) + Send + 'static) -> Interleaved {
+    let words = (0..WORDS).map(|_| AtomicU64::new(0)).collect();
+    Interleaved {
+        words,
+        writer: std::sync::Mutex::new(Box::new(writer)),
+    }
+}
+
+fn publish(words: &[AtomicU64], value: u64) {
+    let version = words[Field::TailVersion.index()].load(Ordering::SeqCst) + 1;
+    let at = TAIL.copy(version);
+    let sequence = words[at].load(Ordering::SeqCst);
+    words[at].store(sequence + 2, Ordering::SeqCst);
+    for word in &words[at + 1..=at + TAIL_WORDS] {
+        word.store(value, Ordering::SeqCst);
+    }
+    words[Field::TailVersion.index()].store(version, Ordering::SeqCst);
+}
+
+#[test]
+fn a_reader_retries_a_copy_that_a_writer_rewrote_while_it_read_it() {
+    let mut lapped = false;
+    let words = interleaved(move |index, words| {
+        let version = words[Field::TailVersion.index()].load(Ordering::SeqCst);
+        let at = TAIL.copy(version);
+        if version > 0 && !lapped && index == at + 4 {
+            lapped = true;
+            publish(words, 8);
+            publish(words, 9);
+        }
+    });
+    publish(&words.words, 1);
+    let mut read = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut read));
+    assert_eq!(read, [9; TAIL_WORDS]);
+}
+
+#[test]
+fn a_reader_waits_out_a_copy_whose_writer_is_still_writing_it() {
+    let mut seen_open = 0;
+    let words = interleaved(move |index, words| {
+        let at = TAIL.copy(words[Field::TailVersion.index()].load(Ordering::SeqCst));
+        if index == at && words[at].load(Ordering::SeqCst) % 2 == 1 {
+            seen_open += 1;
+            if seen_open == 3 {
+                for word in &words[at + 1..=at + TAIL_WORDS] {
+                    word.store(9, Ordering::SeqCst);
+                }
+                words[at].fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    publish(&words.words, 1);
+    let at = TAIL.copy(1);
+    words.words[at].fetch_add(1, Ordering::SeqCst);
+    words.words[at + 1].store(5, Ordering::SeqCst);
+    let mut read = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut read));
+    assert_eq!(read, [9; TAIL_WORDS]);
+}
