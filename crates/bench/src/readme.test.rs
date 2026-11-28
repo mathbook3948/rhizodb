@@ -136,7 +136,7 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.starts_with("2026-11-25, 4 CPUs, Linux에서 측정했습니다."),
+        table.starts_with("2026-11-25에 4 CPUs, Linux 환경에서 측정했습니다."),
         "{table}"
     );
 }

@@ -244,7 +244,7 @@ pub fn render_in(
             "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
         ),
         Language::Korean => format!(
-            "{date}, {machine}에서 측정했습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고 작업마다 {reps}번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 반복 측정 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
+            "{date}에 {machine} 환경에서 측정했습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고 작업마다 {reps}번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치면 '유사'로 표시합니다.\n\n"
         ),
     };
     text.push_str(match language {
