@@ -843,3 +843,29 @@ fn a_reader_that_pins_a_checkpoint_pins_one_whose_log_the_writer_still_keeps() {
     drop(pin);
     drop(held);
 }
+
+#[test]
+fn a_reader_takes_a_log_segment_the_writer_created_but_has_not_written_for_one_still_to_come() {
+    use crate::engine::block_file::BlockSize;
+    use crate::engine::block_file::FileSystem as _;
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    let fs = SimFs::new();
+    let writer = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&writer, 0, 32);
+    let follower = reader(&fs, 0).unwrap();
+    for round in 1..6 {
+        put_round(&writer, round, 32);
+    }
+    let next = segment_files(&fs, NAME).unwrap().into_iter().max().unwrap() + 1;
+    let empty = segment_name(NAME, next);
+    drop(fs.create(&empty, BlockSize::new(4096).unwrap()).unwrap());
+    let joined = reader(&fs, 0).unwrap();
+    assert_eq!(round_seen(&joined, 32), 5);
+    follower.catch_up().unwrap();
+    assert_eq!(round_seen(&follower, 32), 5);
+    fs.remove(&empty).unwrap();
+    put_round(&writer, 6, 32);
+    follower.catch_up().unwrap();
+    assert_eq!(round_seen(&follower, 32), 6);
+}
