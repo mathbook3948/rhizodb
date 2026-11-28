@@ -522,7 +522,9 @@ impl Record {
                 *value = words.word(at + 1 + index).load(Ordering::Relaxed);
             }
             fence(Ordering::Acquire);
-            if sequence.load(Ordering::Relaxed) == before {
+            if sequence.load(Ordering::Relaxed) == before
+                && words.word(self.version.index()).load(Ordering::Relaxed) == version
+            {
                 return true;
             }
         }
