@@ -88,11 +88,11 @@ fn child() {
         }
         "adder" => {
             let (_file, mapping) = mapped(path);
-            assert_eq!(mapping.word(1).unwrap().load(Ordering::Acquire), 42);
+            assert_eq!(mapping.words()[1].load(Ordering::Acquire), 42);
             for _ in 0..ADDS {
-                mapping.word(3).unwrap().fetch_add(1, Ordering::Relaxed);
+                mapping.words()[3].fetch_add(1, Ordering::Relaxed);
             }
-            mapping.word(0).unwrap().store(1, Ordering::Release);
+            mapping.words()[0].store(1, Ordering::Release);
             say("added");
         }
         role => panic!("unknown child role {role}"),
@@ -258,14 +258,14 @@ fn stores_into_a_mapping_show_in_another_process() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("words");
     let (_file, mapping) = mapped(&path);
-    mapping.word(1).unwrap().store(42, Ordering::Release);
+    mapping.words()[1].store(42, Ordering::Release);
     for _ in 0..ADDS {
-        mapping.word(3).unwrap().fetch_add(1, Ordering::Relaxed);
+        mapping.words()[3].fetch_add(1, Ordering::Relaxed);
     }
     let mut adder = Peer::spawn("adder", &path);
     adder.wait_for("added");
-    assert_eq!(mapping.word(0).unwrap().load(Ordering::Acquire), 1);
-    assert_eq!(mapping.word(3).unwrap().load(Ordering::Relaxed), 2 * ADDS);
+    assert_eq!(mapping.words()[0].load(Ordering::Acquire), 1);
+    assert_eq!(mapping.words()[3].load(Ordering::Relaxed), 2 * ADDS);
     assert!(adder.child.wait().unwrap().success());
 }
 
@@ -274,11 +274,11 @@ fn concurrent_adds_from_two_processes_lose_none() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("words");
     let (_file, mapping) = mapped(&path);
-    mapping.word(1).unwrap().store(42, Ordering::Release);
+    mapping.words()[1].store(42, Ordering::Release);
     let mut adder = Peer::spawn("adder", &path);
     for _ in 0..ADDS {
-        mapping.word(3).unwrap().fetch_add(1, Ordering::Relaxed);
+        mapping.words()[3].fetch_add(1, Ordering::Relaxed);
     }
     adder.wait_for("added");
-    assert_eq!(mapping.word(3).unwrap().load(Ordering::Relaxed), 2 * ADDS);
+    assert_eq!(mapping.words()[3].load(Ordering::Relaxed), 2 * ADDS);
 }

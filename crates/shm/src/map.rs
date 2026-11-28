@@ -43,27 +43,14 @@ impl Mapping {
         Ok(Self { raw, words })
     }
 
-    /// How many words the mapping holds.
-    pub fn words(&self) -> usize {
-        self.words
-    }
-
-    /// The word at `index`, or `None` past the mapping's end.
-    pub fn word(&self, index: usize) -> Option<&AtomicU64> {
-        if index >= self.words {
-            return None;
-        }
-        let word = self
-            .raw
-            .as_mut_ptr()
-            .cast::<AtomicU64>()
-            .wrapping_add(index);
-        // SAFETY: `word` lies inside the mapping, since `index < words` and the mapping holds
-        // `words * 8` bytes, and it is aligned, since `new` checked the base and every word is
-        // 8 bytes. The mapping stays valid for as long as `self` lives, which the returned
-        // reference cannot outlive. Every access to these bytes, in this process or another
-        // one, goes through an atomic word, so no non-atomic access races with it, and
-        // `AtomicU64` permits shared mutation through `&`.
-        Some(unsafe { &*word })
+    /// The mapping's words.
+    pub fn words(&self) -> &[AtomicU64] {
+        let first = self.raw.as_mut_ptr().cast::<AtomicU64>();
+        // SAFETY: the mapping holds `words * 8` bytes from `first`, which `new` checked is
+        // aligned for `AtomicU64`, and it stays valid for as long as `self` lives, which the
+        // returned slice cannot outlive. Every access to these bytes, in this process or
+        // another one, goes through an atomic word, so no non-atomic access races with it,
+        // and `AtomicU64` permits shared mutation through `&`.
+        unsafe { std::slice::from_raw_parts(first, self.words) }
     }
 }

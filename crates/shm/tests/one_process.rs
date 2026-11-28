@@ -24,9 +24,7 @@ fn a_mapping_reaches_only_its_words_and_refuses_a_short_file() {
     assert!(Mapping::new(&file, 9).is_err(), "a file one word short");
     assert!(Mapping::new(&file, 0).is_err(), "no words");
     let mapping = Mapping::new(&file, 8).unwrap();
-    assert_eq!(mapping.words(), 8);
-    assert!(mapping.word(7).is_some());
-    assert!(mapping.word(8).is_none());
+    assert_eq!(mapping.words().len(), 8);
 }
 
 #[test]
@@ -37,16 +35,14 @@ fn two_mappings_of_one_file_share_their_words() {
     rhizodb_shm::reserve(&first, 4096).unwrap();
     let a = Mapping::new(&first, 512).unwrap();
     let b = Mapping::new(&open(&path), 512).unwrap();
-    a.word(511).unwrap().store(7, Ordering::Release);
-    assert_eq!(b.word(511).unwrap().load(Ordering::Acquire), 7);
+    a.words()[511].store(7, Ordering::Release);
+    assert_eq!(b.words()[511].load(Ordering::Acquire), 7);
     assert_eq!(
-        b.word(5)
-            .unwrap()
-            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire),
+        b.words()[5].compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire),
         Ok(0)
     );
-    assert_eq!(a.word(5).unwrap().fetch_max(9, Ordering::SeqCst), 3);
-    assert_eq!(b.word(5).unwrap().load(Ordering::Acquire), 9);
+    assert_eq!(a.words()[5].fetch_max(9, Ordering::SeqCst), 3);
+    assert_eq!(b.words()[5].load(Ordering::Acquire), 9);
 }
 
 #[test]
