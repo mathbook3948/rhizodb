@@ -554,6 +554,7 @@ impl Session {
         self.words
             .word(SLOT_BASE + self.slot * SLOT_WORDS + 1)
             .store(lsn.map_or(0, |lsn| lsn + 1), Ordering::SeqCst);
+        fence(Ordering::SeqCst);
     }
 
     /// The oldest LSN after which a snapshot pin of another live process needs the log.
@@ -565,7 +566,7 @@ impl Session {
                     .words
                     .word(SLOT_BASE + slot * SLOT_WORDS + 1)
                     .load(Ordering::SeqCst);
-                (pin != 0 && !self.slot_is_dead(slot).unwrap_or(true)).then(|| pin - 1)
+                (pin != 0 && !self.slot_is_dead(slot).unwrap_or(false)).then(|| pin - 1)
             })
             .min()
     }

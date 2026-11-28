@@ -1641,6 +1641,30 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Pins the last durable checkpoint: no block it reaches is written or cut off, and the log
     /// after it is kept as an acknowledged peer's would be, until the pin is dropped.
     pub(crate) fn pin(&self) -> Result<Pinned<'_, F>, EngineError> {
+        let Some(session) = self
+            .shared
+            .session
+            .as_ref()
+            .filter(|_| self.shared.read_only)
+        else {
+            return self.pin_durable();
+        };
+        for _ in 0..JOIN_TRIES {
+            self.catch_up()?;
+            let pinned = self.pin_durable()?;
+            let newest = session.published_header()?.map(|header| header.generation);
+            if newest.is_none_or(|newest| newest == pinned.header.generation) {
+                return Ok(pinned);
+            }
+        }
+        Err(EngineError::corrupt(
+            "the writer kept publishing checkpoints while a read-only process pinned one",
+        ))
+    }
+
+    // ast-grep-ignore
+    // A read-only process pins only once caught up, and the writer must see the pin before it moves on.
+    fn pin_durable(&self) -> Result<Pinned<'_, F>, EngineError> {
         let shared = &*self.shared;
         if shared.is_poisoned() {
             return Err(shared.refusal());

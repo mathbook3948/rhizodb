@@ -818,3 +818,28 @@ fn a_writer_that_takes_over_writes_no_extent_into_the_trailing_slots_a_reader_re
         assert_eq!(value[0], 1, "key {key}");
     }
 }
+
+#[test]
+fn a_reader_that_pins_a_checkpoint_pins_one_whose_log_the_writer_still_keeps() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    writer.checkpoint().unwrap();
+    let follower = reader(&fs, 0).unwrap();
+    let held = follower.begin_read().unwrap();
+    for round in 2..30 {
+        put_round(&writer, round, 64);
+    }
+    writer.checkpoint().unwrap();
+    let pin = follower.pin().unwrap();
+    let pinned_at = follower.header().checkpoint_lsn;
+    put_round(&writer, 30, 64);
+    writer.checkpoint().unwrap();
+    assert!(
+        writer.log_start() <= pinned_at + 1,
+        "the pin at {pinned_at} came after the log it needs, which starts at {}",
+        writer.log_start()
+    );
+    drop(pin);
+    drop(held);
+}
