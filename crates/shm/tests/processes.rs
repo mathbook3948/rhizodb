@@ -318,3 +318,21 @@ fn concurrent_adds_from_two_processes_lose_none() {
     adder.wait_for("added");
     assert_eq!(mapping.words()[3].load(Ordering::Relaxed), 2 * ADDS);
 }
+
+#[test]
+fn a_test_through_a_read_only_handle_sees_a_shared_lock_of_another_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    let mut holder = Peer::spawn("shared", &path);
+    holder.wait_for("locked");
+    let reading = File::open(&path).unwrap();
+    let (offset, len) = RANGE;
+    assert!(rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap());
+    assert!(!rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Shared).unwrap());
+    holder.kill();
+    let deadline = Instant::now() + PATIENCE;
+    while rhizodb_shm::held_elsewhere(&reading, offset, len, Lock::Exclusive).unwrap() {
+        assert!(Instant::now() < deadline, "the killed holder's lock stayed");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
