@@ -937,6 +937,9 @@ impl GatedWrite<'_> {
 }
 
 impl ReadTransaction for GatedWrite<'_> {
+    const SEES_ONLY_COMMITTED: bool =
+        <<TestStorage as Storage>::Write<'static> as ReadTransaction>::SEES_ONLY_COMMITTED;
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.count(table);
         self.inner.get(table, key)
