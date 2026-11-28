@@ -163,13 +163,31 @@ impl Drop for Peer {
 }
 
 fn can_take(path: &Path, kind: Lock) -> bool {
-    let file = open(path);
-    let (offset, len) = RANGE;
-    let got = rhizodb_shm::try_lock(&file, offset, len, kind).unwrap();
-    if got {
-        rhizodb_shm::unlock(&file, offset, len).unwrap();
+    let (sender, tried) = mpsc::channel();
+    let path = path.to_owned();
+    thread::spawn(move || {
+        let file = open(&path);
+        let (offset, len) = RANGE;
+        let got = rhizodb_shm::try_lock(&file, offset, len, kind).unwrap();
+        if got {
+            rhizodb_shm::unlock(&file, offset, len).unwrap();
+        }
+        let _ = sender.send(got);
+    });
+    tried
+        .recv_timeout(PATIENCE)
+        .expect("a try of a lock returned at once")
+}
+
+fn exits_in_time(child: &mut Child) -> bool {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.success();
+        }
+        thread::sleep(Duration::from_millis(10));
     }
-    got
+    panic!("the child did not exit within {PATIENCE:?}");
 }
 
 // Windows releases the locks of a killed process soon after it exits, not at once.
@@ -281,7 +299,7 @@ fn stores_into_a_mapping_show_in_another_process() {
     adder.wait_for("added");
     assert_eq!(mapping.words()[0].load(Ordering::Acquire), 1);
     assert_eq!(mapping.words()[3].load(Ordering::Relaxed), 2 * ADDS);
-    assert!(adder.child.wait().unwrap().success());
+    assert!(exits_in_time(&mut adder.child));
 }
 
 #[test]

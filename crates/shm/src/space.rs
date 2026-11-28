@@ -177,7 +177,7 @@ mod sys {
 
     // ast-grep-ignore
     // Callers promise that `T` is the plain C struct `class` fills, valid as all zero bytes.
-    unsafe fn information<T>(file: &File, class: i32) -> Option<T> {
+    unsafe fn information<T>(file: &File, class: i32) -> Result<T, io::Error> {
         // SAFETY: the caller promises that all zero bytes are a valid `T`.
         let mut value: T = unsafe { std::mem::zeroed() };
         // SAFETY: the handle is open for as long as `file` is borrowed, and the buffer is a
@@ -190,17 +190,20 @@ mod sys {
                 size_of::<T>() as u32,
             )
         };
-        (filled != 0).then_some(value)
+        if filled == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(value)
+        }
     }
 
     pub(super) fn is_local(file: &File) -> io::Result<bool> {
         // SAFETY: `FILE_REMOTE_PROTOCOL_INFO` is the plain C struct that this class fills.
         let remote =
             unsafe { information::<FILE_REMOTE_PROTOCOL_INFO>(file, FileRemoteProtocolInfo) };
-        if remote.is_some()
-            || io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32)
-        {
-            return Ok(false);
+        match remote {
+            Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => {}
+            _ => return Ok(false),
         }
         let mut name = [0u16; 64];
         // SAFETY: the handle is open for as long as `file` is borrowed, `name` is a writable
@@ -226,13 +229,12 @@ mod sys {
             .position(|unit| *unit == 0)
             .unwrap_or(name.len());
         let kind = String::from_utf16_lossy(&name[..end]).to_ascii_uppercase();
-        Ok(!kind.contains("FUSE") && !kind.contains("DOKAN"))
+        Ok(["NTFS", "REFS", "FAT", "FAT32", "EXFAT"].contains(&kind.as_str()))
     }
 
     pub(super) fn file_id(file: &File) -> io::Result<FileId> {
         // SAFETY: `FILE_ID_INFO` is the plain C struct that this class fills.
-        let info = unsafe { information::<FILE_ID_INFO>(file, FileIdInfo) }
-            .ok_or_else(io::Error::last_os_error)?;
+        let info = unsafe { information::<FILE_ID_INFO>(file, FileIdInfo) }?;
         Ok(FileId {
             volume: info.VolumeSerialNumber,
             file: u128::from_le_bytes(info.FileId.Identifier),
