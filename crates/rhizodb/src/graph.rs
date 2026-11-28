@@ -1028,7 +1028,11 @@ impl<T: ReadTransaction> GraphTx<T> {
         id: RelationshipId,
         key: Token<PropertyKey>,
     ) -> Result<Option<Option<PropertyValue>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::property(bytes, key)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::property(bytes, key)?),
+            |chunk, slot| chunk.property(slot, key.id()),
+        )
     }
 
     /// The type of a relationship, decoding none of its properties. `None` means the
@@ -1037,7 +1041,11 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<Token<RelationshipType>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::rel_type(bytes)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::rel_type(bytes)?),
+            |chunk, slot| Ok(chunk.rel_type(slot)?.map(Token::new)),
+        )
     }
 
     /// The property keys of a relationship, ascending, decoding none of its values. `None`
@@ -1046,7 +1054,15 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<Vec<Token<PropertyKey>>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::keys(bytes)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::keys(bytes)?),
+            |chunk, slot| {
+                Ok(chunk
+                    .keys(slot)?
+                    .map(|keys| keys.into_iter().map(Token::new).collect()))
+            },
+        )
     }
 
     pub(crate) fn relationship(
@@ -1056,6 +1072,25 @@ impl<T: ReadTransaction> GraphTx<T> {
         #[cfg(test)]
         tests::note(tests::Read::RelationshipDecode);
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
+    }
+
+    fn read_relationship<R>(
+        &self,
+        id: RelationshipId,
+        held: impl FnOnce(&[u8]) -> Result<R, GraphError>,
+        stored: impl FnOnce(&ChunkRef<'_>, usize) -> Result<Option<R>, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        if let Some(edit) = self.relationship_chunks.get(&chunk) {
+            return edit.get(slot).map(held).transpose();
+        }
+        let key = relationships::chunk_key(chunk);
+        Ok(self
+            .transaction
+            .get_with(Table::RelationshipChunks, &key, |bytes| {
+                stored(&ChunkRef::parse(&key, bytes)?, slot)
+            })?
+            .flatten())
     }
 
     /// Calls `read` with the stored record of a relationship, if it exists.

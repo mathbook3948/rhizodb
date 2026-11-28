@@ -27,6 +27,22 @@ const UNKNOWN_LAYOUT: GraphError =
 const CHECKSUM_MISMATCH: GraphError =
     GraphError::Corrupt("a relationship chunk does not match its checksum");
 const EMPTY_CHUNK: GraphError = GraphError::Corrupt("a stored relationship chunk is empty");
+fn tagged_at<'a>(ends: Packed<'_>, values: &'a [u8], index: usize) -> Result<&'a [u8], GraphError> {
+    let start = match index {
+        0 => 0,
+        _ => ends.unsigned(index - 1)?,
+    };
+    usize::try_from(start)
+        .ok()
+        .zip(usize::try_from(ends.unsigned(index)?).ok())
+        .and_then(|(start, end)| values.get(start..end))
+        .ok_or_else(bad_columns)
+}
+
+fn bad_columns() -> GraphError {
+    BAD_COLUMNS
+}
+
 const BAD_COLUMNS: GraphError =
     GraphError::Corrupt("the columns of a relationship chunk do not frame its records");
 
@@ -66,7 +82,12 @@ fn checksum(key: &[u8], body: &[u8]) -> u32 {
 /// checksum.
 pub(crate) fn upgrade(key: &[u8], bytes: &[u8]) -> Result<Option<Vec<u8>>, GraphError> {
     let records = match bytes.first() {
-        Some(&LAYOUT_VERSION) => return ChunkRef::parse(key, bytes).map(|_| None),
+        Some(&LAYOUT_VERSION) => {
+            for entry in ChunkRef::parse(key, bytes)?.entries() {
+                entry?;
+            }
+            return Ok(None);
+        }
         Some(&RECORDS_LAYOUT) => {
             sealed(key, bytes)?;
             &bytes[PRESENT_AT..]
@@ -268,7 +289,7 @@ impl<'a> Packed<'a> {
     fn unsigned(&self, index: usize) -> Result<u64, GraphError> {
         self.base
             .checked_add(self.distance(index))
-            .ok_or(BAD_COLUMNS)
+            .ok_or_else(bad_columns)
     }
 
     fn signed(&self, index: usize) -> i64 {
@@ -286,7 +307,7 @@ struct Column<'a> {
 #[derive(Clone, Copy, Debug)]
 enum Values<'a> {
     Integers(Packed<'a>),
-    Tagged(&'a [u8]),
+    Tagged { ends: Packed<'a>, values: &'a [u8] },
 }
 
 impl<'a> Column<'a> {
@@ -301,8 +322,14 @@ impl<'a> Column<'a> {
         let values = match reader.u8()? {
             INTEGERS => Values::Integers(Packed::read(reader, holders.count_ones() as usize)?),
             TAGGED => {
+                let count = holders.count_ones() as usize;
+                let ends = Packed::read(reader, count)?;
                 let length = reader.varint()?;
-                Values::Tagged(reader.take(length)?)
+                let values = reader.take(length)?;
+                if ends.unsigned(count - 1)? != length as u64 {
+                    return Err(BAD_COLUMNS);
+                }
+                Values::Tagged { ends, values }
             }
             _ => return Err(BAD_COLUMNS),
         };
@@ -313,32 +340,35 @@ impl<'a> Column<'a> {
         })
     }
 
-    fn check(&self) -> Result<(), GraphError> {
-        if let Values::Tagged(tagged) = self.values {
-            let mut values = Reader::new(tagged);
-            for _ in 0..self.holders.count_ones() {
-                values.skip_value()?;
-            }
-            values.finish()?;
-        }
-        Ok(())
-    }
-
     fn put_value(&self, slot: usize, out: &mut Vec<u8>) -> Result<(), GraphError> {
         let index = (self.holders & ((1 << slot) - 1)).count_ones() as usize;
+        self.put_nth(index, out)
+    }
+
+    fn value(&self, slot: usize) -> Result<PropertyValue, GraphError> {
+        let index = (self.holders & ((1 << slot) - 1)).count_ones() as usize;
+        match self.values {
+            Values::Integers(packed) => Ok(PropertyValue::Integer(packed.signed(index))),
+            Values::Tagged { ends, values } => {
+                let mut reader = Reader::new(tagged_at(ends, values, index)?);
+                let value = reader.value()?;
+                reader.finish()?;
+                Ok(value)
+            }
+        }
+    }
+
+    fn put_nth(&self, index: usize, out: &mut Vec<u8>) -> Result<(), GraphError> {
         match self.values {
             Values::Integers(packed) => {
                 PropertyValue::Integer(packed.signed(index)).encode_compact_into(out);
             }
-            Values::Tagged(tagged) => {
-                let mut reader = Reader::new(tagged);
-                for _ in 0..index {
-                    reader.skip_value()?;
-                }
-                let rest = reader.remaining();
+            Values::Tagged { ends, values } => {
+                let value = tagged_at(ends, values, index)?;
+                let mut reader = Reader::new(value);
                 reader.skip_value()?;
-                let end = tagged.len() - reader.remaining();
-                out.extend_from_slice(&tagged[tagged.len() - rest..end]);
+                reader.finish()?;
+                out.extend_from_slice(value);
             }
         }
         Ok(())
@@ -350,8 +380,9 @@ impl<'a> Column<'a> {
 /// sources, and targets of those relationships in slot order as three packed columns, and then
 /// the count of property keys the chunk's relationships hold and, for each key in ascending
 /// order, its token, a little-endian bitmap of the slots whose relationship holds it, a kind
-/// byte, and its values: packed when all are integers, tagged after their length in bytes
-/// otherwise. A packed column holds the least value as a varint, zigzag encoded for signed
+/// byte, and its values: packed when all are integers, and otherwise each in its tagged
+/// encoding, after a packed column of the offset each value ends at and the length of all of
+/// them in bytes. A packed column holds the least value as a varint, zigzag encoded for signed
 /// integers, the width in bits as a byte, and each value's distance from the least in that many
 /// bits, the first in the lowest bits of the first byte.
 #[derive(Clone, Copy, Debug)]
@@ -365,8 +396,8 @@ pub(crate) struct ChunkRef<'a> {
 }
 
 impl<'a> ChunkRef<'a> {
-    /// The chunk stored under `key`, checked against its checksum and for columns that frame
-    /// its relationships.
+    /// The chunk stored under `key`, checked against its checksum. The columns of its properties
+    /// are checked as a read walks them, and [`ChunkRef::entries`] walks every value.
     pub(crate) fn parse(key: &[u8], bytes: &'a [u8]) -> Result<Self, GraphError> {
         if bytes.first() != Some(&LAYOUT_VERSION) {
             return Err(UNKNOWN_LAYOUT);
@@ -378,27 +409,8 @@ impl<'a> ChunkRef<'a> {
         let rel_type = Packed::read(&mut reader, count)?;
         let source = Packed::read(&mut reader, count)?;
         let target = Packed::read(&mut reader, count)?;
-        for index in 0..count {
-            if u32::try_from(rel_type.unsigned(index)?).is_err() {
-                return Err(BAD_COLUMNS);
-            }
-            source.unsigned(index)?;
-            target.unsigned(index)?;
-        }
         let keys = reader.varint()?;
         let columns = &rest[rest.len() - reader.remaining()..];
-        let mut previous = None;
-        for _ in 0..keys {
-            let column = Column::read(&mut reader, present)?;
-            if previous.is_some_and(|previous| previous >= column.key)
-                || u32::try_from(column.key).is_err()
-            {
-                return Err(BAD_COLUMNS);
-            }
-            column.check()?;
-            previous = Some(column.key);
-        }
-        reader.finish()?;
         Ok(Self {
             present,
             rel_type,
@@ -409,10 +421,15 @@ impl<'a> ChunkRef<'a> {
         })
     }
 
-    fn columns(&self) -> impl Iterator<Item = Column<'a>> + use<'a> {
-        let mut reader = Reader::new(self.columns);
-        let present = self.present;
-        (0..self.keys).filter_map(move |_| Column::read(&mut reader, present).ok())
+    fn put_ends(&self, index: usize, out: &mut Vec<u8>) -> Result<(), GraphError> {
+        let rel_type = self.rel_type.unsigned(index)?;
+        if u32::try_from(rel_type).is_err() {
+            return Err(BAD_COLUMNS);
+        }
+        put_varint_u64(out, rel_type);
+        put_varint_u64(out, self.source.unsigned(index)?);
+        put_varint_u64(out, self.target.unsigned(index)?);
+        Ok(())
     }
 
     /// The record of the relationship in `slot`, in the encoding of
@@ -423,40 +440,190 @@ impl<'a> ChunkRef<'a> {
             return Ok(None);
         }
         let index = (self.present & (bit - 1)).count_ones() as usize;
-        let mut out = Vec::with_capacity(16);
-        put_varint_u64(&mut out, self.rel_type.unsigned(index)?);
-        put_varint_u64(&mut out, self.source.unsigned(index)?);
-        put_varint_u64(&mut out, self.target.unsigned(index)?);
-        let held = self
-            .columns()
-            .filter(|column| column.holders & bit != 0)
-            .count();
-        put_varint(&mut out, held);
-        for column in self.columns().filter(|column| column.holders & bit != 0) {
-            put_varint_u64(&mut out, column.key);
-            column.put_value(slot, &mut out)?;
+        let mut out = Vec::with_capacity(24);
+        self.put_ends(index, &mut out)?;
+        let count_at = out.len();
+        out.push(0);
+        let mut held = 0;
+        let mut columns = self.walk();
+        while let Some(column) = columns.next()? {
+            if column.holders & bit != 0 {
+                held += 1;
+                put_varint_u64(&mut out, column.key);
+                column.put_value(slot, &mut out)?;
+            }
         }
+        put_count(&mut out, count_at, held);
         Ok(Some(out))
     }
 
-    /// Every slot that holds a relationship, ascending, with its record.
+    /// The type of the relationship in `slot`, or `None` when the slot holds none.
+    pub(crate) fn rel_type(&self, slot: usize) -> Result<Option<u32>, GraphError> {
+        let Some(index) = self.index(slot) else {
+            return Ok(None);
+        };
+        let rel_type = self.rel_type.unsigned(index)?;
+        u32::try_from(rel_type).map(Some).map_err(|_| BAD_COLUMNS)
+    }
+
+    /// The value of property `key` of the relationship in `slot`, decoding no other value. The
+    /// outer `None` means the slot holds no relationship.
+    pub(crate) fn property(
+        &self,
+        slot: usize,
+        key: u32,
+    ) -> Result<Option<Option<PropertyValue>>, GraphError> {
+        if self.index(slot).is_none() {
+            return Ok(None);
+        }
+        let mut columns = self.walk();
+        while let Some(column) = columns.next()? {
+            if column.key == u64::from(key) {
+                return match column.holders & (1 << slot) {
+                    0 => Ok(Some(None)),
+                    _ => column.value(slot).map(|value| Some(Some(value))),
+                };
+            }
+        }
+        Ok(Some(None))
+    }
+
+    /// The property keys of the relationship in `slot`, ascending, decoding no value, or `None`
+    /// when the slot holds no relationship.
+    pub(crate) fn keys(&self, slot: usize) -> Result<Option<Vec<u32>>, GraphError> {
+        if self.index(slot).is_none() {
+            return Ok(None);
+        }
+        let mut keys = Vec::new();
+        let mut columns = self.walk();
+        while let Some(column) = columns.next()? {
+            if column.holders & (1 << slot) != 0 {
+                keys.push(column.key as u32);
+            }
+        }
+        Ok(Some(keys))
+    }
+
+    fn index(&self, slot: usize) -> Option<usize> {
+        let bit = 1u32 << slot;
+        (self.present & bit != 0).then(|| (self.present & (bit - 1)).count_ones() as usize)
+    }
+
+    /// Every slot that holds a relationship, ascending, with its record, each value checked as
+    /// it is read.
     pub(crate) fn entries(
         &self,
     ) -> impl Iterator<Item = Result<(usize, Vec<u8>), GraphError>> + use<'a> {
         let chunk = *self;
+        let mut cursors = self.cursors().map_err(Some);
         let mut present = self.present;
+        let mut index = 0;
+        let mut failed = false;
         std::iter::from_fn(move || {
+            if failed {
+                return None;
+            }
+            let cursors = match &mut cursors {
+                Ok(cursors) => cursors,
+                Err(error) => {
+                    failed = true;
+                    return error.take().map(Err);
+                }
+            };
             if present == 0 {
+                failed = true;
                 return None;
             }
             let slot = present.trailing_zeros() as usize;
             present &= present - 1;
-            Some(
-                chunk
-                    .get(slot)
-                    .map(|record| (slot, record.unwrap_or_default())),
-            )
+            let record = chunk.next_record(slot, index, cursors);
+            index += 1;
+            failed = record.is_err();
+            Some(record.map(|record| (slot, record)))
         })
+    }
+
+    fn walk(&self) -> Columns<'a> {
+        Columns {
+            reader: Reader::new(self.columns),
+            present: self.present,
+            left: self.keys,
+            previous: None,
+        }
+    }
+
+    fn cursors(&self) -> Result<Vec<Cursor<'a>>, GraphError> {
+        let mut columns = self.walk();
+        let mut cursors = Vec::new();
+        while let Some(column) = columns.next()? {
+            cursors.push(Cursor { column, next: 0 });
+        }
+        Ok(cursors)
+    }
+
+    fn next_record(
+        &self,
+        slot: usize,
+        index: usize,
+        cursors: &mut [Cursor<'a>],
+    ) -> Result<Vec<u8>, GraphError> {
+        let bit = 1u32 << slot;
+        let mut out = Vec::with_capacity(24);
+        self.put_ends(index, &mut out)?;
+        let count_at = out.len();
+        out.push(0);
+        let mut held = 0;
+        for cursor in cursors.iter_mut() {
+            if cursor.column.holders & bit == 0 {
+                continue;
+            }
+            held += 1;
+            put_varint_u64(&mut out, cursor.column.key);
+            cursor.column.put_nth(cursor.next, &mut out)?;
+            cursor.next += 1;
+        }
+        put_count(&mut out, count_at, held);
+        Ok(out)
+    }
+}
+
+struct Columns<'a> {
+    reader: Reader<'a>,
+    present: u32,
+    left: usize,
+    previous: Option<u64>,
+}
+
+impl<'a> Columns<'a> {
+    fn next(&mut self) -> Result<Option<Column<'a>>, GraphError> {
+        if self.left == 0 {
+            self.reader.finish()?;
+            return Ok(None);
+        }
+        self.left -= 1;
+        let column = Column::read(&mut self.reader, self.present)?;
+        if self.previous.is_some_and(|previous| previous >= column.key)
+            || u32::try_from(column.key).is_err()
+        {
+            return Err(BAD_COLUMNS);
+        }
+        self.previous = Some(column.key);
+        Ok(Some(column))
+    }
+}
+
+struct Cursor<'a> {
+    column: Column<'a>,
+    next: usize,
+}
+
+fn put_count(out: &mut Vec<u8>, at: usize, count: usize) {
+    if count < 0x80 {
+        out[at] = count as u8;
+    } else {
+        let mut varint = Vec::new();
+        put_varint(&mut varint, count);
+        out.splice(at..=at, varint);
     }
 }
 
@@ -577,6 +744,7 @@ impl ChunkEdit {
             } else {
                 out.push(TAGGED);
                 let mut values = Vec::new();
+                let mut ends = Vec::with_capacity(column.len());
                 for property in column {
                     match property.integer {
                         Some(integer) => {
@@ -584,7 +752,9 @@ impl ChunkEdit {
                         }
                         None => values.extend_from_slice(property.value),
                     }
+                    ends.push(values.len() as u64);
                 }
+                put_unsigned(&mut out, ends.iter().copied());
                 put_varint(&mut out, values.len());
                 out.extend_from_slice(&values);
             }

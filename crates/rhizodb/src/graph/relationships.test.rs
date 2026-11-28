@@ -77,6 +77,19 @@ proptest! {
         for slot in 0..CHUNK_SLOTS {
             prop_assert_eq!(chunk.get(slot).unwrap(), model.get(&slot).cloned());
         }
+        for (slot, record) in &model {
+            let decoded = RelationshipRecord::decode(record).unwrap();
+            prop_assert_eq!(chunk.rel_type(*slot).unwrap(), Some(decoded.rel_type.id()));
+            prop_assert_eq!(
+                chunk.keys(*slot).unwrap(),
+                Some(decoded.properties.keys().map(|key| key.id()).collect())
+            );
+            for key in 0..7 {
+                let read = chunk.property(*slot, key).unwrap().unwrap();
+                let expected = RelationshipRecord::property(record, Token::new(key)).unwrap();
+                prop_assert_eq!(format!("{read:?}"), format!("{expected:?}"));
+            }
+        }
         let entries: Vec<(usize, Vec<u8>)> = chunk.entries().collect::<Result<_, _>>().unwrap();
         prop_assert_eq!(entries, records_of(&model));
         let loaded = ChunkEdit::load(&KEY, &stored).unwrap();
@@ -112,28 +125,6 @@ proptest! {
 
     #[test]
     #[ignore = "left out of mise run check, run by mise run random"]
-    fn damaged_columns_under_a_valid_checksum_fail_to_parse_or_read_as_records(
-        edits in edits(),
-        cut in any::<prop::sample::Index>(),
-        flip in any::<prop::sample::Index>(),
-    ) {
-        let (edit, _) = edited(edits);
-        let Some(mut stored) = edit.encode(&KEY).unwrap() else {
-            return Ok(());
-        };
-        let at = PRESENT_AT + flip.index(stored.len() - PRESENT_AT);
-        stored[at] ^= 0x5a;
-        stored.truncate(PRESENT_AT + cut.index(stored.len() - PRESENT_AT + 1));
-        let stored = with_checksum(&KEY, stored);
-        if let Ok(chunk) = ChunkRef::parse(&KEY, &stored) {
-            for entry in chunk.entries() {
-                RelationshipRecord::decode(&entry.unwrap().1).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    #[ignore = "left out of mise run check, run by mise run random"]
     fn a_damaged_chunk_of_an_older_layout_fails_to_upgrade_or_upgrades_its_framed_records(
         edits in edits(),
         sealed in any::<bool>(),
@@ -156,6 +147,40 @@ proptest! {
             prop_assert!(!sealed);
             let chunk = ChunkRef::parse(&KEY, &upgraded).unwrap();
             prop_assert!(chunk.entries().all(|entry| entry.is_ok()));
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(crate::test_scale::cases(256)))]
+
+    #[test]
+    #[ignore = "left out of mise run check, run by mise run random"]
+    fn damaged_columns_under_a_valid_checksum_fail_or_read_without_panicking(
+        edits in edits(),
+        cut in any::<prop::sample::Index>(),
+        flip in any::<prop::sample::Index>(),
+    ) {
+        let (edit, _) = edited(edits);
+        let Some(mut stored) = edit.encode(&KEY).unwrap() else {
+            return Ok(());
+        };
+        let at = PRESENT_AT + flip.index(stored.len() - PRESENT_AT);
+        stored[at] ^= 0x5a;
+        stored.truncate(PRESENT_AT + cut.index(stored.len() - PRESENT_AT + 1));
+        let stored = with_checksum(&KEY, stored);
+        if let Ok(chunk) = ChunkRef::parse(&KEY, &stored) {
+            for slot in 0..CHUNK_SLOTS {
+                let _ = chunk.get(slot);
+                let _ = chunk.rel_type(slot);
+                let _ = chunk.keys(slot);
+                for key in 0..6 {
+                    let _ = chunk.property(slot, key);
+                }
+            }
+            for (_, record) in chunk.entries().flatten() {
+                let _ = RelationshipRecord::decode(&record);
+            }
         }
     }
 }
@@ -337,4 +362,68 @@ fn an_older_record_that_repeats_a_key_upgrades_to_the_value_its_decoding_keeps()
             .unwrap();
         assert_eq!(RelationshipRecord::decode(&read).unwrap(), decoded);
     }
+}
+
+fn handmade(present: u32, body: &[u8]) -> Vec<u8> {
+    let mut stored = vec![LAYOUT_VERSION, 0, 0, 0, 0];
+    stored.extend_from_slice(&present.to_le_bytes());
+    stored.extend_from_slice(body);
+    with_checksum(&KEY, stored)
+}
+
+fn reads_as_corrupt(stored: &[u8]) -> bool {
+    match ChunkRef::parse(&KEY, stored) {
+        Err(_) => true,
+        Ok(chunk) => {
+            chunk.get(0).is_err()
+                && chunk.entries().any(|entry| entry.is_err())
+                && chunk.keys(0).is_err()
+        }
+    }
+}
+
+const ONE_RELATIONSHIP_ENDS: [u8; 6] = [0, 0, 0, 0, 0, 0];
+
+#[test]
+fn a_handmade_chunk_of_one_integer_column_reads_back() {
+    let mut body = ONE_RELATIONSHIP_ENDS.to_vec();
+    body.extend_from_slice(&[1, 4, 1, 0, 0, 0, INTEGERS, 6, 0]);
+    let chunk = handmade(1, &body);
+    let read = ChunkRef::parse(&KEY, &chunk).unwrap();
+    assert_eq!(
+        read.property(0, 4).unwrap(),
+        Some(Some(PropertyValue::Integer(3)))
+    );
+    assert!(!reads_as_corrupt(&chunk));
+}
+
+#[test]
+fn a_column_held_by_a_slot_without_a_relationship_reads_as_corrupt() {
+    let mut body = ONE_RELATIONSHIP_ENDS.to_vec();
+    body.extend_from_slice(&[1, 4, 3, 0, 0, 0, INTEGERS, 6, 0]);
+    assert!(reads_as_corrupt(&handmade(1, &body)));
+}
+
+#[test]
+fn a_packed_column_wider_than_sixty_four_bits_reads_as_corrupt() {
+    let mut body = vec![0, 65];
+    body.extend_from_slice(&[0; 9]);
+    body.extend_from_slice(&[0, 0, 0, 0, 0]);
+    assert!(reads_as_corrupt(&handmade(1, &body)));
+}
+
+#[test]
+fn two_columns_of_one_key_read_as_corrupt() {
+    let mut body = ONE_RELATIONSHIP_ENDS.to_vec();
+    body.extend_from_slice(&[
+        2, 4, 1, 0, 0, 0, INTEGERS, 6, 0, 4, 1, 0, 0, 0, INTEGERS, 8, 0,
+    ]);
+    assert!(reads_as_corrupt(&handmade(1, &body)));
+}
+
+#[test]
+fn bytes_past_the_last_column_read_as_corrupt() {
+    let mut body = ONE_RELATIONSHIP_ENDS.to_vec();
+    body.extend_from_slice(&[1, 4, 1, 0, 0, 0, INTEGERS, 6, 0, 0]);
+    assert!(reads_as_corrupt(&handmade(1, &body)));
 }
