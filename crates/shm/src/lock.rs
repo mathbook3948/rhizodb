@@ -33,6 +33,15 @@ pub fn unlock(file: &File, offset: u64, len: u64) -> io::Result<()> {
     sys::unlock(file, offset, len)
 }
 
+/// Whether another holder keeps `kind` over `len` bytes of `file` from `offset` out, without
+/// taking it. On Unix this is a lock test, which needs no write access even for an exclusive
+/// kind, and it never sees a lock of the caller's own; on Windows it tries the lock and releases
+/// it at once.
+pub fn held_elsewhere(file: &File, offset: u64, len: u64, kind: Lock) -> io::Result<bool> {
+    check_range(offset, len)?;
+    sys::held_elsewhere(file, offset, len, kind)
+}
+
 /// Turns the exclusive lock the caller holds over `len` bytes of `file` from `offset` into a
 /// shared one, with no moment at which the caller holds neither, so no other process finds the
 /// range free in between.
@@ -68,7 +77,7 @@ mod sys {
         offset: u64,
         len: u64,
         kind: libc::c_short,
-    ) -> io::Result<()> {
+    ) -> io::Result<libc::flock> {
         // SAFETY: `flock` is a plain C struct, for which all zero bytes are a valid value, and
         // open-file-description locks require `l_pid` to be zero.
         let mut range: libc::flock = unsafe { std::mem::zeroed() };
@@ -79,13 +88,13 @@ mod sys {
         range.l_start = libc::off_t::try_from(offset).map_err(out_of_range)?;
         range.l_len = libc::off_t::try_from(len).map_err(out_of_range)?;
         // SAFETY: the descriptor is open for as long as `file` is borrowed, and `range` is a
-        // valid, initialized `flock` that outlives the call, which only reads it for these
-        // commands.
+        // valid, initialized `flock` that outlives the call, which these commands read and, for
+        // a test, overwrite with the conflicting lock or with `F_UNLCK`.
         let outcome = unsafe { libc::fcntl(file.as_raw_fd(), command, &raw mut range) };
         if outcome == -1 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(())
+            Ok(range)
         }
     }
 
@@ -107,7 +116,7 @@ mod sys {
         loop {
             let command = if wait { SET_WAIT } else { SET };
             match fcntl(file, command, offset, len, flag(kind)) {
-                Ok(()) => return Ok(true),
+                Ok(_) => return Ok(true),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error)
                     if !wait
@@ -130,9 +139,24 @@ mod sys {
         loop {
             match fcntl(file, SET, offset, len, libc::F_UNLCK as libc::c_short) {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                outcome => return outcome,
+                outcome => return outcome.map(|_| ()),
             }
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const GET: libc::c_int = libc::F_OFD_GETLK;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const GET: libc::c_int = libc::F_GETLK;
+
+    pub(super) fn held_elsewhere(
+        file: &File,
+        offset: u64,
+        len: u64,
+        kind: Lock,
+    ) -> io::Result<bool> {
+        let found = fcntl(file, GET, offset, len, flag(kind))?;
+        Ok(found.l_type != libc::F_UNLCK as libc::c_short)
     }
 
     pub(super) fn downgrade(file: &File, offset: u64, len: u64) -> io::Result<()> {
@@ -225,6 +249,19 @@ mod sys {
         } else {
             Ok(())
         }
+    }
+
+    pub(super) fn held_elsewhere(
+        file: &File,
+        offset: u64,
+        len: u64,
+        kind: Lock,
+    ) -> io::Result<bool> {
+        if !lock(file, offset, len, kind, false)? {
+            return Ok(true);
+        }
+        unlock(file, offset, len)?;
+        Ok(false)
     }
 
     pub(super) fn downgrade(file: &File, offset: u64, len: u64) -> io::Result<()> {
