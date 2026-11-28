@@ -143,7 +143,7 @@ pub(crate) fn run_write<W: WriteTransaction>(
         patterns: &patterns,
         graveyard: &mut graveyard,
         limits,
-        tokens: Vec::new(),
+        tokens: Default::default(),
         holds: &program.holds,
         caches: Caches::default(),
     };
