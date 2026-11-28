@@ -286,19 +286,10 @@ pub(crate) fn join<F: FileSystem>(
         side.lock(SideLock::Session, Lock::Shared)?;
         let first = side.try_upgrade(SideLock::Session)?;
         if first {
-            let held = file.lock().map_err(EngineError::from).and_then(|()| {
-                if cfg!(not(windows)) && file.held_elsewhere()? {
-                    file.unlock()?;
-                    return Err(already_open(
-                        "a session through another path to the database file holds it",
-                    ));
-                }
-                Ok(())
-            });
-            if let Err(error) = held {
+            if let Err(error) = file.lock() {
                 side.unlock(SideLock::Session)?;
                 side.unlock(SideLock::Gate)?;
-                return Err(error);
+                return Err(error.into());
             }
         } else {
             side.unlock(SideLock::Gate)?;
@@ -355,7 +346,7 @@ impl Elected {
             }
         }
         let held = file
-            .lock_session()
+            .lock_session(first)
             .map_err(EngineError::from)
             .and_then(|()| {
                 let slot = claim_slot(&*side, &*words, generation)?;

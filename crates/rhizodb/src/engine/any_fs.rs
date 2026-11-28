@@ -181,12 +181,12 @@ impl BlockFile for AnyFile {
         }
     }
 
-    fn lock_session(&self) -> io::Result<()> {
+    fn lock_session(&self, first: bool) -> io::Result<()> {
         match self {
-            AnyFile::Os(file) => file.lock_session(),
-            AnyFile::Memory(file) => file.lock_session(),
+            AnyFile::Os(file) => file.lock_session(first),
+            AnyFile::Memory(file) => file.lock_session(first),
             #[cfg(test)]
-            AnyFile::Sim(file) => file.lock_session(),
+            AnyFile::Sim(file) => file.lock_session(first),
         }
     }
 
@@ -196,6 +196,24 @@ impl BlockFile for AnyFile {
             AnyFile::Memory(file) => file.unlock(),
             #[cfg(test)]
             AnyFile::Sim(file) => file.unlock(),
+        }
+    }
+
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        match self {
+            AnyFile::Os(file) => file.held_elsewhere(),
+            AnyFile::Memory(file) => file.held_elsewhere(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.held_elsewhere(),
+        }
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        match self {
+            AnyFile::Os(file) => file.identity(),
+            AnyFile::Memory(file) => file.identity(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.identity(),
         }
     }
 
@@ -344,3 +362,7 @@ pub(crate) fn write_copy_on<F: FileSystem + 'static>(
         "closing the copy left a log segment beside it",
     )))
 }
+
+#[cfg(test)]
+#[path = "any_fs.test.rs"]
+mod tests;
