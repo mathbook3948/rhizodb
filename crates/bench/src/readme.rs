@@ -43,11 +43,13 @@ impl Language {
     }
 }
 
-const KOREAN_LABELS: [(&str, &str); 16] = [
+const KOREAN_LABELS: [(&str, &str); 18] = [
     ("Point lookup by id", "id로 노드 찾기"),
     ("Filtered scan", "조건으로 걸러 읽기"),
     ("`ORDER BY ... LIMIT`", "`ORDER BY ... LIMIT`"),
     ("1-hop neighbours", "1홉 이웃"),
+    ("1-hop with a relationship property", "1홉 이웃과 관계 속성"),
+    ("Sum of a relationship property", "관계 속성 합계"),
     ("2-hop distinct", "2홉 이웃(중복 제거)"),
     ("3-hop distinct", "3홉 이웃(중복 제거)"),
     ("Variable length `*1..3`", "가변 길이 `*1..3`"),
@@ -66,11 +68,13 @@ const KOREAN_LABELS: [(&str, &str); 16] = [
 ];
 
 /// The workloads README.md shows, in order, each with the label of its row.
-pub const ROWS: [(&str, &str); 15] = [
+pub const ROWS: [(&str, &str); 17] = [
     ("read/point-lookup", "Point lookup by id"),
     ("read/filter-scan", "Filtered scan"),
     ("read/order-limit", "`ORDER BY ... LIMIT`"),
     ("traverse/1-hop", "1-hop neighbours"),
+    ("traverse/1-hop-since", "1-hop with a relationship property"),
+    ("scan/knows-since-sum", "Sum of a relationship property"),
     ("traverse/2-hop-distinct", "2-hop distinct"),
     ("traverse/3-hop-distinct", "3-hop distinct"),
     ("traverse/variable-length-1..3", "Variable length `*1..3`"),
@@ -195,6 +199,12 @@ fn smaller(rhizodb: Option<f64>, other: Option<f64>, language: Language) -> Stri
             } else {
                 ("LadybugDB", ours / theirs)
             };
+            if format!("{ratio:.1}") == "1.0" {
+                return match language {
+                    Language::English => "similar".to_owned(),
+                    Language::Korean => "유사".to_owned(),
+                };
+            }
             match language {
                 Language::English => format!("{engine} {ratio:.1}x smaller"),
                 Language::Korean => format!("{engine}가 {ratio:.1}배 작음"),

@@ -73,32 +73,35 @@ Every run checks that both engines return the same rows, and bulk load uses each
 The suite and every query are in [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench), and `mise run bench-readme` measures again and rewrites this table.
 
 <!-- bench-table:start -->
-Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.
+Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.
 
 | Workload | RhizoDB | LadybugDB | Faster |
 | --- | ---: | ---: | --- |
-| Point lookup by id | 0.398 | 0.844 | RhizoDB 2.1x |
-| Filtered scan | 0.315 | 0.390 | similar |
-| `ORDER BY ... LIMIT` | 0.512 | 0.829 | RhizoDB 1.6x |
-| 1-hop neighbours | 0.318 | 0.675 | RhizoDB 2.1x |
-| 2-hop distinct | 0.630 | 9.59 | RhizoDB 15.2x |
-| 3-hop distinct | 4.23 | 34.5 | RhizoDB 8.1x |
-| Variable length `*1..3` | 4.69 | 28.2 | RhizoDB 6.0x |
-| Group by city | 1.88 | 2.66 | RhizoDB 1.4x |
-| Substring scan of a text property | 21.2 | 32.5 | RhizoDB 1.5x |
-| Keyword search | 53.1 | 433 | RhizoDB 8.2x |
-| Vector search | 218 | 389 | RhizoDB 1.8x |
-| Small commits | 73.0 | 214 | RhizoDB 2.9x |
-| Bulk update | 11.7 | 12.1 | similar |
-| Detach delete | 240 | 378 | RhizoDB 1.6x |
-| Bulk load | 829 | 937 | RhizoDB 1.1x |
-| File size after bulk load | 14.3 MiB | 13.0 MiB | LadybugDB 1.1x smaller |
+| Point lookup by id | 0.416 | 0.847 | RhizoDB 2.0x |
+| Filtered scan | 0.303 | 0.378 | RhizoDB 1.2x |
+| `ORDER BY ... LIMIT` | 0.497 | 0.841 | RhizoDB 1.7x |
+| 1-hop neighbours | 0.316 | 0.608 | RhizoDB 1.9x |
+| 1-hop with a relationship property | 0.484 | 0.618 | RhizoDB 1.3x |
+| Sum of a relationship property | 52.1 | 1.40 | LadybugDB 37.1x |
+| 2-hop distinct | 0.644 | 8.57 | RhizoDB 13.3x |
+| 3-hop distinct | 4.61 | 32.7 | RhizoDB 7.1x |
+| Variable length `*1..3` | 5.08 | 26.8 | RhizoDB 5.3x |
+| Group by city | 1.88 | 2.49 | RhizoDB 1.3x |
+| Substring scan of a text property | 20.8 | 29.3 | RhizoDB 1.4x |
+| Keyword search | 52.1 | 375 | RhizoDB 7.2x |
+| Vector search | 203 | 398 | RhizoDB 2.0x |
+| Small commits | 67.0 | 203 | RhizoDB 3.0x |
+| Bulk update | 12.4 | 12.9 | similar |
+| Detach delete | 242 | 375 | RhizoDB 1.5x |
+| Bulk load | 676 | 905 | RhizoDB 1.3x |
+| File size after bulk load | 12.9 MiB | 13.0 MiB | similar |
 <!-- bench-table:end -->
 
 The table is measured again on whatever machine runs it, so a later table may come from a different host than an earlier one.
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
-LadybugDB keeps a slightly smaller file, and the two engines are similar on the filtered scan and the bulk update.
+The two engines keep files of a similar size and are similar on the bulk update.
+LadybugDB sums a relationship property over every relationship far faster, since RhizoDB reads each relationship's chunk one relationship at a time.
 
 ## Development
 

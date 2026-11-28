@@ -200,11 +200,11 @@ fn encode_temporal(value: &Temporal, out: &mut Vec<u8>) {
     }
 }
 
-fn zigzag(value: i64) -> u64 {
+pub(crate) fn zigzag(value: i64) -> u64 {
     ((value << 1) ^ (value >> 63)) as u64
 }
 
-fn unzigzag(value: u64) -> i64 {
+pub(crate) fn unzigzag(value: u64) -> i64 {
     (value >> 1) as i64 ^ -((value & 1) as i64)
 }
 
@@ -378,6 +378,22 @@ impl<'a> Reader<'a> {
             }
             tag @ TAG_DATE..=TAG_DURATION => self.temporal(tag).map(PropertyValue::Temporal),
             tag => Err(DecodeError::UnknownTag(tag)),
+        }
+    }
+
+    /// The next value when it is an integer, or `None` after moving past a value of another type
+    /// without building it.
+    pub(crate) fn integer_or_skip(&mut self) -> Result<Option<i64>, DecodeError> {
+        match self.bytes.first() {
+            Some(&TAG_INTEGER) => {
+                self.u8()?;
+                Ok(Some(self.u64()? as i64))
+            }
+            Some(&TAG_VARINT_INTEGER) => {
+                self.u8()?;
+                Ok(Some(unzigzag(self.varint_u64()?)))
+            }
+            _ => self.skip_value().map(|()| None),
         }
     }
 
