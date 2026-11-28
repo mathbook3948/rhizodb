@@ -1287,6 +1287,14 @@ struct GatedFile {
 }
 
 impl BlockFile for GatedFile {
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        self.file.held_elsewhere()
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        self.file.identity()
+    }
+
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.gate.pass();
         self.file.read(first, buffer)
@@ -1582,6 +1590,14 @@ fn died() -> io::Error {
 }
 
 impl BlockFile for DiesBeforeSyncFile {
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        self.file.held_elsewhere()
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        self.file.identity()
+    }
+
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.file.read(first, buffer)
     }
