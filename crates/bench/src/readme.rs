@@ -45,7 +45,7 @@ impl Language {
 
 const KOREAN_LABELS: [(&str, &str); 18] = [
     ("Point lookup by id", "id로 노드 조회"),
-    ("Filtered scan", "조건 필터 스캔"),
+    ("Filtered scan", "필터 스캔"),
     ("`ORDER BY ... LIMIT`", "`ORDER BY ... LIMIT`"),
     ("1-hop neighbours", "1홉 이웃"),
     (

@@ -128,7 +128,7 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.contains("| 조건 필터 스캔 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
+        table.contains("| 필터 스캔 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
         "{table}"
     );
     assert!(
