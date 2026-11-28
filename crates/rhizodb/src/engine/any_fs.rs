@@ -1,6 +1,5 @@
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::ErrorKind;
@@ -11,7 +10,6 @@ use crate::storage::copy_tables;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
-use super::block_file::SECTOR_SIZE;
 use super::error::EngineError;
 use super::mem_fs::MemFile;
 use super::mem_fs::MemFs;
@@ -21,6 +19,8 @@ use super::snapshot::install;
 use super::store::Engine;
 use super::store::EngineOptions;
 use super::store::staging_name;
+use super::stray_log::Place;
+use super::stray_log::adopt;
 use super::wal::segment_files;
 use super::wal::segment_name;
 
@@ -177,49 +177,6 @@ const MEMORY_NAME: &str = "memory";
 
 const MOST_SYMLINKS: usize = 40;
 
-#[derive(Debug, PartialEq)]
-struct Place {
-    directory: PathBuf,
-    name: String,
-}
-
-impl Place {
-    fn of(path: &Path) -> io::Result<Self> {
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "the database path {} names no file in UTF-8",
-                        path.display()
-                    ),
-                )
-            })?;
-        let directory = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        Ok(Self {
-            directory: std::fs::canonicalize(directory)?,
-            name: name.to_owned(),
-        })
-    }
-
-    fn path(&self) -> PathBuf {
-        self.directory.join(&self.name)
-    }
-
-    fn segments(&self) -> io::Result<Vec<u64>> {
-        segment_files(&OsFs::new(&self.directory), &self.name)
-    }
-
-    fn segment(&self, sequence: u64) -> PathBuf {
-        self.directory.join(segment_name(&self.name, sequence))
-    }
-}
-
 #[derive(Debug)]
 struct Resolved {
     real: Place,
@@ -271,48 +228,6 @@ impl Resolved {
         }
         self.given.segments()
     }
-
-    fn adopt_stray_segments(&self) -> Result<(), EngineError> {
-        let real = OsFs::new(&self.real.directory);
-        let lock = real.open(
-            &self.real.name,
-            BlockSize::new(SECTOR_SIZE).ok_or(EngineError::TooLarge)?,
-        )?;
-        lock.lock()?;
-        let stray = self.stray_segments()?;
-        let own = self.real.segments()?;
-        if let (Some(last_own), Some(first_stray)) = (own.last(), stray.first())
-            && last_own >= first_stray
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "log segments lie both beside {} and beside {}, which name one database \
-                     file, and only one set can be its log, so remove the set that is stale",
-                    self.real.path().display(),
-                    self.given.path().display()
-                ),
-            )
-            .into());
-        }
-        let given = OsFs::new(&self.given.directory);
-        for sequence in stray {
-            let (from, to) = (self.given.segment(sequence), self.real.segment(sequence));
-            std::fs::rename(&from, &to).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!(
-                        "cannot move the log segment {} to {}, so move it there by hand: {error}",
-                        from.display(),
-                        to.display()
-                    ),
-                )
-            })?;
-            real.sync_names()?;
-            given.sync_names()?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(unix)]
@@ -347,12 +262,12 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
         return open();
     }
     if !resolved.real.segments()?.is_empty() {
-        resolved.adopt_stray_segments()?;
+        adopt(&resolved.real, &resolved.given, options)?;
         return open();
     }
     match open() {
         Err(EngineError::WalMissing) => {
-            resolved.adopt_stray_segments()?;
+            adopt(&resolved.real, &resolved.given, options)?;
             open()
         }
         opened => opened,

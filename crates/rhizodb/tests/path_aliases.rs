@@ -317,23 +317,88 @@ fn the_log_an_older_release_named_after_a_symlink_moves_beside_the_file_on_a_wri
     assert_every_path_sees_every_commit(&[&a.real, &a.linked_file]);
 }
 
+fn restore(files: &[(PathBuf, Vec<u8>)], directories: &[&Path]) {
+    for directory in directories {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+            {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+    for (path, bytes) in files {
+        if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+}
+
 #[test]
-fn a_move_of_an_older_release_log_that_stopped_part_way_finishes_on_the_next_open() {
+fn a_move_of_an_older_release_log_killed_after_any_step_fails_loudly_through_the_real_path_and_finishes_through_the_link()
+ {
     let a = aliases();
     let stray = older_release_layout(&a, 1 << 20);
     assert!(stray.len() >= 2, "{stray:?}");
-    move_segments(&stray[..1], &a.real);
-    let error = OpenOptions::new()
-        .read_only(true)
-        .open(&a.linked_file)
-        .map(drop)
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::ReadOnly, "{error}");
-    let db = Database::open(&a.linked_file).unwrap();
-    assert_eq!(count(&db), 150);
-    drop(db);
-    assert!(segments(&a.linked_file).is_empty());
-    assert_every_path_sees_every_commit(&[&a.real, &a.linked_file]);
+    let directories = [a.real.parent().unwrap(), a.linked_file.parent().unwrap()];
+    let crashed: Vec<_> = directories.iter().flat_map(|d| files(d)).collect();
+    for moved in 1..stray.len() {
+        restore(&crashed, &directories);
+        move_segments(&stray[stray.len() - moved..], &a.real);
+        let before: Vec<_> = directories.iter().flat_map(|d| files(d)).collect();
+        for opened in [
+            OpenOptions::new().read_only(true).open(&a.real),
+            Database::open(&a.real),
+        ] {
+            let error = opened.map(drop).expect_err(&format!("{moved} moved"));
+            assert_eq!(
+                error.kind(),
+                ErrorKind::CorruptData,
+                "{moved} moved: {error}"
+            );
+        }
+        let error = OpenOptions::new()
+            .read_only(true)
+            .open(&a.linked_file)
+            .map(drop)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ReadOnly, "{moved} moved: {error}");
+        let after: Vec<_> = directories.iter().flat_map(|d| files(d)).collect();
+        assert_eq!(after, before, "{moved} moved");
+        let db = Database::open(&a.linked_file).unwrap();
+        assert_eq!(count(&db), 150, "{moved} moved");
+        drop(db);
+        assert!(segments(&a.linked_file).is_empty());
+        assert_every_path_sees_every_commit(&[&a.real, &a.linked_file]);
+    }
+}
+
+#[test]
+fn a_log_beside_a_symlink_that_belongs_to_another_database_is_refused_by_name_and_left_as_it_is() {
+    let a = aliases();
+    crash_through(&a.real, &a.real);
+    for segment in segments(&a.real) {
+        std::fs::remove_file(segment).unwrap();
+    }
+    let other = tempfile::tempdir().unwrap();
+    let foreign = other.path().join("alias.rhizodb");
+    crash_through(&foreign, &foreign);
+    move_segments(&segments(&foreign), &a.linked_file);
+    let stray = segments(&a.linked_file);
+    let directories = [a.real.parent().unwrap(), a.linked_file.parent().unwrap()];
+    let before: Vec<_> = directories.iter().flat_map(|d| files(d)).collect();
+    let error = Database::open(&a.linked_file).map(drop).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Storage, "{error}");
+    let causes = causes(&error);
+    assert!(causes.contains("none was moved"), "{causes}");
+    for segment in &stray {
+        assert!(causes.contains(&segment.display().to_string()), "{causes}");
+    }
+    let after: Vec<_> = directories.iter().flat_map(|d| files(d)).collect();
+    assert_eq!(after, before);
 }
 
 #[test]
