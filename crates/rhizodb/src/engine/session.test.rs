@@ -1099,3 +1099,77 @@ fn the_checkpoint_lock_is_a_byte_of_its_own_that_one_holder_at_a_time_takes() {
     theirs.unlock(SideLock::Checkpoint).unwrap();
     drop(other);
 }
+
+type WriterStep = dyn FnMut(usize, &[AtomicU64]) + Send;
+
+// ast-grep-ignore
+// Words that run `writer` before each access a reader makes, so a test places a writer's steps between a reader's loads.
+struct Interleaved {
+    words: Vec<AtomicU64>,
+    writer: std::sync::Mutex<Box<WriterStep>>,
+}
+
+impl fmt::Debug for Interleaved {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Interleaved")
+    }
+}
+
+impl SideWords for Interleaved {
+    fn word(&self, index: usize) -> &AtomicU64 {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        writer(index, &self.words);
+        &self.words[index]
+    }
+}
+
+fn interleaved(writer: impl FnMut(usize, &[AtomicU64]) + Send + 'static) -> Interleaved {
+    let words = (0..WORDS).map(|_| AtomicU64::new(0)).collect();
+    Interleaved {
+        words,
+        writer: std::sync::Mutex::new(Box::new(writer)),
+    }
+}
+
+// ast-grep-ignore
+// Fills the copy the next version names with `value`, and publishes that version only when `publish` says so.
+fn write_copy(words: &[AtomicU64], value: u64, publish: bool) {
+    let version = words[Field::TailVersion.index()].load(Ordering::SeqCst) + 1;
+    let at = TAIL.copy(version);
+    let sequence = words[at].load(Ordering::SeqCst);
+    words[at].store(sequence + 2, Ordering::SeqCst);
+    for word in &words[at + 1..=at + TAIL_WORDS] {
+        word.store(value, Ordering::SeqCst);
+    }
+    if publish {
+        words[Field::TailVersion.index()].store(version, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn a_reader_never_reads_a_copy_newer_than_the_version_it_found_so_reads_never_go_back() {
+    let mut lapped = false;
+    let words = interleaved(move |index, words| {
+        let version = words[Field::TailVersion.index()].load(Ordering::SeqCst);
+        if version == 1 && !lapped && index == TAIL.copy(1) {
+            lapped = true;
+            write_copy(words, 2, true);
+            write_copy(words, 3, false);
+        }
+    });
+    write_copy(&words.words, 1, true);
+    let mut first = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut first));
+    let mut second = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut second));
+    assert!(
+        first[0] <= second[0],
+        "a read returned {} and the next one {}",
+        first[0],
+        second[0]
+    );
+    assert_eq!(first, [2; TAIL_WORDS]);
+}
