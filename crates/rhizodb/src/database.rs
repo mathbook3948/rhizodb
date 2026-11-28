@@ -273,7 +273,9 @@ impl OpenOptions {
     /// database's read queries share: a query splits only across the threads that other read
     /// queries of the database leave idle, so many concurrent queries each stay on their own
     /// thread instead of crowding the cores. The database starts the other threads at its first
-    /// split and keeps them waiting for the next one until it drops.
+    /// split and keeps them waiting for the next one until it drops, so every open database
+    /// holds `threads - 1` parked threads with 2 MiB stacks for its whole life, and a host that
+    /// keeps many databases open should lower this.
     ///
     /// ```
     /// use rhizodb::OpenOptions;
@@ -292,9 +294,12 @@ impl OpenOptions {
     }
 
     /// How many start nodes a match must read before a read query splits them across
-    /// [threads](OpenOptions::threads), so that a small query does not pay to start them. It
-    /// defaults to 8192. Zero and one act as two, since a match of one start node has nothing to
-    /// split.
+    /// [threads](OpenOptions::threads), so that a small query does not pay to hand work to
+    /// them. A split takes every idle thread whatever its start nodes, so a lower threshold
+    /// speeds up matches that do much work per start node, such as traversals of several hops,
+    /// and a higher one keeps matches that do little, such as a filter over one property, from
+    /// paying more to coordinate threads than they save. It defaults to 8192. Zero and one act as
+    /// two, since a match of one start node has nothing to split.
     pub fn parallel_threshold(mut self, nodes: usize) -> Self {
         self.parallelism.threshold = nodes;
         self
