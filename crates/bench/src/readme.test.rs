@@ -109,7 +109,7 @@ fn a_report_without_results_fails() {
 #[test]
 fn a_korean_table_uses_korean_words_for_every_row() {
     let table =
-        render_in(&report(), "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+        render_in(&report(), "CPU 4개, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
 
     assert!(
         table.contains("| 작업 | RhizoDB | LadybugDB | 더 빠른 쪽 |"),
@@ -136,7 +136,7 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.starts_with("2026-11-25에 4 CPUs, Linux 환경에서 측정했습니다."),
+        table.starts_with("2026-11-25에 CPU 4개, Linux 환경에서 측정했습니다."),
         "{table}"
     );
 }
@@ -157,25 +157,39 @@ fn an_unknown_language_code_fails() {
     assert_eq!(Language::from_code("ko"), Ok(Language::Korean));
 }
 
-#[test]
-fn files_whose_sizes_round_to_the_same_ratio_are_similar() {
+fn with_sizes(rhizodb: u64, ladybugdb: u64) -> Value {
     let mut document = report();
     for row in document["results"].as_array_mut().into_iter().flatten() {
         if row["workload"] == "load/bulk" {
             row["bytes"] = json!(if row["engine"] == "rhizodb" {
-                13_484_032
+                rhizodb
             } else {
-                13_631_488
+                ladybugdb
             });
         }
     }
-    let english = render(&document, "4 CPUs, Linux", "2026-11-25").unwrap_or_default();
-    let korean =
-        render_in(&document, "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+    document
+}
 
-    assert!(
-        english.contains("| File size after bulk load | 12.9 MiB | 13.0 MiB | similar |"),
-        "{english}"
-    );
-    assert!(korean.contains("| 유사 |"), "{korean}");
+#[test]
+fn sizes_less_than_five_percent_apart_are_similar_and_six_percent_apart_are_not() {
+    let size_cell = |document: &Value, language: Language| {
+        render_in(document, "machine", "2026-11-25", language)
+            .unwrap_or_default()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .rsplit('|')
+            .nth(1)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    let close = with_sizes(1_000_000, 1_049_000);
+    let apart = with_sizes(1_000_000, 1_060_000);
+
+    assert_eq!(size_cell(&close, Language::English), "similar");
+    assert_eq!(size_cell(&close, Language::Korean), "유사");
+    assert_eq!(size_cell(&apart, Language::English), "RhizoDB 1.1x smaller");
+    assert_eq!(size_cell(&apart, Language::Korean), "RhizoDB가 1.1배 작음");
 }

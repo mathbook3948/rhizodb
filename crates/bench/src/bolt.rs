@@ -435,7 +435,7 @@ impl Instance for BoltInstance {
                 "CALL db.index.fulltext.queryNodes('bio_text', $term) YIELD node, score RETURN node.id AS id, score ORDER BY score DESC LIMIT 10"
             }
             Flavor::Memgraph => {
-                "CALL text_search.search('bio_text', $term) YIELD node, score RETURN node.id AS id, score ORDER BY score DESC LIMIT 10"
+                "CALL text_search.search('bio_text', 'data.bio:' + $term) YIELD node, score RETURN node.id AS id, score ORDER BY score DESC LIMIT 10"
             }
         })
     }

@@ -65,6 +65,14 @@ pub use transaction::WriteTransaction;
 #[doc(hidden)]
 pub use value::read_value_for_fuzzing;
 
+/// How many times a write of this process to a database file has waited behind a lock that
+/// another process holds on the file, as a reader of RhizoDB 0.2.0 takes, for tests.
+#[cfg(windows)]
+#[doc(hidden)]
+pub fn write_retries_for_testing() -> u64 {
+    engine::os_fs::write_retries()
+}
+
 /// The README, whose example runs as a doctest.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]

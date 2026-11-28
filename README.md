@@ -73,36 +73,36 @@ Every run checks that both engines return the same rows, and bulk load uses each
 The suite and every query are in [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench), and `mise run bench-readme` measures again and rewrites this table.
 
 <!-- bench-table:start -->
-Measured on 2026-11-28 on 16 CPUs (12th Gen Intel(R) Core(TM) i7-12700KF), Windows 10.0.26300.0, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.
+Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row is marked similar when its ranges of runs overlap, or, for the file size, when the sizes differ by less than 5 percent.
 
 | Workload | RhizoDB | LadybugDB | Faster |
 | --- | ---: | ---: | --- |
-| Point lookup by id | 0.430 | 1.00 | RhizoDB 2.3x |
-| Filtered scan | 0.943 | 0.479 | LadybugDB 2.0x |
-| `ORDER BY ... LIMIT` | 1.07 | 0.604 | LadybugDB 1.8x |
-| 1-hop neighbours | 0.309 | 0.660 | RhizoDB 2.1x |
-| 1-hop with a relationship property | 0.388 | 0.693 | RhizoDB 1.8x |
-| Sum of a relationship property | 18.2 | 1.42 | LadybugDB 12.9x |
-| 2-hop distinct | 0.696 | 15.9 | RhizoDB 22.9x |
-| 3-hop distinct | 4.44 | 52.4 | RhizoDB 11.8x |
-| Variable length `*1..3` | 4.75 | 36.1 | RhizoDB 7.6x |
-| Group by city | 2.58 | 3.23 | RhizoDB 1.2x |
-| Substring scan of a text property | 25.2 | 42.9 | RhizoDB 1.7x |
-| Keyword search | 42.4 | 298 | RhizoDB 7.0x |
-| Vector search | 169 | 357 | RhizoDB 2.1x |
-| Small commits | 268 | 412 | RhizoDB 1.5x |
-| Bulk update | 21.2 | 27.6 | similar |
-| Detach delete | 225 | 499 | RhizoDB 2.2x |
-| Bulk load | 735 | 964 | RhizoDB 1.3x |
+| Point lookup by id | 0.432 | 0.798 | RhizoDB 1.8x |
+| Filtered scan | 0.307 | 0.372 | similar |
+| `ORDER BY ... LIMIT` | 0.445 | 0.802 | RhizoDB 1.8x |
+| 1-hop neighbours | 0.310 | 0.601 | RhizoDB 1.9x |
+| 1-hop with a relationship property | 0.455 | 0.687 | RhizoDB 1.5x |
+| Sum of a relationship property | 2.82 | 1.19 | LadybugDB 2.4x |
+| 2-hop distinct | 0.705 | 10.2 | RhizoDB 14.5x |
+| 3-hop distinct | 4.78 | 35.3 | RhizoDB 7.4x |
+| Variable length `*1..3` | 5.28 | 27.9 | RhizoDB 5.3x |
+| Group by city | 1.91 | 2.56 | RhizoDB 1.3x |
+| Substring scan of a text property | 20.8 | 28.3 | RhizoDB 1.4x |
+| Keyword search | 52.9 | 406 | RhizoDB 7.7x |
+| Vector search | 215 | 394 | RhizoDB 1.8x |
+| Small commits | 68.0 | 202 | RhizoDB 3.0x |
+| Bulk update | 12.5 | 12.5 | similar |
+| Detach delete | 222 | 367 | RhizoDB 1.7x |
+| Bulk load | 723 | 902 | RhizoDB 1.2x |
 | File size after bulk load | 12.9 MiB | 13.0 MiB | similar |
 <!-- bench-table:end -->
 
 The table is measured again on whatever machine runs it, so a later table may come from a different host than an earlier one.
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
+[`crates/bench/ENGINES.md`](https://github.com/mathbook3948/rhizodb/blob/main/crates/bench/ENGINES.md) compares RhizoDB with SQLite, DuckDB, CozoDB, Neo4j, Memgraph, and FalkorDB on the same workloads.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
-The two engines keep files of a similar size and are similar on the bulk update.
-LadybugDB sums a relationship property over every relationship far faster, since RhizoDB reads each relationship's chunk one relationship at a time.
-On this machine LadybugDB is also faster on the filtered scan and `ORDER BY ... LIMIT`.
+The two engines keep files of a similar size and are similar on the filtered scan and the bulk update.
+LadybugDB is faster at summing a relationship property over every relationship.
 
 ## Development
 
