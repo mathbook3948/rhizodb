@@ -73,6 +73,9 @@ pub(crate) use properties::ScanGroup;
 pub(crate) use records::NodeRecord;
 pub(crate) use records::Properties;
 pub(crate) use records::RelationshipRecord;
+pub(crate) use relationships::Batch as RelationshipBatch;
+pub(crate) use relationships::SCANNED_KEYS as SCANNED_RELATIONSHIP_KEYS;
+pub(crate) use relationships::slots as relationship_slots;
 pub(crate) use value_key::Bound;
 pub(crate) use value_key::Compared;
 pub(crate) use value_key::KeyRange;
@@ -100,6 +103,7 @@ use meta::Part;
 use meta::Slot;
 use relationships::ChunkEdit;
 use relationships::ChunkRef;
+use relationships::SCANNED_KEYS;
 use upgrade::UPGRADE_BATCH_BYTES;
 use upgrade::UpgradeBudget;
 use upgrade::UpgradeStep;
@@ -1138,6 +1142,46 @@ impl<T: ReadTransaction> GraphTx<T> {
                 Ok::<(), GraphError>(())
             })?;
         held.try_for_each(|(&chunk, edit)| visit_held(chunk, edit, &mut visit))
+    }
+
+    /// Calls `visit` with a [`RelationshipBatch`] of the relationships of type `rel_type`, or of
+    /// every type, of each chunk in ascending order, as this transaction has left them. A batch
+    /// holds the ends of a relationship stored in the file only when `ends` asks for them, and
+    /// the values of `keys`, which holds at most [`SCANNED_RELATIONSHIP_KEYS`]. A key of `None`
+    /// reads as null.
+    pub(crate) fn scan_relationships<E: From<GraphError> + From<StorageError>>(
+        &self,
+        rel_type: Option<Token<RelationshipType>>,
+        ends: bool,
+        keys: &[Option<Token<PropertyKey>>],
+        mut visit: impl FnMut(&RelationshipBatch) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let mut batch = RelationshipBatch::default();
+        let mut ids = [None; SCANNED_KEYS];
+        for (id, key) in ids.iter_mut().zip(keys) {
+            *id = key.map(Token::id);
+        }
+        let ids = &ids[..keys.len()];
+        let rel_type = rel_type.map(Token::id);
+        let mut held = self.relationship_chunks.iter().peekable();
+        self.transaction
+            .visit_prefix(Table::RelationshipChunks, &[], |key, value| {
+                let chunk = relationships::parse_key(key).map_err(GraphError::from)?;
+                while let Some((&at, edit)) = held.next_if(|(at, _)| **at <= chunk) {
+                    batch.fill_held(edit.entries(), rel_type, ids)?;
+                    visit(&batch)?;
+                    if at == chunk {
+                        return Ok(());
+                    }
+                }
+                ChunkRef::parse(key, value)?.fill(rel_type, ends, ids, &mut batch)?;
+                visit(&batch)
+            })?;
+        for (_, edit) in held {
+            batch.fill_held(edit.entries(), rel_type, ids)?;
+            visit(&batch)?;
+        }
+        Ok(())
     }
 
     /// The labels of the label set `set`.

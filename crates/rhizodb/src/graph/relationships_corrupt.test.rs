@@ -69,6 +69,8 @@ fn a_damaged_relationship_chunk_fails_every_read_and_write_and_the_check_as_corr
     let corrupt = Some(ErrorKind::CorruptData);
     assert_eq!(kind_of(&db, "MATCH ()-[r:R]->() RETURN r.k"), corrupt);
     assert_eq!(kind_of(&db, "MATCH ()-[r:R]->() RETURN r"), corrupt);
+    assert_eq!(kind_of(&db, "MATCH ()-[r:R]->() RETURN sum(r.k)"), corrupt);
+    assert_eq!(kind_of(&db, "MATCH ()-[r:R]->() RETURN count(*)"), corrupt);
     assert_eq!(
         kind_of(&db, "MATCH (:Item {i: 0})-[r]->() RETURN r.k, r.s"),
         corrupt
