@@ -23,8 +23,8 @@ pub fn reserve(file: &File, len: u64) -> io::Result<()> {
 }
 
 /// Whether `file` lies on a file system of this machine, whose shared mappings and byte-range
-/// locks every process that opens the file shares. A network file system and any FUSE mount
-/// count as not local.
+/// locks every process that opens the file shares. Only file systems known to be local count:
+/// a network file system, any FUSE mount, an unknown type, and a failed query do not.
 pub fn is_local(file: &File) -> io::Result<bool> {
     sys::is_local(file)
 }
@@ -53,22 +53,20 @@ mod sys {
 
     pub(super) use super::unix_file_id as file_id;
 
-    const NFS: u32 = 0x6969;
-    const SMB: u32 = 0x517B;
-    const CIFS: u32 = 0xFF53_4D42;
-    const SMB2: u32 = 0xFE53_4D42;
-    const NINE_P: u32 = 0x0102_1997;
-    const CEPH: u32 = 0x00C3_6400;
-    const AFS: u32 = 0x5346_414F;
-    const KAFS: u32 = 0x6B41_4653;
-    const FUSE: u32 = 0x6573_5546;
-    const CODA: u32 = 0x7375_7245;
-    const NCP: u32 = 0x0000_564C;
-    const LUSTRE: u32 = 0x0BD0_0BD0;
-    const GFS2: u32 = 0x0116_1970;
-    const OCFS2: u32 = 0x7461_636F;
-    const SHARED_OR_REMOTE: [u32; 14] = [
-        NFS, SMB, CIFS, SMB2, NINE_P, CEPH, AFS, KAFS, FUSE, CODA, NCP, LUSTRE, GFS2, OCFS2,
+    const EXT: u32 = 0xEF53;
+    const XFS: u32 = 0x5846_5342;
+    const BTRFS: u32 = 0x9123_683E;
+    const TMPFS: u32 = 0x0102_1994;
+    const RAMFS: u32 = 0x8584_58F6;
+    const ZFS: u32 = 0x2FC1_2FC1;
+    const F2FS: u32 = 0xF2F5_2010;
+    const BCACHEFS: u32 = 0xCA45_1A4E;
+    const JFS: u32 = 0x3153_464A;
+    const REISERFS: u32 = 0x5265_4973;
+    const NILFS: u32 = 0x0000_3434;
+    const OVERLAYFS: u32 = 0x794C_7630;
+    const LOCAL: [u32; 12] = [
+        EXT, XFS, BTRFS, TMPFS, RAMFS, ZFS, F2FS, BCACHEFS, JFS, REISERFS, NILFS, OVERLAYFS,
     ];
 
     pub(super) fn reserve(file: &File, len: u64) -> io::Result<()> {
@@ -83,7 +81,7 @@ mod sys {
 
     pub(super) fn is_local(file: &File) -> io::Result<bool> {
         let kind = rustix::fs::fstatfs(file)?.f_type as u32;
-        Ok(!SHARED_OR_REMOTE.contains(&kind))
+        Ok(LOCAL.contains(&kind))
     }
 }
 
@@ -97,17 +95,27 @@ mod sys {
     pub(super) use super::unix_file_id as file_id;
 
     pub(super) fn reserve(file: &File, len: u64) -> io::Result<()> {
-        Ok(rustix::fs::fallocate(
-            file,
-            FallocateFlags::empty(),
-            0,
-            len,
-        )?)
+        match rustix::fs::fallocate(file, FallocateFlags::empty(), 0, len) {
+            Err(rustix::io::Errno::NOTSUP | rustix::io::Errno::INVAL) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the file system cannot reserve blocks for a file",
+            )),
+            outcome => Ok(outcome?),
+        }
     }
 
     pub(super) fn is_local(file: &File) -> io::Result<bool> {
-        let flags = rustix::fs::fstatfs(file)?.f_flags;
-        Ok(flags & libc::MNT_LOCAL as u32 != 0)
+        let stat = rustix::fs::fstatfs(file)?;
+        let kind: Vec<u8> = stat
+            .f_fstypename
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect();
+        let fuse = [&b"macfuse"[..], b"osxfuse", b"fuse"]
+            .iter()
+            .any(|name| kind.starts_with(name));
+        Ok(stat.f_flags & libc::MNT_LOCAL as u32 != 0 && !fuse)
     }
 }
 
@@ -140,12 +148,14 @@ mod sys {
     use std::os::windows::fs::FileExt;
     use std::os::windows::io::AsRawHandle;
 
+    use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::FILE_ID_INFO;
     use windows_sys::Win32::Storage::FileSystem::FILE_REMOTE_PROTOCOL_INFO;
     use windows_sys::Win32::Storage::FileSystem::FileIdInfo;
     use windows_sys::Win32::Storage::FileSystem::FileRemoteProtocolInfo;
     use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandleEx;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
 
     use super::FileId;
 
@@ -187,7 +197,36 @@ mod sys {
         // SAFETY: `FILE_REMOTE_PROTOCOL_INFO` is the plain C struct that this class fills.
         let remote =
             unsafe { information::<FILE_REMOTE_PROTOCOL_INFO>(file, FileRemoteProtocolInfo) };
-        Ok(remote.is_none())
+        if remote.is_some()
+            || io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32)
+        {
+            return Ok(false);
+        }
+        let mut name = [0u16; 64];
+        // SAFETY: the handle is open for as long as `file` is borrowed, `name` is a writable
+        // buffer of the length passed, and the other out pointers are null, which the call
+        // permits for information the caller does not want.
+        let named = unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle() as HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                name.as_mut_ptr(),
+                name.len() as u32,
+            )
+        };
+        if named == 0 {
+            return Ok(false);
+        }
+        let end = name
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(name.len());
+        let kind = String::from_utf16_lossy(&name[..end]).to_ascii_uppercase();
+        Ok(!kind.contains("FUSE") && !kind.contains("DOKAN"))
     }
 
     pub(super) fn file_id(file: &File) -> io::Result<FileId> {

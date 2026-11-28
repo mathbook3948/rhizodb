@@ -8,10 +8,10 @@ use std::io::BufReader;
 use std::io::Write;
 use std::path::Path;
 use std::process::Child;
-use std::process::ChildStdout;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -99,9 +99,11 @@ fn child() {
     }
 }
 
+const PATIENCE: Duration = Duration::from_secs(60);
+
 struct Peer {
     child: Child,
-    stdout: BufReader<ChildStdout>,
+    lines: mpsc::Receiver<String>,
 }
 
 impl Peer {
@@ -115,19 +117,28 @@ impl Peer {
             .spawn()
             .unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self { child, stdout }
+        let (sender, lines) = mpsc::channel();
+        thread::spawn(move || {
+            for line in stdout.lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { child, lines }
     }
 
     fn wait_for(&mut self, wanted: &str) {
-        let mut line = String::new();
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            line.clear();
-            assert!(
-                self.stdout.read_line(&mut line).unwrap() > 0,
-                "the child exited before printing {wanted:?}"
-            );
-            if line.trim_end() == wanted {
-                return;
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(left) {
+                Ok(line) if line.trim_end() == wanted => return,
+                Ok(_) => {}
+                Err(mpsc::RecvTimeoutError::Timeout) => panic!("no {wanted:?} within {PATIENCE:?}"),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the child exited before printing {wanted:?}")
+                }
             }
         }
     }
@@ -231,26 +242,27 @@ fn a_waiting_lock_is_granted_once_the_holder_dies() {
     let path = dir.path().join("locks");
     let mut holder = Peer::spawn("exclusive", &path);
     holder.wait_for("locked");
-    let waiter = {
+    let (granted, waiter) = mpsc::channel();
+    {
         let path = path.clone();
         thread::spawn(move || {
             let file = open(&path);
             let (offset, len) = RANGE;
             rhizodb_shm::lock(&file, offset, len, Lock::Exclusive).unwrap();
-            Instant::now()
-        })
-    };
-    thread::sleep(Duration::from_millis(200));
+            let _ = granted.send(Instant::now());
+            thread::sleep(PATIENCE);
+        });
+    }
     assert!(
-        !waiter.is_finished(),
+        waiter.recv_timeout(Duration::from_millis(200)).is_err(),
         "the waiter got the lock while the holder lived"
     );
     let killed = Instant::now();
     holder.kill();
-    assert!(
-        waiter.join().unwrap() >= killed,
-        "granted only after the kill"
-    );
+    let at = waiter
+        .recv_timeout(PATIENCE)
+        .expect("the waiter got the lock once the holder died");
+    assert!(at >= killed, "granted only after the kill");
 }
 
 #[test]
