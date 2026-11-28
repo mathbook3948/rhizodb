@@ -5,6 +5,7 @@ use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::gql::ast;
 use crate::gql::ast::Direction;
+use crate::gql::visit;
 use crate::procedure::Procedure;
 use crate::procedure::Procedures;
 use crate::result::Parameters;
@@ -2865,7 +2866,7 @@ fn collect_free<'a>(expr: &'a ast::Expr, bound: &mut Vec<&'a str>, free: &mut Ve
             }
         }
         other => {
-            for child in children(other) {
+            for child in children_outside_bodies(other) {
                 collect_free(child, bound, free);
             }
         }
@@ -3121,42 +3122,20 @@ fn collect_pattern_free<'a>(
 }
 
 fn contains_aggregate(expr: &ast::Expr) -> bool {
-    aggregate_call(expr).is_some() || children(expr).into_iter().any(contains_aggregate)
+    aggregate_call(expr).is_some()
+        || children_outside_bodies(expr)
+            .into_iter()
+            .any(contains_aggregate)
 }
 
 fn calls_rand(expr: &ast::Expr) -> bool {
-    matches!(expr, ast::Expr::Function(call) if Function::lookup(&qualified_name(call)) == Some(Function::Rand))
-        || children(expr)
-            .into_iter()
-            .chain(bodies(expr))
-            .any(calls_rand)
+    visit::any_expr(
+        expr,
+        &mut |expr| matches!(expr, ast::Expr::Function(call) if Function::lookup(&qualified_name(call)) == Some(Function::Rand)),
+    )
 }
 
-fn bodies(expr: &ast::Expr) -> Vec<&ast::Expr> {
-    match expr {
-        ast::Expr::ListComprehension(comprehension) => comprehension
-            .filter
-            .as_deref()
-            .into_iter()
-            .chain(comprehension.projection.as_deref())
-            .collect(),
-        ast::Expr::ListPredicate(predicate) => vec![&predicate.predicate],
-        ast::Expr::Reduce(reduce) => vec![&reduce.body],
-        ast::Expr::PatternComprehension(comprehension) => comprehension
-            .filter
-            .as_deref()
-            .into_iter()
-            .chain(std::iter::once(comprehension.projection.as_ref()))
-            .collect(),
-        ast::Expr::Exists(subquery) | ast::Expr::Count(subquery) => match subquery.as_ref() {
-            ast::Subquery::Pattern { filter, .. } => filter.iter().collect(),
-            ast::Subquery::Query(_) => Vec::new(),
-        },
-        _ => Vec::new(),
-    }
-}
-
-fn children(expr: &ast::Expr) -> Vec<&ast::Expr> {
+fn children_outside_bodies(expr: &ast::Expr) -> Vec<&ast::Expr> {
     match expr {
         ast::Expr::Literal(_)
         | ast::Expr::Parameter(_)
