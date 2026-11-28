@@ -27,6 +27,7 @@ pub(crate) fn reached(name: &str) {
 
 /// Does nothing outside a build made with `--cfg crash_points`.
 #[cfg(not(crash_points))]
+#[inline(always)]
 pub(crate) fn reached(_name: &str) {}
 
 /// Shrinks the log's segments, the memtable, and the checkpoint stages when
@@ -48,6 +49,7 @@ pub(crate) fn tuned(options: super::store::EngineOptions) -> super::store::Engin
 
 /// Leaves `options` as they are outside a build made with `--cfg crash_points`.
 #[cfg(not(crash_points))]
+#[inline(always)]
 pub(crate) fn tuned(options: super::store::EngineOptions) -> super::store::EngineOptions {
     options
 }
