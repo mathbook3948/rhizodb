@@ -533,12 +533,23 @@ fn write_all_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<()> {
                 if error.kind() == io::ErrorKind::WouldBlock
                     && start.elapsed() < WRITE_PATIENCE =>
             {
+                WRITE_RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 thread::sleep(pause);
                 pause = pause.saturating_mul(2).min(LONGEST_LOCK_PAUSE);
             }
             outcome => return outcome,
         }
     }
+}
+
+#[cfg(windows)]
+static WRITE_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many times a write of this process to a database file has waited behind another process's
+/// lock on the file.
+#[cfg(windows)]
+pub(crate) fn write_retries() -> u64 {
+    WRITE_RETRIES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(windows)]
