@@ -586,3 +586,29 @@ fn a_reader_that_joins_while_a_stage_chose_its_space_reads_its_tree_whole() {
     assert_eq!(round_seen(&joined, 1024), seen);
     joined.check().unwrap();
 }
+
+#[test]
+fn a_fallback_open_refuses_a_file_that_a_session_holds_elsewhere() {
+    let fs = written(1);
+    let _member = reader(&fs, 0).unwrap();
+    fs.refuse_side_sharing();
+    assert_eq!(
+        kind(reader(&fs, 0).unwrap_err()),
+        ErrorKind::DatabaseAlreadyOpen
+    );
+}
+
+#[test]
+fn no_second_session_starts_over_a_file_that_a_session_through_another_name_holds() {
+    let fs = written(1);
+    let _member = reader(&fs, 0).unwrap();
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    fs.rename(&side_name(NAME), "elsewhere-shm").unwrap();
+    match join(&fs, NAME, &file) {
+        Err(error) => assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen),
+        Ok(Joined::Alone { .. }) => {}
+        Ok(Joined::Session(_)) => panic!("a second session started over one file"),
+    }
+}

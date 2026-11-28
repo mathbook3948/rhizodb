@@ -22,9 +22,9 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A read-only open that may not create the side file, since its file system is read-only, its directory refuses the create, or its file system refuses multi-process access, opens as in phase 1 under a whole-file shared lock and joins no session, which keeps out a session's first process as it keeps out every open that writes.
 - Such an open checks again for the side file once it holds its shared lock, and fails with `DatabaseAlreadyOpen` when one appeared, so a session that began between its check and its lock is never read alongside.
 - An open that created a side file it then finds unusable, as on a file system that refuses multi-process access, removes it before it opens as in phase 1, so it leaves no side file that would refuse later opens.
-- A read-only open that finds a side file on a read-only file system opens as in phase 1, since no process can write the database file there and so no session can hold it.
+- A read-only open that finds a side file on a read-only file system, or a file system that refuses sessions, tests the database file's range lock and fails with `DatabaseAlreadyOpen` when another process holds it, since a read-only mount may show a file that a writer elsewhere still changes.
 - A read-only open that finds a side file it may not open for writing for any other reason, such as its permissions, fails with `DatabaseAlreadyOpen` and names the side file, since a session of another user may hold the file.
-- The side file is created with the permission bits of the database file, so every user who may open the database for reading may join a session, and its owner is the creating process's user.
+- The side file is created and then changed with `fchmod`, past the umask, to read and write for every class of user that may read the database file, since joining a session writes the side file, and its owner is the creating process's user.
 - A read-only open of a phase 1 build checks for the side file under its shared lock and refuses the file while one exists, so it never reads a file that a session holds.
 - The first process of a session creates the side file while it holds the database file's exclusive whole-file lock, and only then takes the shared lock it holds while open, so a phase 1 reader either holds its lock first and keeps the session out or finds the side file.
 - The last process of a session removes the side file while it holds the gate and the session lock exclusively, so a session that ends cleanly leaves no side file and a phase 1 read-only open reads the file again.
@@ -60,17 +60,23 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Every lock of a session is an OS byte-range lock, which the OS releases when its holder dies.
 - No lock is a mutex in shared memory, since macOS has no robust mutexes and a robust mutex leaves its protected state for the next holder to repair.
 - Each process of a session holds a shared lock on the database file while it is open, so an older build or an exclusive open fails while a session is open.
+- Besides the whole-file lock, every process of a session holds a shared range lock on the database file past any block, an open-file-description lock on Linux and a classic `fcntl` lock elsewhere on Unix, which a read-only descriptor may hold.
+- A first process, while it holds the whole-file lock exclusively, tests that range for a lock of any other process, which needs no write access, and fails with `DatabaseAlreadyOpen` when it finds one, and only then takes its own shared range lock and turns its whole-file lock shared.
+- So a first process that reaches the file through another name, as a hard link, and wins the gap that `flock` leaves when it turns exclusive into shared, finds the other session's range lock and refuses, and two sessions never hold one file.
+- On Windows the session lock on the database file is already such a range, and a first process takes it shared before it releases its whole-file exclusive lock, which the same handle may hold at once.
 - On Windows that lock covers a byte range past any block the file can hold, since a shared lock there denies writes to the range it covers, the holder's own included.
 - The side file carries the gate lock, the session lock, the write lock, the checkpoint lock, and one liveness lock per slot, each on a byte from 2^40 on, far past any growth of the mapped state, since Windows enforces locks on the bytes they cover, writes included.
 - On Windows a write to the database file that a lock refuses, as a phase 1 reader's whole-file shared lock does while it checks for the side file, is tried again with a bounded backoff and fails without poisoning the engine only once that bound passes.
 - A reset of the side file writes only the mapped state, so it never writes a byte that another process holds locked.
 - Every process holds the session lock shared while it is open, and an open that gets it exclusively is the first of its session.
-- Every open takes the gate lock exclusively, then the session lock shared, and then tries to turn it into an exclusive one, and an open whose try succeeds is the first of a new session, since every process that held the session lock closed or died.
+- Every open, on every platform, takes the gate lock exclusively, then the session lock shared, and then tries to turn it into an exclusive one, and an open whose try succeeds is the first of a new session, since every process that held the session lock closed or died.
 - On Unix that try is one `fcntl` call, which the kernel makes atomically, and on Windows, which has no atomic upgrade, the open releases its shared lock and tries the exclusive one, which is safe since only a holder of the gate elects.
-- The first process holds the gate and its exclusive session lock until it is ready, so every other open waits for it at the gate, and none joins a session half ready or takes itself for the first.
-- The first process keeps the gate and its exclusive session lock until it is ready, which includes a recovery or a format upgrade it runs at open, however many commits that upgrade takes.
+- An open checks, after it takes the gate and before it takes the session lock or maps anything, that its handle is still the side file the path names, so it never elects itself on a side file that a last process unlinked.
+- On Windows an open that finds the path refusing access, as a side file being removed does, closes its handle and opens the path again, a bounded number of times, and then fails with `DatabaseAlreadyOpen`, since that refusal may also be a real access denial.
+- The first process holds the gate and its exclusive session lock until it is ready and has claimed its slot, so every other open waits for it at the gate.
 - A first process that dies before it is ready leaves both locks free, so the next open finds itself the first and resets the side file again.
 - A process that closes takes the gate before it gives up its session lock, so an open that holds the gate sees a process of the session leave only by dying.
+- The first process keeps the gate and its exclusive session lock until it is ready, which includes a recovery or a format upgrade it runs at open, however many commits that upgrade takes.
 - The write lock is held exclusively from the start of a write transaction to its commit or rollback.
 - A write that finds the write lock held waits, as a write waits for another in one process today.
 - The checkpoint lock is held exclusively by a process while it writes a checkpoint, a compaction, or any other header.
@@ -210,7 +216,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - The engine benchmarks of a single-process open must not regress at any phase.
 - The side file's mapping and the byte-range locks live in a small workspace crate of their own that allows audited unsafe code, over `windows-sys` on Windows and `nix` or `libc` on Unix.
 - That crate is `rhizodb-shm` in `crates/shm`, and `rhizodb` depends on it by version, so a release publishes it first.
-- That crate exposes only mapping a file, atomic access to the words of a mapping, locking, unlocking, and downgrading a byte range, growing a file with its blocks reserved, reading a file's identity for the registry, and telling whether a file lies on a local file system.
+- That crate exposes only mapping a file, atomic access to the words of a mapping, locking, unlocking, downgrading, and testing a byte range, growing a file with its blocks reserved, reading a file's identity for the registry, and telling whether a file lies on a local file system.
 - That crate calls a safe crate where one covers a call, such as `rustix` for `fallocate` and `statfs`, so its own unsafe code is the mapping, the atomic view of it, and the lock and volume calls that no safe crate covers.
 - Every unsafe block in that crate carries a `SAFETY` comment, which `clippy::undocumented_unsafe_blocks` enforces, and the crate denies `unsafe_op_in_unsafe_fn`.
 - A mapping in that crate is never handed out as a slice or reference to plain bytes, only as atomic words, since another process may store into it at any time.
