@@ -62,6 +62,17 @@ pub(crate) struct Groups<'p> {
     limits: Limits,
 }
 
+/// The state of one aggregate that a scan folded from integers alone, bounded so that no order
+/// of its rows would give another result: the rows, the non-null values, their total, and the
+/// least or greatest of them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Folded {
+    pub(crate) rows: usize,
+    pub(crate) counted: usize,
+    pub(crate) total: i64,
+    pub(crate) best: Option<i64>,
+}
+
 struct Accumulator {
     rows: usize,
     counted: usize,
@@ -243,6 +254,29 @@ impl<'p> Groups<'p> {
                 accumulator.counted += rows;
             }
         }
+    }
+
+    /// Sets the one group of a projection without keys to the state each aggregate folded.
+    pub(crate) fn fold(&mut self, folded: Vec<Folded>) {
+        let accumulators = folded
+            .into_iter()
+            .map(|folded| Accumulator {
+                rows: folded.rows,
+                counted: folded.counted,
+                best: folded.best.map(Datum::Integer),
+                total: Total {
+                    count: folded.counted,
+                    integer: Some(folded.total),
+                    floats: false,
+                    float: match folded.counted {
+                        0 => -0.0,
+                        _ => folded.total as f64,
+                    },
+                },
+                ..Accumulator::new(self.limits)
+            })
+            .collect();
+        self.groups = vec![(Vec::new(), accumulators)];
     }
 
     /// One row per group with keys, aggregates, and final expressions filled in. Without keys,

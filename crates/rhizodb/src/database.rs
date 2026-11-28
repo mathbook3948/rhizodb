@@ -37,6 +37,14 @@ fn open_backend(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
     })
 }
 
+fn open_backend_shared(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
+    any_fs::open_path_shared(path, options).map_err(|error| {
+        StorageError::from(error)
+            .in_context(|| format!("cannot open the database at {}", path.display()))
+            .into()
+    })
+}
+
 fn open_backend_read_only(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
     Ok(any_fs::open_path_read_only(path, options).map_err(StorageError::from)?)
 }
@@ -81,6 +89,7 @@ const PEER_ID_LIMIT: usize = 64;
 pub struct OpenOptions {
     create: bool,
     read_only: bool,
+    multi_process: bool,
     replica: bool,
     parallelism: Parallelism,
     engine: EngineOptions,
@@ -94,6 +103,7 @@ impl Default for OpenOptions {
         Self {
             create: true,
             read_only: false,
+            multi_process: false,
             replica: false,
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
@@ -127,8 +137,8 @@ impl OpenOptions {
     /// in the same process fails with `DatabaseAlreadyOpen` too; share the one `Database`
     /// across threads instead.
     ///
-    /// It never creates, writes, renames, or removes a file, whatever [`OpenOptions::create`]
-    /// says: a path with no file or an empty file fails with
+    /// It never creates, writes, renames, or removes a file but one, whatever
+    /// [`OpenOptions::create`] says: a path with no file or an empty file fails with
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound). After an unclean
     /// shutdown it replays the write-ahead log into memory and leaves the log as it is, so reads
     /// see every commit the log holds, once it has synced the log so that no power loss takes
@@ -149,9 +159,17 @@ impl OpenOptions {
     /// [`Database::snapshot`] fails with `ReadOnly` after a crash cut a checkpoint between its
     /// stages, until an open that writes finishes it.
     ///
-    /// A read-only open also fails with `DatabaseAlreadyOpen` while a file named after the
-    /// database file with `-shm` lies beside it, which a later build keeps for processes that
-    /// share the file while one of them writes, since this build cannot read alongside them.
+    /// The one file it creates and writes is the side file named after the database file with
+    /// `-shm`, which every process that has the file open read-only maps to share the state of
+    /// their session, created with the database file's permissions. The last of them to close
+    /// removes it, and it is never needed to read the database. Where the directory refuses to
+    /// create it, as on read-only media, or on a file system that is not local, the open reads
+    /// the file alone instead, leaves no side file, and still shares the file with any number
+    /// of such opens. A process of another build fails to
+    /// join a running session with `DatabaseAlreadyOpen`, and an open that finds every slot of
+    /// the session taken fails with
+    /// [`ErrorKind::TooManyProcesses`](crate::ErrorKind::TooManyProcesses). A read-only open of
+    /// an earlier release refuses a file while a side file lies beside it.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -173,6 +191,43 @@ impl OpenOptions {
     /// ```
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Whether a database opened for writing lets processes that open the file
+    /// [read-only](OpenOptions::read_only) read it while this one writes, which it does not
+    /// unless this is set to `true`.
+    ///
+    /// Such an open takes part in the file's multi-process session, as every read-only open
+    /// does, through the side file named after the database file with `-shm`. One process of
+    /// the session writes at a time: a second open for writing in the session fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen), as does an
+    /// open for writing without this setting while any process of the session has the file
+    /// open. A read-only process reads every commit this one made before each of its reads
+    /// begins, and this one's checkpoints never reuse space that a read-only process still reads.
+    ///
+    /// The file must lie on a local file system of this machine that takes byte-range locks
+    /// and shared mappings, and the directory must take the side file, or the open fails with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage). A writer that closes while read-only
+    /// processes still have the file open leaves its log for the next open that writes, which
+    /// replays it, and writes nothing else. It has no effect on a database in memory or one
+    /// opened read-only.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("graph.rhizodb");
+    /// let writer = OpenOptions::new().multi_process(true).open(&path)?;
+    /// writer.execute("INSERT (:City {name: 'Oslo'})", &Parameters::new())?;
+    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::DatabaseAlreadyOpen);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn multi_process(mut self, multi_process: bool) -> Self {
+        self.multi_process = multi_process;
         self
     }
 
@@ -361,10 +416,16 @@ impl OpenOptions {
                 format!("there is no database file at {}", path.display()),
             ));
         }
+        let engine = EngineOptions {
+            build: crate::graph::build_identity(),
+            ..self.engine
+        };
         let backend = if self.read_only {
-            open_backend_read_only(path, self.engine)?
+            open_backend_read_only(path, engine)?
+        } else if self.multi_process {
+            open_backend_shared(path, engine)?
         } else {
-            open_backend(path, self.engine)?
+            open_backend(path, engine)?
         };
         self.database(graph_on(backend, self.replica)?)
     }

@@ -15,6 +15,7 @@ use super::mem_fs::MemFile;
 use super::mem_fs::MemFs;
 use super::os_fs::OsFile;
 use super::os_fs::OsFs;
+use super::session::SideFile;
 use super::snapshot::install;
 use super::store::Engine;
 use super::store::EngineOptions;
@@ -97,6 +98,33 @@ impl FileSystem for AnyFs {
             AnyFs::Sim(fs) => fs.sync_names(),
         }
     }
+
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        match self {
+            AnyFs::Os(fs) => fs.open_side(name),
+            AnyFs::Memory(fs) => fs.open_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.open_side(name),
+        }
+    }
+
+    fn remove_side(&self, name: &str) -> io::Result<()> {
+        match self {
+            AnyFs::Os(fs) => fs.remove_side(name),
+            AnyFs::Memory(fs) => fs.remove_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.remove_side(name),
+        }
+    }
+
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        match self {
+            AnyFs::Os(fs) => fs.create_side(name),
+            AnyFs::Memory(fs) => fs.create_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.create_side(name),
+        }
+    }
 }
 
 impl BlockFile for AnyFile {
@@ -151,6 +179,42 @@ impl BlockFile for AnyFile {
             AnyFile::Memory(file) => file.lock_shared(),
             #[cfg(test)]
             AnyFile::Sim(file) => file.lock_shared(),
+        }
+    }
+
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.lock_session(first),
+            AnyFile::Memory(file) => file.lock_session(first),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.lock_session(first),
+        }
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.unlock(),
+            AnyFile::Memory(file) => file.unlock(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.unlock(),
+        }
+    }
+
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        match self {
+            AnyFile::Os(file) => file.held_elsewhere(),
+            AnyFile::Memory(file) => file.held_elsewhere(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.held_elsewhere(),
+        }
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        match self {
+            AnyFile::Os(file) => file.identity(),
+            AnyFile::Memory(file) => file.identity(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.identity(),
         }
     }
 
@@ -274,6 +338,21 @@ pub(crate) fn open_path(path: &Path, options: EngineOptions) -> Result<Engine<An
     }
 }
 
+/// Opens the database file at `path` as the process of its multi-process session that writes,
+/// as [`Engine::open_shared`] does.
+pub(crate) fn open_path_shared(
+    path: &Path,
+    options: EngineOptions,
+) -> Result<Engine<AnyFs>, EngineError> {
+    let resolved = Resolved::of(path)?;
+    let real = &resolved.real;
+    if !real.directory.join(&real.name).exists() || !resolved.stray_segments()?.is_empty() {
+        open_path(path, options)?.close()?;
+    }
+    let fs = OsFs::shared(&real.directory, &real.name)?;
+    Engine::open_shared(Arc::new(AnyFs::Os(fs)), &real.name, options)
+}
+
 /// Opens the existing database file at `path` with the engine read-only, as
 /// [`Engine::open_read_only`] does. Fails where [`open_path`] would move log segments.
 pub(crate) fn open_path_read_only(
@@ -367,3 +446,7 @@ pub(crate) fn write_copy_on<F: FileSystem + 'static>(
         "closing the copy left a log segment beside it",
     )))
 }
+
+#[cfg(test)]
+#[path = "any_fs.test.rs"]
+mod tests;

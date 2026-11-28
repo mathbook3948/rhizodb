@@ -271,6 +271,18 @@ impl BlockFile for ViewFile {
         }
     }
 
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        if self.locked {
+            Ok(false)
+        } else {
+            self.file.held_elsewhere()
+        }
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        self.file.identity()
+    }
+
     fn set_block_count(&self, _count: u64) -> io::Result<()> {
         Err(unchanged())
     }

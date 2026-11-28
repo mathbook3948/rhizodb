@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io;
 
+use super::session::SideFile;
+
 /// The unit a storage device writes whole, and the most a torn write keeps or loses together.
 pub(crate) const SECTOR_SIZE: usize = 512;
 
@@ -65,6 +67,33 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
     /// holds an exclusive one. Any number of handles hold shared locks at once.
     fn lock_shared(&self) -> io::Result<()>;
 
+    /// Takes the shared lock that every process of a multi-process session holds on the
+    /// database file, which keeps out exclusive locks of other handles but no reader or writer,
+    /// and gives up any exclusive lock this handle holds. For the `first` process of a session
+    /// it fails with [`io::ErrorKind::WouldBlock`] when another handle holds the session lock,
+    /// which a session through another path or link to the file does.
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        let _ = first;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this file takes part in no multi-process session",
+        ))
+    }
+
+    /// Gives up the exclusive lock this handle holds.
+    fn unlock(&self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Whether another handle holds the session lock on the file, which every process of a
+    /// multi-process session does, through any path or link to it. It tests the lock without
+    /// taking it, answers `false` where the file takes no locks, and off Linux also counts a
+    /// whole-file lock another handle holds, which such a test cannot see past.
+    fn held_elsewhere(&self) -> io::Result<bool>;
+
+    /// The identity of the file this handle reaches, the same through every path and link.
+    fn identity(&self) -> io::Result<(u64, u128)>;
+
     /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
     fn set_block_count(&self, count: u64) -> io::Result<()>;
 
@@ -93,6 +122,32 @@ pub(crate) trait FileSystem: Send + Sync {
 
     /// Returns once every create, rename, and remove so far survives a power loss.
     fn sync_names(&self) -> io::Result<()>;
+
+    /// Opens the existing side file `name` of a multi-process session for reading and writing,
+    /// and fails with [`io::ErrorKind::NotFound`] when there is none, or with
+    /// [`io::ErrorKind::Unsupported`] where processes cannot share it.
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        Err(no_sessions(name))
+    }
+
+    /// Removes the side file `name` that this open created and found it cannot use, which a
+    /// read-only open may do although it removes no other file.
+    fn remove_side(&self, name: &str) -> io::Result<()> {
+        self.remove(name)
+    }
+
+    /// Creates the side file `name`, and fails with [`io::ErrorKind::AlreadyExists`] when it
+    /// exists.
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        Err(no_sessions(name))
+    }
+}
+
+fn no_sessions(name: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("no multi-process session can keep {name} here"),
+    )
 }
 
 #[cfg(test)]

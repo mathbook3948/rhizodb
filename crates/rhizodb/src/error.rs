@@ -173,6 +173,9 @@ pub enum ErrorKind {
     /// again until that `Database` is dropped. A file system that does not support file locks
     /// gives no such check, and a second open of a file there succeeds.
     DatabaseAlreadyOpen,
+    /// Every slot of the multi-process session that holds the database file is taken by a
+    /// process that has it open, so another process can open it only once one of them closes it.
+    TooManyProcesses,
     /// A database opened with [`OpenOptions::read_only`](crate::OpenOptions::read_only) was
     /// asked to change its file: a query that updates the graph, a write transaction, an index
     /// change, an import, a compaction, a call that writes for replication, or an upgrade of a

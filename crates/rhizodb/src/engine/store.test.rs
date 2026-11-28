@@ -23,6 +23,7 @@ fn tiny(checkpoint: CheckpointMode) -> EngineOptions {
         stage_floor: 8,
         max_retained_bytes: EngineOptions::default().max_retained_bytes,
         pin_limit: EngineOptions::default().pin_limit,
+        build: 0,
     }
 }
 
@@ -1288,6 +1289,14 @@ struct GatedFile {
 }
 
 impl BlockFile for GatedFile {
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        self.file.held_elsewhere()
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        self.file.identity()
+    }
+
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.gate.pass();
         self.file.read(first, buffer)
@@ -1583,6 +1592,14 @@ fn died() -> io::Error {
 }
 
 impl BlockFile for DiesBeforeSyncFile {
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        self.file.held_elsewhere()
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        self.file.identity()
+    }
+
     fn read(&self, first: u64, buffer: &mut [u8]) -> io::Result<()> {
         self.file.read(first, buffer)
     }

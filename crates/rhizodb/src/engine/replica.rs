@@ -37,6 +37,7 @@ use crate::engine::wal_format::Body;
 use crate::engine::wal_format::NotRecord;
 use crate::engine::wal_format::RECORD_HEADER;
 use crate::engine::wal_format::RECORD_LIMIT;
+use crate::engine::wal_format::Record;
 use crate::engine::wal_format::SegmentHeader;
 use crate::engine::wal_format::Step;
 use crate::engine::wal_format::chain_after;
@@ -319,6 +320,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             shared.poison_with(&error);
             return Err(error);
         }
+        shared.publish_header(&header);
         lock(&shared.identity).replication = header.replication;
         durable.header = header;
         Ok(())
@@ -785,8 +787,11 @@ fn too_far_behind(after: u64, oldest_lsn: u64) -> EngineError {
     )
 }
 
+// ast-grep-ignore
+// Windows refuses to open a file that another process is removing, which is gone all the same.
 fn is_gone(error: &EngineError) -> bool {
-    matches!(error, EngineError::Io(io) if io.kind() == io::ErrorKind::NotFound)
+    matches!(error, EngineError::Io(io) if io.kind() == io::ErrorKind::NotFound
+        || (cfg!(windows) && io.kind() == io::ErrorKind::PermissionDenied))
 }
 
 fn open_segment<F: FileSystem>(
@@ -804,13 +809,40 @@ fn open_segment<F: FileSystem>(
         )));
     }
     file.read(0, &mut block)?;
-    let header = SegmentHeader::decode(&block)?;
+    let header = SegmentHeader::decode(&block)
+        .map_err(|error| EngineError::corrupt(format!("log segment {sequence}: {error}")))?;
     if header.database_id != database_id || header.sequence != sequence {
         return Err(EngineError::corrupt(format!(
             "log segment {sequence} belongs to another database"
         )));
     }
     Ok((file, header))
+}
+
+// ast-grep-ignore
+// A writer creates a segment and then writes its header, so a follower may find it empty or torn.
+fn open_written_segment<F: FileSystem>(
+    fs: &F,
+    base: &str,
+    sequence: u64,
+    database_id: u128,
+) -> Result<Option<(F::File, SegmentHeader)>, EngineError> {
+    let size = BlockSize::new(WAL_BLOCK).ok_or(EngineError::TooLarge)?;
+    let file = fs.open(&segment_name(base, sequence), size)?;
+    if file.block_count()? == 0 {
+        return Ok(None);
+    }
+    let mut block = vec![0; WAL_BLOCK];
+    file.read(0, &mut block)?;
+    let Ok(header) = SegmentHeader::decode(&block) else {
+        return Ok(None);
+    };
+    if header.database_id != database_id || header.sequence != sequence {
+        return Err(EngineError::corrupt(format!(
+            "log segment {sequence} belongs to another database"
+        )));
+    }
+    Ok(Some((file, header)))
 }
 
 fn read_segment(
@@ -820,11 +852,21 @@ fn read_segment(
     upto: u64,
     take: &mut dyn FnMut(Vec<u8>, Option<u64>) -> Result<bool, EngineError>,
 ) -> Result<bool, EngineError> {
+    let start = ((header.unit() / WAL_BLOCK) as u64, header.first_lsn);
+    read_segment_from(file, header, start, after, upto, take).map(|(done, _)| done)
+}
+
+fn read_segment_from(
+    file: &impl BlockFile,
+    header: &SegmentHeader,
+    (mut at, mut lsn): (u64, u64),
+    after: u64,
+    upto: u64,
+    take: &mut dyn FnMut(Vec<u8>, Option<u64>) -> Result<bool, EngineError>,
+) -> Result<(bool, (u64, u64)), EngineError> {
     let seed = header.record_seed();
     let blocks = file.block_count()?;
     let unit = header.unit();
-    let mut lsn = header.first_lsn;
-    let mut at = (unit / WAL_BLOCK) as u64;
     let mut buffer = vec![0; WAL_BLOCK];
     while at < blocks && lsn <= upto {
         buffer.resize(WAL_BLOCK, 0);
@@ -852,14 +894,159 @@ fn read_segment(
                 header.sequence, record.lsn
             )));
         }
-        if lsn > after {
-            buffer.truncate(length);
-            if take(std::mem::take(&mut buffer), record.prev)? {
-                return Ok(true);
-            }
-        }
         lsn += 1;
         at += span;
+        if lsn > after + 1 {
+            buffer.truncate(length);
+            if take(std::mem::take(&mut buffer), record.prev)? {
+                return Ok((true, (at, lsn)));
+            }
+        }
     }
-    Ok(lsn > upto)
+    Ok((lsn > upto, (at, lsn)))
+}
+
+/// Where a process that follows its session's log reads the next record: the log's salt, the
+/// segment, and the block and LSN of the record, or nothing before it found one.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Cursor {
+    at: Option<(u64, u64, u64, u64)>,
+}
+
+/// Hands each record of the log that `header` starts, from LSN `next` up to `until`, to
+/// `apply`, reading on from `cursor` when it points at `next`, and returns whether it reached
+/// `until`. It returns `false` when a segment it needs is gone or belongs to a newer log, since
+/// a checkpoint another process wrote since released it.
+pub(crate) fn follow_published<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    header: &Header,
+    cursor: &mut Cursor,
+    next: u64,
+    until: u64,
+    apply: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+) -> Result<bool, EngineError> {
+    if next > until {
+        return Ok(true);
+    }
+    let found = match cursor.at {
+        Some((salt, sequence, at, lsn)) if salt == header.wal.salt && lsn == next => {
+            Some((sequence, (at, lsn)))
+        }
+        _ => None,
+    };
+    let (mut sequence, mut start) = match found {
+        Some(found) => found,
+        None => {
+            let mut holding = None;
+            for sequence in segment_files(fs, name)?
+                .into_iter()
+                .filter(|sequence| *sequence >= header.wal.first_segment)
+            {
+                match open_written_segment(fs, name, sequence, header.database_id) {
+                    Ok(None) => break,
+                    Ok(Some((_, segment))) if segment.salt == header.wal.salt => {
+                        if segment.first_lsn > next {
+                            break;
+                        }
+                        holding = Some((
+                            sequence,
+                            ((segment.unit() / WAL_BLOCK) as u64, segment.first_lsn),
+                        ));
+                    }
+                    Ok(_) => return Ok(false),
+                    Err(error) if is_gone(&error) => return Ok(false),
+                    Err(error) => return Err(error),
+                }
+            }
+            match holding {
+                Some(holding) => holding,
+                None => return Ok(false),
+            }
+        }
+    };
+    let mut next = next;
+    loop {
+        let (file, segment) = match open_segment(fs, name, sequence, header.database_id) {
+            Ok(opened) => opened,
+            Err(error) if is_gone(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if segment.salt != header.wal.salt {
+            return Ok(false);
+        }
+        let seed = segment.record_seed();
+        let (_, end) =
+            read_segment_from(&file, &segment, start, next - 1, until, &mut |bytes, _| {
+                let (record, _) = decode_record(seed, &bytes).map_err(|refused| match refused {
+                    NotRecord::Refused(error) => error,
+                    NotRecord::End | NotRecord::Invalid(_) => {
+                        EngineError::corrupt("a published log record does not decode")
+                    }
+                })?;
+                next = record.lsn + 1;
+                apply(record)?;
+                Ok(false)
+            })?;
+        cursor.at = Some((header.wal.salt, sequence, end.0, end.1));
+        if next > until {
+            return Ok(true);
+        }
+        sequence += 1;
+        match open_segment(fs, name, sequence, header.database_id) {
+            Ok((_, following)) if following.salt == header.wal.salt => {
+                start = ((following.unit() / WAL_BLOCK) as u64, following.first_lsn);
+            }
+            Ok(_) => return Ok(false),
+            Err(error) if is_gone(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Hands each record of the log that `header` starts, after its checkpoint and up to `until`,
+/// to `apply`, and returns whether it reached `until`. It returns `false` when a segment it
+/// needs is gone or belongs to a newer log, since a checkpoint another process wrote since
+/// released it, so the caller starts again from a newer header.
+pub(crate) fn replay_published<F: FileSystem>(
+    fs: &F,
+    name: &str,
+    header: &Header,
+    until: u64,
+    apply: &mut dyn FnMut(Record) -> Result<(), EngineError>,
+) -> Result<bool, EngineError> {
+    let mut next = header.checkpoint_lsn + 1;
+    if next > until {
+        return Ok(true);
+    }
+    let sequences = segment_files(fs, name)?;
+    for sequence in sequences
+        .into_iter()
+        .filter(|sequence| *sequence >= header.wal.first_segment)
+    {
+        let (file, segment) = match open_segment(fs, name, sequence, header.database_id) {
+            Ok(opened) => opened,
+            Err(error) if is_gone(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if segment.salt != header.wal.salt || segment.first_lsn > next {
+            return Ok(false);
+        }
+        let seed = segment.record_seed();
+        read_segment(&file, &segment, next - 1, until, &mut |bytes, _| {
+            let (record, _) = decode_record(seed, &bytes).map_err(|refused| match refused {
+                NotRecord::Refused(error) => error,
+                NotRecord::End | NotRecord::Invalid(_) => {
+                    EngineError::corrupt("a published log record does not decode")
+                }
+            })?;
+            next = record.lsn + 1;
+            apply(record)?;
+            Ok(false)
+        })?;
+        if next > until {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

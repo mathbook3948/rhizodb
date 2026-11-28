@@ -50,6 +50,7 @@ fn options() -> EngineOptions {
         stage_floor: 8,
         max_retained_bytes: u64::MAX,
         pin_limit: EngineOptions::default().pin_limit,
+        build: 0,
     }
 }
 

@@ -356,6 +356,35 @@ impl Memtable {
         freed
     }
 
+    /// A memtable that holds each key's newest version if a commit after `lsn` wrote it, for
+    /// readers that read a tree holding every commit up to `lsn`.
+    pub(crate) fn after(&self, lsn: u64) -> Memtable {
+        let kept = Memtable::default();
+        let mut added = 0u64;
+        {
+            let mut into = kept.chains.write().unwrap_or_else(PoisonError::into_inner);
+            for (table, keys) in self.read().iter() {
+                for (key, chain) in keys {
+                    let Some(version) = chain.last().filter(|version| version.lsn > lsn) else {
+                        continue;
+                    };
+                    kept.filter
+                        .insert_under_write_lock(filter_hash(*table, &key.bytes));
+                    added += cost(&key.bytes, &version.slot);
+                    into.entry(*table).or_default().insert(
+                        Key::new(Arc::clone(&key.bytes)),
+                        vec![Version {
+                            lsn: version.lsn,
+                            slot: version.slot.clone(),
+                        }],
+                    );
+                }
+            }
+        }
+        kept.bytes.store(added, Ordering::Relaxed);
+        kept
+    }
+
     /// Every key's newest version, per table in key order, which a checkpoint writes to the file.
     pub(crate) fn newest(&self) -> BTreeMap<TableId, Vec<(Bytes, Slot)>> {
         self.read()

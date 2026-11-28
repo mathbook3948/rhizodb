@@ -4,9 +4,13 @@ use std::io;
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicU64;
+
+use rhizodb_shm::Lock;
 
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
@@ -16,6 +20,10 @@ use super::mem_fs::byte_index;
 use super::mem_fs::read_blocks;
 use super::mem_fs::resize_blocks;
 use super::mem_fs::write_blocks;
+use super::session::SideFile;
+use super::session::SideLock;
+use super::session::SideWords;
+use super::session::WORDS;
 
 const DEVICE_UNIT: usize = 4096;
 
@@ -76,6 +84,10 @@ struct State {
     capacity: Option<u64>,
     handles: u64,
     locks: BTreeMap<usize, Held>,
+    sessions: BTreeMap<usize, BTreeSet<u64>>,
+    sides: BTreeMap<usize, Arc<SimSide>>,
+    refuse_sides: bool,
+    unshared_sides: bool,
 }
 
 // ast-grep-ignore
@@ -380,6 +392,28 @@ impl SimFs {
         }
     }
 
+    /// Makes every later creation of a side file fail as a read-only directory refuses it.
+    pub(crate) fn refuse_side_files(&self) {
+        lock(&self.state).refuse_sides = true;
+    }
+
+    /// Makes side files unusable as on a file system that shares no mappings: a creation
+    /// leaves the file and then fails, and an open of one fails, both as unsupported.
+    pub(crate) fn refuse_side_sharing(&self) {
+        lock(&self.state).unshared_sides = true;
+    }
+
+    fn side(&self, state: &mut State, name: &str, inode: usize) -> SimSideHandle {
+        state.handles += 1;
+        SimSideHandle {
+            side: Arc::clone(state.sides.entry(inode).or_default()),
+            handle: state.handles,
+            state: Arc::clone(&self.state),
+            name: name.to_owned(),
+            inode,
+        }
+    }
+
     fn file(&self, state: &mut State, inode: usize, size: BlockSize) -> SimFile {
         state.handles += 1;
         let handle = state.handles;
@@ -525,6 +559,34 @@ impl FileSystem for SimFs {
         Ok(self.file(&mut state, inode, size))
     }
 
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        let mut state = lock(&self.state);
+        state.operate(None, false)?;
+        let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
+        if state.unshared_sides {
+            return Err(unshared());
+        }
+        Ok(Box::new(self.side(&mut state, name, inode)))
+    }
+
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        if lock(&self.state).refuse_sides {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the simulated directory refuses side files",
+            ));
+        }
+        let file = self.create(
+            name,
+            BlockSize::new(SECTOR_SIZE).expect("a sector is a block"),
+        )?;
+        let mut state = lock(&self.state);
+        if state.unshared_sides {
+            return Err(unshared());
+        }
+        Ok(Box::new(self.side(&mut state, name, file.inode)))
+    }
+
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let mut state = lock(&self.state);
         state.operate(None, false)?;
@@ -585,6 +647,12 @@ impl Drop for SimFile {
         if released {
             state.locks.remove(&self.inode);
         }
+        if let Some(holders) = state.sessions.get_mut(&self.inode) {
+            holders.remove(&self.handle);
+            if holders.is_empty() {
+                state.sessions.remove(&self.inode);
+            }
+        }
     }
 }
 
@@ -633,10 +701,59 @@ impl BlockFile for SimFile {
             Some(Held::Exclusive(holder)) => *holder == self.handle,
             Some(Held::Shared(holders)) => holders.iter().all(|holder| *holder == self.handle),
         };
-        if !free {
+        let in_session = state
+            .sessions
+            .get(&self.inode)
+            .is_some_and(|holders| holders.iter().any(|holder| *holder != self.handle));
+        if !free || in_session {
             return Err(held_elsewhere());
         }
         state.locks.insert(self.inode, Held::Exclusive(self.handle));
+        Ok(())
+    }
+
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        if first && self.held_elsewhere()? {
+            return Err(held_elsewhere());
+        }
+        let mut state = lock(&self.state);
+        match state.locks.get(&self.inode) {
+            Some(Held::Exclusive(holder)) if *holder != self.handle => {
+                return Err(held_elsewhere());
+            }
+            Some(Held::Exclusive(_)) => {
+                state.locks.remove(&self.inode);
+            }
+            _ => {}
+        }
+        state
+            .sessions
+            .entry(self.inode)
+            .or_default()
+            .insert(self.handle);
+        Ok(())
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        Ok((0, self.inode as u128))
+    }
+
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        let state = lock(&self.state);
+        let exclusive = matches!(state.locks.get(&self.inode), Some(Held::Exclusive(holder)) if *holder != self.handle);
+        let session = state
+            .sessions
+            .get(&self.inode)
+            .is_some_and(|holders| holders.iter().any(|holder| *holder != self.handle));
+        Ok(exclusive || session)
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if matches!(state.locks.get(&self.inode), Some(Held::Exclusive(holder)) if *holder == self.handle)
+        {
+            state.locks.remove(&self.inode);
+        }
         Ok(())
     }
 
@@ -711,3 +828,177 @@ impl BlockFile for SimFile {
 #[cfg(test)]
 #[path = "sim_fs.test.rs"]
 mod tests;
+
+// ast-grep-ignore
+// Lost at a power loss, as the side file is never synced; locks belong to handles, as OFD locks.
+#[derive(Debug)]
+struct SimSide {
+    words: Box<[AtomicU64]>,
+    locks: Mutex<BTreeMap<SideLock, SideHeld>>,
+    changed: Condvar,
+}
+
+impl Default for SimSide {
+    fn default() -> Self {
+        Self {
+            words: (0..WORDS).map(|_| AtomicU64::new(0)).collect(),
+            locks: Mutex::new(BTreeMap::new()),
+            changed: Condvar::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SideHeld {
+    Exclusive(u64),
+    Shared(BTreeSet<u64>),
+}
+
+#[derive(Debug)]
+struct SimSideHandle {
+    side: Arc<SimSide>,
+    handle: u64,
+    state: Arc<Mutex<State>>,
+    name: String,
+    inode: usize,
+}
+
+fn unshared() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the simulated file system shares no mappings",
+    )
+}
+
+#[derive(Debug)]
+struct SimWords(Arc<SimSide>);
+
+impl SideWords for SimWords {
+    fn word(&self, index: usize) -> &AtomicU64 {
+        &self.0.words[index]
+    }
+}
+
+impl SimSideHandle {
+    fn take(&self, locks: &mut BTreeMap<SideLock, SideHeld>, at: SideLock, kind: Lock) -> bool {
+        let me = self.handle;
+        let granted = match (locks.get(&at), kind) {
+            (None, Lock::Exclusive) => SideHeld::Exclusive(me),
+            (None, Lock::Shared) => SideHeld::Shared(BTreeSet::from([me])),
+            (Some(SideHeld::Exclusive(holder)), _) if *holder != me => return false,
+            (Some(SideHeld::Exclusive(_)), Lock::Exclusive) => SideHeld::Exclusive(me),
+            (Some(SideHeld::Exclusive(_)), Lock::Shared) => SideHeld::Shared(BTreeSet::from([me])),
+            (Some(SideHeld::Shared(holders)), Lock::Exclusive) => {
+                if holders.iter().any(|holder| *holder != me) {
+                    return false;
+                }
+                SideHeld::Exclusive(me)
+            }
+            (Some(SideHeld::Shared(holders)), Lock::Shared) => {
+                let mut holders = holders.clone();
+                holders.insert(me);
+                SideHeld::Shared(holders)
+            }
+        };
+        locks.insert(at, granted);
+        true
+    }
+
+    fn release(&self, locks: &mut BTreeMap<SideLock, SideHeld>, at: SideLock) {
+        let empty = match locks.get_mut(&at) {
+            Some(SideHeld::Exclusive(holder)) => *holder == self.handle,
+            Some(SideHeld::Shared(holders)) => {
+                holders.remove(&self.handle);
+                holders.is_empty()
+            }
+            None => false,
+        };
+        if empty {
+            locks.remove(&at);
+        }
+        self.side.changed.notify_all();
+    }
+}
+
+impl SideFile for SimSideHandle {
+    fn lock(&self, at: SideLock, kind: Lock) -> io::Result<()> {
+        let mut locks = self
+            .side
+            .locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if matches!(locks.get(&at), Some(SideHeld::Exclusive(holder)) if *holder == self.handle) {
+            return Err(io::Error::other(format!(
+                "{at:?} is already this handle's exclusively, and on Windows a wait for it again \
+                 never ends"
+            )));
+        }
+        while !self.take(&mut locks, at, kind) {
+            locks = self
+                .side
+                .changed
+                .wait(locks)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        Ok(())
+    }
+
+    fn try_lock(&self, at: SideLock, kind: Lock) -> io::Result<bool> {
+        let mut locks = self
+            .side
+            .locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(self.take(&mut locks, at, kind))
+    }
+
+    fn unlock(&self, at: SideLock) -> io::Result<()> {
+        let mut locks = self
+            .side
+            .locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.release(&mut locks, at);
+        Ok(())
+    }
+
+    fn downgrade(&self, at: SideLock) -> io::Result<()> {
+        self.try_lock(at, Lock::Shared).map(|_| ())
+    }
+
+    fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
+        self.try_lock(at, Lock::Exclusive)
+    }
+
+    fn is_named(&self) -> io::Result<bool> {
+        Ok(lock(&self.state).live_names.get(&self.name) == Some(&self.inode))
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.live_names.get(&self.name) == Some(&self.inode) {
+            state.change_names(NameChange::Remove {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn map(&self, _grow: bool) -> io::Result<Box<dyn SideWords>> {
+        Ok(Box::new(SimWords(Arc::clone(&self.side))))
+    }
+}
+
+impl Drop for SimSideHandle {
+    fn drop(&mut self) {
+        let mut locks = self
+            .side
+            .locks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let held: Vec<SideLock> = locks.keys().copied().collect();
+        for at in held {
+            self.release(&mut locks, at);
+        }
+    }
+}

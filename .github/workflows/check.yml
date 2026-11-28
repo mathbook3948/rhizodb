@@ -41,11 +41,11 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-      - run: cargo publish --dry-run --package rhizodb --locked
+      - run: cargo publish --dry-run --package rhizodb-shm --package rhizodb --locked
       - run: |
-          cargo package --package rhizodb --locked --no-verify
-          tar -xzf target/package/rhizodb-*.crate -C "$RUNNER_TEMP"
-          cargo test --doc --locked --manifest-path "$RUNNER_TEMP"/rhizodb-*/Cargo.toml
+          cargo package --package rhizodb-shm --package rhizodb --locked --no-verify
+          tar -xzf target/package/rhizodb-[0-9]*.crate -C "$RUNNER_TEMP"
+          cargo test --doc --manifest-path "$RUNNER_TEMP"/rhizodb-[0-9]*/Cargo.toml --config "patch.crates-io.rhizodb-shm.path='$PWD/crates/shm'"
         env:
           CARGO_TARGET_DIR: target
 

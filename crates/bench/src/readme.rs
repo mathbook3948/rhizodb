@@ -44,11 +44,14 @@ impl Language {
 }
 
 const KOREAN_LABELS: [(&str, &str); 18] = [
-    ("Point lookup by id", "id로 노드 찾기"),
-    ("Filtered scan", "조건으로 걸러 읽기"),
+    ("Point lookup by id", "id로 노드 조회"),
+    ("Filtered scan", "필터 스캔"),
     ("`ORDER BY ... LIMIT`", "`ORDER BY ... LIMIT`"),
     ("1-hop neighbours", "1홉 이웃"),
-    ("1-hop with a relationship property", "1홉 이웃과 관계 속성"),
+    (
+        "1-hop with a relationship property",
+        "1홉 이웃과 관계 속성 읽기",
+    ),
     ("Sum of a relationship property", "관계 속성 합계"),
     ("2-hop distinct", "2홉 이웃(중복 제거)"),
     ("3-hop distinct", "3홉 이웃(중복 제거)"),
@@ -56,12 +59,12 @@ const KOREAN_LABELS: [(&str, &str); 18] = [
     ("Group by city", "도시별 집계"),
     (
         "Substring scan of a text property",
-        "텍스트 속성에서 부분 문자열 찾기",
+        "텍스트 속성 부분 문자열 검색",
     ),
     ("Keyword search", "키워드 검색"),
     ("Vector search", "벡터 검색"),
     ("Small commits", "작은 커밋"),
-    ("Bulk update", "대량 수정"),
+    ("Bulk update", "일괄 수정"),
     ("Detach delete", "`DETACH DELETE`"),
     ("Bulk load", "대량 적재"),
     ("File size after bulk load", "대량 적재 후 파일 크기"),
@@ -241,7 +244,7 @@ pub fn render_in(
             "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
         ),
         Language::Korean => format!(
-            "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
+            "{date}에 {machine} 환경에서 측정했습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고 작업마다 {reps}번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치면 '유사'로 표시합니다.\n\n"
         ),
     };
     text.push_str(match language {

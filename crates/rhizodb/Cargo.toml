@@ -27,6 +27,7 @@ crc32fast = "1.5.5"
 twox-hash = { version = "2.1.5", default-features = false, features = ["std", "xxhash3_64"] }
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
 memchr = "2.8.3"
+rhizodb-shm = { version = "0.2.0", path = "../shm" }
 regex-automata = "0.4.18"
 regex-syntax = "0.8.11"
 unicode-normalization = "0.1.26"

@@ -19,6 +19,24 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - An open that does not ask keeps the exclusive lock, creates no side file, and runs none of the code below but the role rules it keeps in its own memory.
 - The processes that have a file open with multi-process access form a session, which begins with the first of them and ends when the last one closes.
 - From phase 3 on, every read-only open joins a session, so a read-write process that joins later finds it.
+- A read-only open that may not create the side file, since its file system is read-only, its directory refuses the create, or its file system refuses multi-process access, opens as in phase 1 under a shared lock and joins no session, which keeps out a session's first process as it keeps out every open that writes.
+- That shared lock is the whole-file lock on Linux, and elsewhere a shared range lock on a byte of its own past any block, the reader byte, which an exclusive whole-file lock still conflicts with, since on macOS and the BSDs a whole-file lock would hide every session from the test below and on Windows it would refuse that test.
+- Such an open checks again for the side file once it holds its shared lock, and fails with `DatabaseAlreadyOpen` when one appeared, so a session that began between its check and its lock is never read alongside.
+- It then tests the database file's session range for a lock of any other process and fails with `DatabaseAlreadyOpen` when it finds one, so a session that holds the file through a hard link or another path, whose side file has another name, is never read alongside either.
+- Off Linux that test also finds any whole-file lock of another process, which it cannot see past, so there such an open fails while a reader of an older build holds the file, which errs on the side of refusing.
+- An open that created a side file it then finds unusable, as on a file system that refuses multi-process access, removes it before it opens as in phase 1, so it leaves no side file that would refuse later opens.
+- A read-only open that finds a side file on a read-only file system tests the database file's range lock and fails with `DatabaseAlreadyOpen` when another process holds it, since a read-only mount may show a file that a writer elsewhere still changes, and otherwise opens as in phase 1.
+- A read-only open that finds a side file on a file system that refuses sessions, as an NFS client of a directory where a local session runs, fails with `DatabaseAlreadyOpen`, since a writer there cannot see it in a slot.
+- A read-only open that finds a side file it may not open for writing for any other reason, such as its permissions, fails with `DatabaseAlreadyOpen` and names the side file, since a session of another user may hold the file.
+- The side file is created and then changed with `fchmod`, past the umask, to read and write for every class of user that may read the database file, since joining a session writes the side file, and its owner is the creating process's user.
+- A read-only open of a phase 1 build checks for the side file under its shared lock and refuses the file while one exists, so it never reads a file that a session holds.
+- That check looks only for the side file of the name it was given, so a read-only open of a phase 1 build that reaches the file through another name, such as a bind mount or a file system alias, still reads it beside a session, which no later build can prevent.
+- The first process of a session creates the side file while it holds the database file's exclusive whole-file lock, and only then takes the shared lock it holds while open, so a phase 1 reader either holds its lock first and keeps the session out or finds the side file.
+- The last process of a session removes the side file while it holds the gate and the session lock exclusively, so a session that ends cleanly leaves no side file and a phase 1 read-only open reads the file again.
+- An open that holds the gate checks that the side file it opened is still the one the path names, by its file identity, and otherwise closes it and opens the path again, so no open joins a side file that a last process removed.
+- On Windows, a side file that another process is removing refuses access, which an open treats as a side file still being removed and opens the path again.
+- Only a crash of the last process of a session leaves a side file behind, and the next open of any process removes it or resets it, so no person needs to remove it.
+- The first process of every session, not only the one that creates the side file, takes the database file's exclusive whole-file lock before it resets the side file, so two side files of one database file, reached through a hard link or another path, never hold two sessions at once.
 - An open that locks the file exclusively fails while a session is open, and a session's open fails while an exclusive open holds the file.
 - A database in memory cannot take part in a session.
 - A process opens a file at most once, through a process-wide registry of open files keyed by device and inode, as SQLite's `unixInodeInfo` is, so a second open in the same process fails even through a hard link or another path, since a byte-range lock never conflicts with another lock of its own process.
@@ -26,7 +44,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - The registry also holds the side file's one handle, so no other open in the process opens or closes a descriptor of it.
 - A session keeps its shared state in a side file named after the database file with `-shm`, which the first process of each session creates or resets in place and never truncates.
 - The side file holds the session's identity, a copy of the newest durable header, the end of the log, a journal of reused blocks, the acknowledged peers, the replication role, and one slot per process.
-- The session's identity is the side file's layout version, the engine format minor, the graph format version, the tokenizer fingerprint, and the database id.
+- The session's identity is the side file's layout version, the engine format minor, the graph format version and the tokenizer fingerprint of the build, the database id, and the database file's identity, which is its device and inode on Unix and its volume serial number and 128-bit file id on Windows.
+- An open checks the side file's length and its layout's magic word before it maps or reads it, and a later process that finds a side file too short or of another layout fails to join without mapping it, since a mapping past a file's end raises `SIGBUS`.
 - A process whose build or file differs in any part of the identity fails to join.
 - The replication role is not part of the identity, since `promote` and `demote` change it while the session runs.
 - The side file grows by `fallocate` on Linux, by `F_PREALLOCATE` followed by `ftruncate` on macOS, and by writing a non-zero pattern on Windows, never by setting its length alone, so a full disk fails the growth instead of a later store into a mapped page that has no block, which raises `SIGBUS`.
@@ -37,17 +56,37 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A record of several words sits behind a sequence number that is odd while it changes, so a reader retries a torn read instead of taking a lock.
 - The side file is never synced and never trusted across sessions, since the first process of a session rebuilds it from the database file and the log.
 - Multi-process access is refused on a file system the engine finds to be remote, since processes on other machines share no memory, so a mapped side file cannot coordinate them.
+- The engine checks both the database file and the side file, each by `fstatfs` of its open handle on Unix and by the handle's remote protocol information on Windows.
+- On Linux a file system takes part only when its `statfs` type is on an allowlist of local file systems, such as ext2 to ext4, XFS, btrfs, tmpfs, ZFS, F2FS, bcachefs, JFS, ReiserFS, NILFS, and overlayfs, so an unknown or network type is refused.
+- FUSE mounts are refused on every platform, macFUSE and WinFsp among them, even when they are local, since a FUSE file system need not keep a shared mapping coherent between processes.
+- On macOS a file system takes part only when its `statfs` flags have `MNT_LOCAL` and its type name is not a FUSE one, and on Windows only when the handle has no remote protocol and the query fails as it does for a local file, so any other failure counts as remote.
+- Other Unix platforms refuse multi-process access, and their read-only opens open as in phase 1.
 - Multi-process access is refused on a file system that refuses byte-range locks or shared mappings, where a single-process open still goes on unlocked.
 - Every lock of a session is an OS byte-range lock, which the OS releases when its holder dies.
 - No lock is a mutex in shared memory, since macOS has no robust mutexes and a robust mutex leaves its protected state for the next holder to repair.
 - Each process of a session holds a shared lock on the database file while it is open, so an older build or an exclusive open fails while a session is open.
+- Besides the whole-file lock, every process of a session holds a shared range lock on the database file past any block, an open-file-description lock on Linux and a classic `fcntl` lock elsewhere on Unix, which a read-only descriptor may hold.
+- On Linux a first process, while it holds the whole-file lock exclusively, tests that range for a lock of any other process, which needs no write access and which an open-file-description test sees past its own `flock`, fails with `DatabaseAlreadyOpen` when it finds one, and only then takes its own shared range lock and turns its whole-file lock shared.
+- So on Linux a first process that reaches the file through another name, as a hard link, and wins the gap that `flock` leaves when it turns exclusive into shared, finds the other session's range lock and refuses, and two sessions never hold one file.
+- macOS and the BSDs keep `flock` and `fcntl` locks in one list, where a process's own exclusive `flock` refuses its own `fcntl` lock and a test under its own `flock` finds that `flock`, so there a first process never turns its whole-file lock shared.
+- There it releases its exclusive whole-file lock, takes its shared range lock, then tests the session byte and the reader byte for a lock of any other process, fails with `DatabaseAlreadyOpen` when it finds one, and only then takes a shared whole-file lock, which keeps out an older build's writer should a classic `fcntl` lock drop.
+- Two first processes through two names that race there each take before they test, so at least one finds the other and refuses, and a reader through another name that takes its reader byte in that gap makes the first process refuse, so two sessions, or a session and a reader beside it, never hold one file.
+- That race fails safe: both first processes may refuse, and an open that refuses fails with `DatabaseAlreadyOpen` and may be tried again, which is accepted since it needs two opens through two names of one file within that gap.
+- There a first process's exclusive whole-file lock also conflicts with every other process's range lock in that one list, so it cannot start while a session or a reader holds the file through another name, and its test covers only the gap after it releases that lock.
+- On Windows the session lock on the database file is already such a range, and a first process takes it shared before it releases its whole-file exclusive lock, which the same handle may hold at once.
 - On Windows that lock covers a byte range past any block the file can hold, since a shared lock there denies writes to the range it covers, the holder's own included.
-- The side file carries the session lock, the write lock, the checkpoint lock, and one liveness lock per slot, each on a byte past the mapped state, since Windows enforces locks on the bytes they cover.
+- The side file carries the gate lock, the session lock, the write lock, the checkpoint lock, and one liveness lock per slot, each on a byte from 2^40 on, far past any growth of the mapped state, since Windows enforces locks on the bytes they cover, writes included.
+- On Windows a write to the database file that a lock refuses, as a phase 1 reader's whole-file shared lock does while it checks for the side file, is tried again with a bounded backoff and fails without poisoning the engine only once that bound passes.
 - A reset of the side file writes only the mapped state, so it never writes a byte that another process holds locked.
 - Every process holds the session lock shared while it is open, and an open that gets it exclusively is the first of its session.
-- The first process turns its exclusive session lock into a shared one without a gap, so no other open finds the lock free and takes itself for the first.
-- On Unix that change is one `fcntl` call, which the kernel makes atomically.
-- On Windows, which has no atomic downgrade, every open takes a gate lock on its own byte before it tries the session lock, and the first process holds the gate while it releases its exclusive session lock and takes a shared one.
+- Every open, on every platform, takes the gate lock exclusively, then the session lock shared, and then tries to turn it into an exclusive one, and an open whose try succeeds is the first of a new session, since every process that held the session lock closed or died.
+- On Unix that try is one `fcntl` call, which the kernel makes atomically, and on Windows, which has no atomic upgrade, the open releases its shared lock and tries the exclusive one, which is safe since only a holder of the gate elects.
+- An open checks, after it takes the gate and before it takes the session lock or maps anything, that its handle is still the side file the path names, so it never elects itself on a side file that a last process unlinked.
+- On Windows an open that finds the path refusing access, as a side file being removed does, closes its handle and opens the path again, a bounded number of times, and then fails with `DatabaseAlreadyOpen`, since that refusal may also be a real access denial.
+- The first process holds the gate and its exclusive session lock until it is ready and has claimed its slot, so every other open waits for it at the gate.
+- A first process that dies before it is ready leaves both locks free, so the next open finds itself the first and resets the side file again.
+- A process that closes takes the gate before it gives up its session lock, so an open that holds the gate sees a process of the session leave only by dying.
+- The first process keeps the gate and its exclusive session lock until it is ready, which includes a recovery or a format upgrade it runs at open, however many commits that upgrade takes.
 - The write lock is held exclusively from the start of a write transaction to its commit or rollback.
 - A write that finds the write lock held waits, as a write waits for another in one process today.
 - The checkpoint lock is held exclusively by a process while it writes a checkpoint, a compaction, or any other header.
@@ -56,12 +95,13 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process that gets another slot's liveness lock knows that slot's owner is dead.
 - Locks are taken in the order session lock, write lock, checkpoint lock, and no process that holds the checkpoint lock waits for the write lock, so no two processes wait for each other.
 - On Linux every lock of a session is an open-file-description lock, so closing another descriptor of the file drops none of them.
+- macOS uses classic `fcntl` locks, since its public API offers no open-file-description locks.
 - Where only classic `fcntl` locks exist, as on macOS, a process opens the side file once and never closes a descriptor of it while it is open, since closing any descriptor of a file drops every `fcntl` lock the process holds on it.
 - The engine opens the side file only through its one handle, and its docs name opening or closing the side file anywhere else in the process as a hazard that drops the session's locks there, as SQLite's docs do for its files.
 - A blocking classic `fcntl` wait that fails with `EDEADLK` is taken again, since the kernel detects deadlocks per process across all of its files and so reports false ones between threads of one process or between databases it has open.
 - That retry covers the write lock, the checkpoint lock, and an open's wait for the session lock, which waits while it holds no other lock on that side file, and it sleeps between tries with a growing backoff instead of spinning.
 - The lock order rules out a real deadlock only within one database, so a host that makes two processes each hold a write transaction of one database while they wait for the other's hangs forever, as it would with two databases in one process today.
-- The database file is locked only with the standard library's whole-file lock or a range lock past its blocks, and the side file only with range locks, so no file mixes `flock` and `fcntl`.
+- The database file is locked with the standard library's whole-file lock and with shared range locks past its blocks, and the side file only with range locks, so only the database file mixes `flock` and `fcntl`, and no process holds a range lock of its own beside its own exclusive `flock`, nor tests for others under its own `flock` off Linux.
 - A child forked from a process that has the file open must not touch the database, as SQLite and LMDB forbid it for their handles.
 - A forked child shares its parent's open-file-description locks until it closes the descriptors or runs a program, so a parent that dies first keeps its slot alive and its tree held until then.
 - Descriptors are opened close-on-exec, so a child that runs a program drops every lock at once.
@@ -82,18 +122,21 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - A process that finds a newer whole checkpoint's header in the side file adopts it before it reads the log, by loading that header's catalog and extent table and pointing new readers at its tree.
 - Adopting a whole checkpoint's header moves the process's view to at least the checkpoint's LSN, since its tree holds every commit up to that LSN.
 - Adopting a whole checkpoint's header gives new readers a memtable that holds only the commits after the checkpoint's LSN, and readers that began before keep the old memtable and tree until they end.
-- A stage's tree holds each key it covers at its value as of the stage's frozen LSN, so a process adopts a stage's header only once it has caught up through the `staged_lsn` that header records.
-- Adopting a stage's header replaces only the tree for new readers, and readers whose view lies below the stage's frozen LSN keep the previous tree, since the memtable still holds every commit after the LSN the log replays from.
+- A process adopts only whole checkpoints' headers, which are the only ones the session publishes, so it never loads a stage's tree.
 - A log segment that is gone when a process opens it was released by a checkpoint, so the process adopts the newest header and goes on from its LSN.
-- When that newest header is a stage, the process loads the stage's tree, replays the log from the header's `checkpoint_lsn` through its `staged_lsn` and on into a new memtable, and lets new readers begin only once it has caught up.
 - On Windows, a segment that another process is removing refuses access, and the process treats that refusal as a released segment.
 - In a session, a process keeps every tombstone in its memtable until it adopts a checkpoint that covers it, since a checkpoint another process writes from its own frozen memtable may hold the key's older value.
-- After catching up with records that change index definitions, the graph reloads them before any reader begins, as after `apply`.
+- A read-only process catches up as a graph read begins, through the same path as `apply`, so the graph reloads the index definitions and drops its cached counts before any reader sees the new commits.
 - Catching up with any record another process wrote drops the graph's cached counts of column deltas.
 - Tokens and label sets need no refresh, since a committed one never changes and a miss reads it from the table.
-- A process with no transaction open adopts each new checkpoint from a thread of its own within a bounded time, so an idle process does not hold an old tree.
+- A read-only process runs the same catch-up from a thread of its own every 100 milliseconds, so an idle process adopts each new checkpoint within a bounded time and does not hold an old tree.
+- That thread first checks, without the follow gate, whether the session published a commit or a checkpoint this process lacks, so an idle poll stalls no reader, and a catch-up that fails there makes the next read of the process run it again and fail with its error.
+- Every catch-up, on any thread, changes what a new reader reads only under the follow gate held exclusively, and then raises a follow epoch.
+- A graph read holds the follow gate shared from its check of the follow epoch to the start of its storage read, and reloads the index definitions and drops its cached counts first when the epoch moved, so no reader pairs a snapshot with definitions of another commit.
+- A graph read that finds its process behind runs the catch-up before it takes the follow gate and outside the lock that publishes the index definitions, so the follow gate always comes before that lock and two reader threads of one process never wait for each other.
 - Each slot records the oldest checkpoint generation that any tree of its process reaches, which includes the trees of its readers, snapshots, pins, and published view.
-- A checkpoint in any process takes the lowest generation of every live slot as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches.
+- A checkpoint in any process takes the lowest generation of every live slot, and the generation of the newest header the session published, as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches or that an open joining now may load.
+- The published header bounds the oldest tree too, since a header that holds only some stages of a checkpoint is never published, so a joiner that loads the last published header never meets the store that a Dekker pattern with a stage's header would need.
 - A checkpoint reads the slots again before each stage, as it computes the oldest tree again for each stage in one process.
 - A process raises its slot's generation only once its last tree of the lower generation is gone, and never lowers it.
 - A process joins by writing the newest durable generation into a free slot and checking that it is still the newest, retrying otherwise, as an LMDB reader does, so a checkpoint either sees the slot or the process loads a newer header.
@@ -102,9 +145,13 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Beginning a read writes nothing to the side file and takes no lock, since the process's slot already covers the tree its published view holds.
 - From phase 3 on, a slot also records the oldest LSN that its process's snapshot pins keep, so a pin in a read-only process keeps the log too, and a checkpoint keeps the log after the oldest such LSN of every slot, as it keeps the log for a pin of its own.
 - Acknowledged peers live in the side file, so an `acknowledge` in any process keeps the log for that peer, and every header a checkpoint writes records them.
-- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process before it reads the generations.
+- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process while it holds that lock, so a process that claims the slot meanwhile never has its words cleared.
+- A writer that opens in a session keeps every extent slot the file holds, rather than lowering its high-water mark past the free slots at the end as a lone open does, since a tree of another process may reach them.
 - The log needs no entry in the slots, since a process that misses a segment adopts the checkpoint that released it.
 - The side file holds a fixed number of slots, and an open that finds none free fails with its own error kind.
+- A checkpoint never clears or ignores the slot of a live process, so a read that never ends, in any process, keeps every block its tree reaches from reuse, as a long read in one process does today.
+- A process that is stopped, as by a signal or a debugger, counts as live, since it still holds its liveness lock.
+- A stale reader shows as the space `DatabaseStats::held_bytes` reports and as the file's growth, in every process of the session.
 - `DatabaseStats::held_bytes` counts the space that the trees of every process keep from reuse.
 - A commit that pushes the memtable or the log past its limit starts a checkpoint in its own process when it gets the checkpoint lock without waiting, and otherwise leaves the work to the checkpoint already running.
 - That checkpoint freezes the process's memtable under the write lock, so it covers every commit of every process up to the frozen LSN, and runs on that process's checkpoint thread while every process goes on committing.
@@ -131,7 +178,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - An extent in a reused slot has a new id, so the cached pages of the extent before it are never looked up again.
 - A checkpoint records an extent's id in the side file's journal under its generation before its first write into a free range of that extent, so a checkpoint that dies after the write still leaves the extent named.
 - The journal only appends, so a dead checkpoint's entries and the entries its successor writes under the same generation number both stay, and a process drops the extents of both.
-- A process that adopts a header first drops its cached pages and values in the extents the journal names for every generation after the last one it adopted, and drops its whole cache when the journal no longer reaches back that far.
+- Until the journal lands, a read-only process that adopts a header drops its whole block cache before any reader reads the new tree, which is correct since every block it cached afterwards is one a tree it holds reaches.
 - The first process of a session resets the side file under the session lock, held exclusively, and then opens the file as an open does today.
 - A first process that opened read-write recovers the log, or starts a new log on a clean file, before it lets another process join.
 - A first process that opened read-only replays the log into memory, and the first read-write process that joins later recovers the log under the write and checkpoint locks.
@@ -169,6 +216,12 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - `demote` waits for the write lock by trying it without blocking until its deadline, as it polls the writer mutex today.
 - `install_snapshot` locks the database file exclusively, as it does today, so it fails while a session is open.
 - A graph format or tokenizer upgrade runs only in the first process of a session, before another process joins, since a process of another build fails to join.
+- A read-only open that is the first process of its session and finds a graph format or tokenizer older than its build's fails with `ReadOnly`, as in phase 1.
+- A process that joins a session whose graph waits for its writer's upgrade, as a replica's graph does, joins with its upgrade pending and refuses graph reads with `FormatUpgradePending`, as that replica does.
+- Catching up treats each record as `apply` does for an upgrade: a record that publishes an older format or marks the format as upgrading marks the process's graph pending and counts one more wait before it publishes, and the record that writes the current format ends the wait once the index definitions reload.
+- So no reader in any process sees a graph between its old and its new format, and each process ends its wait as it catches up with the upgrade's last commit.
+- `promote` of a session whose upgrade is pending runs the upgrade in the promoting process and holds the write lock from the upgrade's first commit through its checkpoint, so no other process commits into a half moved graph.
+- A write transaction that begins on a graph whose format is marked as upgrading, as a promoter that died left it, resumes the upgrade under the write lock before it begins, as a writer's open resumes it.
 - An index definition is created or dropped in a write transaction like any other, so it takes the write lock, and the other processes reload definitions when they catch up with it.
 - `backup_to`, `export`, `check`, and snapshot exports run in any process, on that process's read snapshot or durable header.
 - A read transaction in a session costs one atomic load from the side file when nothing was committed since the last one began, and otherwise the replay of the new records.
@@ -176,7 +229,11 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Each process of a session holds its own memtable and block cache, so a session's memory grows with its processes.
 - The engine benchmarks of a single-process open must not regress at any phase.
 - The side file's mapping and the byte-range locks live in a small workspace crate of their own that allows audited unsafe code, over `windows-sys` on Windows and `nix` or `libc` on Unix.
-- That crate exposes only mapping a file, atomic access to the words of a mapping, and locking and unlocking a byte range.
+- That crate is `rhizodb-shm` in `crates/shm`, and `rhizodb` depends on it by version, so a release publishes it first.
+- That crate exposes only mapping a file, atomic access to the words of a mapping, locking, unlocking, downgrading, and testing a byte range, growing a file with its blocks reserved, reading a file's identity for the registry, and telling whether a file lies on a local file system.
+- That crate calls a safe crate where one covers a call, such as `rustix` for `fallocate` and `statfs`, so its own unsafe code is the mapping, the atomic view of it, and the lock and volume calls that no safe crate covers.
+- Every unsafe block in that crate carries a `SAFETY` comment, which `clippy::undocumented_unsafe_blocks` enforces, and the crate denies `unsafe_op_in_unsafe_fn`.
+- A mapping in that crate is never handed out as a slice or reference to plain bytes, only as atomic words, since another process may store into it at any time.
 - `rhizodb` keeps `#![forbid(unsafe_code)]` and reaches the side file and its locks only through that crate.
 - That crate's tests run under Miri where Miri can run them, such as the atomic word access over memory it owns, and on the CI jobs of every platform for the mappings and locks, while the simulated side file implements the same trait.
 - The side file and its locks are reached through a trait, with an implementation over the operating system and a simulated one, as files are.
@@ -187,18 +244,28 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Kill tests spawn the test binary as child processes that write numbered commits and read snapshots, kill them at random points, and check that each snapshot every survivor read is a prefix of the reported commits, that the next writer goes on, that a dead process's slot is reclaimed, and that the file reopened alone passes `check` with every reported commit.
 - Phase 3's kill tests kill readers and the writer, and phase 4's add writers in several processes racing for the write lock, checked by the isolation history check across processes.
 - A differential test runs one commit sequence in one process and across several and requires the same final tables and, for every snapshot, the tables of the one-process run at that snapshot's LSN.
+- Every wait in a test of real processes, on a child's output, a lock, or a thread, is bounded, so a hang fails the test instead of timing out the job.
+- The release publishes `rhizodb-shm` before `rhizodb`, at the same version.
+- A short run of the kill tests is part of `mise run check`, so every pull request runs real child processes with kills on all three CI platforms, and the long runs are ignored tests that the random and nightly workflows run.
+- Phases 3 and 4 land as a series of pull requests, each of which passes every check on all three CI platforms alone.
+- Each step refuses the combinations of processes it does not yet serve correctly, so no commit of the main branch lets a session lose or misread a commit.
+- Step 1 adds `rhizodb-shm`, with tests that spawn child processes to show that a byte-range lock conflicts across processes, drops when its holder is killed, and that a store into a mapping in one process shows in another.
+- Step 2 adds the side-file trait over the OS and the simulation, the process registry, the side file's layout and reset, the session lock with the election of the first process, the slots with their liveness locks, and the `OpenOptions` setting, and lets only read-only processes form a session.
+- Step 3 lands in three parts: first one read-write process joins or starts a session and read-only processes read the commits made before they opened, then they catch up with later commits and adopt later checkpoints, and last come the snapshot pins kept in slots, a writer that recovers the log its readers replayed, and the kill tests of a writer and its readers.
+- Step 3 as a whole lets one read-write process join or start a session of read-only processes, with the published log end, catch-up, adoption of headers, the slots' generations and pinned LSNs in checkpoints, the freed-space rules, the cache journal, recovery by a late read-write process, the close protocol, and kill tests of child read-only processes and their writer, which completes phase 3.
+- Each step adds the simulated-session tests and the Shuttle models of the protocols it builds: step 2 the election and the slots, step 3 the join against a checkpoint's reuse, catch-up, and adoption.
+- Step 4 adds the differential test and the long simulated runs.
+- Step 5 takes the write lock for each write transaction, catches up before each one, lets any process checkpoint under the checkpoint lock, and moves the replication role, the record behind it, and the acknowledged peers into the side file, with kill tests of writers in several child processes, which completes phase 4.
+- Step 6 adds the isolation history check across processes and the long runs of the kill tests.
 
 ## Open
 
+- How a read-only open joins a session whose side file it may only read, as another user's, or whether it reads a private copy of the shared state, as SQLite falls back to on read-only media.
+- Whether CI runs the refusal paths on an SMB loopback share on Windows and a FUSE mount on Linux.
 - What `OpenOptions` calls the setting, and whether multi-process access becomes the default once its cost on one process is measured to be nothing, which the phase 4 benchmarks decide.
-- How a read-only open of a phase 1 build is kept out of a session, since it shares the database file's lock with the session's processes, and on Windows its whole-file shared lock denies the session writer's writes to the file; a header flag that every header of a session carries refuses it once the session writes a header, or phase 1 ships only beside phase 3, and the release plan decides.
-- Whether macOS gives programs open-file-description locks, which a run on the macOS CI runner decides.
-- How a remote file system is told apart, including FUSE mounts, which tests on the file systems of each CI platform decide.
 - Whether adopting a whole checkpoint copies the memtable's versions after its LSN or replays the log after it, which a benchmark of adoption under write load decides.
 - How many slots the side file holds, how many generations its journal covers, and how often an idle process looks for a new checkpoint, which tests with many processes and frequent checkpoints decide.
 - Whether a checkpoint may ignore a slot older than a time limit, as a snapshot pin expires, so a stopped process cannot keep the file from reusing space forever, at the cost of that process failing its reads as expired, which phase 3's tests with a stopped reader process decide by showing how far the file grows.
 - How the block cache budget is shared among the processes of a session, since each takes the default for itself, which a benchmark of a session of several processes against the machine's memory decides.
-- Whether the last process of a session removes the side file, as SQLite does, which needs an open that raced with the removal to find that its mapping names a removed file, and a test of opens racing the last close on each CI platform decides.
 - Whether writers waiting on the write lock are served in order, since neither `fcntl` nor `LockFileEx` promises it, which a phase 4 test of writers in several processes racing for the lock on each CI platform decides by measuring the longest wait.
 - Whether a copy-on-write file system such as ZFS or btrfs is refused for multi-process access, since it may allocate a new block for each store into a mapped page whatever the growth reserved, so a full disk can still raise `SIGBUS`; a full-disk test on each decides.
-- How a read-only open on read-only media joins a session, since from phase 3 every read-only open needs a side file it may not create there, while SQLite falls back to a private copy of its shared memory; a test of opens on a read-only mount decides whether to fall back or to refuse.

@@ -35,12 +35,14 @@ fn read_only() -> OpenOptions {
     OpenOptions::new().read_only(true)
 }
 
-/// Every file in `directory` with its bytes.
+/// Every file in `directory` with its bytes, but the side file of a multi-process session,
+/// which a read-only open creates beside the database file and changes as processes join.
 fn files(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     std::fs::read_dir(directory)
         .unwrap()
-        .map(|entry| {
-            let path = entry.unwrap().path();
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| !path.to_string_lossy().ends_with("-shm"))
+        .map(|path| {
             let bytes = std::fs::read(&path).unwrap();
             (path, bytes)
         })
@@ -58,6 +60,28 @@ fn graph_file() -> (tempfile::TempDir, PathBuf) {
         "UNWIND range(1, 100) AS i INSERT (:Item {i: i, text: 'item ' + toString(i)})",
     );
     (directory, path)
+}
+
+/// Runs `run` on a thread of its own and fails, naming `what` and the files of `directory`, when
+/// it has not returned within a minute, as a lock wait that never ends leaves it.
+fn within<T: Send + 'static>(
+    what: &str,
+    directory: &Path,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|_| {
+            let names: Vec<_> = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            panic!("{what} did not return within a minute, as a lock wait that never ends leaves it; the directory holds {names:?}")
+        })
 }
 
 fn count(db: &Database) -> i64 {
@@ -282,6 +306,81 @@ impl Holder {
     }
 }
 
+impl Holder {
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+/// Starts a read-only child and kills it after `delay`, wherever its open has got to.
+fn kill_while_opening(path: &Path, delay: Duration) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["read_only_child", "--exact", "--ignored", "--nocapture"])
+        .env(DATABASE_ENV, path)
+        .env(MODE_ENV, "read")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(delay);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+fn next(seed: &mut u64) -> u64 {
+    *seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[test]
+fn read_only_processes_killed_at_any_point_leave_the_session_to_the_rest_and_then_to_a_writer() {
+    let (directory, path) = graph_file();
+    let before = files(directory.path());
+    let mut seed = seed();
+    let mut holders: Vec<Holder> = (0..3).map(|_| Holder::spawn(&path, "read")).collect();
+    for round in 0..8 {
+        let victim = (next(&mut seed) % holders.len() as u64) as usize;
+        holders.swap_remove(victim).kill();
+        kill_while_opening(&path, Duration::from_millis(next(&mut seed) % 40));
+        holders.push(Holder::spawn(&path, "read"));
+        assert_eq!(
+            count(&read_only().open(&path).unwrap()),
+            100,
+            "round {round}"
+        );
+        let error = Database::open(&path).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DatabaseAlreadyOpen,
+            "round {round}: {error}"
+        );
+    }
+    for holder in holders {
+        holder.kill();
+    }
+    kill_while_opening(&path, Duration::from_millis(next(&mut seed) % 40));
+    assert_eq!(files(directory.path()), before);
+    assert_eq!(count(&Database::open(&path).unwrap()), 100);
+}
+
+#[test]
+fn an_open_by_a_new_name_is_refused_while_a_session_holds_the_file_by_its_old_one() {
+    let (directory, path) = graph_file();
+    let holder = Holder::spawn(&path, "read");
+    let renamed = directory.path().join("renamed.rhizodb");
+    std::fs::rename(&path, &renamed).unwrap();
+    let error = read_only().open(&renamed).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
+    let error = Database::open(&renamed).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
+    holder.close();
+    assert_eq!(count(&read_only().open(&renamed).unwrap()), 100);
+}
+
 impl Drop for Holder {
     fn drop(&mut self) {
         self.child.kill().ok();
@@ -340,7 +439,12 @@ fn a_read_only_open_after_a_writer_exits_without_closing_replays_its_commits_whe
         .unwrap();
     assert!(status.success());
     let before = files(directory.path());
-    let opened = read_only().open(&path);
+    let opened = {
+        let path = path.clone();
+        within("a read-only open", directory.path(), move || {
+            read_only().open(&path)
+        })
+    };
     if cfg!(windows) {
         let error = opened.map(drop).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ReadOnly, "{error}");
@@ -350,5 +454,8 @@ fn a_read_only_open_after_a_writer_exits_without_closing_replays_its_commits_whe
         db.check().unwrap();
     }
     assert_eq!(files(directory.path()), before);
-    assert_eq!(count(&Database::open(&path).unwrap()), 150);
+    let reopened = within("an open for writing", directory.path(), move || {
+        Database::open(&path)
+    });
+    assert_eq!(count(&reopened.unwrap()), 150);
 }
