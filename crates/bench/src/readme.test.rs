@@ -124,11 +124,11 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.contains("| 벡터 검색 | 4.00 | 지원 안 함 | 비교 못 함 |"),
+        table.contains("| 벡터 검색 | 4.00 | 지원 안 함 | 해당 없음 |"),
         "{table}"
     );
     assert!(
-        table.contains("| 조건으로 걸러 읽기 | 재지 않음 | 재지 않음 | 비교 못 함 |"),
+        table.contains("| 조건으로 걸러 읽기 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
         "{table}"
     );
     assert!(

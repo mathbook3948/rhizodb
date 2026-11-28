@@ -119,7 +119,7 @@ fn cell(row: Option<&Value>, language: Language) -> (String, Option<Timing>) {
     let Some(row) = row else {
         let text = match language {
             Language::English => "not run",
-            Language::Korean => "재지 않음",
+            Language::Korean => "측정 안 함",
         };
         return (text.to_owned(), None);
     };
@@ -149,7 +149,7 @@ fn cell(row: Option<&Value>, language: Language) -> (String, Option<Timing>) {
 fn not_applicable(language: Language) -> String {
     match language {
         Language::English => "n/a",
-        Language::Korean => "비교 못 함",
+        Language::Korean => "해당 없음",
     }
     .to_owned()
 }
@@ -231,7 +231,7 @@ pub fn render_in(
             "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
         ),
         Language::Korean => format!(
-            "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 유사로 표시합니다.\n\n"
+            "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
         ),
     };
     text.push_str(match language {
