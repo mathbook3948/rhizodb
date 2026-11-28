@@ -54,6 +54,9 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - An open whose growth of the side file fails is refused.
 - Every process maps the side file into memory and reads and writes it with atomic operations, as SQLite maps its wal-index and LMDB its lock file.
 - A record of several words sits behind a sequence number that is odd while it changes, so a reader retries a torn read instead of taking a lock.
+- Each such record keeps two copies, each behind its own sequence number, and a version word that names the newer copy, so a writer fills the older copy and only then moves the version, and a writer that dies mid-write leaves the newer copy whole for every reader instead of a sequence that stays odd forever.
+- The side file publishes the log tail as one such record of the active segment, its end block, the next LSN, the chain, and the clock, so a writer that takes the write lock appends where the last writer stopped.
+- A side file of another layout version is refused like any other identity mismatch, so a build that predates a layout change never reads the words it moved.
 - The side file is never synced and never trusted across sessions, since the first process of a session rebuilds it from the database file and the log.
 - Multi-process access is refused on a file system the engine finds to be remote, since processes on other machines share no memory, so a mapped side file cannot coordinate them.
 - The engine checks both the database file and the side file, each by `fstatfs` of its open handle on Unix and by the handle's remote protocol information on Windows.
