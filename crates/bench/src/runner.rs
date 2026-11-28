@@ -339,7 +339,10 @@ fn copy_directory(from: &Path, to: &Path) -> io::Result<()> {
             copy_directory(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target)?;
-            fs::File::open(&target)?.sync_all()?;
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&target)?
+                .sync_all()?;
         }
     }
     Ok(())

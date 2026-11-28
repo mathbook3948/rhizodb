@@ -16,6 +16,7 @@ use std::process::ChildStdout;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
+use std::time::Instant;
 
 use rhizodb::Database;
 use rhizodb::ErrorKind;
@@ -25,6 +26,9 @@ use support::*;
 
 const DATABASE_ENV: &str = "RHIZODB_MULTI_PROCESS_DATABASE";
 const MODE_ENV: &str = "RHIZODB_MULTI_PROCESS_MODE";
+
+/// How long the child that stands in for a read-only open of 0.2.0 keeps opening the file.
+const OLDER_READER_FOR: Duration = Duration::from_secs(10);
 
 fn writer_options() -> OpenOptions {
     OpenOptions::new().multi_process(true)
@@ -74,6 +78,28 @@ fn multi_process_child() {
                 writeln!(stdout, "committed {round}").unwrap();
                 stdout.flush().unwrap();
             }
+        }
+        Ok("older-reader") => {
+            writeln!(stdout, "ready 0").unwrap();
+            stdout.flush().unwrap();
+            let side = format!("{path}-shm");
+            let until = Instant::now() + OLDER_READER_FOR;
+            let mut held = 0;
+            while Instant::now() < until {
+                let file = std::fs::File::open(&path).unwrap();
+                if file.try_lock_shared().is_ok() {
+                    held += 1;
+                    assert!(
+                        std::path::Path::new(&side).exists(),
+                        "a session holds the file"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                    file.unlock().unwrap();
+                }
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            writeln!(stdout, "held {held}").unwrap();
+            stdout.flush().unwrap();
         }
         _ => {
             let db = reader_options().open(&path).unwrap();
@@ -315,4 +341,42 @@ fn reader_threads_of_one_process_keep_reading_beside_a_committing_writer() {
     }
     writer.kill();
     drop(db);
+}
+
+// ast-grep-ignore
+// A read-only open of 0.2.0 takes a whole-file shared lock before it checks for the side file, which on Windows refuses the writer's writes to the database file while it lasts.
+#[test]
+fn a_writer_checkpoints_while_a_reader_of_an_older_build_keeps_opening_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    let db = writer_options().open(&path).unwrap();
+    let (mut older, _) = Peer::spawn(&path, "older-reader");
+    let until = Instant::now() + OLDER_READER_FOR - Duration::from_secs(2);
+    let mut round = 0;
+    while Instant::now() < until {
+        run(
+            &db,
+            &format!(
+                "INSERT (:Round {{n: {round}, pad: '{}'}})",
+                "x".repeat(2000)
+            ),
+        );
+        if round % 10 == 9 {
+            db.compact().unwrap();
+        }
+        round += 1;
+    }
+    let held: u64 = older.line_starting("held ").parse().unwrap();
+    assert!(held > 0, "the older reader never took its lock");
+    #[cfg(windows)]
+    assert!(
+        rhizodb::write_retries_for_testing() > 0,
+        "no write of the writer met the older reader's lock"
+    );
+    assert!(
+        round >= 10,
+        "the writer finished no checkpoint beside the older reader"
+    );
+    assert_eq!(rounds(&db), round);
+    db.check().unwrap();
 }

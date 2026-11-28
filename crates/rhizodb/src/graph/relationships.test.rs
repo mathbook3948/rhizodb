@@ -427,3 +427,32 @@ fn bytes_past_the_last_column_read_as_corrupt() {
     body.extend_from_slice(&[1, 4, 1, 0, 0, 0, INTEGERS, 6, 0, 0]);
     assert!(reads_as_corrupt(&handmade(1, &body)));
 }
+
+#[test]
+fn a_relationship_with_more_properties_than_one_count_byte_holds_reads_back() {
+    for count in [127u32, 128, 129, 300] {
+        let mut edit = ChunkEdit::default();
+        let mut model = Vec::new();
+        for (slot, text) in [(0, false), (9, true)] {
+            let properties = (0..count)
+                .map(|key| {
+                    let value = match text {
+                        true => PropertyValue::String(format!("value {key}")),
+                        false => PropertyValue::Integer(i64::from(key) - 64),
+                    };
+                    (Token::new(key), value)
+                })
+                .collect();
+            let record = one_record(1, 2, 3, properties);
+            edit.set(slot, Some(&record));
+            model.push((slot, record));
+        }
+        let stored = edit.encode(&KEY).unwrap().unwrap();
+        let chunk = ChunkRef::parse(&KEY, &stored).unwrap();
+        for (slot, record) in &model {
+            assert_eq!(chunk.get(*slot).unwrap().as_ref(), Some(record), "{count}");
+        }
+        let entries: Vec<(usize, Vec<u8>)> = chunk.entries().collect::<Result<_, _>>().unwrap();
+        assert_eq!(entries, model, "{count}");
+    }
+}

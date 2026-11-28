@@ -266,7 +266,7 @@ impl Instance for FalkorInstance {
     }
 
     fn create_keyword_index(&self) -> Result<Built, EngineError> {
-        self.feature("CALL db.idx.fulltext.createNodeIndex('Person', 'bio')")?;
+        self.feature("CREATE FULLTEXT INDEX FOR (p:Person) ON (p.bio)")?;
         Ok(Built::Index)
     }
 
