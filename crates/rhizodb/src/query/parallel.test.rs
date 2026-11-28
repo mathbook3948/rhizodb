@@ -227,3 +227,25 @@ fn splits_from_many_threads_at_once_share_the_pool_and_match_one_thread() {
         "{alone}"
     );
 }
+
+#[test]
+fn a_split_over_fewer_row_groups_than_morsels_cuts_each_group_for_every_thread() {
+    let slots = crate::graph::SLOTS as u64;
+    let ids: Vec<NodeId> = (slots / 2..slots / 2 + 10_000).map(NodeId).collect();
+
+    let cut = morsels(&ids, 4);
+
+    assert_eq!(cut.len(), 18, "{cut:?}");
+    assert_eq!(cut.first().map(|morsel| morsel.0), Some(0));
+    assert_eq!(cut.last().map(|morsel| morsel.1), Some(ids.len()));
+    for pair in cut.windows(2) {
+        assert_eq!(pair[0].1, pair[1].0, "{cut:?}");
+    }
+    for &(start, end) in &cut {
+        assert_eq!(
+            crate::graph::row_group(ids[start]),
+            crate::graph::row_group(ids[end - 1]),
+            "a morsel crosses a row group: {cut:?}"
+        );
+    }
+}

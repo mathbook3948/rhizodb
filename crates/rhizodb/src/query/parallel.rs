@@ -402,7 +402,7 @@ fn morsels(ids: &[NodeId], threads: usize) -> Vec<(usize, usize)> {
         start = end;
     }
     let wanted = threads.saturating_mul(MORSELS_PER_THREAD);
-    let pieces = threads.div_ceil(groups.len().max(1));
+    let pieces = wanted.div_ceil(groups.len().max(1));
     let size = ids.len().div_ceil(wanted).max(1);
     let mut morsels = Vec::new();
     for (start, end) in groups {
