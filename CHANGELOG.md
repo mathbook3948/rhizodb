@@ -4,6 +4,10 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Added
+
+- `OpenOptions::max_dump_line_bytes` caps the bytes of one dump line that `Database::import` reads. A longer line fails with `ErrorKind::InvalidDump` once that many bytes are read, so a host that imports dumps it did not write can bound the memory one line takes. No cap is set by default.
+
 ## 0.2.0
 
 Released on 2026-11-28.
