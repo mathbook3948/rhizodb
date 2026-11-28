@@ -83,6 +83,11 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
         Ok(())
     }
 
+    /// The identity of the file this handle reaches, the same through every path and link.
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        Ok((0, 0))
+    }
+
     /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
     fn set_block_count(&self, count: u64) -> io::Result<()>;
 

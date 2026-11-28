@@ -508,11 +508,51 @@ enum Log {
 
 const JOIN_TRIES: usize = 1000;
 
-fn identity(options: &EngineOptions, header: &Header) -> SessionIdentity {
-    SessionIdentity {
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STAGE_PLACED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+type FreedByGeneration = BTreeMap<u64, Vec<(ExtentId, Blocks)>>;
+
+// ast-grep-ignore
+// Another process's earlier checkpoints freed these, for trees this process cannot see (rule 118).
+fn held_free_space(
+    extents: &ExtentTable,
+    generation: u64,
+) -> (BTreeMap<u64, u64>, FreedByGeneration) {
+    let quarantine = extents
+        .free_slots()
+        .into_iter()
+        .map(|slot| (slot, generation))
+        .collect();
+    let free: Vec<(ExtentId, Blocks)> = extents
+        .entries
+        .iter()
+        .filter_map(|(id, entry)| {
+            let free = entry.free();
+            (!free.is_empty()).then_some((*id, free))
+        })
+        .collect();
+    let freed = if free.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([(generation, free)])
+    };
+    (quarantine, freed)
+}
+
+fn identity(
+    options: &EngineOptions,
+    header: &Header,
+    file: &impl BlockFile,
+) -> Result<SessionIdentity, EngineError> {
+    Ok(SessionIdentity {
         build: options.build,
         database_id: header.database_id,
-    }
+        file: file.identity()?,
+    })
 }
 
 // ast-grep-ignore
@@ -917,9 +957,9 @@ impl<F: FileSystem + 'static> Engine<F> {
     ) -> Result<Self, EngineError> {
         let file = fs.open(name, block_size()?)?;
         let elected = match session::join(&*fs, name, &file)? {
-            Joined::Alone => {
+            Joined::Alone { recheck } => {
                 file.lock_shared()?;
-                if fs.names()?.contains(&side_name(name)) {
+                if recheck && fs.names()?.contains(&side_name(name)) {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "a multi-process session may hold the database file, since its -shm \
@@ -941,14 +981,22 @@ impl<F: FileSystem + 'static> Engine<F> {
         };
         if elected.is_first() {
             let (header, _) = read_header(&file)?;
-            let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+            let session = elected.finish(
+                &file,
+                identity(&options, &header, &file)?,
+                header.generation,
+            )?;
             let loaded = load(file, &options)?;
             return Self::start(fs, name, loaded, options, true, Some(session), Log::Own);
         }
         let header = elected
             .published_header()?
             .ok_or_else(|| EngineError::corrupt("a multi-process session published no header"))?;
-        let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
         let pages = Arc::new(Pages::new(
             file,
             page_seed(header.database_id),
@@ -1015,7 +1063,11 @@ impl<F: FileSystem + 'static> Engine<F> {
         elected.take_write_lock()?;
         file.sync()?;
         let (header, _) = read_header(&file)?;
-        let session = elected.finish(&file, identity(&options, &header), header.generation)?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
         let loaded = load(file, &options)?;
         Self::start(fs, name, loaded, options, false, Some(session), Log::Own)
     }
@@ -1048,6 +1100,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             extents,
             catalog,
         } = loaded;
+        let loaded_generation = header.generation;
         let published = matches!(log, Log::Replayed { .. });
         let (layers, mut replayed) = match log {
             Log::Replayed { layers, replayed } => (layers, replayed),
@@ -1118,6 +1171,13 @@ impl<F: FileSystem + 'static> Engine<F> {
         let epochs = replica::load_epochs(&layers)?;
         let term = epochs.last().map_or(0, |epoch| epoch.term);
         let role = replica::role_at_open(&header, &epochs);
+        let mut extents = extents;
+        let (quarantine, freed) = if session.is_some() && !read_only {
+            extents.cover_file(pages.file_bytes()? / BLOCK as u64);
+            held_free_space(&extents, loaded_generation)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
         let shared = Arc::new(Shared {
             options,
             read_only,
@@ -1155,8 +1215,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             running: Mutex::new(false),
             finished: Condvar::new(),
             failure: Mutex::new(None),
-            quarantine: Mutex::new(BTreeMap::new()),
-            freed: Mutex::new(BTreeMap::new()),
+            quarantine: Mutex::new(quarantine),
+            freed: Mutex::new(freed),
             poisoned: AtomicBool::new(false),
             keeping_free_space: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
@@ -2040,6 +2100,8 @@ impl<F: FileSystem + 'static> Shared<F> {
                         job.lsn,
                         durable.header.generation + 1,
                     );
+                    #[cfg(test)]
+                    STAGE_PLACED.with(|hook| hook.borrow_mut().take().map(|run| run()));
                 }
             }
         }
