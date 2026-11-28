@@ -566,3 +566,32 @@ fn a_writer_that_takes_over_writes_no_extent_into_the_trailing_slots_a_reader_re
         assert_eq!(value[0], 1, "key {key}");
     }
 }
+
+#[test]
+fn a_first_process_that_fails_before_it_is_ready_leaves_no_side_file_and_no_lock() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: file.identity().unwrap(),
+    };
+    let session = elected.finish(&file, identity, 1).unwrap();
+    drop(session);
+    drop(file);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file outlived the only process of its session"
+    );
+    let next = reader(&fs, 0).unwrap();
+    assert_eq!(next.session_slot(), Some(0));
+    assert_eq!(items(&next), 1);
+}
