@@ -116,6 +116,12 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - `apply` publishes the log's new end in the side file after each record it appends, as it publishes each record to its own readers today.
 - A writer appends at the end the side file names and writes over whatever a dead writer left past it, since no record past that end was published, and so none was acknowledged.
 - A writer that finds a log segment after the one the side file names removes it, as recovery removes an unfinished rollover.
+- A writer that joins a session whose log another writer appended to loads the published header, replays the published log, and opens the log at the published tail, and only a writer that finds no published tail recovers the log.
+- A writer publishes the tail after each record it appends under the lock its catch-up takes, and takes the published tail over before its next append, opening any segment another writer started.
+- A writer that starts a new segment first removes any file of that name, since only a writer that died before it published a record there could have left one.
+- Every process of a session, a writer included, catches up from a thread of its own while idle, and records its oldest tree and its oldest pin in its slot, since a checkpoint in any other process reads both.
+- A writer that adopts a header records the space it freed as a checkpoint of its own does, so space that a tree of the generation before still reaches stays held.
+- A checkpoint gives its header a generation above every header in the file, a stage's header that a dead process left included, so no later open chooses that stage's header over it.
 - Before a read or write transaction begins, a process compares the log end the side file publishes with the last LSN it holds, and begins at once when they match.
 - When records are new, the process reads them from the log segments up to the published end, checks each record's checksum and chain hash, and applies it to its memtable, as an open replays the log.
 - A process never reads a record past the published end, so it never sees a record that is still being appended or that a dead writer tore.
@@ -261,6 +267,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Step 4 adds the differential test and the long simulated runs.
 - Step 5 takes the write lock for each write transaction, catches up before each one, lets any process checkpoint under the checkpoint lock, and moves the replication role, the record behind it, and the acknowledged peers into the side file, with kill tests of writers in several child processes, which completes phase 4.
 - Step 6 adds the isolation history check across processes and the long runs of the kill tests.
+- A build with `--cfg crash_points` aborts its process at named steps of a commit, a hand-over of the tail, and a checkpoint, and the check runs the kill tests of writers at every such step on each CI platform.
 
 ## Open
 

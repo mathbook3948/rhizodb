@@ -27,7 +27,7 @@ pub(crate) const SLOTS: usize = 128;
 const SLOT_WORDS: usize = 2;
 const SLOT_BASE: usize = WORDS - SLOTS * SLOT_WORDS;
 const MAGIC: u64 = u64::from_le_bytes(*b"rhizoshm");
-const LAYOUT: u64 = 2;
+const LAYOUT: u64 = 3;
 
 const TAIL_WORDS: usize = 8;
 
@@ -94,10 +94,6 @@ pub(crate) enum SideLock {
     /// Held exclusively by the process that writes the session's log and checkpoints.
     Write,
     /// Held exclusively by a process while it writes a checkpoint or any other header.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 4 takes it around each header")
-    )]
     Checkpoint,
     /// Held exclusively by a process while its slot is in use.
     Slot(usize),
@@ -188,6 +184,7 @@ pub(crate) struct Elected {
     side: Box<dyn SideFile>,
     words: Box<dyn SideWords>,
     first: bool,
+    writing: bool,
 }
 
 /// How an open that may take part in a session goes on.
@@ -340,7 +337,12 @@ pub(crate) fn join<F: FileSystem>(
         if first {
             words.word(Field::Magic.index()).store(0, Ordering::SeqCst);
         }
-        return Ok(Joined::Session(Elected { side, words, first }));
+        return Ok(Joined::Session(Elected {
+            side,
+            words,
+            first,
+            writing: false,
+        }));
     }
     Err(already_open(
         "the -shm file of the database file kept being removed while it was opened",
@@ -348,15 +350,18 @@ pub(crate) fn join<F: FileSystem>(
 }
 
 impl Elected {
-    /// Takes the session's write lock for as long as this process is open, and fails when
-    /// another process of the session writes.
-    pub(crate) fn take_write_lock(&self) -> Result<(), EngineError> {
-        if self.side.try_lock(SideLock::Write, Lock::Exclusive)? {
-            return Ok(());
-        }
-        Err(already_open(
-            "another process of the multi-process session writes the database",
-        ))
+    /// Takes the session's write lock, waiting while another process writes, so the open reads
+    /// the log's tail that no other process moves until it gives the lock up.
+    pub(crate) fn lock_write(&mut self) -> Result<(), EngineError> {
+        self.side.lock(SideLock::Write, Lock::Exclusive)?;
+        self.writing = true;
+        Ok(())
+    }
+
+    /// The end of the session's log that its last writer published, or `None` when no writer
+    /// of the session has appended to it, so the log still needs a recovery.
+    pub(crate) fn published_tail(&self) -> Option<Tail> {
+        read_tail(&*self.words)
     }
 
     /// Whether this open is the session's first process.
@@ -379,7 +384,17 @@ impl Elected {
         identity: Identity,
         generation: u64,
     ) -> Result<Session, EngineError> {
-        let Elected { side, words, first } = self;
+        let Elected {
+            side,
+            words,
+            first,
+            writing,
+        } = self;
+        let unlock_write = |side: &dyn SideFile| {
+            if writing {
+                let _ = side.unlock(SideLock::Write);
+            }
+        };
         if first {
             reset(&*words, identity);
         } else {
@@ -387,6 +402,7 @@ impl Elected {
             let theirs =
                 Field::IDENTITY.map(|field| words.word(field.index()).load(Ordering::SeqCst));
             if magic != MAGIC || theirs != identity.words() {
+                unlock_write(&*side);
                 side.unlock(SideLock::Session)?;
                 return Err(already_open(
                     "a multi-process session of another build or layout holds the database file",
@@ -400,6 +416,7 @@ impl Elected {
         let slot = match held {
             Ok(slot) => slot,
             Err(error) => {
+                unlock_write(&*side);
                 if first {
                     let _ = side.unlock(SideLock::Gate);
                 }
@@ -413,8 +430,21 @@ impl Elected {
             slot,
             getting_ready: AtomicBool::new(first),
             published: AtomicU64::new(u64::MAX),
+            writing: AtomicBool::new(writing),
+            checkpointing: AtomicBool::new(false),
         })
     }
+}
+
+fn read_tail(words: &dyn SideWords) -> Option<Tail> {
+    let mut read = [0; TAIL_WORDS];
+    TAIL.read(words, &mut read).then_some(Tail {
+        segment: read[0],
+        end_block: read[1],
+        next_lsn: read[2],
+        chain: read[3],
+        hlc: read[4],
+    })
 }
 
 fn published_header(words: &dyn SideWords) -> Result<Option<Header>, EngineError> {
@@ -431,10 +461,6 @@ fn published_header(words: &dyn SideWords) -> Result<Option<Header>, EngineError
 
 /// The end of the session's log, as the process that appended its last record left it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "phase 4 hands the tail between writers")
-)]
 pub(crate) struct Tail {
     /// The segment that holds the last record.
     pub(crate) segment: u64,
@@ -449,10 +475,6 @@ pub(crate) struct Tail {
 }
 
 impl Tail {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 4 hands the tail between writers")
-    )]
     fn words(self) -> [u64; TAIL_WORDS] {
         [
             self.segment,
@@ -574,6 +596,8 @@ pub(crate) struct Session {
     slot: usize,
     getting_ready: AtomicBool,
     published: AtomicU64,
+    writing: AtomicBool,
+    checkpointing: AtomicBool,
 }
 
 impl Session {
@@ -600,9 +624,51 @@ impl Session {
         Ok(last?)
     }
 
+    /// Takes the session's write lock, waiting while another process holds it. The caller holds
+    /// its process's writer mutex, so no other thread of the process holds the lock.
+    pub(crate) fn lock_write(&self) -> Result<(), EngineError> {
+        self.side.lock(SideLock::Write, Lock::Exclusive)?;
+        self.writing.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Gives up the session's write lock that [`Session::lock_write`] took.
+    pub(crate) fn unlock_write(&self) -> Result<(), EngineError> {
+        self.writing.store(false, Ordering::SeqCst);
+        Ok(self.side.unlock(SideLock::Write)?)
+    }
+
+    /// Takes the session's checkpoint lock, waiting while another process holds it when
+    /// `wait`, and returns whether it got it. The caller holds its process's checkpoint mutex.
+    pub(crate) fn lock_checkpoint(&self, wait: bool) -> Result<bool, EngineError> {
+        if wait {
+            self.side.lock(SideLock::Checkpoint, Lock::Exclusive)?;
+        } else if !self.side.try_lock(SideLock::Checkpoint, Lock::Exclusive)? {
+            return Ok(false);
+        }
+        self.checkpointing.store(true, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    /// Whether this process holds the session's checkpoint lock.
+    pub(crate) fn holds_checkpoint(&self) -> bool {
+        self.checkpointing.load(Ordering::SeqCst)
+    }
+
+    /// Gives up the session's checkpoint lock that [`Session::lock_checkpoint`] took.
+    pub(crate) fn unlock_checkpoint(&self) -> Result<(), EngineError> {
+        self.checkpointing.store(false, Ordering::SeqCst);
+        Ok(self.side.unlock(SideLock::Checkpoint)?)
+    }
+
     /// Publishes `header`, which is durable, as the newest header of the session, and orders
-    /// that store before every later load of a slot.
+    /// that store before every later load of a slot. Only a holder of the checkpoint lock, or
+    /// a first process that lets no other join yet, writes the header's record.
     pub(crate) fn publish_header(&self, header: &Header) {
+        assert!(
+            self.checkpointing.load(Ordering::SeqCst) || self.is_getting_ready(),
+            "a header is published only under the session's checkpoint lock"
+        );
         let block = header.encode();
         let record: Vec<u64> = block
             .as_chunks::<8>()
@@ -625,36 +691,35 @@ impl Session {
         self.getting_ready.load(Ordering::SeqCst)
     }
 
-    /// Publishes `lsn` as the last commit of the session's log, which is durable.
-    pub(crate) fn publish_log_end(&self, lsn: u64) {
+    /// Publishes `tail` as the end of the session's log, which is durable up to it, and then its
+    /// last LSN as the session's last commit. Only a holder of the write lock, or a first
+    /// process that lets no other join yet, writes the tail's record.
+    pub(crate) fn publish_tail(&self, tail: Tail) {
+        assert!(
+            self.writing.load(Ordering::SeqCst) || self.is_getting_ready(),
+            "the log's tail is published only under the session's write lock"
+        );
+        TAIL.write(&*self.words, &tail.words());
+        self.words
+            .word(Field::LogEnd.index())
+            .store(tail.next_lsn - 1, Ordering::Release);
+    }
+
+    /// Publishes `lsn` as the last commit of a log that no writer of the session appends to,
+    /// as a first process that opened read-only replayed it.
+    pub(crate) fn publish_replayed_end(&self, lsn: u64) {
+        assert!(
+            self.is_getting_ready(),
+            "a replayed log's end is published only before others join"
+        );
         self.words
             .word(Field::LogEnd.index())
             .store(lsn, Ordering::Release);
     }
 
-    /// Publishes `tail` as the end of the session's log, which is durable up to it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 4 hands the tail between writers")
-    )]
-    pub(crate) fn publish_tail(&self, tail: Tail) {
-        TAIL.write(&*self.words, &tail.words());
-    }
-
     /// The end of the session's log that its last writer published, or `None` before any.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 4 hands the tail between writers")
-    )]
     pub(crate) fn published_tail(&self) -> Option<Tail> {
-        let mut words = [0; TAIL_WORDS];
-        TAIL.read(&*self.words, &mut words).then_some(Tail {
-            segment: words[0],
-            end_block: words[1],
-            next_lsn: words[2],
-            chain: words[3],
-            hlc: words[4],
-        })
+        read_tail(&*self.words)
     }
 
     /// The last durable commit of the session's log.
@@ -767,6 +832,12 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if self.writing.swap(false, Ordering::SeqCst) {
+            let _ = self.side.unlock(SideLock::Write);
+        }
+        if self.checkpointing.swap(false, Ordering::SeqCst) {
+            let _ = self.side.unlock(SideLock::Checkpoint);
+        }
         self.hold_pin(None);
         self.words
             .word(SLOT_BASE + self.slot * SLOT_WORDS)

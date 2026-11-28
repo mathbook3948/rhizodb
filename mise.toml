@@ -30,8 +30,10 @@ depends = ["check-fast"]
 run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "cargo clippy --package rhizodb --target-dir target/fuzzing --config \"build.rustflags = ['--cfg', 'fuzzing']\" -- -D warnings",
+  "cargo clippy --package rhizodb --all-targets --target-dir target/crash-points --config \"build.rustflags = ['--cfg', 'crash_points']\" -- -D warnings",
   "cargo rustdoc --package rhizodb -- -D warnings",
   "cargo test --workspace",
+  "cargo test --package rhizodb --test multi_writer --target-dir target/crash-points --config \"build.rustflags = ['--cfg', 'crash_points']\" -- each_step",
   "cargo run --quiet --package rhizodb --example social",
   "cargo run --quiet --package rhizodb --example search",
   "cargo run --quiet --package rhizodb --example procedures",

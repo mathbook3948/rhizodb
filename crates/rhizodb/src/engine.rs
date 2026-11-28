@@ -7,6 +7,7 @@ pub(crate) mod changes;
 pub(crate) mod check;
 pub(crate) mod checkpoint;
 pub(crate) mod codec;
+pub(crate) mod crash_point;
 pub(crate) mod error;
 pub(crate) mod extent;
 #[cfg(any(test, fuzzing))]

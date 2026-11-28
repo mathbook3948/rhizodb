@@ -417,10 +417,10 @@ impl OpenOptions {
                 format!("there is no database file at {}", path.display()),
             ));
         }
-        let engine = EngineOptions {
+        let engine = crate::engine::crash_point::tuned(EngineOptions {
             build: crate::graph::build_identity(),
             ..self.engine
-        };
+        });
         let backend = if self.read_only {
             open_backend_read_only(path, engine)?
         } else if self.multi_process {

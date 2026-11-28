@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::EndCheckpointOnDrop;
 use super::Engine;
 use super::Writer;
 use super::hybrid_clock_after;
@@ -305,6 +306,13 @@ impl<F: FileSystem + 'static> Engine<F> {
     fn write_replication(&self, change: impl FnOnce(&mut Replication)) -> Result<(), EngineError> {
         self.writable("change its replication state")?;
         let shared = &*self.shared;
+        if !shared.begin_checkpoint(true)? {
+            return Err(shared.refusal());
+        }
+        let _finish = EndCheckpointOnDrop {
+            shared,
+            completed: true,
+        };
         let mut durable = lock(&shared.durable);
         let mut replication = durable.header.replication;
         change(&mut replication);
@@ -348,7 +356,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Makes a file that holds no change and no history a replica, and refuses a file that a
     /// writer holds.
     pub(crate) fn declare_replica(&self) -> Result<(), EngineError> {
-        let writer = lock(&self.shared.writer);
+        let writer = self.lock_writer()?;
         match self.role() {
             Role::Replica => Ok(()),
             Role::Writer if writer.last_lsn == 0 && self.epochs().is_empty() => {
@@ -452,7 +460,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     pub(crate) fn apply_changes(&self, changes: &Decoded) -> Result<(), EngineError> {
         self.writable("apply changes")?;
         let shared = &*self.shared;
-        let mut writer = lock(&shared.writer);
+        let mut writer = self.lock_writer()?;
         if shared.is_poisoned() {
             return Err(shared.refusal());
         }
@@ -683,7 +691,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     pub(crate) fn promote(&self, term: u64, writer_id: &[u8]) -> Result<(), EngineError> {
         self.writable("become the writer")?;
         let shared = &*self.shared;
-        let mut writer = lock(&shared.writer);
+        let mut writer = self.lock_writer()?;
         if shared.is_poisoned() {
             return Err(shared.refusal());
         }

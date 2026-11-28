@@ -94,6 +94,11 @@ impl<B: BlockFile> Pages<B> {
         }
     }
 
+    /// The database file the pages are read from.
+    pub(crate) fn file(&self) -> &B {
+        &self.file
+    }
+
     /// Forgets every cached page and value, as another process may have written their blocks
     /// again since this process last read them.
     pub(crate) fn forget_cached(&self) {

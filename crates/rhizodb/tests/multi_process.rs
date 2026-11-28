@@ -1,5 +1,5 @@
 //! Opens one database file from several child processes at once, one writing with
-//! `OpenOptions::multi_process` and the rest read-only, kills them at random points, and checks
+//! `OpenOptions::multi_process`, beside a second writer in the parent, and the rest read-only, kills them at random points, and checks
 //! that every reader reads a whole prefix of the reported commits and catches up with later
 //! ones, that a killed writer loses no reported commit, and that the file reopened alone passes
 //! `check`.
@@ -226,8 +226,9 @@ fn readers_beside_a_writer_killed_at_random_points_read_whole_prefixes_and_lose_
             let in_parent = rounds(&reader_options().open(&path).unwrap());
             assert!(in_parent >= seen, "life {life}: a later reader read less");
         }
-        let error = writer_options().open(&path).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
+        let joined = writer_options().open(&path).unwrap();
+        assert!(rounds(&joined) >= writer.committed.len() as i64);
+        drop(joined);
         std::thread::sleep(Duration::from_millis(next(&mut seed) % 30));
         let committed = writer.kill();
         reported = committed.last().map_or(reported, |last| last + 1);

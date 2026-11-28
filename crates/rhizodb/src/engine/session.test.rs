@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::engine::layout::BLOCK;
+use crate::engine::sim_fs::Failure;
 use crate::engine::sim_fs::SimFs;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
@@ -284,11 +285,18 @@ fn a_writer_joins_readers_and_its_commits_reach_the_readers_that_join_after() {
 }
 
 #[test]
-fn a_session_takes_one_writer_and_keeps_out_an_exclusive_open() {
+fn a_session_takes_a_second_writer_and_keeps_out_an_exclusive_open() {
     let fs = SimFs::new();
-    let _writer = writer(&fs, EngineOptions::default()).unwrap();
-    let error = writer(&fs, EngineOptions::default()).unwrap_err();
-    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
+    let first = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&first, 1, 4);
+    let second = writer(&fs, EngineOptions::default()).unwrap();
+    assert_eq!(round_seen(&second, 4), 1);
+    put_round(&second, 2, 4);
+    first.catch_up().unwrap();
+    assert_eq!(round_seen(&first, 4), 2);
+    put_round(&first, 3, 4);
+    second.catch_up().unwrap();
+    assert_eq!(round_seen(&second, 4), 3);
     let error = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap_err();
     assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
 }
@@ -772,6 +780,7 @@ fn a_reader_adopting_while_a_checkpoint_runs_in_stages_reads_one_whole_round() {
     }
     assert!(ran.get(), "no checkpoint ran in stages");
     round_seen(&follower, 1024);
+    crate::engine::store::ADOPTED.with(|hook| hook.borrow_mut().take());
 }
 
 fn put_big(engine: &Engine<SimFs>, round: u8, keys: std::ops::Range<u64>) {
@@ -992,6 +1001,7 @@ fn a_writer_that_dies_while_it_publishes_the_tail_leaves_the_last_one_for_every_
         chain: 0xfeed,
         hlc: 99,
     };
+    session.lock_write().unwrap();
     session.publish_tail(first);
     assert_eq!(session.published_tail(), Some(first));
     let version = session
@@ -1026,6 +1036,7 @@ fn a_writer_that_dies_while_it_publishes_the_tail_leaves_the_last_one_for_every_
 fn readers_never_see_a_tail_or_header_that_mixes_two_publishes() {
     let fs = written(1);
     let (session, _file) = first_session(&fs);
+    session.lock_write().unwrap();
     let session = Arc::new(session);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let readers: Vec<_> = (0..3)
@@ -1100,6 +1111,43 @@ fn the_checkpoint_lock_is_a_byte_of_its_own_that_one_holder_at_a_time_takes() {
     drop(other);
 }
 
+// ast-grep-ignore
+// A build of another layout reads these words where this one wrote others, so any change here must bump LAYOUT too.
+#[test]
+fn the_side_file_layout_is_pinned_to_its_version() {
+    assert_eq!(LAYOUT, 3);
+    let fields = [
+        Field::Magic,
+        Field::Layout,
+        Field::Minor,
+        Field::Build,
+        Field::DatabaseLow,
+        Field::DatabaseHigh,
+        Field::FileVolume,
+        Field::FileLow,
+        Field::FileHigh,
+        Field::HeaderVersion,
+        Field::LogEnd,
+        Field::TailVersion,
+    ];
+    let indexes: Vec<usize> = fields.iter().map(|field| field.index()).collect();
+    assert_eq!(indexes, (0..12).collect::<Vec<_>>());
+    assert_eq!((HEADER.base, HEADER.len, HEADER.end()), (16, 512, 1042));
+    assert_eq!((TAIL.base, TAIL.len, TAIL.end()), (1042, 8, 1060));
+    assert_eq!((SLOT_BASE, SLOT_WORDS, WORDS), (3840, 2, 4096));
+    let offsets = [
+        SideLock::Gate,
+        SideLock::Session,
+        SideLock::Write,
+        SideLock::Checkpoint,
+        SideLock::Slot(0),
+        SideLock::Slot(SLOTS - 1),
+    ]
+    .map(|lock| lock.offset() - LOCKS_FROM);
+    assert_eq!(offsets, [0, 1, 2, 3, 64, 191]);
+    assert_eq!(LOCKS_FROM, 1 << 40);
+}
+
 type WriterStep = dyn FnMut(usize, &[AtomicU64]) + Send;
 
 // ast-grep-ignore
@@ -1149,6 +1197,195 @@ fn write_copy(words: &[AtomicU64], value: u64, publish: bool) {
     }
 }
 
+fn publish(words: &[AtomicU64], value: u64) {
+    write_copy(words, value, true);
+}
+
+#[test]
+fn a_reader_retries_a_copy_that_a_writer_rewrote_while_it_read_it() {
+    let mut lapped = false;
+    let words = interleaved(move |index, words| {
+        let version = words[Field::TailVersion.index()].load(Ordering::SeqCst);
+        let at = TAIL.copy(version);
+        if version > 0 && !lapped && index == at + 4 {
+            lapped = true;
+            publish(words, 8);
+            publish(words, 9);
+        }
+    });
+    publish(&words.words, 1);
+    let mut read = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut read));
+    assert_eq!(read, [9; TAIL_WORDS]);
+}
+
+#[test]
+fn a_reader_waits_out_a_copy_whose_writer_is_still_writing_it() {
+    let mut seen_open = 0;
+    let words = interleaved(move |index, words| {
+        let at = TAIL.copy(words[Field::TailVersion.index()].load(Ordering::SeqCst));
+        if index == at && words[at].load(Ordering::SeqCst) % 2 == 1 {
+            seen_open += 1;
+            if seen_open == 3 {
+                for word in &words[at + 1..=at + TAIL_WORDS] {
+                    word.store(9, Ordering::SeqCst);
+                }
+                words[at].fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    publish(&words.words, 1);
+    let at = TAIL.copy(1);
+    words.words[at].fetch_add(1, Ordering::SeqCst);
+    words.words[at + 1].store(5, Ordering::SeqCst);
+    let mut read = [0; TAIL_WORDS];
+    assert!(TAIL.read(&words, &mut read));
+    assert_eq!(read, [9; TAIL_WORDS]);
+}
+
+fn try_round(engine: &Engine<SimFs>, round: u8, keys: u64) -> Result<(), EngineError> {
+    let mut write = engine.begin_write()?;
+    for key in 0..keys {
+        write.put(Table::Nodes, &key.to_be_bytes(), &[round; 200])?;
+    }
+    write.put(Table::Metadata, &[b'r', round], &[round])?;
+    write.commit()?;
+    Ok(())
+}
+
+fn rounds_held(engine: &Engine<SimFs>) -> Vec<u8> {
+    let read = engine.begin_read().unwrap();
+    (0..=u8::MAX)
+        .filter(|round| {
+            read.get(Table::Metadata, &[b'r', *round])
+                .unwrap()
+                .is_some()
+        })
+        .collect()
+}
+
+// ast-grep-ignore
+// A bound on work that a lock left by a dead writer would hang, so the test fails and names the step.
+fn within<T: Send + 'static>(what: String, run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, finished) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(run());
+    });
+    match finished.recv_timeout(Duration::from_secs(30)) {
+        Ok(done) => done,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{what} hung, as a lock a dead writer kept would leave it")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what} failed"),
+    }
+}
+
+fn dying_step(fs: &SimFs, first: &Engine<SimFs>) -> bool {
+    let acked = try_round(first, 5, 64).is_ok();
+    let _ = first.checkpoint();
+    let _ = try_round(first, 6, 64);
+    let _ = fs;
+    acked
+}
+
+#[test]
+fn a_writer_that_dies_at_any_step_of_a_commit_or_checkpoint_loses_no_acknowledged_commit() {
+    let steps = {
+        let fs = SimFs::new();
+        let first = writer(&fs, churning()).unwrap();
+        let before = fs.operations();
+        assert!(dying_step(&fs, &first));
+        fs.operations() - before
+    };
+    assert!(steps > 20, "the step took {steps} operations");
+    for step in 0..=steps {
+        let fs = SimFs::new();
+        let first = writer(&fs, churning()).unwrap();
+        for round in 1..5 {
+            try_round(&first, round, 64).unwrap();
+        }
+        let second = writer(&fs, churning()).unwrap();
+        let reader = reader(&fs, 0).unwrap();
+        fs.fail_after(step, Failure::FromThenOn);
+        let mut acked: Vec<u8> = (1..5).collect();
+        if dying_step(&fs, &first) {
+            acked.push(5);
+        }
+        let sixth = first.begin_read().is_ok() && rounds_held(&first).contains(&6);
+        drop(first);
+        fs.heal();
+        let checked = within(
+            format!("the writer after a death at step {step}"),
+            move || {
+                try_round(&second, 7, 64).unwrap();
+                let held = rounds_held(&second);
+                reader.catch_up().unwrap();
+                assert_eq!(rounds_held(&reader), held, "step {step}");
+                assert_eq!(round_seen(&reader, 64), 7, "step {step}");
+                second.checkpoint().unwrap();
+                second.check().unwrap();
+                drop(reader);
+                second.close().unwrap();
+                held
+            },
+        );
+        for round in &acked {
+            assert!(
+                checked.contains(round),
+                "step {step} lost acknowledged round {round}: {checked:?}"
+            );
+        }
+        if sixth {
+            assert!(checked.contains(&6), "step {step}: {checked:?}");
+        }
+        let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+        assert_eq!(rounds_held(&alone), checked, "step {step}");
+        alone.check().unwrap();
+        alone.close().unwrap();
+    }
+}
+
+#[test]
+fn two_writers_that_take_turns_checkpointing_reuse_no_block_a_reader_still_reads() {
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    put_round(&first, 1, 512);
+    first.checkpoint().unwrap();
+    let second = writer(&fs, churning()).unwrap();
+    let options = EngineOptions {
+        cache_bytes: 4 * BLOCK,
+        ..EngineOptions::default()
+    };
+    let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    let read = held.begin_read().unwrap();
+    for round in 2..80 {
+        let turn = if round % 3 == 0 { &second } else { &first };
+        put_round(turn, round, 512);
+        if round % 7 == 0 {
+            turn.checkpoint().unwrap();
+        }
+        if round % 19 == 0 {
+            turn.compact().unwrap();
+        }
+        assert_eq!(round_seen(turn, 512), round as u8, "round {round}");
+    }
+    assert_eq!(round_in(&read, 512), 1);
+    drop(read);
+    for engine in [&first, &second] {
+        engine.catch_up().unwrap();
+        assert_eq!(round_seen(engine, 512), 79);
+        engine.check().unwrap();
+    }
+    held.catch_up().unwrap();
+    assert_eq!(round_seen(&held, 512), 79);
+    drop(held);
+    first.close().unwrap();
+    second.close().unwrap();
+    let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+    assert_eq!(round_seen(&alone, 512), 79);
+    alone.check().unwrap();
+}
+
 #[test]
 fn a_reader_never_reads_a_copy_newer_than_the_version_it_found_so_reads_never_go_back() {
     let mut lapped = false;
@@ -1172,4 +1409,187 @@ fn a_reader_never_reads_a_copy_newer_than_the_version_it_found_so_reads_never_go
         second[0]
     );
     assert_eq!(first, [2; TAIL_WORDS]);
+}
+
+// ast-grep-ignore
+// On Windows a segment of an older log outlives its removal while another process still has it open.
+#[test]
+fn a_writer_joins_beside_a_segment_of_an_older_log_that_is_still_on_disk() {
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    use crate::engine::wal_format::SegmentHeader;
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    for round in 1..40 {
+        put_round(&first, round, 64);
+    }
+    first.checkpoint().unwrap();
+    let oldest = segment_files(&fs, NAME).unwrap()[0];
+    assert!(oldest > 0, "the log kept its first segment");
+    let stale = fs
+        .create(
+            &segment_name(NAME, oldest - 1),
+            crate::engine::block_file::BlockSize::new(crate::engine::layout::WAL_BLOCK).unwrap(),
+        )
+        .unwrap();
+    let header = crate::engine::store::read_header(
+        &fs.open(NAME, crate::engine::store::block_size().unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+    .0;
+    let mut block = SegmentHeader {
+        minor: crate::engine::header::FORMAT_MINOR,
+        record_unit: crate::engine::wal_format::RECORD_UNIT as u32,
+        database_id: header.database_id,
+        sequence: oldest - 1,
+        first_lsn: 1,
+        salt: header.wal.salt.wrapping_add(1),
+        ..SegmentHeader::default()
+    }
+    .encode();
+    block.resize(crate::engine::wal_format::RECORD_UNIT, 0);
+    stale.write(0, &block).unwrap();
+    drop(stale);
+    let second = writer(&fs, churning()).unwrap();
+    put_round(&second, 40, 64);
+    first.catch_up().unwrap();
+    assert_eq!(round_seen(&first, 64), 40);
+    second.check().unwrap();
+}
+
+// ast-grep-ignore
+// The other process's checkpoint holds only the checkpoint lock, so it publishes while this writer's transaction is open, after the catch-up at its start.
+#[test]
+fn a_writer_that_freezes_after_another_process_published_a_checkpoint_builds_on_that_checkpoint() {
+    let fs = SimFs::new();
+    let background = EngineOptions {
+        checkpoint: crate::engine::store::CheckpointMode::Background,
+        memtable_limit: 9000,
+        cache_bytes: 2 * BLOCK,
+        ..churning()
+    };
+    let uncached = EngineOptions {
+        cache_bytes: 2 * BLOCK,
+        ..churning()
+    };
+    let first = writer(&fs, background).unwrap();
+    let second = writer(&fs, uncached).unwrap();
+    put_round(&first, 1, 40);
+    first.wait_for_checkpoints();
+    let gate = first.hold_checkpoints();
+    put_round(&first, 2, 40);
+    let mut write = second.begin_write().unwrap();
+    drop(gate);
+    first.wait_for_checkpoints();
+    let theirs = first.header();
+    assert!(
+        theirs.generation > second.header().generation,
+        "the other process published no checkpoint while the write was open"
+    );
+    for key in 0..40u64 {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &[3; 200])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let ours = second.header();
+    assert!(
+        ours.generation > theirs.generation,
+        "a checkpoint built on generation {} beside a published {}",
+        ours.generation,
+        theirs.generation
+    );
+    first.catch_up().unwrap();
+    assert_eq!(
+        first.header(),
+        ours,
+        "the other process did not adopt the newer header"
+    );
+    for round in 4..12 {
+        let turn = if round % 2 == 0 { &first } else { &second };
+        put_round(turn, round, 40);
+        first.wait_for_checkpoints();
+    }
+    for engine in [&first, &second] {
+        engine.catch_up().unwrap();
+        assert_eq!(round_seen(engine, 40), 11);
+        engine.check().unwrap();
+    }
+    first.close().unwrap();
+    second.close().unwrap();
+    let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+    assert_eq!(round_seen(&alone, 40), 11);
+    alone.check().unwrap();
+}
+
+// ast-grep-ignore
+// A segment past the tail that a dead writer started holds a first LSN the log never reached, so a recovery that met it would fail the log as corrupt.
+#[test]
+fn a_writer_removes_the_segment_a_dead_writer_started_past_the_tail_before_a_recovery_meets_it() {
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    use crate::engine::wal_format::SegmentHeader;
+    let fs = SimFs::new();
+    let roomy = EngineOptions {
+        segment_target: 1 << 20,
+        wal_limit: 1 << 22,
+        ..churning()
+    };
+    let first = writer(&fs, roomy).unwrap();
+    let tiny = |engine: &Engine<SimFs>, round: u8| {
+        let mut write = engine.begin_write().unwrap();
+        write.put(Table::Nodes, &[0], &[round]).unwrap();
+        write.commit().unwrap();
+    };
+    for round in 1..4 {
+        tiny(&first, round);
+    }
+    let last = *segment_files(&fs, NAME).unwrap().last().unwrap();
+    let header = crate::engine::store::read_header(
+        &fs.open(NAME, crate::engine::store::block_size().unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+    .0;
+    let started = fs
+        .create(
+            &segment_name(NAME, last + 1),
+            crate::engine::block_file::BlockSize::new(crate::engine::layout::WAL_BLOCK).unwrap(),
+        )
+        .unwrap();
+    let mut block = SegmentHeader {
+        minor: crate::engine::header::FORMAT_MINOR,
+        record_unit: crate::engine::wal_format::RECORD_UNIT as u32,
+        database_id: header.database_id,
+        shard_id: header.shard_id,
+        sequence: last + 1,
+        first_lsn: 4,
+        salt: header.wal.salt,
+        ..SegmentHeader::default()
+    }
+    .encode();
+    block.resize(crate::engine::wal_format::RECORD_UNIT, 0);
+    started.write(0, &block).unwrap();
+    started.sync().unwrap();
+    drop(started);
+    fs.sync_names().unwrap();
+    let second = writer(&fs, roomy).unwrap();
+    for round in 4..7 {
+        tiny(&second, round);
+    }
+    assert_eq!(
+        *segment_files(&fs, NAME).unwrap().last().unwrap(),
+        last,
+        "the next writer left the segment it never appended to: {:?}",
+        segment_files(&fs, NAME).unwrap()
+    );
+    let crashed = fs.crash(crate::engine::sim_fs::Crash::DropUnsynced);
+    drop(second);
+    drop(first);
+    let alone = Engine::open(Arc::new(crashed), NAME, roomy).unwrap();
+    let read = alone.begin_read().unwrap();
+    assert_eq!(read.get(Table::Nodes, &[0]).unwrap().unwrap()[0], 6);
+    drop(read);
+    alone.check().unwrap();
 }

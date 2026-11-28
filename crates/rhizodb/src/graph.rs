@@ -655,9 +655,10 @@ impl<S: Storage> Graph<S> {
         if self.storage.is_behind() {
             self.storage.catch_up()?;
         }
+        let writing_here = lock(&self.writers.slot).writer == Some(thread::current().id());
         self.storage.with_follow_held(|| {
             let epoch = self.storage.follow_epoch();
-            if epoch != self.followed.load(Ordering::SeqCst) {
+            if epoch != self.followed.load(Ordering::SeqCst) && !writing_here {
                 self.apply_outside(true, |_| ())?;
                 self.followed.store(epoch, Ordering::SeqCst);
             }
@@ -834,11 +835,16 @@ impl<S: Storage> Graph<S> {
             transaction.rollback()?;
         };
         let committed = &self.committed_index_definitions;
-        let index_definitions = if committed.changes.load(Ordering::SeqCst).is_multiple_of(2) {
-            OnceLock::from(Arc::clone(&lock(&committed.definitions)))
-        } else {
-            OnceLock::new()
-        };
+        let followed = self.storage.follow_epoch() == self.followed.load(Ordering::SeqCst);
+        if !followed {
+            lock(&self.committed_column_deltas).clear();
+        }
+        let index_definitions =
+            if followed && committed.changes.load(Ordering::SeqCst).is_multiple_of(2) {
+                OnceLock::from(Arc::clone(&lock(&committed.definitions)))
+            } else {
+                OnceLock::new()
+            };
         Ok(GraphTx::new(
             transaction,
             Shared {
