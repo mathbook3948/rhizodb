@@ -321,9 +321,10 @@ impl OpenOptions {
     /// How many bytes one line of a dump may hold for [`Database::import`], counting a carriage
     /// return before its line feed but not the line feed, which is not limited by default. A
     /// line that passes it fails with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump)
-    /// once that many bytes are read, before the rest of it is read or parsed. Parsing a line
-    /// takes many times its length in memory, so a host that imports dumps it did not write
-    /// sets this to what it can afford, and one that imports only its own exports leaves it.
+    /// once that many bytes are read, before the rest of it is read or parsed. Importing a line
+    /// takes up to about 60 times its length in memory at its peak, as for a long list of small
+    /// integers, so a host that imports dumps it did not write sets this to what it can afford
+    /// divided by about 60, and one that imports only its own exports leaves it.
     pub fn max_dump_line_bytes(mut self, bytes: usize) -> Self {
         self.max_dump_line = bytes;
         self
