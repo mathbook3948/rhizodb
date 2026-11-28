@@ -131,6 +131,12 @@ pub(crate) trait FileSystem: Send + Sync {
         Err(no_sessions(name))
     }
 
+    /// Removes the side file `name` that this open created and found it cannot use, which a
+    /// read-only open may do although it removes no other file.
+    fn remove_side(&self, name: &str) -> io::Result<()> {
+        self.remove(name)
+    }
+
     /// Creates the side file `name`, and fails with [`io::ErrorKind::AlreadyExists`] when it
     /// exists.
     fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {

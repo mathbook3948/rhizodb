@@ -508,7 +508,7 @@ fn a_read_only_open_where_side_files_cannot_be_shared_opens_alone_and_leaves_non
 }
 
 #[test]
-fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
+fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_refuses_the_file() {
     let fs = written(1);
     fs.create(
         &side_name(NAME),
@@ -516,7 +516,10 @@ fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
     )
     .unwrap();
     fs.refuse_side_sharing();
-    assert_eq!(items(&reader(&fs, 0).unwrap()), 1);
+    assert_eq!(
+        kind(reader(&fs, 0).unwrap_err()),
+        ErrorKind::DatabaseAlreadyOpen
+    );
 }
 
 #[test]
@@ -769,4 +772,49 @@ fn a_reader_adopting_while_a_checkpoint_runs_in_stages_reads_one_whole_round() {
     }
     assert!(ran.get(), "no checkpoint ran in stages");
     round_seen(&follower, 1024);
+}
+
+fn put_big(engine: &Engine<SimFs>, round: u8, keys: std::ops::Range<u64>) {
+    let mut write = engine.begin_write().unwrap();
+    for key in keys {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &vec![round; 3000])
+            .unwrap();
+    }
+    write.commit().unwrap();
+}
+
+fn delete_from(engine: &Engine<SimFs>, keys: std::ops::Range<u64>) {
+    let mut write = engine.begin_write().unwrap();
+    write
+        .delete_range(
+            Table::Nodes,
+            &keys.start.to_be_bytes(),
+            &keys.end.to_be_bytes(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+}
+
+#[test]
+fn a_writer_that_takes_over_writes_no_extent_into_the_trailing_slots_a_reader_reaches() {
+    let fs = SimFs::new();
+    let first = writer(&fs, EngineOptions::default()).unwrap();
+    put_big(&first, 1, 0..6000);
+    put_big(&first, 1, 10_000..16_000);
+    first.checkpoint().unwrap();
+    delete_from(&first, 0..6000);
+    first.checkpoint().unwrap();
+    let held = reader(&fs, 0).unwrap();
+    let read = held.begin_read().unwrap();
+    delete_from(&first, 10_000..16_000);
+    first.checkpoint().unwrap();
+    first.close().unwrap();
+    let second = writer(&fs, EngineOptions::default()).unwrap();
+    put_big(&second, 2, 20_000..32_000);
+    second.checkpoint().unwrap();
+    for key in (10_000..16_000u64).step_by(7) {
+        let value = read.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(value[0], 1, "key {key}");
+    }
 }
