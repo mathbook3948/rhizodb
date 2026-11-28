@@ -275,6 +275,7 @@ struct Shared<F: FileSystem> {
     follow: Mutex<replica::Cursor>,
     follow_gate: std::sync::RwLock<()>,
     follow_epoch: AtomicU64,
+    follow_failed: AtomicBool,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
 }
@@ -1258,6 +1259,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             follow: Mutex::new(replica::Cursor::default()),
             follow_gate: std::sync::RwLock::new(()),
             follow_epoch: AtomicU64::new(0),
+            follow_failed: AtomicBool::new(false),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
         });
@@ -1293,7 +1295,9 @@ impl<F: FileSystem + 'static> Engine<F> {
                     while let Err(mpsc::RecvTimeoutError::Timeout) =
                         stopped.recv_timeout(FOLLOW_POLL)
                     {
-                        let _ = follower_shared.catch_up();
+                        if follower_shared.needs_follow() {
+                            let _ = follower_shared.catch_up();
+                        }
                     }
                 })?;
             Some((stop, follower))
@@ -1309,12 +1313,13 @@ impl<F: FileSystem + 'static> Engine<F> {
     }
 
     /// Whether another process of the session committed after the newest commit this read-only
-    /// process reads.
+    /// process reads, or its last catch-up failed, so the next read catches up and reports why.
     pub(crate) fn is_behind(&self) -> bool {
         let shared = &*self.shared;
         match &shared.session {
             Some(session) if shared.read_only => {
-                session.log_end() > lock(&shared.published).view.snapshot
+                shared.follow_failed.load(Ordering::SeqCst)
+                    || session.log_end() > lock(&shared.published).view.snapshot
             }
             _ => false,
         }
@@ -1745,12 +1750,36 @@ impl<F: FileSystem + 'static> Engine<F> {
 }
 
 impl<F: FileSystem + 'static> Shared<F> {
+    fn needs_follow(&self) -> bool {
+        let Some(session) = self.session.as_ref().filter(|_| self.read_only) else {
+            return false;
+        };
+        self.follow_failed.load(Ordering::SeqCst)
+            || session.log_end() > lock(&self.published).view.snapshot
+            || session.published_header().map_or(true, |header| {
+                header
+                    .is_some_and(|header| header.generation > lock(&self.durable).header.generation)
+            })
+    }
+
     fn catch_up(&self) -> Result<(), EngineError> {
+        let cursor = lock(&self.follow);
+        if !self.needs_follow() {
+            return Ok(());
+        }
+        let outcome = self.catch_up_holding(cursor);
+        self.follow_failed.store(outcome.is_err(), Ordering::SeqCst);
+        outcome
+    }
+
+    fn catch_up_holding(
+        &self,
+        mut cursor: MutexGuard<'_, replica::Cursor>,
+    ) -> Result<(), EngineError> {
         let shared = self;
         let Some(session) = shared.session.as_ref().filter(|_| shared.read_only) else {
             return Ok(());
         };
-        let mut cursor = lock(&shared.follow);
         let _changing = shared
             .follow_gate
             .write()

@@ -283,3 +283,34 @@ fn opens_through_another_link_are_refused_while_a_writer_s_session_holds_the_fil
     let db = writer_options().open(&path).unwrap();
     assert!(rounds(&db) >= committed.len() as i64);
 }
+
+#[test]
+fn reader_threads_of_one_process_keep_reading_beside_a_committing_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    drop(writer_options().open(&path).unwrap());
+    let (mut writer, _) = Peer::spawn(&path, "write");
+    writer.wait_for_commits(5);
+    let db = std::sync::Arc::new(reader_options().open(&path).unwrap());
+    let (done, finished) = std::sync::mpsc::channel();
+    for _ in 0..3 {
+        let db = std::sync::Arc::clone(&db);
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut last = 0;
+            for _ in 0..1500 {
+                let seen = rounds(&db);
+                assert!(seen >= last, "a reader went back from {last} to {seen}");
+                last = seen;
+            }
+            let _ = done.send(last);
+        });
+    }
+    for _ in 0..3 {
+        finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the reader threads stalled, as a deadlock leaves them");
+    }
+    writer.kill();
+    drop(db);
+}

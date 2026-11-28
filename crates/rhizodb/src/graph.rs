@@ -644,7 +644,7 @@ impl<S: Storage> Graph<S> {
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
         if self.storage.is_behind() {
-            self.apply_outside(true, Storage::catch_up)??;
+            self.storage.catch_up()?;
         }
         self.storage.with_follow_held(|| {
             let epoch = self.storage.follow_epoch();
