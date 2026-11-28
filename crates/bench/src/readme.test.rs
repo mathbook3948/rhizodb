@@ -116,11 +116,11 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.contains("| id로 노드 찾기 | 2.00 | 5.00 | RhizoDB 2.5배 |"),
+        table.contains("| id로 노드 조회 | 2.00 | 5.00 | RhizoDB 2.5배 |"),
         "{table}"
     );
     assert!(
-        table.contains("| 대량 수정 | 16.5 | 16.1 | 유사 |"),
+        table.contains("| 일괄 수정 | 16.5 | 16.1 | 유사 |"),
         "{table}"
     );
     assert!(
@@ -128,7 +128,7 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.contains("| 조건으로 걸러 읽기 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
+        table.contains("| 조건 필터 스캔 | 측정 안 함 | 측정 안 함 | 해당 없음 |"),
         "{table}"
     );
     assert!(
@@ -136,7 +136,7 @@ fn a_korean_table_uses_korean_words_for_every_row() {
         "{table}"
     );
     assert!(
-        table.starts_with("2026-11-25에 4 CPUs, Linux에서 쟀습니다."),
+        table.starts_with("2026-11-25, 4 CPUs, Linux에서 측정했습니다."),
         "{table}"
     );
 }
