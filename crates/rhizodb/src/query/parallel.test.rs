@@ -193,3 +193,35 @@ fn a_split_limit_skips_row_groups_without_start_nodes() {
     );
     assert_eq!(read, 3);
 }
+
+#[test]
+fn a_split_takes_one_thread_for_each_half_threshold_of_start_nodes() {
+    let threshold = 2 * crate::graph::SLOTS;
+    for (groups, helpers) in [(5, 4), (GROUPS, 19)] {
+        let db = crate::OpenOptions::new()
+            .threads(20)
+            .parallel_threshold(threshold)
+            .in_memory()
+            .unwrap();
+        db.execute(
+            &format!(
+                "UNWIND range(0, {}) AS i INSERT (:P {{id: i}})",
+                groups * crate::graph::SLOTS - 1
+            ),
+            &crate::Parameters::new(),
+        )
+        .unwrap();
+        RAN.with(|ran| ran.set(None));
+        let rows = outcome(&db, "MATCH (n:P) WHERE n.id % 2 = 0 RETURN count(*)");
+
+        assert_eq!(
+            rows,
+            format!("[[Integer({})]]", groups * crate::graph::SLOTS / 2)
+        );
+        assert_eq!(
+            RAN.with(Cell::take).map(|(taken, _)| taken),
+            Some(helpers),
+            "{groups} groups"
+        );
+    }
+}

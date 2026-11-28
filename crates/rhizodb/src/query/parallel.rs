@@ -336,14 +336,25 @@ fn split<'q, 'w, T: ReadTransaction>(
     };
     let stops = env.stops_early(clauses, streamed);
     let threshold = parallelism.threshold.max(2);
-    let past = NodeId(u64::try_from(threshold).ok()?);
-    if (stops && (enough.is_none() || !env.tx.may_hold_from(past).ok()?))
-        || (!stops && env.scanned_count(&part.start).ok()? < u64::try_from(threshold).ok()?)
+    let past = u64::try_from(threshold).ok()?;
+    let starts = if stops {
+        None
+    } else {
+        Some(env.scanned_count(&part.start).ok()?)
+    };
+    if (stops && (enough.is_none() || !env.tx.may_hold_from(NodeId(past)).ok()?))
+        || starts.is_some_and(|starts| starts < past)
         || !ptr::eq(env.oriented(part, row).ok()?.0, part)
     {
         return None;
     }
-    let helpers = workers.reserve(parallelism.threads - 1, parallelism.threads);
+    let threads = match starts {
+        Some(starts) => usize::try_from(starts / (past / 2))
+            .unwrap_or(usize::MAX)
+            .clamp(2, parallelism.threads.max(2)),
+        None => parallelism.threads,
+    };
+    let helpers = workers.reserve(threads - 1, parallelism.threads);
     if helpers.threads == 0 {
         return None;
     }
@@ -354,7 +365,7 @@ fn split<'q, 'w, T: ReadTransaction>(
         )
     } else {
         let ids = env.scanned_nodes(&part.start).ok()?;
-        let morsels = morsels(&ids, parallelism.threads);
+        let morsels = morsels(&ids, threads);
         (Source::Listed { ids, morsels }, 0)
     };
     Some(Split {

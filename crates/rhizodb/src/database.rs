@@ -291,9 +291,10 @@ impl OpenOptions {
     }
 
     /// How many start nodes a match must read before a read query splits them across
-    /// [threads](OpenOptions::threads), so that a small query does not pay to start them. It
-    /// defaults to 8192. Zero and one act as two, since a match of one start node has nothing to
-    /// split.
+    /// [threads](OpenOptions::threads), so that a small query does not pay to start them. A
+    /// split that lists its start nodes takes one thread for each half of this many, so a match
+    /// a little past it runs on few threads however many cores the machine has. It defaults to
+    /// 8192. Zero and one act as two, since a match of one start node has nothing to split.
     pub fn parallel_threshold(mut self, nodes: usize) -> Self {
         self.parallelism.threshold = nodes;
         self
