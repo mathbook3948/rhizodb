@@ -69,9 +69,11 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
 
     /// Takes the shared lock that every process of a multi-process session holds on the
     /// database file, which keeps out exclusive locks of other handles but no reader or writer,
-    /// and gives up any exclusive lock this handle holds, with no moment at which it holds
-    /// neither.
-    fn lock_session(&self) -> io::Result<()> {
+    /// and gives up any exclusive lock this handle holds. For the `first` process of a session
+    /// it fails with [`io::ErrorKind::WouldBlock`] when another handle holds the session lock,
+    /// which a session through another path or link to the file does.
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        let _ = first;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "this file takes part in no multi-process session",
@@ -83,17 +85,14 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
         Ok(())
     }
 
-    /// Whether another handle holds an exclusive lock or the session lock on the file, which a
-    /// writer or a process of a multi-process session does. It tries the session's range lock
-    /// exclusively and releases it at once, and answers `false` where the file takes no locks.
-    fn held_elsewhere(&self) -> io::Result<bool> {
-        Ok(false)
-    }
+    /// Whether another handle holds the session lock on the file, which every process of a
+    /// multi-process session does, through any path or link to it. It tests the lock without
+    /// taking it, answers `false` where the file takes no locks, and off Linux also counts a
+    /// whole-file lock another handle holds, which such a test cannot see past.
+    fn held_elsewhere(&self) -> io::Result<bool>;
 
     /// The identity of the file this handle reaches, the same through every path and link.
-    fn identity(&self) -> io::Result<(u64, u128)> {
-        Ok((0, 0))
-    }
+    fn identity(&self) -> io::Result<(u64, u128)>;
 
     /// Truncates the file to `count` blocks, or extends it with zeroed blocks.
     fn set_block_count(&self, count: u64) -> io::Result<()>;

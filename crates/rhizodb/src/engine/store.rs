@@ -966,6 +966,14 @@ impl<F: FileSystem + 'static> Engine<F> {
                     )
                     .into());
                 }
+                if file.held_elsewhere()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "a multi-process session holds the database file through another path, \
+                         or an older build holds it where a lock test cannot tell the two apart",
+                    )
+                    .into());
+                }
                 return Self::start(
                     fs,
                     name,

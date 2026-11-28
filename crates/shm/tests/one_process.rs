@@ -1,18 +1,39 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use rhizodb_shm::Lock;
 use rhizodb_shm::Mapping;
 
-fn open(path: &Path) -> File {
-    File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .unwrap()
+// ast-grep-ignore
+// Shared rather than duplicated, since closing a duplicate drops every classic `fcntl` lock.
+fn open(path: &Path) -> Arc<File> {
+    Arc::new(
+        File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap(),
+    )
+}
+
+const PATIENCE: Duration = Duration::from_secs(60);
+
+fn try_lock(file: &Arc<File>, offset: u64, len: u64, kind: Lock) -> std::io::Result<bool> {
+    let (sender, tried) = mpsc::channel();
+    let file = Arc::clone(file);
+    thread::spawn(move || {
+        let _ = sender.send(rhizodb_shm::try_lock(&file, offset, len, kind));
+    });
+    tried
+        .recv_timeout(PATIENCE)
+        .expect("a try of a lock returned at once")
 }
 
 #[test]
@@ -82,9 +103,9 @@ fn a_temporary_directory_is_local() {
 fn a_range_must_hold_a_byte_and_end_before_two_to_the_sixty_three() {
     let dir = tempfile::tempdir().unwrap();
     let file = open(&dir.path().join("locks"));
-    assert!(rhizodb_shm::try_lock(&file, 0, 0, Lock::Shared).is_err());
-    assert!(rhizodb_shm::try_lock(&file, i64::MAX as u64, 1, Lock::Shared).is_err());
-    assert!(rhizodb_shm::try_lock(&file, i64::MAX as u64 - 1, 1, Lock::Shared).unwrap());
+    assert!(try_lock(&file, 0, 0, Lock::Shared).is_err());
+    assert!(try_lock(&file, i64::MAX as u64, 1, Lock::Shared).is_err());
+    assert!(try_lock(&file, i64::MAX as u64 - 1, 1, Lock::Shared).unwrap());
 }
 
 #[test]
@@ -92,8 +113,8 @@ fn locks_on_disjoint_ranges_do_not_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("locks");
     let a = open(&path);
-    assert!(rhizodb_shm::try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
-    assert!(rhizodb_shm::try_lock(&a, 101, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&a, 101, 1, Lock::Exclusive).unwrap());
     rhizodb_shm::unlock(&a, 100, 1).unwrap();
     rhizodb_shm::unlock(&a, 101, 1).unwrap();
 }
@@ -106,10 +127,26 @@ fn locks_of_two_handles_in_one_process_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("locks");
     let (a, b) = (open(&path), open(&path));
-    assert!(rhizodb_shm::try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
-    assert!(!rhizodb_shm::try_lock(&b, 100, 1, Lock::Shared).unwrap());
+    assert!(try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
+    assert!(!try_lock(&b, 100, 1, Lock::Shared).unwrap());
     rhizodb_shm::unlock(&a, 100, 1).unwrap();
-    assert!(rhizodb_shm::try_lock(&b, 100, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&b, 100, 1, Lock::Exclusive).unwrap());
+}
+
+// Open-file-description locks belong to the handle, so a test through another handle of the
+// same process sees them.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_test_through_another_handle_of_one_process_sees_its_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks");
+    let (a, b) = (open(&path), File::open(&path).unwrap());
+    assert!(!rhizodb_shm::held_elsewhere(&b, 100, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&a, 100, 1, Lock::Shared).unwrap());
+    assert!(rhizodb_shm::held_elsewhere(&b, 100, 1, Lock::Exclusive).unwrap());
+    assert!(!rhizodb_shm::held_elsewhere(&a, 100, 1, Lock::Exclusive).unwrap());
+    rhizodb_shm::unlock(&a, 100, 1).unwrap();
+    assert!(!rhizodb_shm::held_elsewhere(&b, 100, 1, Lock::Exclusive).unwrap());
 }
 
 // Classic `fcntl` locks belong to the process, so they never conflict within it.
@@ -119,8 +156,8 @@ fn classic_locks_of_one_process_never_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("locks");
     let (a, b) = (open(&path), open(&path));
-    assert!(rhizodb_shm::try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
-    assert!(rhizodb_shm::try_lock(&b, 100, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&a, 100, 1, Lock::Exclusive).unwrap());
+    assert!(try_lock(&b, 100, 1, Lock::Exclusive).unwrap());
     rhizodb_shm::unlock(&a, 100, 1).unwrap();
 }
 

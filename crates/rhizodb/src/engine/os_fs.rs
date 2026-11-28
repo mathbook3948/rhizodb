@@ -147,12 +147,32 @@ fn lock_or_skip_where_unsupported(
 // Past any block, so it never refuses a write on Windows; on Unix an fcntl lock converts atomically.
 const SESSION_BYTE: u64 = 1 << 62;
 
-fn try_session_range(file: &File, kind: Lock) -> Result<(), TryLockError> {
-    match rhizodb_shm::try_lock(file, SESSION_BYTE, 1, kind) {
+// ast-grep-ignore
+// Off Linux a phase 1 reader locks this byte, since a whole-file lock would hide sessions from its test.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const READER_BYTE: u64 = SESSION_BYTE + 1;
+
+fn try_range(file: &File, at: u64, kind: Lock) -> Result<(), TryLockError> {
+    match rhizodb_shm::try_lock(file, at, 1, kind) {
         Ok(true) => Ok(()),
         Ok(false) => Err(TryLockError::WouldBlock),
         Err(error) => Err(TryLockError::Error(error)),
     }
+}
+
+fn held_by_others(file: &File, len: u64) -> io::Result<bool> {
+    match rhizodb_shm::held_elsewhere(file, SESSION_BYTE, len, Lock::Exclusive) {
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(false),
+        outcome => outcome,
+    }
+}
+
+#[cfg(unix)]
+fn another_session() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "a session through another path to the database file holds it",
+    )
 }
 
 // ast-grep-ignore
@@ -361,37 +381,48 @@ impl BlockFile for OsFile {
     }
 
     fn held_elsewhere(&self) -> io::Result<bool> {
-        Ok(
-            rhizodb_shm::held_elsewhere(&self.file, SESSION_BYTE, 1, Lock::Exclusive)
-                .unwrap_or(false),
-        )
+        held_by_others(&self.file, 1)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn lock_shared(&self) -> io::Result<()> {
         lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
     }
 
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn lock_shared(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| try_range(&self.file, READER_BYTE, Lock::Shared))
+    }
+
     // ast-grep-ignore
-    // Linux turns a flock shared by unlocking it first, so the range lock covers that gap.
+    // Linux keeps flock and range locks apart, and its flock unlocks before it turns shared.
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn lock_session(&self) -> io::Result<()> {
-        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))?;
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        if first && self.held_elsewhere()? {
+            return Err(another_session());
+        }
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
         self.lock_shared()
     }
 
     // ast-grep-ignore
-    // BSD kernels keep flock and fcntl locks in one list and turn a flock shared in place.
+    // BSD kernels keep flock and fcntl locks in one list, so a test runs only while no flock is held.
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
-    fn lock_session(&self) -> io::Result<()> {
-        self.lock_shared()?;
-        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        self.file.unlock()?;
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
+        if first && held_by_others(&self.file, 2)? {
+            let _ = rhizodb_shm::unlock(&self.file, SESSION_BYTE, 1);
+            return Err(another_session());
+        }
+        lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
     }
 
     // ast-grep-ignore
     // A shared lock on Windows denies writes to what it covers, so this one lies past any block.
     #[cfg(windows)]
-    fn lock_session(&self) -> io::Result<()> {
-        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))?;
+    fn lock_session(&self, _first: bool) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
         let _ = self.file.unlock();
         Ok(())
     }
