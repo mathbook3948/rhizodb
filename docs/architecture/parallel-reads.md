@@ -37,6 +37,7 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - A threshold below two acts as two, since one start node cannot split.
 - Consecutive row groups join one morsel up to a quarter of a thread's share of the start nodes.
 - Each database keeps a pool of one thread fewer than `threads` for the helpers of its splits, started by its first split and stopped when it drops, so a split wakes waiting threads instead of spawning them.
+- Those threads stay parked with their 2 MiB stacks for the life of the database, so a host that keeps many databases open lowers `threads`.
 - A split runs on the calling thread and hands only its helpers to the pool, and it ends once every helper has finished.
 - Each database counts the threads running its read queries, callers and helpers alike, and a clause splits only when that count leaves some of `threads` idle, taking at most the idle ones as helpers.
 - A clause that finds no idle thread runs on the calling thread without collecting its start nodes for morsels.

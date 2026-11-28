@@ -339,14 +339,38 @@ fn copy_directory(from: &Path, to: &Path) -> io::Result<()> {
             copy_directory(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target)?;
-            fs::OpenOptions::new()
-                .read(true)
-                .write(cfg!(windows))
-                .open(&target)?
-                .sync_all()?;
+            sync_copy(&target)?;
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_copy(target: &Path) -> io::Result<()> {
+    fs::File::open(target)?.sync_all()
+}
+
+#[cfg(windows)]
+// ast-grep-ignore
+// Windows flushes only through a writable handle, and `fs::copy` keeps the read-only attribute.
+#[expect(
+    clippy::permissions_set_readonly_false,
+    reason = "on Windows this clears only the read-only attribute, and the kept permissions are restored after the sync"
+)]
+fn sync_copy(target: &Path) -> io::Result<()> {
+    let kept = fs::metadata(target)?.permissions();
+    if !kept.readonly() {
+        return fs::OpenOptions::new().write(true).open(target)?.sync_all();
+    }
+    let mut writable = kept.clone();
+    writable.set_readonly(false);
+    fs::set_permissions(target, writable)?;
+    let synced = fs::OpenOptions::new()
+        .write(true)
+        .open(target)
+        .and_then(|file| file.sync_all());
+    fs::set_permissions(target, kept)?;
+    synced
 }
 
 /// Runs every selected workload: one warm-up run per engine that is not reported, then `reps`
