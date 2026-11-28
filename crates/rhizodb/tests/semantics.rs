@@ -357,6 +357,14 @@ fn an_aggregate_argument_cannot_call_rand() {
         "MATCH (n) RETURN collect([(n)-->(m) WHERE rand() < 0.5 | m])",
         "MATCH (n) RETURN collect([(n)-->(m) | rand()])",
         "MATCH (n) RETURN count(EXISTS { (n)-->(m) WHERE rand() < 0.5 })",
+        "MATCH (n) RETURN count(EXISTS { (n)-->({x: rand()}) })",
+        "MATCH (n) RETURN collect([(n)-->({x: rand()}) | 1])",
+        "MATCH (n) RETURN count(EXISTS { MATCH (n)-->(m) WHERE rand() < 0.5 })",
+        "MATCH (n) RETURN sum(COUNT { MATCH (n)-->(m) WHERE rand() < 0.5 RETURN m })",
+        "RETURN collect(COLLECT { UNWIND [1, 2] AS x RETURN x + rand() })",
+        "RETURN sum(VALUE { RETURN rand() })",
+        "RETURN sum(VALUE { UNWIND [1, 2] AS x WITH x WHERE x < rand() * 2 RETURN x })",
+        "RETURN sum(VALUE { CALL { RETURN rand() AS r } RETURN r })",
     ] {
         assert_eq!(
             error_kind(&db, query),

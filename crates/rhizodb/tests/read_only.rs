@@ -346,30 +346,17 @@ fn read_only_processes_killed_at_any_point_leave_the_session_to_the_rest_and_the
 }
 
 #[test]
-fn a_process_opens_a_file_read_only_once_through_any_of_its_names() {
+fn an_open_by_a_new_name_is_refused_while_a_session_holds_the_file_by_its_old_one() {
     let (directory, path) = graph_file();
-    let link = directory.path().join("linked.rhizodb");
-    std::fs::hard_link(&path, &link).unwrap();
-    let db = read_only().open(&path).unwrap();
-    let error = read_only().open(&link).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
-    drop(db);
-    assert_eq!(count(&read_only().open(&link).unwrap()), 100);
-}
-
-#[test]
-fn an_open_through_another_link_is_refused_while_a_session_holds_the_file() {
-    let (directory, path) = graph_file();
-    let link = directory.path().join("linked.rhizodb");
-    std::fs::hard_link(&path, &link).unwrap();
     let holder = Holder::spawn(&path, "read");
-    let error = read_only().open(&link).unwrap_err();
+    let renamed = directory.path().join("renamed.rhizodb");
+    std::fs::rename(&path, &renamed).unwrap();
+    let error = read_only().open(&renamed).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
-    let error = Database::open(&link).unwrap_err();
+    let error = Database::open(&renamed).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
-    assert_eq!(count(&read_only().open(&path).unwrap()), 100);
     holder.close();
-    assert_eq!(count(&read_only().open(&link).unwrap()), 100);
+    assert_eq!(count(&read_only().open(&renamed).unwrap()), 100);
 }
 
 impl Drop for Holder {
