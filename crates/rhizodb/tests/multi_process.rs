@@ -258,3 +258,28 @@ fn a_writer_keeps_writing_and_reusing_space_while_readers_come_and_die() {
     assert_eq!(rounds(&alone), 300);
     alone.check().unwrap();
 }
+
+#[test]
+fn opens_through_another_link_are_refused_while_a_writer_s_session_holds_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    let link = directory.path().join("linked.rhizodb");
+    drop(writer_options().open(&path).unwrap());
+    std::fs::hard_link(&path, &link).unwrap();
+    let (mut writer, _) = Peer::spawn(&path, "write");
+    writer.wait_for_commits(3);
+    for (what, options) in [
+        ("a writer", writer_options()),
+        ("a reader", reader_options()),
+    ] {
+        let error = options.open(&link).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DatabaseAlreadyOpen,
+            "{what}: {error}"
+        );
+    }
+    let committed = writer.kill();
+    let db = writer_options().open(&path).unwrap();
+    assert!(rounds(&db) >= committed.len() as i64);
+}

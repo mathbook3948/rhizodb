@@ -153,6 +153,14 @@ impl BlockFile for MemFile {
         Ok(())
     }
 
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        Ok((0, 0))
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         resize_blocks(&mut lock(&self.bytes), self.size, count)
     }

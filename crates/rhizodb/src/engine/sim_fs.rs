@@ -712,7 +712,10 @@ impl BlockFile for SimFile {
         Ok(())
     }
 
-    fn lock_session(&self) -> io::Result<()> {
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        if first && self.held_elsewhere()? {
+            return Err(held_elsewhere());
+        }
         let mut state = lock(&self.state);
         match state.locks.get(&self.inode) {
             Some(Held::Exclusive(holder)) if *holder != self.handle => {
