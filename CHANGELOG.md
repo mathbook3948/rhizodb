@@ -6,6 +6,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Fixed
 
+- `Database::apply` on a writer or a fenced writer could leave it refusing reads and writes with `ErrorKind::FormatUpgradePending`. This happened when the changes carried an older graph format or an upgrade, as a new writer's first changes after a rolling upgrade do. The apply failed with `ErrorKind::NotReplica` or `ErrorKind::WriteTransactionOnThisThread` but still marked the graph as waiting for an upgrade. The mark stayed when the call came from a thread holding a write transaction, or when the database's file held an older format, and otherwise cleared once the call returned. Only a replica now starts waiting for an upgrade.
 - An aggregate argument that called `rand()` only inside a pattern's property map or the clauses of a subquery was accepted, as in `sum(VALUE { RETURN rand() })` or `count(EXISTS { MATCH (n)-->(m) WHERE rand() < 0.5 })`, and returned a random result. It now fails with `ErrorKind::NonConstantExpression`, as `rand()` directly in the argument does.
 
 ## 0.2.0
