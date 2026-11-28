@@ -156,3 +156,26 @@ fn an_unknown_language_code_fails() {
     assert!(Language::from_code("fr").is_err());
     assert_eq!(Language::from_code("ko"), Ok(Language::Korean));
 }
+
+#[test]
+fn files_whose_sizes_round_to_the_same_ratio_are_similar() {
+    let mut document = report();
+    for row in document["results"].as_array_mut().into_iter().flatten() {
+        if row["workload"] == "load/bulk" {
+            row["bytes"] = json!(if row["engine"] == "rhizodb" {
+                13_484_032
+            } else {
+                13_631_488
+            });
+        }
+    }
+    let english = render(&document, "4 CPUs, Linux", "2026-11-25").unwrap_or_default();
+    let korean =
+        render_in(&document, "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+
+    assert!(
+        english.contains("| File size after bulk load | 12.9 MiB | 13.0 MiB | similar |"),
+        "{english}"
+    );
+    assert!(korean.contains("| 유사 |"), "{korean}");
+}

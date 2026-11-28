@@ -263,6 +263,8 @@ struct Shared<F: FileSystem> {
     compaction_due: AtomicBool,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
+    #[cfg(test)]
+    keeping_retired: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -813,7 +815,7 @@ fn checkpoint_worker<F: FileSystem + 'static>(
             match receiver.recv_timeout(RETIRED_POLL) {
                 Ok(task) => Some(task),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    retired.retain(|memtable| Arc::strong_count(memtable) > 1);
+                    free_retired(shared, &mut retired);
                     shared.compact_when_due();
                     continue;
                 }
@@ -830,8 +832,18 @@ fn checkpoint_worker<F: FileSystem + 'static>(
             }
             Task::Remove(detached) => detached.remove(),
         }
-        retired.retain(|memtable| Arc::strong_count(memtable) > 1);
+        free_retired(shared, &mut retired);
     }
+}
+
+fn free_retired<F: FileSystem>(shared: &Shared<F>, retired: &mut Vec<Arc<Memtable>>) {
+    #[cfg(test)]
+    if shared.keeping_retired.load(Ordering::Acquire) {
+        return;
+    }
+    #[cfg(not(test))]
+    let _ = shared;
+    retired.retain(|memtable| Arc::strong_count(memtable) > 1);
 }
 
 impl<F: FileSystem + 'static> Engine<F> {
@@ -1007,6 +1019,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             compaction_due: AtomicBool::new(false),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
+            #[cfg(test)]
+            keeping_retired: AtomicBool::new(false),
         });
         if recovered && !read_only {
             make_recovery_durable(&shared, &fs, name)?;
@@ -1390,6 +1404,13 @@ impl<F: FileSystem + 'static> Engine<F> {
     pub(crate) fn while_checkpointing<T>(&self, run: impl FnOnce() -> T) -> T {
         let _durable = lock(&self.shared.durable);
         run()
+    }
+
+    #[cfg(test)]
+    /// Makes the checkpoint thread keep every memtable it wrote while `keep` holds, so a test
+    /// sees whether anything else still owns one.
+    pub(crate) fn keep_retired(&self, keep: bool) {
+        self.shared.keeping_retired.store(keep, Ordering::Release);
     }
 
     #[cfg(test)]

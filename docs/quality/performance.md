@@ -76,6 +76,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - That table has a column for each engine the report holds, and its last column names the fastest engine and how far ahead of the next one it is, or that the two are within noise.
 - `mise run bench-engines` runs every embedded engine at the medium scale with five repetitions, and each server whose URL the environment gives.
 - `mise run bench-servers start` runs Neo4j, Memgraph, and FalkorDB in Docker from images pinned by version and digest, on loopback ports, waits until each answers, and prints the variables that give their URLs.
+- `mise run size-report` loads the benchmark graph into RhizoDB and reports where the bytes of its file go, by table, page fill, and property key.
 - The benchmark builds in release with one codegen unit, so a change to unrelated code cannot move a measurement through how the compiler splits the crate.
 
 ## Open

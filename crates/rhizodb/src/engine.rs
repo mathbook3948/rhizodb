@@ -38,6 +38,10 @@ mod crash_tests;
 #[path = "engine/bench.test.rs"]
 mod bench_tests;
 
+#[cfg(test)]
+#[path = "engine/size.test.rs"]
+mod size_report;
+
 pub(crate) use store::Epoch;
 pub(crate) use store::Role;
 pub(crate) use store::different;
