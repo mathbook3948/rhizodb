@@ -2,7 +2,9 @@ id: doc-comments-on-public-api-only
 valid:
   - "/// A contract.\npub fn f() {}"
   - "/** A contract. */\npub fn f() {}"
+  - "/// A crate-wide contract.\npub(crate) fn f() {}"
 invalid:
   - "/// Explains internals.\nfn f() {}"
   - "/** Explains internals. */\nfn f() {}"
   - "pub struct S {\n    /** A note. */\n    x: u8,\n}"
+  - "fn f() {\n    /// A note.\n    let x = 1;\n}"
