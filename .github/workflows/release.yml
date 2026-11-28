@@ -170,7 +170,16 @@ jobs:
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --package rhizodb --locked --no-verify
+          TAG: ${{ needs.tag.outputs.name }}
+        run: |
+          version="${TAG#v}"
+          shm="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --user-agent "rhizodb-release (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY})" \
+            "https://crates.io/api/v1/crates/rhizodb-shm/${version}")"
+          if [ "$shm" != "200" ]; then
+            cargo publish --package rhizodb-shm --locked --no-verify
+          fi
+          cargo publish --package rhizodb --locked --no-verify
 
   github-release:
     needs: [tag, publish]

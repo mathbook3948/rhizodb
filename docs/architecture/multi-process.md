@@ -225,7 +225,7 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - The engine benchmarks of a single-process open must not regress at any phase.
 - The side file's mapping and the byte-range locks live in a small workspace crate of their own that allows audited unsafe code, over `windows-sys` on Windows and `nix` or `libc` on Unix.
 - That crate is `rhizodb-shm` in `crates/shm`, and `rhizodb` depends on it by version, so a release publishes it first.
-- That crate exposes only mapping a file, atomic access to the words of a mapping, locking, unlocking, downgrading, and testing a byte range, growing a file with its blocks reserved, and telling whether a file lies on a local file system.
+- That crate exposes only mapping a file, atomic access to the words of a mapping, locking, unlocking, downgrading, and testing a byte range, growing a file with its blocks reserved, reading a file's identity for the registry, and telling whether a file lies on a local file system.
 - That crate calls a safe crate where one covers a call, such as `rustix` for `fallocate` and `statfs`, so its own unsafe code is the mapping, the atomic view of it, and the lock and volume calls that no safe crate covers.
 - Every unsafe block in that crate carries a `SAFETY` comment, which `clippy::undocumented_unsafe_blocks` enforces, and the crate denies `unsafe_op_in_unsafe_fn`.
 - A mapping in that crate is never handed out as a slice or reference to plain bytes, only as atomic words, since another process may store into it at any time.
