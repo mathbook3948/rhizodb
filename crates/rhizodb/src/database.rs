@@ -86,6 +86,7 @@ pub struct OpenOptions {
     engine: EngineOptions,
     force_install: bool,
     limits: Limits,
+    max_dump_line: usize,
 }
 
 impl Default for OpenOptions {
@@ -98,6 +99,7 @@ impl Default for OpenOptions {
             engine: EngineOptions::default(),
             force_install: false,
             limits: Limits::default(),
+            max_dump_line: usize::MAX,
         }
     }
 }
@@ -324,6 +326,19 @@ impl OpenOptions {
         self
     }
 
+    /// How many bytes one line of a dump may hold for [`Database::import`], counting a carriage
+    /// return before its line feed but not the line feed, which is not limited by default. A
+    /// line that passes it fails with [`ErrorKind::InvalidDump`](crate::ErrorKind::InvalidDump)
+    /// once that many bytes are read, before the rest of it is read or parsed. Importing a line
+    /// takes up to about 100 times its length in memory at its peak, as for a node with many
+    /// short property names or a long list of one-element lists, so a host that imports dumps it
+    /// did not write sets this to what it can afford divided by about 100, and one that imports
+    /// only its own exports leaves it.
+    pub fn max_dump_line_bytes(mut self, bytes: usize) -> Self {
+        self.max_dump_line = bytes;
+        self
+    }
+
     /// Creates a database with these settings that lives in memory and is gone when dropped, as
     /// [`Database::in_memory`] describes.
     ///
@@ -337,10 +352,7 @@ impl OpenOptions {
                 "a database in memory starts empty, so there is none to open read-only",
             ));
         }
-        Ok(Database::from_parts(
-            graph_on(in_memory_backend(self.engine)?, self.replica)?,
-            Statements::new(self.parallelism, self.limits),
-        ))
+        self.database(graph_on(in_memory_backend(self.engine)?, self.replica)?)
     }
 
     /// Opens the database file at `path` with these settings, as [`Database::open`] describes.
@@ -366,10 +378,7 @@ impl OpenOptions {
         } else {
             open_backend(path, engine)?
         };
-        Ok(Database::from_parts(
-            graph_on(backend, self.replica)?,
-            Statements::new(self.parallelism, self.limits),
-        ))
+        self.database(graph_on(backend, self.replica)?)
     }
 
     /// Writes the snapshot that `input` streams to the database file at `path` with these
@@ -390,10 +399,14 @@ impl OpenOptions {
         }
         let installed = any_fs::install_path(path.as_ref(), input, self.engine, self.force_install)
             .map_err(StorageError::from)?;
-        Ok(Database::from_parts(
-            graph_on(installed, true)?,
-            Statements::new(self.parallelism, self.limits),
-        ))
+        self.database(graph_on(installed, true)?)
+    }
+
+    fn database(&self, graph: Graph<Backend>) -> Result<Database, Error> {
+        let mut database =
+            Database::from_parts(graph, Statements::new(self.parallelism, self.limits));
+        database.max_dump_line = self.max_dump_line;
+        Ok(database)
     }
 }
 
@@ -460,6 +473,7 @@ pub struct Database {
     pub(crate) graph: Graph<Backend>,
     statements: Statements,
     pub(crate) roles: Mutex<()>,
+    max_dump_line: usize,
 }
 
 impl Database {
@@ -468,6 +482,7 @@ impl Database {
             graph,
             statements,
             roles: Mutex::new(()),
+            max_dump_line: usize::MAX,
         }
     }
 
@@ -482,6 +497,11 @@ impl Database {
     /// it upgrades. A damaged file fails with
     /// [`ErrorKind::CorruptData`](crate::ErrorKind::CorruptData), on open or on the operation that
     /// reads the damage, since every page carries a checksum.
+    ///
+    /// The log segments beside the file are named after it, found through `path` with every
+    /// symlink and `..` resolved, so every path to the file finds the same log. On Unix a file
+    /// with more than one hard link fails with [`ErrorKind::Storage`](crate::ErrorKind::Storage),
+    /// since each of its names would find its own log.
     ///
     /// It is the same as [`OpenOptions::new`] followed by [`OpenOptions::open`].
     ///
@@ -803,7 +823,8 @@ impl Database {
     /// first and filled as the elements arrive.
     ///
     /// The import commits a batch of lines at a time, so its memory stays bounded by the batch
-    /// and the longest line, however large the dump. Write transactions and writing queries on
+    /// and the longest line, however large the dump. [`OpenOptions::max_dump_line_bytes`]
+    /// bounds that line. Write transactions and writing queries on
     /// other threads wait until the import ends, so none lands between two batches, while
     /// reads go on and see the batches committed so far. A failed import therefore leaves the
     /// batches before the failure committed. Import into a new file and delete it when the
@@ -841,7 +862,7 @@ impl Database {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn import(&self, input: impl std::io::BufRead) -> Result<(), Error> {
-        crate::dump::import(&self.graph, input)
+        crate::dump::import(&self.graph, input, self.max_dump_line)
     }
 
     /// Makes `procedure` callable with `CALL` by its name, replacing any procedure registered

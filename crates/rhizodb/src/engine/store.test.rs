@@ -617,6 +617,7 @@ fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
     )
     .unwrap();
     fill(&engine, 4);
+    engine.keep_retired(true);
     let checkpoint_held = lock(&engine.shared.durable);
     engine.start_checkpoint(&mut lock(&engine.shared.writer));
     let frozen = {
@@ -635,6 +636,7 @@ fn the_checkpoint_thread_frees_a_frozen_memtable_that_a_commit_held_last() {
         frozen.upgrade().is_some(),
         "the commit freed the frozen memtable"
     );
+    engine.keep_retired(false);
     let deadline = Instant::now() + Duration::from_secs(5);
     while frozen.strong_count() > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));

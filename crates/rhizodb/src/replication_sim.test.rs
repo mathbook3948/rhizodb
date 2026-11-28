@@ -692,6 +692,12 @@ fn replicas_converge_on_their_writer_under_random_faults() {
 }
 
 #[test]
+fn a_stale_writer_of_an_older_format_that_refuses_its_successors_upgrade_converges() {
+    let mut sim = Sim::new(1_592_594_788, true);
+    sim.run(300);
+}
+
+#[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn replicas_converge_through_a_rolling_upgrade_under_random_faults() {
     let first = std::env::var("RHIZODB_REPLICATION_SEED")

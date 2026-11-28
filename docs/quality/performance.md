@@ -72,6 +72,7 @@ RhizoDB's speed is only known relative to something, and the numbers will decide
 - Reopening is measured with a warm page cache.
 - The README's table compares RhizoDB with LadybugDB at the medium scale with five repetitions, shows every chosen workload whichever engine wins, and names the machine and the date.
 - `mise run bench-readme` measures again and rewrites the README's table, and given a saved report it only rewrites the table.
+- `mise run size-report` loads the benchmark graph into RhizoDB and reports where the bytes of its file go, by table, page fill, and property key.
 - The benchmark builds in release with one codegen unit, so a change to unrelated code cannot move a measurement through how the compiler splits the crate.
 
 ## Open

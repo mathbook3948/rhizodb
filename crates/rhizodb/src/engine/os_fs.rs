@@ -102,9 +102,7 @@ const LOCK_PATIENCE: Duration = Duration::from_millis(500);
 
 const LONGEST_LOCK_PAUSE: Duration = Duration::from_millis(10);
 
-fn lock_or_skip_where_unsupported(
-    try_lock: impl Fn() -> Result<(), TryLockError>,
-) -> io::Result<()> {
+fn lock_patiently(try_lock: impl Fn() -> Result<(), TryLockError>) -> io::Result<()> {
     let start = Instant::now();
     let mut pause = Duration::from_micros(100);
     loop {
@@ -120,11 +118,17 @@ fn lock_or_skip_where_unsupported(
                     "the database file is already open",
                 ));
             }
-            Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Unsupported => {
-                return Ok(());
-            }
             Err(TryLockError::Error(error)) => return Err(error),
         }
+    }
+}
+
+fn lock_or_skip_where_unsupported(
+    try_lock: impl Fn() -> Result<(), TryLockError>,
+) -> io::Result<()> {
+    match lock_patiently(try_lock) {
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
+        locked => locked,
     }
 }
 
@@ -335,6 +339,23 @@ impl FileSystem for OsFs {
     #[cfg(not(unix))]
     fn sync_names(&self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+impl OsFile {
+    /// Locks the file for this handle alone, failing where the file system has no locks.
+    pub(crate) fn lock_or_refuse_where_unsupported(&self) -> io::Result<()> {
+        lock_patiently(|| self.file.try_lock())
+    }
+
+    /// Another handle to the file, as blocks of `size`, that shares this one's lock, so reads
+    /// through it never wait on that lock.
+    pub(crate) fn share(&self, size: BlockSize) -> io::Result<Self> {
+        Ok(Self {
+            file: self.file.try_clone()?,
+            size,
+            read_only: self.read_only,
+        })
     }
 }
 

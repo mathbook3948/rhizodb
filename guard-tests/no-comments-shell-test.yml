@@ -1,0 +1,7 @@
+id: no-comments-shell
+valid:
+  - "#!/bin/sh\necho hi\n"
+  - "# ast-grep-ignore\necho hi\n"
+invalid:
+  - "# a note\necho hi\n"
+  - "echo hi # mentions ast-grep-ignore\n"

@@ -104,7 +104,7 @@ use upgrade::UPGRADE_BATCH_BYTES;
 use upgrade::UpgradeBudget;
 use upgrade::UpgradeStep;
 
-pub(crate) const FORMAT_VERSION: u32 = 15;
+pub(crate) const FORMAT_VERSION: u32 = 16;
 
 /// The graph format and keyword tokenizer of this build in one word, which every process of a
 /// multi-process session must share.
@@ -142,7 +142,8 @@ const OLDEST_FORMAT_VERSION: u32 = 11;
 const RELATIONSHIP_CHUNKS_FORMAT_VERSION: u32 = 12;
 const POSTING_BLOCKS_FORMAT_VERSION: u32 = 14;
 const RELATIONSHIP_CHECKSUMS_FORMAT_VERSION: u32 = 15;
-const UPGRADE_STEPS: [(u32, UpgradeStep); 3] = [
+const RELATIONSHIP_COLUMNS_FORMAT_VERSION: u32 = 16;
+const UPGRADE_STEPS: [(u32, UpgradeStep); 4] = [
     (
         RELATIONSHIP_CHUNKS_FORMAT_VERSION,
         UpgradeStep::RelationshipChunks,
@@ -151,6 +152,10 @@ const UPGRADE_STEPS: [(u32, UpgradeStep); 3] = [
     (
         RELATIONSHIP_CHECKSUMS_FORMAT_VERSION,
         UpgradeStep::RelationshipChecksums,
+    ),
+    (
+        RELATIONSHIP_COLUMNS_FORMAT_VERSION,
+        UpgradeStep::RelationshipColumns,
     ),
 ];
 const HELD_RELATIONSHIP_BYTES: usize = 4 << 20;
@@ -659,31 +664,15 @@ impl<S: Storage> Graph<S> {
             } else {
                 OnceLock::new()
             };
-        let tx = GraphTx {
+        let tx = GraphTx::new(
             transaction,
-            _writer: None,
-            index_definitions,
-            catalog: None,
-            tokens: Arc::clone(&self.committed_tokens),
-            reads_committed_tokens: true,
-            own_tokens: CommittedTokens::default(),
-            label_sets: Arc::clone(&self.committed_label_sets),
-            own_label_sets: LabelSetCache::default(),
-            new_label_sets: BTreeMap::new(),
-            meta: BTreeMap::new(),
-            columns: BTreeMap::new(),
-            reader: ColumnReader::default(),
-            labels: LabelReader::default(),
-            column_deltas: None,
-            own_column_deltas: BTreeMap::new(),
-            adjacency: BTreeMap::new(),
-            relationship_chunks: BTreeMap::new(),
-            relationship_bytes: 0,
-            record_buffer: Vec::new(),
-            committing: false,
-            postings: postings::Held::default(),
-            counters: Vec::new(),
-        };
+            Shared {
+                index_definitions,
+                tokens: Arc::clone(&self.committed_tokens),
+                label_sets: Arc::clone(&self.committed_label_sets),
+                ..Shared::default()
+            },
+        );
         if waited && let Some(found) = Self::pending_in(&tx)? {
             return Err(GraphError::UpgradePending(found));
         }
@@ -830,37 +819,23 @@ impl<S: Storage> Graph<S> {
         } else {
             OnceLock::new()
         };
-        Ok(GraphTx {
+        Ok(GraphTx::new(
             transaction,
-            _writer: Some(WriterClaim {
-                writers: Arc::clone(&self.writers),
-                owner: current,
-            }),
-            index_definitions,
-            catalog: Some(Catalog {
-                shared: Arc::clone(&self.committed_index_definitions),
-                changed: false,
-            }),
-            tokens: Arc::clone(&self.committed_tokens),
-            reads_committed_tokens: false,
-            own_tokens: CommittedTokens::default(),
-            label_sets: Arc::clone(&self.committed_label_sets),
-            own_label_sets: LabelSetCache::default(),
-            new_label_sets: BTreeMap::new(),
-            meta: BTreeMap::new(),
-            columns: BTreeMap::new(),
-            reader: ColumnReader::default(),
-            labels: LabelReader::default(),
-            column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
-            own_column_deltas: BTreeMap::new(),
-            adjacency: BTreeMap::new(),
-            relationship_chunks: BTreeMap::new(),
-            relationship_bytes: 0,
-            record_buffer: Vec::new(),
-            committing: false,
-            postings: postings::Held::default(),
-            counters: Vec::new(),
-        })
+            Shared {
+                writer: Some(WriterClaim {
+                    writers: Arc::clone(&self.writers),
+                    owner: current,
+                }),
+                index_definitions,
+                catalog: Some(Catalog {
+                    shared: Arc::clone(&self.committed_index_definitions),
+                    changed: false,
+                }),
+                tokens: Arc::clone(&self.committed_tokens),
+                label_sets: Arc::clone(&self.committed_label_sets),
+                column_deltas: Some(Arc::clone(&self.committed_column_deltas)),
+            },
+        ))
     }
 }
 
@@ -872,7 +847,6 @@ pub(crate) struct GraphTx<T> {
     index_definitions: OnceLock<Arc<[Vec<u8>]>>,
     catalog: Option<Catalog>,
     tokens: Arc<CommittedTokens>,
-    reads_committed_tokens: bool,
     own_tokens: CommittedTokens,
     label_sets: Arc<LabelSetCache>,
     own_label_sets: LabelSetCache,
@@ -892,24 +866,41 @@ pub(crate) struct GraphTx<T> {
     counters: Vec<(Vec<u8>, u64)>,
 }
 
+#[derive(Debug, Default)]
+struct Shared {
+    writer: Option<WriterClaim>,
+    index_definitions: OnceLock<Arc<[Vec<u8>]>>,
+    catalog: Option<Catalog>,
+    tokens: Arc<CommittedTokens>,
+    label_sets: Arc<LabelSetCache>,
+    column_deltas: Option<Arc<ColumnDeltas>>,
+}
+
 impl<T> GraphTx<T> {
-    fn bare(transaction: T) -> Self {
+    fn new(transaction: T, shared: Shared) -> Self {
+        let Shared {
+            writer,
+            index_definitions,
+            catalog,
+            tokens,
+            label_sets,
+            column_deltas,
+        } = shared;
         Self {
             transaction,
-            _writer: None,
-            index_definitions: OnceLock::new(),
-            catalog: None,
-            tokens: Arc::default(),
-            reads_committed_tokens: false,
+            _writer: writer,
+            index_definitions,
+            catalog,
+            tokens,
             own_tokens: CommittedTokens::default(),
-            label_sets: Arc::default(),
+            label_sets,
             own_label_sets: LabelSetCache::default(),
             new_label_sets: BTreeMap::new(),
             meta: BTreeMap::new(),
             columns: BTreeMap::new(),
             reader: ColumnReader::default(),
             labels: LabelReader::default(),
-            column_deltas: None,
+            column_deltas,
             own_column_deltas: BTreeMap::new(),
             adjacency: BTreeMap::new(),
             relationship_chunks: BTreeMap::new(),
@@ -919,6 +910,10 @@ impl<T> GraphTx<T> {
             postings: postings::Held::default(),
             counters: Vec::new(),
         }
+    }
+
+    fn bare(transaction: T) -> Self {
+        Self::new(transaction, Shared::default())
     }
 }
 
@@ -1039,7 +1034,11 @@ impl<T: ReadTransaction> GraphTx<T> {
         id: RelationshipId,
         key: Token<PropertyKey>,
     ) -> Result<Option<Option<PropertyValue>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::property(bytes, key)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::property(bytes, key)?),
+            |chunk, slot| chunk.property(slot, key.id()),
+        )
     }
 
     /// The type of a relationship, decoding none of its properties. `None` means the
@@ -1048,7 +1047,11 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<Token<RelationshipType>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::rel_type(bytes)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::rel_type(bytes)?),
+            |chunk, slot| Ok(chunk.rel_type(slot)?.map(Token::new)),
+        )
     }
 
     /// The property keys of a relationship, ascending, decoding none of its values. `None`
@@ -1057,7 +1060,15 @@ impl<T: ReadTransaction> GraphTx<T> {
         &self,
         id: RelationshipId,
     ) -> Result<Option<Vec<Token<PropertyKey>>>, GraphError> {
-        self.with_relationship(id, |bytes| Ok(RelationshipRecord::keys(bytes)?))
+        self.read_relationship(
+            id,
+            |bytes| Ok(RelationshipRecord::keys(bytes)?),
+            |chunk, slot| {
+                Ok(chunk
+                    .keys(slot)?
+                    .map(|keys| keys.into_iter().map(Token::new).collect()))
+            },
+        )
     }
 
     pub(crate) fn relationship(
@@ -1067,6 +1078,25 @@ impl<T: ReadTransaction> GraphTx<T> {
         #[cfg(test)]
         tests::note(tests::Read::RelationshipDecode);
         self.with_relationship(id, |bytes| Ok(RelationshipRecord::decode(bytes)?))
+    }
+
+    fn read_relationship<R>(
+        &self,
+        id: RelationshipId,
+        held: impl FnOnce(&[u8]) -> Result<R, GraphError>,
+        stored: impl FnOnce(&ChunkRef<'_>, usize) -> Result<Option<R>, GraphError>,
+    ) -> Result<Option<R>, GraphError> {
+        let (chunk, slot) = relationships::locate(id);
+        if let Some(edit) = self.relationship_chunks.get(&chunk) {
+            return edit.get(slot).map(held).transpose();
+        }
+        let key = relationships::chunk_key(chunk);
+        Ok(self
+            .transaction
+            .get_with(Table::RelationshipChunks, &key, |bytes| {
+                stored(&ChunkRef::parse(&key, bytes)?, slot)
+            })?
+            .flatten())
     }
 
     /// Calls `read` with the stored record of a relationship, if it exists.
@@ -1085,7 +1115,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .get_with(Table::RelationshipChunks, &key, |bytes| {
                 ChunkRef::parse(&key, bytes)?
                     .get(slot)?
-                    .map(read)
+                    .map(|record| read(&record))
                     .transpose()
             })?
             .flatten())
@@ -1109,7 +1139,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                 }
                 for entry in ChunkRef::parse(key, value)?.entries() {
                     let (slot, record) = entry?;
-                    visit(relationships::relationship_at(chunk, slot), record)?;
+                    visit(relationships::relationship_at(chunk, slot), &record)?;
                 }
                 Ok::<(), GraphError>(())
             })?;
@@ -1138,7 +1168,7 @@ impl<T: ReadTransaction> GraphTx<T> {
             .ok_or(GraphError::Corrupt(
                 "a node has a label set that does not exist",
             ))?;
-        if self.reads_committed_tokens {
+        if T::SEES_ONLY_COMMITTED {
             self.label_sets.insert(set, Arc::clone(&labels));
         } else {
             self.own_label_sets.insert(set, Arc::clone(&labels));
@@ -1830,7 +1860,7 @@ impl<T: ReadTransaction> GraphTx<T> {
     }
 
     fn remember_token<K: TokenKind>(&self, name: Arc<str>, token: Token<K>) {
-        if self.reads_committed_tokens {
+        if T::SEES_ONLY_COMMITTED {
             self.tokens.insert(name, token);
         } else {
             self.own_tokens.insert(name, token);
@@ -1952,7 +1982,7 @@ impl<T: WriteTransaction> GraphTx<T> {
     fn flush_relationships(&mut self) -> Result<(), GraphError> {
         for (chunk, edit) in std::mem::take(&mut self.relationship_chunks) {
             let key = relationships::chunk_key(chunk);
-            match edit.encode(&key) {
+            match edit.encode(&key)? {
                 Some(bytes) => self
                     .transaction
                     .put(Table::RelationshipChunks, &key, &bytes)?,
@@ -2006,8 +2036,8 @@ impl<T: WriteTransaction> GraphTx<T> {
         match step {
             UpgradeStep::RelationshipChunks => self.move_relationships_to_chunks_from(budget),
             UpgradeStep::PostingBlocks => self.move_postings_to_blocks_from(cursor, budget),
-            UpgradeStep::RelationshipChecksums => {
-                self.seal_relationship_chunks_from(cursor, budget)
+            UpgradeStep::RelationshipChecksums | UpgradeStep::RelationshipColumns => {
+                self.upgrade_relationship_chunks_from(cursor, budget)
             }
             UpgradeStep::Tokenizer => self.rebuild_keyword_indexes_from(cursor, budget),
         }
@@ -2042,7 +2072,7 @@ impl<T: WriteTransaction> GraphTx<T> {
         };
         for (chunk, edit) in chunks {
             let key = relationships::chunk_key(chunk);
-            if let Some(bytes) = edit.encode(&key) {
+            if let Some(bytes) = edit.encode(&key)? {
                 self.transaction
                     .put(Table::RelationshipChunks, &key, &bytes)?;
             }
@@ -2055,12 +2085,12 @@ impl<T: WriteTransaction> GraphTx<T> {
         Ok((!complete).then(|| next.map_or_else(Vec::new, |chunk| chunk.to_be_bytes().to_vec())))
     }
 
-    fn seal_relationship_chunks_from(
+    fn upgrade_relationship_chunks_from(
         &mut self,
         cursor: Option<&[u8]>,
         budget: &mut UpgradeBudget,
     ) -> Result<Option<Vec<u8>>, GraphError> {
-        let mut sealed = Vec::new();
+        let mut upgraded = Vec::new();
         let mut next = None;
         let complete = upgrade::finished(self.transaction.visit_range(
             Table::RelationshipChunks,
@@ -2071,17 +2101,14 @@ impl<T: WriteTransaction> GraphTx<T> {
                     next = Some(key.to_vec());
                     return Err(upgrade::Scan::Full);
                 }
-                if let Some(bytes) = relationships::seal(key, value)? {
-                    for entry in ChunkRef::parse(key, &bytes)?.entries() {
-                        RelationshipRecord::decode(entry?.1)?;
-                    }
+                if let Some(bytes) = relationships::upgrade(key, value)? {
                     budget.spend(key.len() + bytes.len());
-                    sealed.push((key.to_vec(), bytes));
+                    upgraded.push((key.to_vec(), bytes));
                 }
                 Ok(())
             },
         ))?;
-        for (key, bytes) in sealed {
+        for (key, bytes) in upgraded {
             self.transaction
                 .put(Table::RelationshipChunks, &key, &bytes)?;
         }
