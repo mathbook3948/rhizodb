@@ -440,6 +440,9 @@ fn claim_slot(
     for slot in 0..SLOTS {
         if side.try_lock(SideLock::Slot(slot), Lock::Exclusive)? {
             words
+                .word(SLOT_BASE + slot * SLOT_WORDS + 1)
+                .store(0, Ordering::SeqCst);
+            words
                 .word(SLOT_BASE + slot * SLOT_WORDS)
                 .store(generation, Ordering::SeqCst);
             return Ok(slot);
@@ -536,6 +539,29 @@ impl Session {
         fence(Ordering::SeqCst);
     }
 
+    /// Records that this process pins a checkpoint whose log after `lsn` its snapshots need, or
+    /// none, so the writer keeps that log as it keeps the log for a pin of its own.
+    pub(crate) fn hold_pin(&self, lsn: Option<u64>) {
+        self.words
+            .word(SLOT_BASE + self.slot * SLOT_WORDS + 1)
+            .store(lsn.map_or(0, |lsn| lsn + 1), Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+    }
+
+    /// The oldest LSN after which a snapshot pin of another live process needs the log.
+    pub(crate) fn oldest_other_pin(&self) -> Option<u64> {
+        (0..SLOTS)
+            .filter(|slot| *slot != self.slot)
+            .filter_map(|slot| {
+                let pin = self
+                    .words
+                    .word(SLOT_BASE + slot * SLOT_WORDS + 1)
+                    .load(Ordering::SeqCst);
+                (pin != 0 && !self.slot_is_dead(slot).unwrap_or(false)).then(|| pin - 1)
+            })
+            .min()
+    }
+
     // ast-grep-ignore
     // Cleared under the slot's own lock, so a process that claims it meanwhile keeps its words.
     fn clear_if_dead(&self, slot: usize) -> bool {
@@ -593,7 +619,6 @@ impl Session {
 
     /// Whether the process that held `slot` is gone, which frees the slot for the caller to
     /// clear. A slot this process holds is never gone.
-    #[cfg(test)]
     pub(crate) fn slot_is_dead(&self, slot: usize) -> io::Result<bool> {
         if slot == self.slot {
             return Ok(false);
@@ -608,6 +633,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.hold_pin(None);
         self.words
             .word(SLOT_BASE + self.slot * SLOT_WORDS)
             .store(0, Ordering::SeqCst);

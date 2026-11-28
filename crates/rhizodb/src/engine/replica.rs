@@ -787,8 +787,11 @@ fn too_far_behind(after: u64, oldest_lsn: u64) -> EngineError {
     )
 }
 
+// ast-grep-ignore
+// Windows refuses to open a file that another process is removing, which is gone all the same.
 fn is_gone(error: &EngineError) -> bool {
-    matches!(error, EngineError::Io(io) if io.kind() == io::ErrorKind::NotFound)
+    matches!(error, EngineError::Io(io) if io.kind() == io::ErrorKind::NotFound
+        || (cfg!(windows) && io.kind() == io::ErrorKind::PermissionDenied))
 }
 
 fn open_segment<F: FileSystem>(

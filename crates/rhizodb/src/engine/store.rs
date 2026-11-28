@@ -1679,6 +1679,30 @@ impl<F: FileSystem + 'static> Engine<F> {
     /// Pins the last durable checkpoint: no block it reaches is written or cut off, and the log
     /// after it is kept as an acknowledged peer's would be, until the pin is dropped.
     pub(crate) fn pin(&self) -> Result<Pinned<'_, F>, EngineError> {
+        let Some(session) = self
+            .shared
+            .session
+            .as_ref()
+            .filter(|_| self.shared.read_only)
+        else {
+            return self.pin_durable();
+        };
+        for _ in 0..JOIN_TRIES {
+            self.catch_up()?;
+            let pinned = self.pin_durable()?;
+            let newest = session.published_header()?.map(|header| header.generation);
+            if newest.is_none_or(|newest| newest == pinned.header.generation) {
+                return Ok(pinned);
+            }
+        }
+        Err(EngineError::corrupt(
+            "the writer kept publishing checkpoints while a read-only process pinned one",
+        ))
+    }
+
+    // ast-grep-ignore
+    // A read-only process pins only once caught up, and the writer must see the pin before it moves on.
+    fn pin_durable(&self) -> Result<Pinned<'_, F>, EngineError> {
         let shared = &*self.shared;
         if shared.is_poisoned() {
             return Err(shared.refusal());
@@ -1720,6 +1744,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             id
         };
         drop(durable);
+        shared.publish_pins();
         Ok(Pinned {
             engine: self,
             id,
@@ -1771,6 +1796,18 @@ impl<F: FileSystem + 'static> Engine<F> {
 }
 
 impl<F: FileSystem + 'static> Shared<F> {
+    /// Records in this read-only process's slot the oldest LSN its pins need the log after, so
+    /// the session's writer keeps that log.
+    pub(crate) fn publish_pins(&self) {
+        if let Some(session) = &self.session
+            && self.read_only
+        {
+            let mut retention = lock(&self.retention);
+            retention.expire(self.now());
+            session.hold_pin(retention.oldest_pin());
+        }
+    }
+
     fn needs_follow(&self) -> bool {
         let Some(session) = self.session.as_ref().filter(|_| self.read_only) else {
             return false;
@@ -1993,8 +2030,12 @@ impl<F: FileSystem + 'static> Shared<F> {
         retention.expire(self.now());
         let first = wal.first_lsn();
         retention.peers.retain(|_, lsn| *lsn + 1 >= first);
+        let others = self.session.as_ref().and_then(Session::oldest_other_pin);
         let pinned = retention
             .oldest_pin()
+            .into_iter()
+            .chain(others)
+            .min()
             .map_or(needed, |lsn| wal.first_needed(lsn).min(needed));
         while let Some(oldest) = retention.oldest_peer() {
             let from = wal.first_needed(oldest);
@@ -2586,6 +2627,7 @@ impl<F: FileSystem + 'static> Pinned<'_, F> {
 impl<F: FileSystem + 'static> Drop for Pinned<'_, F> {
     fn drop(&mut self) {
         lock(&self.engine.shared.retention).pins.remove(&self.id);
+        self.engine.shared.publish_pins();
         self.engine.shared.reconsider_retention();
     }
 }
