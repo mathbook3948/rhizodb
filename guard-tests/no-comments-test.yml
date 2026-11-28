@@ -4,8 +4,11 @@ valid:
   - "// ast-grep-ignore\nfn f() {}"
   - "///\npub fn f() {}"
   - "//! A module.\n"
+  - "fn f() {\n    // SAFETY: the pointer is valid,\n    // and aligned.\n    unsafe { g() }\n}"
 invalid:
   - "// a note\nfn f() {}"
   - "/* mentions ast-grep-ignore */\nfn f() {}"
   - "/*** not a doc comment */\npub fn f() {}"
   - "//// not a doc comment\npub fn f() {}"
+  - "fn f() {\n    // SAFETY: the pointer is valid.\n    unsafe { g() };\n    // a note after it\n    h();\n}"
+  - "// a note before\n// SAFETY: misplaced\nfn f() {}"

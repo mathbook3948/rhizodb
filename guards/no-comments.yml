@@ -2,7 +2,7 @@ id: no-comments
 language: rust
 severity: error
 message: Comments are not allowed. Make the code say it through names, types, or structure.
-note: Doc comments on public API are allowed. A comment about an external constraint needs `// ast-grep-ignore` on the line above it.
+note: Doc comments on public API are allowed, and so is a safety comment above an unsafe block. A comment about an external constraint needs `// ast-grep-ignore` on the line above it.
 files:
   - crates/*/src/**/*.rs
 rule:
@@ -14,6 +14,13 @@ rule:
       - regex: ^//(/([^/]|$)|!)
       - regex: ^/\*(\*[^*/]|!)
       - regex: ^// ast-grep-ignore
+      - regex: "^// SAFETY: "
+      - follows:
+          kind: line_comment
+          regex: "^// SAFETY: "
+          stopBy:
+            not:
+              kind: line_comment
 ---
 id: doc-comments-on-public-api-only
 language: rust
