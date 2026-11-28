@@ -780,6 +780,7 @@ fn a_reader_adopting_while_a_checkpoint_runs_in_stages_reads_one_whole_round() {
     }
     assert!(ran.get(), "no checkpoint ran in stages");
     round_seen(&follower, 1024);
+    crate::engine::store::ADOPTED.with(|hook| hook.borrow_mut().take());
 }
 
 fn put_big(engine: &Engine<SimFs>, round: u8, keys: std::ops::Range<u64>) {

@@ -2231,7 +2231,7 @@ impl<F: FileSystem + 'static> Shared<F> {
         };
         drop(running);
         #[cfg(test)]
-        ADOPTED.with(|hook| hook.borrow_mut().take().map(|run| run()));
+        let _ = ADOPTED.try_with(|hook| hook.borrow_mut().take().map(|run| run()));
         Ok(true)
     }
 
@@ -2654,7 +2654,7 @@ impl<F: FileSystem + 'static> Shared<F> {
                         durable.header.generation + 1,
                     );
                     #[cfg(test)]
-                    STAGE_PLACED.with(|hook| hook.borrow_mut().take().map(|run| run()));
+                    let _ = STAGE_PLACED.try_with(|hook| hook.borrow_mut().take().map(|run| run()));
                 }
             }
         }
