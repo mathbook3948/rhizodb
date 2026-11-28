@@ -105,3 +105,54 @@ fn splicing_a_readme_without_markers_fails() {
 fn a_report_without_results_fails() {
     assert!(render(&json!({}), "machine", "date").is_err());
 }
+
+#[test]
+fn a_korean_table_uses_korean_words_for_every_row() {
+    let table =
+        render_in(&report(), "4 CPUs, Linux", "2026-11-25", Language::Korean).unwrap_or_default();
+
+    assert!(
+        table.contains("| 작업 | RhizoDB | LadybugDB | 더 빠른 쪽 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| id로 노드 찾기 | 2.00 | 5.00 | RhizoDB 2.5배 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 대량 수정 | 16.5 | 16.1 | 유사 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 벡터 검색 | 4.00 | 지원 안 함 | 비교 못 함 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 조건으로 걸러 읽기 | 재지 않음 | 재지 않음 | 비교 못 함 |"),
+        "{table}"
+    );
+    assert!(
+        table.contains("| 대량 적재 후 파일 크기 | 1.0 MiB | 3.0 MiB | RhizoDB가 3.0배 작음 |"),
+        "{table}"
+    );
+    assert!(
+        table.starts_with("2026-11-25에 4 CPUs, Linux에서 쟀습니다."),
+        "{table}"
+    );
+}
+
+#[test]
+fn every_row_label_has_a_korean_label() {
+    for (_, label) in ROWS {
+        assert!(
+            KOREAN_LABELS.iter().any(|(english, _)| *english == label),
+            "{label} has no Korean label"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_language_code_fails() {
+    assert!(Language::from_code("fr").is_err());
+    assert_eq!(Language::from_code("ko"), Ok(Language::Korean));
+}

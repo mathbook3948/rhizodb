@@ -5,6 +5,8 @@
 [![Documentation](https://docs.rs/rhizodb/badge.svg)](https://docs.rs/rhizodb)
 [![License](https://img.shields.io/crates/l/rhizodb)](#license)
 
+English | [한국어](https://github.com/mathbook3948/rhizodb/blob/main/README.ko.md)
+
 An embedded, schemaless property graph database for Rust, queried with GQL.
 
 RhizoDB runs inside your program, with no server: a database is one file and its write-ahead log, or memory.
