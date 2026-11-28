@@ -76,3 +76,24 @@ path = "fuzz_targets/dump_import.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "engine_resealed"
+path = "fuzz_targets/engine_resealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_resealed"
+path = "fuzz_targets/graph_resealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parameters"
+path = "fuzz_targets/parameters.rs"
+test = false
+doc = false
+bench = false

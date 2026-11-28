@@ -4,6 +4,10 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Added
+
+- `OpenOptions::max_dump_line_bytes` caps the bytes of one dump line that `Database::import` reads. A longer line fails with `ErrorKind::InvalidDump` once that many bytes are read, so a host that imports dumps it did not write can bound the memory one line takes. No cap is set by default.
+
 ### Fixed
 
 - `Database::apply` on a writer or a fenced writer could leave it refusing reads and writes with `ErrorKind::FormatUpgradePending`. This happened when the changes carried an older graph format or an upgrade, as a new writer's first changes after a rolling upgrade do. The apply failed with `ErrorKind::NotReplica` or `ErrorKind::WriteTransactionOnThisThread` but still marked the graph as waiting for an upgrade. The mark stayed when the call came from a thread holding a write transaction, or when the database's file held an older format, and otherwise cleared once the call returned. Only a replica now starts waiting for an upgrade.
