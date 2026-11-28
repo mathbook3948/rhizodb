@@ -97,6 +97,7 @@ Measured on 2026-11-27 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-
 
 The table is measured again on whatever machine runs it, so a later table may come from a different host than an earlier one.
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
+[`crates/bench/ENGINES.md`](https://github.com/mathbook3948/rhizodb/blob/main/crates/bench/ENGINES.md) compares RhizoDB with SQLite, DuckDB, CozoDB, Neo4j, Memgraph, and FalkorDB on the same workloads.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
 LadybugDB keeps a slightly smaller file, and the two engines are similar on the filtered scan and the bulk update.
 
