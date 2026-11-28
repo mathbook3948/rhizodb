@@ -1114,7 +1114,7 @@ fn the_checkpoint_lock_is_a_byte_of_its_own_that_one_holder_at_a_time_takes() {
 // A build of another layout reads these words where this one wrote others, so any change here must bump LAYOUT too.
 #[test]
 fn the_side_file_layout_is_pinned_to_its_version() {
-    assert_eq!(LAYOUT, 2);
+    assert_eq!(LAYOUT, 3);
     let fields = [
         Field::Magic,
         Field::Layout,
@@ -1455,4 +1455,140 @@ fn a_writer_joins_beside_a_segment_of_an_older_log_that_is_still_on_disk() {
     first.catch_up().unwrap();
     assert_eq!(round_seen(&first, 64), 40);
     second.check().unwrap();
+}
+
+// ast-grep-ignore
+// The other process's checkpoint holds only the checkpoint lock, so it publishes while this writer's transaction is open, after the catch-up at its start.
+#[test]
+fn a_writer_that_freezes_after_another_process_published_a_checkpoint_builds_on_that_checkpoint() {
+    let fs = SimFs::new();
+    let background = EngineOptions {
+        checkpoint: crate::engine::store::CheckpointMode::Background,
+        memtable_limit: 9000,
+        cache_bytes: 2 * BLOCK,
+        ..churning()
+    };
+    let uncached = EngineOptions {
+        cache_bytes: 2 * BLOCK,
+        ..churning()
+    };
+    let first = writer(&fs, background).unwrap();
+    let second = writer(&fs, uncached).unwrap();
+    put_round(&first, 1, 40);
+    first.wait_for_checkpoints();
+    let gate = first.hold_checkpoints();
+    put_round(&first, 2, 40);
+    let mut write = second.begin_write().unwrap();
+    drop(gate);
+    first.wait_for_checkpoints();
+    let theirs = first.header();
+    assert!(
+        theirs.generation > second.header().generation,
+        "the other process published no checkpoint while the write was open"
+    );
+    for key in 0..40u64 {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &[3; 200])
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let ours = second.header();
+    assert!(
+        ours.generation > theirs.generation,
+        "a checkpoint built on generation {} beside a published {}",
+        ours.generation,
+        theirs.generation
+    );
+    first.catch_up().unwrap();
+    assert_eq!(
+        first.header(),
+        ours,
+        "the other process did not adopt the newer header"
+    );
+    for round in 4..12 {
+        let turn = if round % 2 == 0 { &first } else { &second };
+        put_round(turn, round, 40);
+        first.wait_for_checkpoints();
+    }
+    for engine in [&first, &second] {
+        engine.catch_up().unwrap();
+        assert_eq!(round_seen(engine, 40), 11);
+        engine.check().unwrap();
+    }
+    first.close().unwrap();
+    second.close().unwrap();
+    let alone = Engine::open(Arc::new(fs.clone()), NAME, churning()).unwrap();
+    assert_eq!(round_seen(&alone, 40), 11);
+    alone.check().unwrap();
+}
+
+// ast-grep-ignore
+// A segment past the tail that a dead writer started holds a first LSN the log never reached, so a recovery that met it would fail the log as corrupt.
+#[test]
+fn a_writer_removes_the_segment_a_dead_writer_started_past_the_tail_before_a_recovery_meets_it() {
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    use crate::engine::wal_format::SegmentHeader;
+    let fs = SimFs::new();
+    let roomy = EngineOptions {
+        segment_target: 1 << 20,
+        wal_limit: 1 << 22,
+        ..churning()
+    };
+    let first = writer(&fs, roomy).unwrap();
+    let tiny = |engine: &Engine<SimFs>, round: u8| {
+        let mut write = engine.begin_write().unwrap();
+        write.put(Table::Nodes, &[0], &[round]).unwrap();
+        write.commit().unwrap();
+    };
+    for round in 1..4 {
+        tiny(&first, round);
+    }
+    let last = *segment_files(&fs, NAME).unwrap().last().unwrap();
+    let header = crate::engine::store::read_header(
+        &fs.open(NAME, crate::engine::store::block_size().unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+    .0;
+    let started = fs
+        .create(
+            &segment_name(NAME, last + 1),
+            crate::engine::block_file::BlockSize::new(crate::engine::layout::WAL_BLOCK).unwrap(),
+        )
+        .unwrap();
+    let mut block = SegmentHeader {
+        minor: crate::engine::header::FORMAT_MINOR,
+        record_unit: crate::engine::wal_format::RECORD_UNIT as u32,
+        database_id: header.database_id,
+        shard_id: header.shard_id,
+        sequence: last + 1,
+        first_lsn: 4,
+        salt: header.wal.salt,
+        ..SegmentHeader::default()
+    }
+    .encode();
+    block.resize(crate::engine::wal_format::RECORD_UNIT, 0);
+    started.write(0, &block).unwrap();
+    started.sync().unwrap();
+    drop(started);
+    fs.sync_names().unwrap();
+    let second = writer(&fs, roomy).unwrap();
+    for round in 4..7 {
+        tiny(&second, round);
+    }
+    assert_eq!(
+        *segment_files(&fs, NAME).unwrap().last().unwrap(),
+        last,
+        "the next writer left the segment it never appended to: {:?}",
+        segment_files(&fs, NAME).unwrap()
+    );
+    let crashed = fs.crash(crate::engine::sim_fs::Crash::DropUnsynced);
+    drop(second);
+    drop(first);
+    let alone = Engine::open(Arc::new(crashed), NAME, roomy).unwrap();
+    let read = alone.begin_read().unwrap();
+    assert_eq!(read.get(Table::Nodes, &[0]).unwrap().unwrap()[0], 6);
+    drop(read);
+    alone.check().unwrap();
 }

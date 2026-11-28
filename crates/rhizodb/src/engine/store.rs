@@ -313,6 +313,8 @@ struct Shared<F: FileSystem> {
     took_checkpoint_lock: AtomicBool,
     #[cfg(test)]
     keeping_retired: AtomicBool,
+    #[cfg(test)]
+    checkpoint_gate: Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -1404,6 +1406,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             took_checkpoint_lock: AtomicBool::new(false),
             #[cfg(test)]
             keeping_retired: AtomicBool::new(false),
+            #[cfg(test)]
+            checkpoint_gate: Mutex::new(()),
         });
         if recovered && !read_only {
             make_recovery_durable(&shared, &fs, name)?;
@@ -1957,6 +1961,18 @@ impl<F: FileSystem + 'static> Engine<F> {
     }
 
     #[cfg(test)]
+    /// Holds every checkpoint of this process back from writing until the guard drops.
+    pub(crate) fn hold_checkpoints(&self) -> MutexGuard<'_, ()> {
+        lock(&self.shared.checkpoint_gate)
+    }
+
+    #[cfg(test)]
+    /// Waits for the checkpoint this process runs, if any.
+    pub(crate) fn wait_for_checkpoints(&self) {
+        self.shared.wait_for_checkpoint();
+    }
+
+    #[cfg(test)]
     /// Moves the clock that snapshot time limits read forward by `by`.
     pub(crate) fn advance_clock(&self, by: Duration) {
         *lock(&self.shared.clock_ahead) += by;
@@ -2487,6 +2503,8 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn run_checkpoint(&self, job: Job, clean: bool) {
+        #[cfg(test)]
+        drop(lock(&self.checkpoint_gate));
         let mut finish = EndCheckpointOnDrop {
             shared: self,
             completed: false,

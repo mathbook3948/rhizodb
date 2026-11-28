@@ -413,3 +413,34 @@ fn a_writer_killed_at_each_step_of_a_commit_a_tail_hand_over_or_a_checkpoint_los
         }
     }
 }
+
+// ast-grep-ignore
+// On Windows a removed segment keeps its name while any process holds it open, so a writer that joins after a recovery still finds a segment of the log before it.
+#[test]
+fn a_writer_joins_after_a_recovery_while_a_segment_of_the_older_log_is_held_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("graph.rhizodb");
+    drop(writer_options().open(&path).unwrap());
+    let (mut dying, _) = spawn_writer(&path, 0, &[]);
+    dying.wait_for_commits(20);
+    let mut reported = BTreeMap::new();
+    reported.insert(0, dying.kill().last().map_or(0, |last| last + 1));
+    let segments: Vec<std::fs::File> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|name| name.to_string_lossy().contains("-wal-"))
+        .map(|name| std::fs::File::open(name).unwrap())
+        .collect();
+    assert!(!segments.is_empty(), "the killed writer left no log");
+    let (mut recovering, start) = spawn_writer(&path, 1, &[]);
+    assert_eq!(start, 0);
+    recovering.wait_for_commits(5);
+    let joined = writer_options().open(&path).unwrap();
+    run(&joined, "INSERT (:Commit {w: 2, n: 0, pad: 'joined'})");
+    assert!(commits(&joined).get(&0).copied().unwrap_or(0) >= reported[&0]);
+    drop(joined);
+    reported.insert(1, recovering.kill().last().map_or(0, |last| last + 1));
+    reported.insert(2, 1);
+    drop(segments);
+    holds_every_reported_commit(&path, &reported, "after a join beside an older log");
+}

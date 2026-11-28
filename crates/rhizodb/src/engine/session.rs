@@ -27,7 +27,7 @@ pub(crate) const SLOTS: usize = 128;
 const SLOT_WORDS: usize = 2;
 const SLOT_BASE: usize = WORDS - SLOTS * SLOT_WORDS;
 const MAGIC: u64 = u64::from_le_bytes(*b"rhizoshm");
-const LAYOUT: u64 = 2;
+const LAYOUT: u64 = 3;
 
 const TAIL_WORDS: usize = 8;
 
