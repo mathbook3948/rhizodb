@@ -73,7 +73,7 @@ C++로 작성된 임베디드 그래프 데이터베이스 [LadybugDB](https://l
 벤치마크 코드와 쿼리는 전부 [`crates/bench`](https://github.com/mathbook3948/rhizodb/tree/main/crates/bench)에 있습니다. `mise run bench-readme`를 실행하면 다시 측정해서 이 표를 갱신합니다.
 
 <!-- bench-table:start -->
-2026-11-28에 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880 환경에서 측정했습니다. 규모는 `medium`(사람 20000명, `KNOWS` 관계 200000개, 도시 100개)이고 작업마다 5번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치거나, 파일 크기는 차이가 5% 미만이면 '유사'로 표시합니다.
+2026-11-28에 CPU 4개 (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880 환경에서 측정했습니다. 규모는 `medium`(사람 20000명, `KNOWS` 관계 200000개, 도시 100개)이고 작업마다 5번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치거나 파일 크기 차이가 5% 미만이면 '유사'로 표시합니다.
 
 | 작업 | RhizoDB | LadybugDB | 더 빠른 쪽 |
 | --- | ---: | ---: | --- |
@@ -99,6 +99,7 @@ C++로 작성된 임베디드 그래프 데이터베이스 [LadybugDB](https://l
 
 이 표는 명령을 실행한 컴퓨터에서 매번 새로 측정하므로, 갱신할 때마다 측정 환경이 달라질 수 있습니다.
 각 행은 id 조회 100번이나 작은 커밋 500번처럼 작업 묶음 전체에 걸린 시간입니다. 단일 쿼리의 지연 시간으로 읽지 말고, 같은 행에서 두 엔진을 비교하는 데 쓰세요.
+SQLite, DuckDB, CozoDB, Neo4j, Memgraph, FalkorDB와의 비교는 [`crates/bench/ENGINES.md`](https://github.com/mathbook3948/rhizodb/blob/main/crates/bench/ENGINES.md)에 있습니다.
 RhizoDB의 벡터 인덱스는 전수 비교 방식이고, LadybugDB는 HNSW 그래프를 씁니다. 이번 측정에서는 둘 다 실제 최근접 이웃을 모두 찾았습니다.
 파일 크기, 필터 스캔, 일괄 수정은 두 엔진이 비슷합니다.
 모든 관계의 속성을 합하는 작업은 LadybugDB가 더 빠릅니다.
