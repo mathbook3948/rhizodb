@@ -869,3 +869,69 @@ fn a_reader_takes_a_log_segment_the_writer_created_but_has_not_written_for_one_s
     follower.catch_up().unwrap();
     assert_eq!(round_seen(&follower, 32), 6);
 }
+
+#[test]
+fn a_first_process_that_fails_before_it_is_ready_leaves_no_side_file_and_no_lock() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: file.identity().unwrap(),
+    };
+    let session = elected.finish(&file, identity, 1).unwrap();
+    drop(session);
+    drop(file);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file outlived the only process of its session"
+    );
+    let next = reader(&fs, 0).unwrap();
+    assert_eq!(next.session_slot(), Some(0));
+    assert_eq!(items(&next), 1);
+}
+
+#[test]
+fn a_reader_reports_a_torn_log_segment_it_needs_as_corrupt_at_once() {
+    use crate::engine::block_file::BlockFile as _;
+    use crate::engine::block_file::BlockSize;
+    use crate::engine::block_file::FileSystem as _;
+    use crate::engine::wal::segment_files;
+    use crate::engine::wal::segment_name;
+    let fs = SimFs::new();
+    let options = EngineOptions {
+        segment_target: 4096,
+        ..EngineOptions::default()
+    };
+    let writer = writer(&fs, options).unwrap();
+    put_round(&writer, 0, 32);
+    let follower = reader(&fs, 0).unwrap();
+    for round in 1..6 {
+        put_round(&writer, round, 32);
+    }
+    let segments = segment_files(&fs, NAME).unwrap();
+    assert!(segments.len() > 2, "the log rolled over");
+    let newest = segment_name(NAME, *segments.last().unwrap());
+    let size = BlockSize::new(4096).unwrap();
+    fs.open(&newest, size)
+        .unwrap()
+        .write(0, &[0; 4096])
+        .unwrap();
+    let started = std::time::Instant::now();
+    let error = follower.catch_up().unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("log segment"), "{message}");
+    assert_eq!(kind(error), ErrorKind::CorruptData, "{message}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the reader retried a torn segment it needs"
+    );
+}
