@@ -39,7 +39,7 @@ fn agrees(query: &str, mut run: impl FnMut(&str) -> Outcome) -> bool {
     took
 }
 
-const QUERIES: [&str; 12] = [
+const QUERIES: [&str; 15] = [
     "MATCH ()-[r:T]->() RETURN count(*), count(r), count(r.p), sum(r.p), avg(r.p), min(r.p), max(r.p)",
     "MATCH (:A)-[r:T]->(:B) RETURN count(*), sum(r.p), max(r.q)",
     "MATCH (a:A)<-[r]-(b) RETURN count(a), count(b), sum(r.p), min(r.p)",
@@ -52,6 +52,9 @@ const QUERIES: [&str; 12] = [
     "MATCH ()-[r]->() RETURN count(*), sum(r.q), min(r.q), max(r.p)",
     "MATCH ()<-[r:U]-(:A) RETURN avg(r.q), count(r.p)",
     "MATCH ()-[r:T]->() RETURN collect(r.p)",
+    "MATCH ()-[r:T]->() RETURN sum(DISTINCT r.p)",
+    "MATCH ()-[r:T*1..2]->() RETURN count(*)",
+    "MATCH ()-[r:T*2]->() RETURN count(*)",
 ];
 
 struct Rng(u64);
