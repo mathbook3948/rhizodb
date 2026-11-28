@@ -7,6 +7,8 @@ mod datum;
 mod eval;
 mod exec;
 mod functions;
+#[cfg(any(test, fuzzing))]
+pub(crate) mod fuzz;
 mod keys;
 mod matcher;
 mod orient;

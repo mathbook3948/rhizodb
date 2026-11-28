@@ -965,6 +965,25 @@ fn seal(chunk: &mut [u8], body_start: usize) {
     chunk[HEAD_CHECKSUM..BODY_CHECKSUM].copy_from_slice(&head.to_le_bytes());
 }
 
+/// Writes the checksums of a chunk or delta stored under `key` again over whatever its bytes now
+/// hold, so a fuzzer's damage reaches the parser behind the check. A chunk whose layout no
+/// longer frames keeps its checksums, since the parser refuses it before reading them.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn reseal_for_fuzzing(key: &[u8], bytes: &mut [u8]) {
+    match parse_key(key) {
+        Ok(Some((_, Part::Chunk))) => {
+            if let Ok(layout) = Layout::of(bytes) {
+                seal(bytes, layout.body);
+            }
+        }
+        Ok(Some((_, Part::Delta(_)))) if bytes.len() == DELTA => {
+            let sum = checksum(key, &[&bytes[..2 * STATE]]);
+            bytes[2 * STATE..].copy_from_slice(&sum.to_le_bytes());
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 #[path = "meta.test.rs"]
 mod tests;
