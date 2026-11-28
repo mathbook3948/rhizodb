@@ -186,6 +186,9 @@ where
         limits,
         |env, clauses, rows| {
             env.read_run(clauses, rows, |clauses, streamed, rows| {
+                if let Some(done) = env.relationship_clauses(clauses, &rows)? {
+                    return Ok(done);
+                }
                 match split(env, parallelism, workers, clauses, streamed, &rows) {
                     Some(read) => match read.run(env) {
                         Some(done) => Ok(done),

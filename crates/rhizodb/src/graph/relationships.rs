@@ -8,6 +8,7 @@ use crate::value::zigzag;
 
 use super::GraphError;
 use super::ids::RelationshipId;
+use super::ids::Token;
 use super::records::RelationshipRecord;
 
 pub(crate) const CHUNK_SHIFT: u32 = 5;
@@ -21,6 +22,8 @@ const PRESENT_AT: usize = 5;
 const INTEGERS: u8 = 0;
 const TAGGED: u8 = 1;
 const MAX_WIDTH: u8 = 64;
+/// How many property keys one scan of relationship chunks reads.
+pub(crate) const SCANNED_KEYS: usize = 4;
 
 const UNKNOWN_LAYOUT: GraphError =
     GraphError::Corrupt("a relationship chunk has an unknown layout");
@@ -37,6 +40,17 @@ fn tagged_at<'a>(ends: Packed<'_>, values: &'a [u8], index: usize) -> Result<&'a
         .zip(usize::try_from(ends.unsigned(index)?).ok())
         .and_then(|(start, end)| values.get(start..end))
         .ok_or_else(bad_columns)
+}
+
+/// The slots whose bits `mask` sets, ascending.
+pub(crate) fn slots(mut mask: u32) -> impl Iterator<Item = usize> {
+    std::iter::from_fn(move || {
+        (mask != 0).then(|| {
+            let slot = mask.trailing_zeros() as usize;
+            mask &= mask - 1;
+            slot
+        })
+    })
 }
 
 fn bad_columns() -> GraphError {
@@ -295,6 +309,39 @@ impl<'a> Packed<'a> {
     fn signed(&self, index: usize) -> i64 {
         unzigzag(self.base).wrapping_add(self.distance(index) as i64)
     }
+
+    fn unpack(&self, count: usize) -> [u64; CHUNK_SLOTS] {
+        let mut out = [0; CHUNK_SLOTS];
+        let width = usize::from(self.width);
+        if width == 0 {
+            return out;
+        }
+        if width + 7 > 64 {
+            for (index, value) in out.iter_mut().take(count).enumerate() {
+                *value = self.distance(index);
+            }
+            return out;
+        }
+        let mut padded = [0u8; CHUNK_SLOTS * 8 + 8];
+        let bits = &self.bits[..self.bits.len().min(CHUNK_SLOTS * 8)];
+        padded[..bits.len()].copy_from_slice(bits);
+        let mask = u64::MAX >> (64 - width);
+        for (index, value) in out.iter_mut().take(count).enumerate() {
+            let start = index * width;
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&padded[start / 8..start / 8 + 8]);
+            *value = (u64::from_le_bytes(word) >> (start % 8)) & mask;
+        }
+        out
+    }
+
+    fn unsigned_all(&self, count: usize) -> Result<[u64; CHUNK_SLOTS], GraphError> {
+        let mut out = self.unpack(count);
+        for value in out.iter_mut().take(count) {
+            *value = self.base.checked_add(*value).ok_or_else(bad_columns)?;
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -369,6 +416,88 @@ impl<'a> Column<'a> {
                 reader.skip_value()?;
                 reader.finish()?;
                 out.extend_from_slice(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The relationships of one chunk that a scan reads, each by its slot.
+#[derive(Debug)]
+pub(crate) struct Batch {
+    /// The slots that hold a relationship of the type scanned.
+    pub(crate) present: u32,
+    /// The source of each present relationship, when the scan asks for its ends.
+    pub(crate) sources: [u64; CHUNK_SLOTS],
+    /// The target of each present relationship, when the scan asks for its ends.
+    pub(crate) targets: [u64; CHUNK_SLOTS],
+    /// One column per key the scan reads, in the order of its keys.
+    pub(crate) columns: [BatchColumn; SCANNED_KEYS],
+}
+
+/// The values of one property key in a [`Batch`].
+#[derive(Debug)]
+pub(crate) struct BatchColumn {
+    /// The present slots whose relationship holds the key.
+    pub(crate) held: u32,
+    /// The slots of `held` whose value is an integer.
+    pub(crate) integers: u32,
+    /// The integer in each slot of `integers`.
+    pub(crate) values: [i64; CHUNK_SLOTS],
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            present: 0,
+            sources: [0; CHUNK_SLOTS],
+            targets: [0; CHUNK_SLOTS],
+            columns: [const {
+                BatchColumn {
+                    held: 0,
+                    integers: 0,
+                    values: [0; CHUNK_SLOTS],
+                }
+            }; SCANNED_KEYS],
+        }
+    }
+}
+
+impl BatchColumn {
+    fn set(&mut self, slot: usize, value: &PropertyValue) {
+        self.held |= 1 << slot;
+        if let PropertyValue::Integer(value) = value {
+            self.integers |= 1 << slot;
+            self.values[slot] = *value;
+        }
+    }
+}
+
+impl Batch {
+    /// Fills the batch from the records a write transaction holds for one chunk.
+    pub(crate) fn fill_held<'r>(
+        &mut self,
+        records: impl Iterator<Item = (usize, &'r [u8])>,
+        rel_type: Option<u32>,
+        keys: &[Option<u32>],
+    ) -> Result<(), GraphError> {
+        self.present = 0;
+        for column in &mut self.columns[..keys.len()] {
+            column.held = 0;
+            column.integers = 0;
+        }
+        for (slot, bytes) in records {
+            let record = RelationshipRecord::decode(bytes)?;
+            if rel_type.is_some_and(|rel_type| rel_type != record.rel_type.id()) {
+                continue;
+            }
+            self.present |= 1 << slot;
+            self.sources[slot] = record.source.0;
+            self.targets[slot] = record.target.0;
+            for (column, key) in self.columns.iter_mut().zip(keys) {
+                if let Some(value) = key.and_then(|key| record.properties.get(&Token::new(key))) {
+                    column.set(slot, value);
+                }
             }
         }
         Ok(())
@@ -502,6 +631,74 @@ impl<'a> ChunkRef<'a> {
             }
         }
         Ok(Some(keys))
+    }
+
+    /// Fills `batch` with the relationships of type `rel_type`, or of every type, their ends
+    /// only when `ends` asks for them, and the values of `keys`, which holds at most
+    /// [`SCANNED_KEYS`]. A key of `None` reads as null. Every value read is checked.
+    pub(crate) fn fill(
+        &self,
+        rel_type: Option<u32>,
+        ends: bool,
+        keys: &[Option<u32>],
+        batch: &mut Batch,
+    ) -> Result<(), GraphError> {
+        let count = self.present.count_ones() as usize;
+        let types = match rel_type {
+            Some(_) => self.rel_type.unsigned_all(count)?,
+            None => [0; CHUNK_SLOTS],
+        };
+        let (sources, targets) = match ends {
+            true => (
+                self.source.unsigned_all(count)?,
+                self.target.unsigned_all(count)?,
+            ),
+            false => ([0; CHUNK_SLOTS], [0; CHUNK_SLOTS]),
+        };
+        let mut wanted = 0;
+        for (index, slot) in slots(self.present).enumerate() {
+            if rel_type.is_none_or(|rel_type| types[index] == u64::from(rel_type)) {
+                wanted |= 1 << slot;
+                batch.sources[slot] = sources[index];
+                batch.targets[slot] = targets[index];
+            }
+        }
+        batch.present = wanted;
+        for column in &mut batch.columns[..keys.len()] {
+            column.held = 0;
+            column.integers = 0;
+        }
+        if wanted == 0 {
+            return Ok(());
+        }
+        let mut walk = self.walk();
+        while let Some(column) = walk.next()? {
+            for (key, held) in keys.iter().zip(&mut batch.columns) {
+                if !key.is_some_and(|key| u64::from(key) == column.key) {
+                    continue;
+                }
+                held.held = column.holders & wanted;
+                match column.values {
+                    Values::Integers(packed) => {
+                        held.integers = held.held;
+                        let least = unzigzag(packed.base);
+                        let distances = packed.unpack(column.holders.count_ones() as usize);
+                        for (index, slot) in slots(column.holders).enumerate() {
+                            held.values[slot] = least.wrapping_add(distances[index] as i64);
+                        }
+                    }
+                    Values::Tagged { .. } => {
+                        for slot in slots(held.held) {
+                            if let PropertyValue::Integer(value) = column.value(slot)? {
+                                held.integers |= 1 << slot;
+                                held.values[slot] = value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn index(&self, slot: usize) -> Option<usize> {
