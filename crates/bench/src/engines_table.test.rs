@@ -101,3 +101,28 @@ fn splicing_replaces_only_the_text_between_the_markers() {
 fn a_report_without_results_fails() {
     assert!(render(&json!({}), "machine", "date").is_err());
 }
+
+#[test]
+fn sizes_less_than_five_percent_apart_are_similar_and_six_percent_apart_are_not() {
+    let size_cell = |rhizodb: u64, sqlite: u64| {
+        let document = json!({
+            "results": [
+                {"workload": "load/bulk", "engine": "rhizodb", "status": "measured", "median_ms": 1.0, "min_ms": 1.0, "max_ms": 1.0, "bytes": rhizodb},
+                {"workload": "load/bulk", "engine": "sqlite", "status": "measured", "median_ms": 1.0, "min_ms": 1.0, "max_ms": 1.0, "bytes": sqlite}
+            ]
+        });
+        render(&document, "machine", "2026-11-28")
+            .unwrap_or_default()
+            .lines()
+            .last()
+            .unwrap_or_default()
+            .rsplit('|')
+            .nth(1)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+
+    assert_eq!(size_cell(1_000_000, 1_049_000), "similar");
+    assert_eq!(size_cell(1_000_000, 1_060_000), "RhizoDB 1.1x smaller");
+}

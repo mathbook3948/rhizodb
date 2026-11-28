@@ -245,7 +245,7 @@ pub(crate) fn english_heading(document: &Value, machine: &str, date: &str) -> St
 fn korean_heading(document: &Value, machine: &str, date: &str) -> String {
     let (scale, reps, persons, knows, cities) = run_shape(document);
     format!(
-        "{date}에 {machine} 환경에서 측정했습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고 작업마다 {reps}번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치거나, 파일 크기는 차이가 5% 미만이면 '유사'로 표시합니다.\n\n"
+        "{date}에 {machine} 환경에서 측정했습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고 작업마다 {reps}번 반복했습니다. 값은 작업 전체 시간의 중앙값(밀리초)이며 낮을수록 빠릅니다. 두 엔진의 반복 측정값 범위가 겹치거나 파일 크기 차이가 5% 미만이면 '유사'로 표시합니다.\n\n"
     )
 }
 

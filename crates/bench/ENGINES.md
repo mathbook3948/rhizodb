@@ -9,6 +9,7 @@ Every run checks that all engines return the same rows, and each engine loads th
 Without those variables the table holds the embedded engines only.
 The vector index workloads are left out by default, since CozoDB's HNSW index build takes longer than every other workload together, and `BENCH_ENGINES_SKIP=` runs them too.
 `mise run bench-servers stop` removes the servers.
+This table comes from its own run, apart from the README's, so a row the two share can differ between them.
 
 <!-- engines-table:start -->
 Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-v880, at the `medium` scale (20000 persons, 200000 `KNOWS` edges, 100 cities), with 5 repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row is marked similar when its ranges of runs overlap, or, for the file size, when the sizes differ by less than 5 percent.
