@@ -328,11 +328,12 @@ impl Elected {
             .lock_session()
             .map_err(EngineError::from)
             .and_then(|()| {
+                let slot = claim_slot(&*side, &*words, generation)?;
                 if first {
                     side.downgrade(SideLock::Session)?;
                     side.unlock(SideLock::Gate)?;
                 }
-                claim_slot(&*side, &*words, generation)
+                Ok(slot)
             });
         let slot = match held {
             Ok(slot) => slot,
