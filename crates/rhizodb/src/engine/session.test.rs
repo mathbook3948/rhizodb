@@ -346,3 +346,97 @@ fn readers_that_join_while_a_writer_checkpoints_each_read_one_whole_round() {
     assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
     assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 32), 119);
 }
+
+#[test]
+fn a_reader_catches_up_with_commits_and_checkpoints_and_adopts_the_newest_tree() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    let follower = reader(&fs, 0).unwrap();
+    let joined_at = follower.header().generation;
+    for round in 2..40 {
+        put_round(&writer, round, 64);
+        assert!(follower.is_behind());
+        follower.catch_up().unwrap();
+        assert!(!follower.is_behind());
+        assert_eq!(round_seen(&follower, 64), round as u8);
+    }
+    assert!(
+        follower.header().generation > joined_at,
+        "never adopted a checkpoint"
+    );
+    writer.check().unwrap();
+    follower.check().unwrap();
+}
+
+#[test]
+fn a_reader_that_fell_behind_a_released_log_adopts_the_checkpoint_that_released_it() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    let follower = reader(&fs, 0).unwrap();
+    for round in 2..40 {
+        put_round(&writer, round, 64);
+    }
+    writer.checkpoint().unwrap();
+    put_round(&writer, 40, 64);
+    follower.catch_up().unwrap();
+    assert_eq!(round_seen(&follower, 64), 40);
+}
+
+#[test]
+fn a_reader_holding_an_old_tree_across_catch_ups_keeps_reading_it_whole() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    let follower = reader(&fs, 0).unwrap();
+    let held = follower.begin_read().unwrap();
+    for round in 2..40 {
+        put_round(&writer, round, 64);
+        follower.catch_up().unwrap();
+        let values: Vec<u8> = (0..64u64)
+            .map(|key| held.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap()[0])
+            .collect();
+        assert!(
+            values.iter().all(|value| *value == 1),
+            "round {round}: {values:?}"
+        );
+    }
+    drop(held);
+    put_round(&writer, 40, 64);
+    follower.catch_up().unwrap();
+    assert_eq!(round_seen(&follower, 64), 40);
+}
+
+#[test]
+fn a_reader_catching_up_while_a_writer_checkpoints_reads_whole_rounds_that_never_go_back() {
+    let fs = SimFs::new();
+    let writer = Arc::new(writer(&fs, churning()).unwrap());
+    put_round(&writer, 0, 32);
+    let follower = reader(&fs, 0).unwrap();
+    let writing = {
+        let writer = Arc::clone(&writer);
+        thread::spawn(move || {
+            for round in 1..150 {
+                put_round(&writer, round, 32);
+            }
+        })
+    };
+    let mut last = 0;
+    let mut held = Vec::new();
+    while !writing.is_finished() {
+        follower.catch_up().unwrap();
+        let seen = round_seen(&follower, 32);
+        assert!(seen >= last, "went back from {last} to {seen}");
+        last = seen;
+        held.push(follower.begin_read().unwrap());
+        if held.len() > 4 {
+            held.remove(0);
+        }
+    }
+    writing.join().unwrap();
+    drop(held);
+    follower.catch_up().unwrap();
+    assert_eq!(round_seen(&follower, 32), 149);
+    writer.check().unwrap();
+}

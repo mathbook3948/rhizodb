@@ -193,6 +193,17 @@ pub(crate) trait Storage {
     fn checkpoint(&self) -> Result<(), StorageError> {
         Ok(())
     }
+
+    /// Whether another process committed after the newest commit this store reads, so a read
+    /// that begins now should catch up first.
+    fn is_behind(&self) -> bool {
+        false
+    }
+
+    /// Reads what other processes committed since this store last caught up.
+    fn catch_up(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 const COPY_BATCH_BYTES: usize = 64 << 20;

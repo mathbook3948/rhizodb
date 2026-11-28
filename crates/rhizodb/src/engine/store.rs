@@ -272,6 +272,7 @@ struct Shared<F: FileSystem> {
     compaction_due: AtomicBool,
     session: Option<Session>,
     left_to_session: AtomicBool,
+    follow: Mutex<replica::Cursor>,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
 }
@@ -1168,6 +1169,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             compaction_due: AtomicBool::new(false),
             session,
             left_to_session: AtomicBool::new(false),
+            follow: Mutex::new(replica::Cursor::default()),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
         });
@@ -1199,6 +1201,149 @@ impl<F: FileSystem + 'static> Engine<F> {
             jobs,
             worker,
         })
+    }
+
+    /// Whether another process of the session committed after the newest commit this read-only
+    /// process reads.
+    pub(crate) fn is_behind(&self) -> bool {
+        let shared = &*self.shared;
+        match &shared.session {
+            Some(session) if shared.read_only => {
+                session.log_end() > lock(&shared.published).view.snapshot
+            }
+            _ => false,
+        }
+    }
+
+    /// Reads the commits that the session's writer published since this read-only process last
+    /// caught up, and adopts the newest checkpoint the writer published once it holds every
+    /// commit that checkpoint does, so new readers read its tree and a smaller memtable.
+    pub(crate) fn catch_up(&self) -> Result<(), EngineError> {
+        let shared = &*self.shared;
+        let Some(session) = shared.session.as_ref().filter(|_| shared.read_only) else {
+            return Ok(());
+        };
+        let mut cursor = lock(&shared.follow);
+        let mut applied = false;
+        for _ in 0..JOIN_TRIES {
+            let until = session.log_end();
+            let next = lock(&shared.published).view.snapshot + 1;
+            let header = lock(&shared.durable).header;
+            let complete = replica::follow_published(
+                &*shared.fs,
+                &shared.name,
+                &header,
+                &mut cursor,
+                next,
+                until,
+                &mut |record| {
+                    applied = true;
+                    self.follow_record(record)
+                },
+            )?;
+            let adopted = self.adopt(session, !complete)?;
+            if complete {
+                if applied {
+                    *lock(&shared.epochs) =
+                        replica::load_epochs(&lock(&shared.published).view.layers)?;
+                }
+                let oldest = shared.oldest_tree();
+                if oldest != u64::MAX {
+                    session.hold_generation(oldest);
+                }
+                return Ok(());
+            }
+            if !adopted {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Err(EngineError::corrupt(
+            "the log that a multi-process session published kept being released while it was read",
+        ))
+    }
+
+    fn follow_record(&self, record: super::wal_format::Record) -> Result<(), EngineError> {
+        let shared = &*self.shared;
+        let (layers, horizon, snapshot, chain) = {
+            let published = lock(&shared.published);
+            let snapshot = published.view.snapshot;
+            let oldest = published.readers.keys().next().copied().unwrap_or(snapshot);
+            (
+                Arc::clone(&published.view.layers),
+                oldest.min(snapshot),
+                snapshot,
+                published.chain,
+            )
+        };
+        if record.prev.is_some_and(|prev| prev != chain) {
+            return Err(EngineError::corrupt(format!(
+                "the published log record at LSN {} does not follow the record before it",
+                record.lsn
+            )));
+        }
+        let chain = chain_after(chain, &encode_record(&record)?);
+        let (lsn, hlc) = (record.lsn, record.hlc);
+        let mut staged = Staged::new(View::new(snapshot, Arc::clone(&layers)));
+        stage_record(&mut staged, record.lsn, record.term, record.body)?;
+        layers.active.apply(lsn, staged.into_changes(), horizon);
+        {
+            let mut published = lock(&shared.published);
+            published.view.snapshot = lsn;
+            published.chain = chain;
+        }
+        let mut writer = lock(&shared.writer);
+        writer.last_lsn = lsn;
+        writer.last_hlc = writer.last_hlc.max(hlc);
+        writer.chain = chain;
+        Ok(())
+    }
+
+    /// Adopts the newest whole checkpoint the session published, when it is newer than this
+    /// process's and this process holds every commit it does or `released` says the log before
+    /// it is gone, and returns whether it did.
+    pub(crate) fn adopt(&self, session: &Session, released: bool) -> Result<bool, EngineError> {
+        let shared = &*self.shared;
+        let Some(header) = session.published_header()? else {
+            return Ok(false);
+        };
+        if header.generation <= lock(&shared.durable).header.generation {
+            return Ok(false);
+        }
+        let snapshot = lock(&shared.published).view.snapshot;
+        if !released && snapshot < header.checkpoint_lsn {
+            return Ok(false);
+        }
+        shared.pages.forget_cached();
+        let loaded = load_pages(Arc::clone(&shared.pages), header, Retained::default())?;
+        lock(&shared.trees).push(Arc::downgrade(&loaded.tree));
+        {
+            let mut published = lock(&shared.published);
+            let active = Arc::new(published.view.layers.active.after(header.checkpoint_lsn));
+            published.view.layers = Arc::new(Layers {
+                active,
+                frozen: None,
+                tree: Arc::clone(&loaded.tree),
+            });
+            if published.view.snapshot < header.checkpoint_lsn {
+                published.view.snapshot = header.checkpoint_lsn;
+                published.chain = header.replication.checkpoint_chain;
+                let mut writer = lock(&shared.writer);
+                writer.last_lsn = header.checkpoint_lsn;
+                writer.last_hlc = writer.last_hlc.max(header.checkpoint_hlc);
+                writer.chain = header.replication.checkpoint_chain;
+            }
+        }
+        *lock(&shared.identity) = Identity {
+            database_id: header.database_id,
+            replication: header.replication,
+        };
+        *lock(&shared.durable) = Durable {
+            header,
+            extents: loaded.extents,
+            catalog: loaded.catalog,
+            tree: loaded.tree,
+        };
+        Ok(true)
     }
 
     fn register(&self) -> View {
@@ -2313,6 +2458,14 @@ impl<F: FileSystem + 'static> Storage for Engine<F> {
 
     fn checkpoint(&self) -> Result<(), StorageError> {
         Ok(Engine::checkpoint_keeping_log(self)?)
+    }
+
+    fn is_behind(&self) -> bool {
+        Engine::is_behind(self)
+    }
+
+    fn catch_up(&self) -> Result<(), StorageError> {
+        Ok(Engine::catch_up(self)?)
     }
 }
 

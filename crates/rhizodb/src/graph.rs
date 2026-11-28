@@ -641,6 +641,9 @@ impl<S: Storage> Graph<S> {
     }
 
     pub(crate) fn read(&self) -> Result<GraphTx<S::Read<'_>>, GraphError> {
+        if self.storage.is_behind() {
+            self.apply_outside(true, Storage::catch_up)??;
+        }
         let upgrades = self.upgrades.load(Ordering::SeqCst);
         self.ready()?;
         #[cfg(test)]

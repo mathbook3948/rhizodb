@@ -200,8 +200,8 @@ impl OpenOptions {
     /// the session writes at a time: a second open for writing in the session fails with
     /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen), as does an
     /// open for writing without this setting while any process of the session has the file
-    /// open. A read-only process sees the commits made before it opened the file, and its
-    /// checkpoints never reuse space that a read-only process still reads.
+    /// open. A read-only process reads every commit this one made before each of its reads
+    /// begins, and this one's checkpoints never reuse space that a read-only process still reads.
     ///
     /// The file must lie on a local file system of this machine that takes byte-range locks
     /// and shared mappings, and the directory must take the side file, or the open fails with

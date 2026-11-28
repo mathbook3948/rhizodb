@@ -1,7 +1,8 @@
 //! Opens one database file from several child processes at once, one writing with
 //! `OpenOptions::multi_process` and the rest read-only, kills them at random points, and checks
-//! that every reader reads a whole prefix of the reported commits, that a killed writer loses no
-//! reported commit, and that the file reopened alone passes `check`.
+//! that every reader reads a whole prefix of the reported commits and catches up with later
+//! ones, that a killed writer loses no reported commit, and that the file reopened alone passes
+//! `check`.
 
 mod support;
 
@@ -19,6 +20,7 @@ use std::time::Duration;
 use rhizodb::Database;
 use rhizodb::ErrorKind;
 use rhizodb::OpenOptions;
+use rhizodb::Value;
 use support::*;
 
 const DATABASE_ENV: &str = "RHIZODB_MULTI_PROCESS_DATABASE";
@@ -34,9 +36,14 @@ fn reader_options() -> OpenOptions {
 
 /// The rounds a database holds, which must be every round from zero to the last.
 fn rounds(db: &Database) -> i64 {
-    let found = ints(&run(db, "MATCH (r:Round) RETURN count(r)"))[0];
-    let last = ints(&run(db, "MATCH (r:Round) RETURN coalesce(max(r.n), -1)"))[0];
-    assert_eq!(found, last + 1, "the rounds are not a whole prefix");
+    let rows = run(
+        db,
+        "MATCH (r:Round) RETURN count(r), count(r) - 1 - coalesce(max(r.n), -1)",
+    );
+    let [Value::Integer(found), Value::Integer(gap)] = rows[0][..] else {
+        panic!("expected two integers, got {rows:?}");
+    };
+    assert_eq!(gap, 0, "the rounds are not a whole prefix");
     found
 }
 
@@ -201,10 +208,10 @@ fn readers_beside_a_writer_killed_at_random_points_read_whole_prefixes_and_lose_
         let victim = (next(&mut seed) % readers.len() as u64) as usize;
         readers.swap_remove(victim).0.kill();
         for (reader, seen) in readers {
-            assert_eq!(
-                reader.close_reader(),
-                seen,
-                "life {life}: a reader's snapshot moved"
+            let caught_up = reader.close_reader();
+            assert!(
+                caught_up >= seen.max(reported),
+                "life {life}: a reader missed commits"
             );
         }
     }
@@ -241,8 +248,8 @@ fn a_writer_keeps_writing_and_reusing_space_while_readers_come_and_die() {
             readers.swap_remove(victim).0.kill();
         }
     }
-    for (reader, seen) in readers {
-        assert_eq!(reader.close_reader(), seen);
+    for (reader, _) in readers {
+        assert_eq!(reader.close_reader(), 300, "a reader did not catch up");
     }
     assert_eq!(rounds(&writer), 300);
     writer.check().unwrap();
