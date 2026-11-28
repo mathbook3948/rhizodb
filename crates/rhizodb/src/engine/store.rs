@@ -270,14 +270,8 @@ struct Shared<F: FileSystem> {
     log_first: AtomicU64,
     retention: Mutex<Retention>,
     compaction_due: AtomicBool,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "held for the locks and slot it gives up when dropped"
-        )
-    )]
     session: Option<Session>,
+    left_to_session: AtomicBool,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
     #[cfg(test)]
@@ -502,6 +496,81 @@ fn find_live_blocks(
     Ok(())
 }
 
+#[derive(Debug)]
+enum Log {
+    /// In its own log, which it replays or recovers.
+    Own,
+    /// In the published log of its session, which it already replayed into `layers`.
+    Replayed {
+        layers: Arc<Layers>,
+        replayed: Replayed,
+    },
+}
+
+const JOIN_TRIES: usize = 1000;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STAGE_PLACED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+type FreedByGeneration = BTreeMap<u64, Vec<(ExtentId, Blocks)>>;
+
+// ast-grep-ignore
+// Another process's earlier checkpoints freed these, for trees this process cannot see (rule 118).
+fn held_free_space(
+    extents: &ExtentTable,
+    generation: u64,
+) -> (BTreeMap<u64, u64>, FreedByGeneration) {
+    let quarantine = extents
+        .free_slots()
+        .into_iter()
+        .map(|slot| (slot, generation))
+        .collect();
+    let free: Vec<(ExtentId, Blocks)> = extents
+        .entries
+        .iter()
+        .filter_map(|(id, entry)| {
+            let free = entry.free();
+            (!free.is_empty()).then_some((*id, free))
+        })
+        .collect();
+    let freed = if free.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([(generation, free)])
+    };
+    (quarantine, freed)
+}
+
+fn identity(
+    options: &EngineOptions,
+    header: &Header,
+    file: &impl BlockFile,
+) -> Result<SessionIdentity, EngineError> {
+    Ok(SessionIdentity {
+        build: options.build,
+        database_id: header.database_id,
+        file: file.identity()?,
+    })
+}
+
+// ast-grep-ignore
+// Holding the generation before checking it is still published pairs with a checkpoint's fence.
+fn held_header(session: &Session) -> Result<Header, EngineError> {
+    loop {
+        let header = session
+            .published_header()?
+            .ok_or_else(|| EngineError::corrupt("a multi-process session published no header"))?;
+        session.hold_generation(header.generation);
+        let still = session.published_header()?.map(|newest| newest.generation);
+        if still == Some(header.generation) {
+            return Ok(header);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Replayed {
     lsn: u64,
@@ -563,11 +632,28 @@ pub(crate) fn load<B: BlockFile + 'static>(
     options: &EngineOptions,
 ) -> Result<Loaded<B>, EngineError> {
     let (header, retained) = read_header(&file)?;
+    load_with(file, header, retained, options)
+}
+
+fn load_with<B: BlockFile + 'static>(
+    file: B,
+    header: Header,
+    retained: Retained,
+    options: &EngineOptions,
+) -> Result<Loaded<B>, EngineError> {
     let pages = Arc::new(Pages::new(
         file,
         page_seed(header.database_id),
         options.cache_bytes,
     ));
+    load_pages(pages, header, retained)
+}
+
+fn load_pages<B: BlockFile + 'static>(
+    pages: Arc<Pages<B>>,
+    header: Header,
+    retained: Retained,
+) -> Result<Loaded<B>, EngineError> {
     let source: Arc<dyn PageSource> = Arc::clone(&pages) as Arc<dyn PageSource>;
     let (tree, extents, catalog) = if header.catalog.is_null() {
         if header.open.iter().any(|open| !open.id.is_none()) || header.checkpoint_lsn != 0 {
@@ -791,6 +877,7 @@ fn make_recovery_durable<F: FileSystem + 'static>(
         hlc,
         shared.options.segment_target,
     )?;
+    shared.publish_header(&header);
     shared
         .needed
         .store(header.wal.first_segment, Ordering::Relaxed);
@@ -880,7 +967,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
         let file = fs.open(name, block_size()?)?;
-        let session = match session::join(&*fs, name, &file)? {
+        let elected = match session::join(&*fs, name, &file)? {
             Joined::Alone { recheck } => {
                 file.lock_shared()?;
                 if recheck && fs.names()?.contains(&side_name(name)) {
@@ -899,19 +986,120 @@ impl<F: FileSystem + 'static> Engine<F> {
                     )
                     .into());
                 }
-                None
+                return Self::start(
+                    fs,
+                    name,
+                    load(file, &options)?,
+                    options,
+                    true,
+                    None,
+                    Log::Own,
+                );
             }
-            Joined::Session(elected) => {
-                let (header, _) = read_header(&file)?;
-                let identity = SessionIdentity {
-                    build: options.build,
-                    database_id: header.database_id,
-                    file: file.identity()?,
-                };
-                Some(elected.finish(&file, identity, header.generation)?)
+            Joined::Session(elected) => elected,
+        };
+        if elected.is_first() {
+            let (header, _) = read_header(&file)?;
+            let session = elected.finish(
+                &file,
+                identity(&options, &header, &file)?,
+                header.generation,
+            )?;
+            let loaded = load(file, &options)?;
+            return Self::start(fs, name, loaded, options, true, Some(session), Log::Own);
+        }
+        let header = elected
+            .published_header()?
+            .ok_or_else(|| EngineError::corrupt("a multi-process session published no header"))?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
+        let pages = Arc::new(Pages::new(
+            file,
+            page_seed(header.database_id),
+            options.cache_bytes,
+        ));
+        for _ in 0..JOIN_TRIES {
+            let header = held_header(&session)?;
+            let until = session.log_end();
+            pages.forget_cached();
+            let loaded = load_pages(Arc::clone(&pages), header, Retained::default())?;
+            let layers = Arc::new(Layers {
+                active: Arc::new(Memtable::default()),
+                frozen: None,
+                tree: Arc::clone(&loaded.tree),
+            });
+            let mut replayed = Replayed {
+                lsn: header.checkpoint_lsn,
+                hlc: header.checkpoint_hlc,
+                chain: header.replication.checkpoint_chain,
+            };
+            let complete = replica::replay_published(&*fs, name, &header, until, &mut |record| {
+                replay_into(&layers, &mut replayed, record)
+            })?;
+            if complete {
+                let log = Log::Replayed { layers, replayed };
+                return Self::start(fs, name, loaded, options, true, Some(session), log);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Err(EngineError::corrupt(
+            "the log that a multi-process session published kept being released while it was read",
+        ))
+    }
+
+    /// Opens the database file `name` on `fs` as the one process of its multi-process session
+    /// that writes, creating it when there is none, beside any number of read-only processes.
+    pub(crate) fn open_shared(
+        fs: Arc<F>,
+        name: &str,
+        options: EngineOptions,
+    ) -> Result<Self, EngineError> {
+        let file = match fs.open(name, block_size()?) {
+            Ok(file) if !file.is_empty()? => file,
+            Ok(_) => {
+                let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
+                file.unlock()?;
+                file
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let file = open_or_create_whole_or_not_at_all(&*fs, name)?;
+                file.unlock()?;
+                file
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let elected = match session::join(&*fs, name, &file)? {
+            Joined::Session(elected) => elected,
+            Joined::Alone { recheck: true } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another open holds the database file outside this path's session, as an \
+                     open through another path or link does",
+                )
+                .into());
+            }
+            Joined::Alone { recheck: false } => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "multi-process access needs a local file system that takes byte-range locks \
+                     and shared mappings, and a directory that takes the -shm file",
+                )
+                .into());
             }
         };
-        Self::start(fs, name, load(file, &options)?, options, true, session)
+        elected.take_write_lock()?;
+        file.sync()?;
+        let (header, _) = read_header(&file)?;
+        let session = elected.finish(
+            &file,
+            identity(&options, &header, &file)?,
+            header.generation,
+        )?;
+        let loaded = load(file, &options)?;
+        Self::start(fs, name, loaded, options, false, Some(session), Log::Own)
     }
 
     /// Opens the database `loaded` read from the locked file named `name`, as [`Engine::open`]
@@ -922,7 +1110,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         loaded: Loaded<F::File>,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        Self::start(fs, name, loaded, options, false, None)
+        Self::start(fs, name, loaded, options, false, None, Log::Own)
     }
 
     fn start(
@@ -932,6 +1120,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         options: EngineOptions,
         read_only: bool,
         session: Option<Session>,
+        log: Log,
     ) -> Result<Self, EngineError> {
         let Loaded {
             pages,
@@ -941,18 +1130,27 @@ impl<F: FileSystem + 'static> Engine<F> {
             extents,
             catalog,
         } = loaded;
-        let layers = Arc::new(Layers {
-            active: Arc::new(Memtable::default()),
-            frozen: None,
-            tree: Arc::clone(&tree),
-        });
-        let mut replayed = Replayed {
-            lsn: header.checkpoint_lsn,
-            hlc: header.checkpoint_hlc,
-            chain: header.replication.checkpoint_chain,
+        let loaded_generation = header.generation;
+        let published = matches!(log, Log::Replayed { .. });
+        let (layers, mut replayed) = match log {
+            Log::Replayed { layers, replayed } => (layers, replayed),
+            Log::Own => (
+                Arc::new(Layers {
+                    active: Arc::new(Memtable::default()),
+                    frozen: None,
+                    tree: Arc::clone(&tree),
+                }),
+                Replayed {
+                    lsn: header.checkpoint_lsn,
+                    hlc: header.checkpoint_hlc,
+                    chain: header.replication.checkpoint_chain,
+                },
+            ),
         };
         let recovered = !header.clean;
-        let (wal, header) = if read_only {
+        let (wal, header) = if published {
+            (None, header)
+        } else if read_only {
             let wal = if header.clean {
                 None
             } else {
@@ -1003,6 +1201,13 @@ impl<F: FileSystem + 'static> Engine<F> {
         let epochs = replica::load_epochs(&layers)?;
         let term = epochs.last().map_or(0, |epoch| epoch.term);
         let role = replica::role_at_open(&header, &epochs);
+        let mut extents = extents;
+        let (quarantine, freed) = if session.is_some() && !read_only {
+            extents.cover_file(pages.file_bytes()? / BLOCK as u64);
+            held_free_space(&extents, loaded_generation)
+        } else {
+            (BTreeMap::new(), BTreeMap::new())
+        };
         let shared = Arc::new(Shared {
             options,
             read_only,
@@ -1040,8 +1245,8 @@ impl<F: FileSystem + 'static> Engine<F> {
             running: Mutex::new(false),
             finished: Condvar::new(),
             failure: Mutex::new(None),
-            quarantine: Mutex::new(BTreeMap::new()),
-            freed: Mutex::new(BTreeMap::new()),
+            quarantine: Mutex::new(quarantine),
+            freed: Mutex::new(freed),
             poisoned: AtomicBool::new(false),
             keeping_free_space: AtomicBool::new(false),
             compacted_bytes: AtomicU64::new(0),
@@ -1053,6 +1258,7 @@ impl<F: FileSystem + 'static> Engine<F> {
             }),
             compaction_due: AtomicBool::new(false),
             session,
+            left_to_session: AtomicBool::new(false),
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
             #[cfg(test)]
@@ -1060,6 +1266,13 @@ impl<F: FileSystem + 'static> Engine<F> {
         });
         if recovered && !read_only {
             make_recovery_durable(&shared, &fs, name)?;
+        }
+        if let Some(session) = &shared.session {
+            if !read_only || session.is_getting_ready() {
+                session.publish_header(&lock(&shared.durable).header);
+                session.publish_log_end(lock(&shared.writer).last_lsn);
+            }
+            session.ready()?;
         }
         let (jobs, worker) = match options.checkpoint {
             _ if read_only => (None, None),
@@ -1164,6 +1377,9 @@ impl<F: FileSystem + 'static> Engine<F> {
         writer.chain = chain;
         writer.last_lsn = lsn;
         writer.last_hlc = writer.last_hlc.max(hlc);
+        if let Some(session) = &self.shared.session {
+            session.publish_log_end(lsn);
+        }
         Ok(())
     }
 
@@ -1292,7 +1508,7 @@ impl<F: FileSystem + 'static> Engine<F> {
     pub(crate) fn close(mut self) -> Result<(), EngineError> {
         self.stop_checkpoints();
         self.shared.close();
-        if self.shared.read_only {
+        if self.shared.read_only || self.shared.left_to_session.load(Ordering::Acquire) {
             return Ok(());
         }
         if self.shared.is_poisoned() {
@@ -1483,6 +1699,16 @@ impl<F: FileSystem + 'static> Engine<F> {
 }
 
 impl<F: FileSystem + 'static> Shared<F> {
+    /// Publishes `header`, once durable, to the other processes of the session, unless it holds
+    /// only some stages of a checkpoint, which no other process adopts.
+    pub(crate) fn publish_header(&self, header: &Header) {
+        if let Some(session) = &self.session
+            && header.staged_lsn == 0
+        {
+            session.publish_header(header);
+        }
+    }
+
     fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
@@ -1736,6 +1962,7 @@ impl<F: FileSystem + 'static> Shared<F> {
             };
             self.pages
                 .write_header(&header, &self.retained_area(&header))?;
+            self.publish_header(&header);
             durable.header = header;
             return Ok(Arc::clone(&durable.tree));
         }
@@ -1768,6 +1995,8 @@ impl<F: FileSystem + 'static> Shared<F> {
                         job.lsn,
                         durable.header.generation + 1,
                     );
+                    #[cfg(test)]
+                    STAGE_PLACED.with(|hook| hook.borrow_mut().take().map(|run| run()));
                 }
             }
         }
@@ -1841,6 +2070,7 @@ impl<F: FileSystem + 'static> Shared<F> {
         };
         self.pages
             .write_header(&header, &self.retained_area(&header))?;
+        self.publish_header(&header);
         let tree = Arc::new(Tree::new(
             generation,
             roots,
@@ -1880,11 +2110,16 @@ impl<F: FileSystem + 'static> Shared<F> {
         }
         let mut trees = lock(&self.trees);
         trees.retain(|tree| tree.strong_count() > 0);
-        trees
+        let own = trees
             .iter()
             .filter_map(|tree| tree.upgrade().map(|tree| tree.generation))
             .min()
-            .unwrap_or(u64::MAX)
+            .unwrap_or(u64::MAX);
+        drop(trees);
+        match &self.session {
+            Some(session) if !self.read_only => own.min(session.oldest_other_generation()),
+            _ => own,
+        }
     }
 
     fn reusable_slots(&self, extents: &ExtentTable, oldest: u64) -> BTreeSet<u64> {
@@ -2001,6 +2236,14 @@ impl<F: FileSystem + 'static> Shared<F> {
     }
 
     fn close(&self) {
+        if let Some(session) = &self.session
+            && !self.read_only
+            && !session.leave_last().unwrap_or(false)
+        {
+            self.wait_for_checkpoint();
+            self.left_to_session.store(true, Ordering::Release);
+            return;
+        }
         let mut writer = match self.writer.try_lock() {
             Ok(writer) => writer,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),

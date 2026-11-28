@@ -94,6 +94,12 @@ impl<B: BlockFile> Pages<B> {
         }
     }
 
+    /// Forgets every cached page and value, as another process may have written their blocks
+    /// again since this process last read them.
+    pub(crate) fn forget_cached(&self) {
+        self.cache.clear();
+    }
+
     /// Records that extent `id` lies in slot `slot`, which never changes once recorded.
     pub(crate) fn place_extent(&self, id: ExtentId, slot: u64) {
         self.slots

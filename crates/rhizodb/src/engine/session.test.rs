@@ -3,6 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::*;
+use crate::engine::layout::BLOCK;
 use crate::engine::sim_fs::SimFs;
 use crate::engine::store::Engine;
 use crate::engine::store::EngineOptions;
@@ -160,6 +161,13 @@ fn an_open_that_elects_itself_holds_back_every_other_until_it_finishes() {
     };
     let session = elected.finish(&file, identity, 1).unwrap();
     assert_eq!(session.slot(), 0);
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !waiting.is_finished(),
+        "joined before the first process published"
+    );
+    session.publish_header(&crate::engine::store::read_header(&file).unwrap().0);
+    session.ready().unwrap();
     assert_eq!(waiting.join().unwrap().unwrap(), Some(1));
 }
 
@@ -197,6 +205,8 @@ fn a_slot_is_dead_once_its_process_is_gone_and_never_while_it_lives() {
         file: file.identity().unwrap(),
     };
     let watcher = elected.finish(&file, identity, 4).unwrap();
+    watcher.publish_header(&crate::engine::store::read_header(&file).unwrap().0);
+    watcher.ready().unwrap();
     let other = reader(&fs, 0).unwrap();
     let slot = other.session_slot().unwrap();
     assert!(!watcher.slot_is_dead(slot).unwrap());
@@ -206,6 +216,137 @@ fn a_slot_is_dead_once_its_process_is_gone_and_never_while_it_lives() {
     assert!(watcher.slot_is_dead(slot).unwrap());
     assert_eq!(watcher.slot_generation(slot), 0);
     assert_eq!(watcher.slot_generation(watcher.slot()), 4);
+}
+
+fn churning() -> EngineOptions {
+    EngineOptions {
+        segment_target: 4096,
+        memtable_limit: 2048,
+        wal_limit: 16_384,
+        checkpoint: crate::engine::store::CheckpointMode::Inline,
+        cache_bytes: 32 * BLOCK,
+        reclaim_slack: 0,
+        stage_floor: 8,
+        ..EngineOptions::default()
+    }
+}
+
+fn writer(fs: &SimFs, options: EngineOptions) -> Result<Engine<SimFs>, EngineError> {
+    Engine::open_shared(Arc::new(fs.clone()), NAME, options)
+}
+
+fn put_round(engine: &Engine<SimFs>, round: u64, keys: u64) {
+    let mut write = engine.begin_write().unwrap();
+    for key in 0..keys {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &[round as u8; 200])
+            .unwrap();
+    }
+    write.commit().unwrap();
+}
+
+fn round_seen(engine: &Engine<SimFs>, keys: u64) -> u8 {
+    let read = engine.begin_read().unwrap();
+    let values: Vec<u8> = (0..keys)
+        .map(|key| read.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap()[0])
+        .collect();
+    assert!(
+        values.iter().all(|value| *value == values[0]),
+        "a torn round: {values:?}"
+    );
+    values[0]
+}
+
+#[test]
+fn a_reader_that_joins_a_writer_reads_every_commit_made_before_it_joined() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&writer, 1, 8);
+    let first = reader(&fs, 0).unwrap();
+    assert_eq!(round_seen(&first, 8), 1);
+    put_round(&writer, 2, 8);
+    assert_eq!(round_seen(&first, 8), 1);
+    assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 8), 2);
+}
+
+#[test]
+fn a_writer_joins_readers_and_its_commits_reach_the_readers_that_join_after() {
+    let fs = written(0);
+    let early = reader(&fs, 0).unwrap();
+    let writer = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&writer, 3, 4);
+    assert_eq!(items(&early), 0);
+    assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 4), 3);
+}
+
+#[test]
+fn a_session_takes_one_writer_and_keeps_out_an_exclusive_open() {
+    let fs = SimFs::new();
+    let _writer = writer(&fs, EngineOptions::default()).unwrap();
+    let error = writer(&fs, EngineOptions::default()).unwrap_err();
+    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
+    let error = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap_err();
+    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
+}
+
+#[test]
+fn checkpoints_reuse_no_block_that_a_reader_in_another_process_still_reads() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    let held = reader(&fs, 0).unwrap();
+    for round in 2..60 {
+        put_round(&writer, round, 64);
+        assert_eq!(round_seen(&held, 64), 1, "after round {round}");
+    }
+    drop(held);
+    for round in 60..80 {
+        put_round(&writer, round, 64);
+    }
+    assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 64), 79);
+    writer.check().unwrap();
+}
+
+#[test]
+fn a_writer_that_closes_beside_readers_leaves_its_log_to_the_next_writer() {
+    let fs = SimFs::new();
+    let first = writer(&fs, EngineOptions::default()).unwrap();
+    put_round(&first, 1, 8);
+    let held = reader(&fs, 0).unwrap();
+    put_round(&first, 2, 8);
+    first.close().unwrap();
+    assert_eq!(round_seen(&held, 8), 1);
+    let next = writer(&fs, EngineOptions::default()).unwrap();
+    assert_eq!(round_seen(&next, 8), 2);
+    put_round(&next, 3, 8);
+    drop(held);
+    next.close().unwrap();
+    let alone = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    assert_eq!(round_seen(&alone, 8), 3);
+    assert!(alone.header().clean || alone.check().is_ok());
+}
+
+#[test]
+fn readers_that_join_while_a_writer_checkpoints_each_read_one_whole_round() {
+    let fs = SimFs::new();
+    let writer = Arc::new(writer(&fs, churning()).unwrap());
+    put_round(&writer, 0, 32);
+    let writing = {
+        let writer = Arc::clone(&writer);
+        thread::spawn(move || {
+            for round in 1..120 {
+                put_round(&writer, round, 32);
+            }
+        })
+    };
+    let mut seen = Vec::new();
+    while !writing.is_finished() {
+        let joined = reader(&fs, 0).unwrap();
+        seen.push(round_seen(&joined, 32));
+    }
+    writing.join().unwrap();
+    assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
+    assert_eq!(round_seen(&reader(&fs, 0).unwrap(), 32), 119);
 }
 
 #[test]
@@ -290,6 +431,72 @@ fn a_process_whose_database_file_differs_fails_to_join() {
 }
 
 #[test]
+fn a_writer_that_takes_over_reuses_no_block_a_reader_of_the_writer_before_it_reads() {
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    put_round(&first, 1, 1024);
+    first.checkpoint().unwrap();
+    let options = EngineOptions {
+        cache_bytes: 4 * BLOCK,
+        ..EngineOptions::default()
+    };
+    let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    for round in 2..30 {
+        put_round(&first, round, 1024);
+    }
+    first.close().unwrap();
+    let second = writer(&fs, churning()).unwrap();
+    for round in 30..90 {
+        put_round(&second, round, 1024);
+        if round % 10 == 0 {
+            second.compact().unwrap();
+        }
+    }
+    held.check().unwrap();
+    assert_eq!(round_seen(&held, 1024), 1);
+}
+
+#[test]
+fn a_reader_that_joins_while_a_stage_chose_its_space_reads_its_tree_whole() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 1024);
+    writer.checkpoint().unwrap();
+    put_round(&writer, 2, 1024);
+    writer.checkpoint().unwrap();
+    let joined = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut armed = false;
+    for round in 3..40 {
+        if !armed && joined.borrow().is_none() {
+            let joined = std::rc::Rc::clone(&joined);
+            let fs = fs.clone();
+            crate::engine::store::STAGE_PLACED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    *joined.borrow_mut() = Some(reader(&fs, 0).unwrap());
+                }));
+            });
+            armed = true;
+        }
+        put_round(&writer, round, 1024);
+        if joined.borrow().is_some() {
+            armed = true;
+        }
+    }
+    let joined = joined
+        .borrow_mut()
+        .take()
+        .expect("no checkpoint ran in stages");
+    let seen = round_seen(&joined, 1024);
+    joined.check().unwrap();
+    for round in 40..60 {
+        put_round(&writer, round, 1024);
+    }
+    writer.compact().unwrap();
+    assert_eq!(round_seen(&joined, 1024), seen);
+    joined.check().unwrap();
+}
+
+#[test]
 fn a_fallback_open_refuses_a_file_that_a_session_holds_elsewhere() {
     let fs = written(1);
     let _member = reader(&fs, 0).unwrap();
@@ -313,4 +520,78 @@ fn no_second_session_starts_over_a_file_that_a_session_through_another_name_hold
         Ok(Joined::Alone { .. }) => {}
         Ok(Joined::Session(_)) => panic!("a second session started over one file"),
     }
+}
+
+fn put_big(engine: &Engine<SimFs>, round: u8, keys: std::ops::Range<u64>) {
+    let mut write = engine.begin_write().unwrap();
+    for key in keys {
+        write
+            .put(Table::Nodes, &key.to_be_bytes(), &vec![round; 3000])
+            .unwrap();
+    }
+    write.commit().unwrap();
+}
+
+fn delete_from(engine: &Engine<SimFs>, keys: std::ops::Range<u64>) {
+    let mut write = engine.begin_write().unwrap();
+    write
+        .delete_range(
+            Table::Nodes,
+            &keys.start.to_be_bytes(),
+            &keys.end.to_be_bytes(),
+        )
+        .unwrap();
+    write.commit().unwrap();
+}
+
+#[test]
+fn a_writer_that_takes_over_writes_no_extent_into_the_trailing_slots_a_reader_reaches() {
+    let fs = SimFs::new();
+    let first = writer(&fs, EngineOptions::default()).unwrap();
+    put_big(&first, 1, 0..6000);
+    put_big(&first, 1, 10_000..16_000);
+    first.checkpoint().unwrap();
+    delete_from(&first, 0..6000);
+    first.checkpoint().unwrap();
+    let held = reader(&fs, 0).unwrap();
+    let read = held.begin_read().unwrap();
+    delete_from(&first, 10_000..16_000);
+    first.checkpoint().unwrap();
+    first.close().unwrap();
+    let second = writer(&fs, EngineOptions::default()).unwrap();
+    put_big(&second, 2, 20_000..32_000);
+    second.checkpoint().unwrap();
+    for key in (10_000..16_000u64).step_by(7) {
+        let value = read.get(Table::Nodes, &key.to_be_bytes()).unwrap().unwrap();
+        assert_eq!(value[0], 1, "key {key}");
+    }
+}
+
+#[test]
+fn a_first_process_that_fails_before_it_is_ready_leaves_no_side_file_and_no_lock() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: file.identity().unwrap(),
+    };
+    let session = elected.finish(&file, identity, 1).unwrap();
+    drop(session);
+    drop(file);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file outlived the only process of its session"
+    );
+    let next = reader(&fs, 0).unwrap();
+    assert_eq!(next.session_slot(), Some(0));
+    assert_eq!(items(&next), 1);
 }

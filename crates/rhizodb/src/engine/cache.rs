@@ -253,6 +253,17 @@ impl Cache {
         }
     }
 
+    /// Forgets every page and value, since another process may have written their blocks again.
+    pub(crate) fn clear(&self) {
+        for shard in &self.shards {
+            let mut shard = shard.write().unwrap_or_else(PoisonError::into_inner);
+            shard.entries.clear();
+            shard.clock.clear();
+            shard.hand = 0;
+            shard.bytes = 0;
+        }
+    }
+
     /// The lookups that found their page or value and those that did not, since the cache was
     /// made.
     pub(crate) fn hits_and_misses(&self) -> (u64, u64) {

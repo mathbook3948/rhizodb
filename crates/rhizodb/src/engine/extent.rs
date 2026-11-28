@@ -381,6 +381,15 @@ impl ExtentTable {
         Some(end)
     }
 
+    /// Raises the high-water mark to every slot a file of `file_blocks` blocks holds, so slots
+    /// that another process's older tree may reach count as free rather than past the end.
+    pub(crate) fn cover_file(&mut self, file_blocks: u64) {
+        let slots = file_blocks
+            .saturating_sub(2)
+            .div_ceil(u64::from(EXTENT_BLOCKS));
+        self.next_slot = self.next_slot.max(slots);
+    }
+
     /// Fails unless every extent starts inside a file of `file_blocks` blocks, then lowers the
     /// high-water mark past the free slots at the end, as an open may since no reader holds a
     /// tree yet.

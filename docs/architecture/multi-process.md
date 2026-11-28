@@ -132,7 +132,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Tokens and label sets need no refresh, since a committed one never changes and a miss reads it from the table.
 - A process with no transaction open adopts each new checkpoint from a thread of its own within a bounded time, so an idle process does not hold an old tree.
 - Each slot records the oldest checkpoint generation that any tree of its process reaches, which includes the trees of its readers, snapshots, pins, and published view.
-- A checkpoint in any process takes the lowest generation of every live slot as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches.
+- A checkpoint in any process takes the lowest generation of every live slot, and the generation of the newest header the session published, as its oldest tree, so it reuses no block or extent slot, and cuts nothing off the file, that a tree in another process still reaches or that an open joining now may load.
+- The published header bounds the oldest tree too, since a header that holds only some stages of a checkpoint is never published, so a joiner that loads the last published header never meets the store that a Dekker pattern with a stage's header would need.
 - A checkpoint reads the slots again before each stage, as it computes the oldest tree again for each stage in one process.
 - A process raises its slot's generation only once its last tree of the lower generation is gone, and never lowers it.
 - A process joins by writing the newest durable generation into a free slot and checking that it is still the newest, retrying otherwise, as an LMDB reader does, so a checkpoint either sees the slot or the process loads a newer header.
@@ -141,7 +142,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Beginning a read writes nothing to the side file and takes no lock, since the process's slot already covers the tree its published view holds.
 - From phase 3 on, a slot also records the oldest LSN that its process's snapshot pins keep, so a pin in a read-only process keeps the log too, and a checkpoint keeps the log after the oldest such LSN of every slot, as it keeps the log for a pin of its own.
 - Acknowledged peers live in the side file, so an `acknowledge` in any process keeps the log for that peer, and every header a checkpoint writes records them.
-- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process before it reads the generations.
+- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process while it holds that lock, so a process that claims the slot meanwhile never has its words cleared.
+- A writer that opens in a session keeps every extent slot the file holds, rather than lowering its high-water mark past the free slots at the end as a lone open does, since a tree of another process may reach them.
 - The log needs no entry in the slots, since a process that misses a segment adopts the checkpoint that released it.
 - The side file holds a fixed number of slots, and an open that finds none free fails with its own error kind.
 - A checkpoint never clears or ignores the slot of a live process, so a read that never ends, in any process, keeps every block its tree reaches from reuse, as a long read in one process does today.
@@ -246,7 +248,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Each step refuses the combinations of processes it does not yet serve correctly, so no commit of the main branch lets a session lose or misread a commit.
 - Step 1 adds `rhizodb-shm`, with tests that spawn child processes to show that a byte-range lock conflicts across processes, drops when its holder is killed, and that a store into a mapping in one process shows in another.
 - Step 2 adds the side-file trait over the OS and the simulation, the process registry, the side file's layout and reset, the session lock with the election of the first process, the slots with their liveness locks, and the `OpenOptions` setting, and lets only read-only processes form a session.
-- Step 3 lets one read-write process join or start a session of read-only processes, with the published log end, catch-up, adoption of headers, the slots' generations and pinned LSNs in checkpoints, the freed-space rules, the cache journal, recovery by a late read-write process, the close protocol, and kill tests of child read-only processes and their writer, which completes phase 3.
+- Step 3 lands in three parts: first one read-write process joins or starts a session and read-only processes read the commits made before they opened, then they catch up with later commits and adopt later checkpoints, and last come the snapshot pins kept in slots and the kill tests of a writer and its readers.
+- Step 3 as a whole lets one read-write process join or start a session of read-only processes, with the published log end, catch-up, adoption of headers, the slots' generations and pinned LSNs in checkpoints, the freed-space rules, the cache journal, recovery by a late read-write process, the close protocol, and kill tests of child read-only processes and their writer, which completes phase 3.
 - Each step adds the simulated-session tests and the Shuttle models of the protocols it builds: step 2 the election and the slots, step 3 the join against a checkpoint's reuse, catch-up, and adoption.
 - Step 4 adds the differential test and the long simulated runs.
 - Step 5 takes the write lock for each write transaction, catches up before each one, lets any process checkpoint under the checkpoint lock, and moves the replication role, the record behind it, and the acknowledged peers into the side file, with kill tests of writers in several child processes, which completes phase 4.

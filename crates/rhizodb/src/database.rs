@@ -37,6 +37,14 @@ fn open_backend(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
     })
 }
 
+fn open_backend_shared(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
+    any_fs::open_path_shared(path, options).map_err(|error| {
+        StorageError::from(error)
+            .in_context(|| format!("cannot open the database at {}", path.display()))
+            .into()
+    })
+}
+
 fn open_backend_read_only(path: &Path, options: EngineOptions) -> Result<Backend, Error> {
     Ok(any_fs::open_path_read_only(path, options).map_err(StorageError::from)?)
 }
@@ -81,6 +89,7 @@ const PEER_ID_LIMIT: usize = 64;
 pub struct OpenOptions {
     create: bool,
     read_only: bool,
+    multi_process: bool,
     replica: bool,
     parallelism: Parallelism,
     engine: EngineOptions,
@@ -94,6 +103,7 @@ impl Default for OpenOptions {
         Self {
             create: true,
             read_only: false,
+            multi_process: false,
             replica: false,
             parallelism: Parallelism::default(),
             engine: EngineOptions::default(),
@@ -181,6 +191,43 @@ impl OpenOptions {
     /// ```
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Whether a database opened for writing lets processes that open the file
+    /// [read-only](OpenOptions::read_only) read it while this one writes, which it does not
+    /// unless this is set to `true`.
+    ///
+    /// Such an open takes part in the file's multi-process session, as every read-only open
+    /// does, through the side file named after the database file with `-shm`. One process of
+    /// the session writes at a time: a second open for writing in the session fails with
+    /// [`ErrorKind::DatabaseAlreadyOpen`](crate::ErrorKind::DatabaseAlreadyOpen), as does an
+    /// open for writing without this setting while any process of the session has the file
+    /// open. A read-only process sees the commits made before it opened the file, and its
+    /// checkpoints never reuse space that a read-only process still reads.
+    ///
+    /// The file must lie on a local file system of this machine that takes byte-range locks
+    /// and shared mappings, and the directory must take the side file, or the open fails with
+    /// [`ErrorKind::Storage`](crate::ErrorKind::Storage). A writer that closes while read-only
+    /// processes still have the file open leaves its log for the next open that writes, which
+    /// replays it, and writes nothing else. It has no effect on a database in memory or one
+    /// opened read-only.
+    ///
+    /// ```
+    /// use rhizodb::Database;
+    /// use rhizodb::ErrorKind;
+    /// use rhizodb::OpenOptions;
+    /// use rhizodb::Parameters;
+    ///
+    /// let directory = tempfile::tempdir()?;
+    /// let path = directory.path().join("graph.rhizodb");
+    /// let writer = OpenOptions::new().multi_process(true).open(&path)?;
+    /// writer.execute("INSERT (:City {name: 'Oslo'})", &Parameters::new())?;
+    /// assert_eq!(Database::open(&path).unwrap_err().kind(), ErrorKind::DatabaseAlreadyOpen);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn multi_process(mut self, multi_process: bool) -> Self {
+        self.multi_process = multi_process;
         self
     }
 
@@ -375,6 +422,8 @@ impl OpenOptions {
         };
         let backend = if self.read_only {
             open_backend_read_only(path, engine)?
+        } else if self.multi_process {
+            open_backend_shared(path, engine)?
         } else {
             open_backend(path, engine)?
         };

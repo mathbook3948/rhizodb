@@ -927,6 +927,12 @@ impl SideFile for SimSideHandle {
             .locks
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if matches!(locks.get(&at), Some(SideHeld::Exclusive(holder)) if *holder == self.handle) {
+            return Err(io::Error::other(format!(
+                "{at:?} is already this handle's exclusively, and on Windows a wait for it again \
+                 never ends"
+            )));
+        }
         while !self.take(&mut locks, at, kind) {
             locks = self
                 .side
