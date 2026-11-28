@@ -4,6 +4,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::fence;
+use std::thread;
+use std::time::Duration;
 
 use rhizodb_shm::Lock;
 
@@ -28,6 +30,10 @@ const HEADER_BASE: usize = 16;
 const MAGIC: u64 = u64::from_le_bytes(*b"rhizoshm");
 const LAYOUT: u64 = 1;
 
+// ast-grep-ignore
+// Far past any growth of the mapped words, since Windows refuses writes to bytes a lock covers.
+const LOCKS_FROM: u64 = 1 << 40;
+
 #[derive(Clone, Copy, Debug)]
 enum Field {
     Magic,
@@ -36,17 +42,23 @@ enum Field {
     Build,
     DatabaseLow,
     DatabaseHigh,
+    FileVolume,
+    FileLow,
+    FileHigh,
     HeaderSequence,
     LogEnd,
 }
 
 impl Field {
-    const IDENTITY: [Field; 5] = [
+    const IDENTITY: [Field; 8] = [
         Field::Layout,
         Field::Minor,
         Field::Build,
         Field::DatabaseLow,
         Field::DatabaseHigh,
+        Field::FileVolume,
+        Field::FileLow,
+        Field::FileHigh,
     ];
 
     fn index(self) -> usize {
@@ -72,8 +84,7 @@ pub(crate) enum SideLock {
 impl SideLock {
     /// The byte of the side file that the lock covers.
     pub(crate) fn offset(self) -> u64 {
-        let past_words = (WORDS * 8) as u64;
-        past_words
+        LOCKS_FROM
             + match self {
                 SideLock::Gate => 0,
                 SideLock::Session => 1,
@@ -99,8 +110,15 @@ pub(crate) trait SideFile: Send + Sync + fmt::Debug {
     /// atomic upgrade, the caller must hold [`SideLock::Gate`], so no other open takes `at` in
     /// between.
     fn try_upgrade(&self, at: SideLock) -> io::Result<bool>;
-    /// Maps the side file's words, growing the file to hold them first when `grow` is true.
+    /// Maps the side file's words, growing the file to hold them first when `grow` is true, and
+    /// fails without mapping when the file is too short for them.
     fn map(&self, grow: bool) -> io::Result<Box<dyn SideWords>>;
+    /// Whether the path this side file was opened by still names it, which it does not once the
+    /// last process of a session removed it.
+    fn is_named(&self) -> io::Result<bool>;
+    /// Removes the side file's name, while this process holds the gate and the session lock
+    /// exclusively.
+    fn unlink(&self) -> io::Result<()>;
 }
 
 /// The mapped words of a side file.
@@ -116,16 +134,22 @@ pub(crate) struct Identity {
     /// The graph format and tokenizer of this build, hashed into one word.
     pub(crate) build: u64,
     pub(crate) database_id: u128,
+    /// The database file's volume and file id, so two side files of one file reached through
+    /// two paths never hold two sessions.
+    pub(crate) file: (u64, u128),
 }
 
 impl Identity {
-    fn words(self) -> [u64; 5] {
+    fn words(self) -> [u64; 8] {
         [
             LAYOUT,
             u64::from(FORMAT_MINOR),
             self.build,
             self.database_id as u64,
             (self.database_id >> 64) as u64,
+            self.file.0,
+            self.file.1 as u64,
+            (self.file.1 >> 64) as u64,
         ]
     }
 }
@@ -148,22 +172,20 @@ pub(crate) struct Elected {
 pub(crate) enum Joined {
     /// It is a process of a session, as its first process or not.
     Session(Elected),
-    /// The side file could not be created here, so it opens alone as a phase 1 read-only open.
-    Alone,
+    /// No session can hold the file here, so it opens alone as a phase 1 read-only open, and
+    /// fails when `recheck` and a side file appeared once it holds its shared lock.
+    Alone { recheck: bool },
 }
 
 fn already_open(message: &'static str) -> EngineError {
     io::Error::new(io::ErrorKind::WouldBlock, message).into()
 }
 
-fn may_not_create(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::PermissionDenied
-            | io::ErrorKind::ReadOnlyFilesystem
-            | io::ErrorKind::Unsupported
-    )
+fn being_removed(error: &io::Error) -> bool {
+    cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied
 }
+
+const OPEN_TRIES: usize = 200;
 
 // ast-grep-ignore
 // The creator holds the file exclusively, so a phase 1 reader keeps it out or sees the side file.
@@ -171,38 +193,65 @@ fn open_or_create<F: FileSystem>(
     fs: &F,
     name: &str,
     file: &F::File,
-) -> Result<Option<Box<dyn SideFile>>, EngineError> {
-    for _ in 0..CREATE_TRIES {
+) -> Result<Result<Box<dyn SideFile>, Joined>, EngineError> {
+    for _ in 0..OPEN_TRIES {
         match fs.open_side(name) {
-            Ok(side) => return Ok(Some(side)),
+            Ok(side) => return Ok(Ok(side)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Unsupported | io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                return Ok(Err(Joined::Alone { recheck: false }));
+            }
+            Err(error) if being_removed(&error) => {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
             Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
                 return Err(already_open(
                     "a multi-process session may hold the database file, and its -shm file \
-                     cannot be opened for writing",
+                     cannot be opened for writing, since its permissions refuse this user",
                 ));
             }
             Err(error) => return Err(error.into()),
         }
         match file.lock() {
             Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(Err(Joined::Alone { recheck: true }));
+            }
             Err(error) => return Err(error.into()),
         }
         let created = fs.create_side(name);
+        if matches!(&created, Err(error) if error.kind() == io::ErrorKind::Unsupported) {
+            let _ = fs.remove(name);
+        }
         file.unlock()?;
         match created {
-            Ok(side) => return Ok(Some(side)),
+            Ok(side) => return Ok(Ok(side)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) if may_not_create(&error) => return Ok(None),
+            Err(error) if being_removed(&error) => thread::sleep(Duration::from_millis(5)),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                return Ok(Err(Joined::Alone { recheck: false }));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                return Ok(Err(Joined::Alone { recheck: true }));
+            }
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(None)
+    Err(already_open(
+        "the -shm file of the database file kept being created and removed",
+    ))
 }
-
-const CREATE_TRIES: usize = 2;
 
 /// Opens the side file of the database file `name`, creating it under `file`'s exclusive lock
 /// when there is none, and elects this open the session's first process or joins the session.
@@ -214,27 +263,45 @@ pub(crate) fn join<F: FileSystem>(
     name: &str,
     file: &F::File,
 ) -> Result<Joined, EngineError> {
-    let side = open_or_create(fs, &side_name(name), file)?;
-    let Some(side) = side else {
-        return Ok(Joined::Alone);
-    };
-    side.lock(SideLock::Gate, Lock::Exclusive)?;
-    side.lock(SideLock::Session, Lock::Shared)?;
-    let first = side.try_upgrade(SideLock::Session)?;
-    if first {
-        if let Err(error) = file.lock() {
-            side.unlock(SideLock::Session)?;
+    for _ in 0..OPEN_TRIES {
+        let side = match open_or_create(fs, &side_name(name), file)? {
+            Ok(side) => side,
+            Err(alone) => return Ok(alone),
+        };
+        side.lock(SideLock::Gate, Lock::Exclusive)?;
+        if !side.is_named()? {
             side.unlock(SideLock::Gate)?;
-            return Err(error.into());
+            continue;
         }
-    } else {
-        side.unlock(SideLock::Gate)?;
+        side.lock(SideLock::Session, Lock::Shared)?;
+        let first = side.try_upgrade(SideLock::Session)?;
+        if first {
+            if let Err(error) = file.lock() {
+                side.unlock(SideLock::Session)?;
+                side.unlock(SideLock::Gate)?;
+                return Err(error.into());
+            }
+        } else {
+            side.unlock(SideLock::Gate)?;
+        }
+        let words = match side.map(first) {
+            Ok(words) => words,
+            Err(error) => {
+                if first {
+                    side.unlock(SideLock::Gate)?;
+                }
+                side.unlock(SideLock::Session)?;
+                return Err(error.into());
+            }
+        };
+        if first {
+            words.word(Field::Magic.index()).store(0, Ordering::SeqCst);
+        }
+        return Ok(Joined::Session(Elected { side, words, first }));
     }
-    let words = side.map(first)?;
-    if first {
-        words.word(Field::Magic.index()).store(0, Ordering::SeqCst);
-    }
-    Ok(Joined::Session(Elected { side, words, first }))
+    Err(already_open(
+        "the -shm file of the database file kept being removed while it was opened",
+    ))
 }
 
 impl Elected {
@@ -474,6 +541,26 @@ impl Session {
             .min()
     }
 
+    // ast-grep-ignore
+    // Cleared under the slot's own lock, so a process that claims it meanwhile keeps its words.
+    fn clear_if_dead(&self, slot: usize) -> bool {
+        if slot == self.slot
+            || !self
+                .side
+                .try_lock(SideLock::Slot(slot), Lock::Exclusive)
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        for offset in 0..SLOT_WORDS {
+            self.words
+                .word(SLOT_BASE + slot * SLOT_WORDS + offset)
+                .store(0, Ordering::SeqCst);
+        }
+        let _ = self.side.unlock(SideLock::Slot(slot));
+        true
+    }
+
     /// The oldest generation that a tree of another live process reaches, or that an open
     /// joining now may load from the header this process published last, clearing the slot of
     /// each process that is gone.
@@ -486,11 +573,7 @@ impl Session {
             if generation == 0 {
                 continue;
             }
-            if self.slot_is_dead(slot).unwrap_or(false) {
-                let _ = word.compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst);
-                self.words
-                    .word(SLOT_BASE + slot * SLOT_WORDS + 1)
-                    .store(0, Ordering::SeqCst);
+            if self.clear_if_dead(slot) {
                 continue;
             }
             oldest = oldest.min(generation);
@@ -535,6 +618,9 @@ impl Drop for Session {
             .store(0, Ordering::SeqCst);
         let _ = self.side.unlock(SideLock::Slot(self.slot));
         if self.side.lock(SideLock::Gate, Lock::Exclusive).is_ok() {
+            if self.side.try_upgrade(SideLock::Session).unwrap_or(false) {
+                let _ = self.side.unlink();
+            }
             let _ = self.side.unlock(SideLock::Session);
             let _ = self.side.unlock(SideLock::Gate);
         }

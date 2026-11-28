@@ -157,6 +157,7 @@ fn an_open_that_elects_itself_holds_back_every_other_until_it_finishes() {
             .unwrap()
             .0
             .database_id,
+        file: file.identity().unwrap(),
     };
     let session = elected.finish(&file, identity, 1).unwrap();
     assert_eq!(session.slot(), 0);
@@ -201,6 +202,7 @@ fn a_slot_is_dead_once_its_process_is_gone_and_never_while_it_lives() {
             .unwrap()
             .0
             .database_id,
+        file: file.identity().unwrap(),
     };
     let watcher = elected.finish(&file, identity, 4).unwrap();
     watcher.publish_header(&crate::engine::store::read_header(&file).unwrap().0);
@@ -482,4 +484,148 @@ fn a_writer_that_joins_readers_of_an_unclean_file_recovers_it_and_the_readers_fo
     early.catch_up().unwrap();
     assert_eq!(round_seen(&early, 16), 2);
     assert_eq!(round_seen(&reader(&crashed, 0).unwrap(), 16), 2);
+}
+
+#[test]
+fn a_read_only_open_where_side_files_cannot_be_shared_opens_alone_and_leaves_none() {
+    let fs = written(2);
+    fs.refuse_side_sharing();
+    let first = reader(&fs, 0).unwrap();
+    assert_eq!(first.session_slot(), None);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "left a side file"
+    );
+    let second = reader(&fs, 0).unwrap();
+    assert_eq!((items(&first), items(&second)), (2, 2));
+}
+
+#[test]
+fn a_read_only_open_beside_a_side_file_that_cannot_be_shared_opens_alone() {
+    let fs = written(1);
+    fs.create(
+        &side_name(NAME),
+        crate::engine::store::block_size().unwrap(),
+    )
+    .unwrap();
+    fs.refuse_side_sharing();
+    assert_eq!(items(&reader(&fs, 0).unwrap()), 1);
+}
+
+#[test]
+fn the_last_process_of_a_session_removes_the_side_file() {
+    let fs = written(1);
+    let first = reader(&fs, 0).unwrap();
+    let second = reader(&fs, 0).unwrap();
+    drop(first);
+    assert!(fs.names().unwrap().contains(&side_name(NAME)));
+    drop(second);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file stayed"
+    );
+    assert_eq!(reader(&fs, 0).unwrap().session_slot(), Some(0));
+}
+
+#[test]
+fn an_open_holding_a_side_file_the_last_process_removed_opens_the_new_one() {
+    let fs = written(1);
+    let early = fs.open_side(&side_name(NAME));
+    assert!(early.is_err(), "no side file before any open");
+    let first = reader(&fs, 0).unwrap();
+    let stale = fs.open_side(&side_name(NAME)).unwrap();
+    drop(first);
+    assert!(!stale.is_named().unwrap());
+    let next = reader(&fs, 0).unwrap();
+    let held = fs.open_side(&side_name(NAME)).unwrap();
+    assert!(held.is_named().unwrap());
+    assert_eq!(next.session_slot(), Some(0));
+}
+
+#[test]
+fn a_process_whose_database_file_differs_fails_to_join() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let _first = reader(&fs, 0).unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: (0, u128::MAX),
+    };
+    let error = elected.finish(&file, identity, 1).unwrap_err();
+    assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
+}
+
+#[test]
+fn a_writer_that_takes_over_reuses_no_block_a_reader_of_the_writer_before_it_reads() {
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    put_round(&first, 1, 1024);
+    first.checkpoint().unwrap();
+    let options = EngineOptions {
+        cache_bytes: 4 * BLOCK,
+        ..EngineOptions::default()
+    };
+    let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    for round in 2..30 {
+        put_round(&first, round, 1024);
+    }
+    first.close().unwrap();
+    let second = writer(&fs, churning()).unwrap();
+    for round in 30..90 {
+        put_round(&second, round, 1024);
+        if round % 10 == 0 {
+            second.compact().unwrap();
+        }
+    }
+    held.check().unwrap();
+    assert_eq!(round_seen(&held, 1024), 1);
+}
+
+#[test]
+fn a_reader_that_joins_while_a_stage_chose_its_space_reads_its_tree_whole() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 1024);
+    writer.checkpoint().unwrap();
+    put_round(&writer, 2, 1024);
+    writer.checkpoint().unwrap();
+    let joined = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut armed = false;
+    for round in 3..40 {
+        if !armed && joined.borrow().is_none() {
+            let joined = std::rc::Rc::clone(&joined);
+            let fs = fs.clone();
+            crate::engine::store::STAGE_PLACED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    *joined.borrow_mut() = Some(reader(&fs, 0).unwrap());
+                }));
+            });
+            armed = true;
+        }
+        put_round(&writer, round, 1024);
+        if joined.borrow().is_some() {
+            armed = true;
+        }
+    }
+    let joined = joined
+        .borrow_mut()
+        .take()
+        .expect("no checkpoint ran in stages");
+    let seen = round_seen(&joined, 1024);
+    joined.check().unwrap();
+    for round in 40..60 {
+        put_round(&writer, round, 1024);
+    }
+    writer.compact().unwrap();
+    assert_eq!(round_seen(&joined, 1024), seen);
+    joined.check().unwrap();
 }

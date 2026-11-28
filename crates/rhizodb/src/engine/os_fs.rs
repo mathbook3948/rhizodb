@@ -151,6 +151,7 @@ const SESSION_BYTE: u64 = 1 << 62;
 #[derive(Debug)]
 struct OsSide {
     file: File,
+    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -163,7 +164,7 @@ impl SideWords for OsWords {
 }
 
 impl OsSide {
-    fn boxed(file: File) -> io::Result<Box<dyn SideFile>> {
+    fn boxed(file: File, path: PathBuf) -> io::Result<Box<dyn SideFile>> {
         if !rhizodb_shm::is_local(&file)? {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -171,7 +172,7 @@ impl OsSide {
                  system",
             ));
         }
-        Ok(Box::new(Self { file }))
+        Ok(Box::new(Self { file, path }))
     }
 }
 
@@ -207,6 +208,22 @@ impl SideFile for OsSide {
         Ok(false)
     }
 
+    fn is_named(&self) -> io::Result<bool> {
+        let named = match File::open(&self.path) {
+            Ok(named) => named,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(rhizodb_shm::file_id(&named)? == rhizodb_shm::file_id(&self.file)?)
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        fs::remove_file(&self.path)
+    }
+
     fn map(&self, grow: bool) -> io::Result<Box<dyn SideWords>> {
         if grow {
             rhizodb_shm::reserve(&self.file, (WORDS * 8) as u64)?;
@@ -219,22 +236,24 @@ impl FileSystem for OsFs {
     type File = OsFile;
 
     fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
-        OsSide::boxed(
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(self.directory.join(name))?,
-        )
+        let path = self.directory.join(name);
+        let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        OsSide::boxed(file, path)
     }
 
     fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
-        OsSide::boxed(
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(self.directory.join(name))?,
-        )
+        let path = self.directory.join(name);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Some(database) = name.strip_suffix("-shm")
+            && let Ok(metadata) = fs::metadata(self.directory.join(database))
+        {
+            let _ = file.set_permissions(metadata.permissions());
+        }
+        OsSide::boxed(file, path)
     }
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
@@ -353,6 +372,11 @@ impl BlockFile for OsFile {
         self.file.unlock()
     }
 
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        let id = rhizodb_shm::file_id(&self.file)?;
+        Ok((id.volume, id.file))
+    }
+
     fn set_block_count(&self, count: u64) -> io::Result<()> {
         self.file.set_len(self.size.offset(count)?)
     }
@@ -414,8 +438,31 @@ fn locked_elsewhere(error: io::Error) -> io::Error {
     }
 }
 
+// ast-grep-ignore
+// A phase 1 reader's whole-file shared lock refuses writes for the moment it checks for -shm.
 #[cfg(windows)]
-fn write_all_at(file: &File, mut buffer: &[u8], mut offset: u64) -> io::Result<()> {
+fn write_all_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<()> {
+    let start = Instant::now();
+    let mut pause = Duration::from_micros(100);
+    loop {
+        match write_all_at_once(file, buffer, offset) {
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && start.elapsed() < WRITE_PATIENCE =>
+            {
+                thread::sleep(pause);
+                pause = pause.saturating_mul(2).min(LONGEST_LOCK_PAUSE);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+#[cfg(windows)]
+const WRITE_PATIENCE: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+fn write_all_at_once(file: &File, mut buffer: &[u8], mut offset: u64) -> io::Result<()> {
     while !buffer.is_empty() {
         match std::os::windows::fs::FileExt::seek_write(file, buffer, offset) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),

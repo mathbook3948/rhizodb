@@ -74,8 +74,10 @@ mod sys {
         let mut range: libc::flock = unsafe { std::mem::zeroed() };
         range.l_type = kind;
         range.l_whence = libc::SEEK_SET as libc::c_short;
-        range.l_start = offset as libc::off_t;
-        range.l_len = len as libc::off_t;
+        let out_of_range =
+            |_| io::Error::new(io::ErrorKind::InvalidInput, "the range passes off_t");
+        range.l_start = libc::off_t::try_from(offset).map_err(out_of_range)?;
+        range.l_len = libc::off_t::try_from(len).map_err(out_of_range)?;
         // SAFETY: the descriptor is open for as long as `file` is borrowed, and `range` is a
         // valid, initialized `flock` that outlives the call, which only reads it for these
         // commands.
