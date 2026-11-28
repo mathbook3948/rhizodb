@@ -83,6 +83,13 @@ pub(crate) trait BlockFile: Send + Sync + fmt::Debug {
         Ok(())
     }
 
+    /// Whether another handle holds an exclusive lock or the session lock on the file, which a
+    /// writer or a process of a multi-process session does. It tries the session's range lock
+    /// exclusively and releases it at once, and answers `false` where the file takes no locks.
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
     /// The identity of the file this handle reaches, the same through every path and link.
     fn identity(&self) -> io::Result<(u64, u128)> {
         Ok((0, 0))

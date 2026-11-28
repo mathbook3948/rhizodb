@@ -128,8 +128,17 @@ fn lock_or_skip_where_unsupported(
     }
 }
 
-#[cfg(windows)]
+// ast-grep-ignore
+// Past any block, so it never refuses a write on Windows; on Unix an fcntl lock converts atomically.
 const SESSION_BYTE: u64 = 1 << 62;
+
+fn try_session_range(file: &File, kind: Lock) -> Result<(), TryLockError> {
+    match rhizodb_shm::try_lock(file, SESSION_BYTE, 1, kind) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(TryLockError::WouldBlock),
+        Err(error) => Err(TryLockError::Error(error)),
+    }
+}
 
 // ast-grep-ignore
 // Opened once per process, since closing any descriptor of it drops every classic fcntl lock.
@@ -233,10 +242,13 @@ impl FileSystem for OsFs {
             .write(true)
             .create_new(true)
             .open(&path)?;
+        #[cfg(unix)]
         if let Some(database) = name.strip_suffix("-shm")
             && let Ok(metadata) = fs::metadata(self.directory.join(database))
         {
-            let _ = file.set_permissions(metadata.permissions());
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode() & 0o666;
+            let _ = file.set_permissions(fs::Permissions::from_mode(mode | ((mode & 0o444) >> 1)));
         }
         OsSide::boxed(file, path)
     }
@@ -329,12 +341,20 @@ impl BlockFile for OsFile {
         lock_or_skip_where_unsupported(|| self.file.try_lock())
     }
 
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        Ok(
+            rhizodb_shm::held_elsewhere(&self.file, SESSION_BYTE, 1, Lock::Exclusive)
+                .unwrap_or(false),
+        )
+    }
+
     fn lock_shared(&self) -> io::Result<()> {
         lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
     }
 
     #[cfg(not(windows))]
     fn lock_session(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))?;
         self.lock_shared()
     }
 
@@ -342,19 +362,16 @@ impl BlockFile for OsFile {
     // A shared lock on Windows denies writes to what it covers, so this one lies past any block.
     #[cfg(windows)]
     fn lock_session(&self) -> io::Result<()> {
-        lock_or_skip_where_unsupported(|| {
-            match rhizodb_shm::try_lock(&self.file, SESSION_BYTE, 1, Lock::Shared) {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(TryLockError::WouldBlock),
-                Err(error) => Err(TryLockError::Error(error)),
-            }
-        })?;
+        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))?;
         let _ = self.file.unlock();
         Ok(())
     }
 
     fn unlock(&self) -> io::Result<()> {
-        self.file.unlock()
+        self.file.unlock()?;
+        #[cfg(not(windows))]
+        let _ = rhizodb_shm::unlock(&self.file, SESSION_BYTE, 1);
+        Ok(())
     }
 
     fn identity(&self) -> io::Result<(u64, u128)> {

@@ -285,3 +285,29 @@ fn a_process_whose_database_file_differs_fails_to_join() {
     let error = elected.finish(&file, identity, 1).unwrap_err();
     assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
 }
+
+#[test]
+fn a_fallback_open_refuses_a_file_that_a_session_holds_elsewhere() {
+    let fs = written(1);
+    let _member = reader(&fs, 0).unwrap();
+    fs.refuse_side_sharing();
+    assert_eq!(
+        kind(reader(&fs, 0).unwrap_err()),
+        ErrorKind::DatabaseAlreadyOpen
+    );
+}
+
+#[test]
+fn no_second_session_starts_over_a_file_that_a_session_through_another_name_holds() {
+    let fs = written(1);
+    let _member = reader(&fs, 0).unwrap();
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    fs.rename(&side_name(NAME), "elsewhere-shm").unwrap();
+    match join(&fs, NAME, &file) {
+        Err(error) => assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen),
+        Ok(Joined::Alone { .. }) => {}
+        Ok(Joined::Session(_)) => panic!("a second session started over one file"),
+    }
+}
