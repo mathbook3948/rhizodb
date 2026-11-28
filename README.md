@@ -77,23 +77,23 @@ Measured on 2026-11-28 on 4 CPUs (Intel(R) Xeon(R) Processor), Linux 6.18.44-fc-
 
 | Workload | RhizoDB | LadybugDB | Faster |
 | --- | ---: | ---: | --- |
-| Point lookup by id | 0.416 | 0.847 | RhizoDB 2.0x |
-| Filtered scan | 0.303 | 0.378 | RhizoDB 1.2x |
-| `ORDER BY ... LIMIT` | 0.497 | 0.841 | RhizoDB 1.7x |
-| 1-hop neighbours | 0.316 | 0.608 | RhizoDB 1.9x |
-| 1-hop with a relationship property | 0.484 | 0.618 | RhizoDB 1.3x |
-| Sum of a relationship property | 52.1 | 1.40 | LadybugDB 37.1x |
-| 2-hop distinct | 0.644 | 8.57 | RhizoDB 13.3x |
-| 3-hop distinct | 4.61 | 32.7 | RhizoDB 7.1x |
-| Variable length `*1..3` | 5.08 | 26.8 | RhizoDB 5.3x |
-| Group by city | 1.88 | 2.49 | RhizoDB 1.3x |
-| Substring scan of a text property | 20.8 | 29.3 | RhizoDB 1.4x |
-| Keyword search | 52.1 | 375 | RhizoDB 7.2x |
-| Vector search | 203 | 398 | RhizoDB 2.0x |
-| Small commits | 67.0 | 203 | RhizoDB 3.0x |
-| Bulk update | 12.4 | 12.9 | similar |
-| Detach delete | 242 | 375 | RhizoDB 1.5x |
-| Bulk load | 676 | 905 | RhizoDB 1.3x |
+| Point lookup by id | 0.432 | 0.798 | RhizoDB 1.8x |
+| Filtered scan | 0.307 | 0.372 | similar |
+| `ORDER BY ... LIMIT` | 0.445 | 0.802 | RhizoDB 1.8x |
+| 1-hop neighbours | 0.310 | 0.601 | RhizoDB 1.9x |
+| 1-hop with a relationship property | 0.455 | 0.687 | RhizoDB 1.5x |
+| Sum of a relationship property | 2.82 | 1.19 | LadybugDB 2.4x |
+| 2-hop distinct | 0.705 | 10.2 | RhizoDB 14.5x |
+| 3-hop distinct | 4.78 | 35.3 | RhizoDB 7.4x |
+| Variable length `*1..3` | 5.28 | 27.9 | RhizoDB 5.3x |
+| Group by city | 1.91 | 2.56 | RhizoDB 1.3x |
+| Substring scan of a text property | 20.8 | 28.3 | RhizoDB 1.4x |
+| Keyword search | 52.9 | 406 | RhizoDB 7.7x |
+| Vector search | 215 | 394 | RhizoDB 1.8x |
+| Small commits | 68.0 | 202 | RhizoDB 3.0x |
+| Bulk update | 12.5 | 12.5 | similar |
+| Detach delete | 222 | 367 | RhizoDB 1.7x |
+| Bulk load | 723 | 902 | RhizoDB 1.2x |
 | File size after bulk load | 12.9 MiB | 13.0 MiB | similar |
 <!-- bench-table:end -->
 
@@ -101,8 +101,8 @@ The table is measured again on whatever machine runs it, so a later table may co
 A row times a whole batch of operations, such as 100 point lookups or 500 small commits, so compare the engines within a row rather than reading a time as one query's latency.
 [`crates/bench/ENGINES.md`](https://github.com/mathbook3948/rhizodb/blob/main/crates/bench/ENGINES.md) compares RhizoDB with SQLite, DuckDB, CozoDB, Neo4j, Memgraph, and FalkorDB on the same workloads.
 RhizoDB's vector index is exact and LadybugDB's is an HNSW graph, and both found every true nearest neighbour here.
-The two engines keep files of a similar size and are similar on the bulk update.
-LadybugDB sums a relationship property over every relationship far faster, since RhizoDB reads each relationship's chunk one relationship at a time.
+The two engines keep files of a similar size and are similar on the filtered scan and the bulk update.
+LadybugDB is faster at summing a relationship property over every relationship.
 
 ## Development
 
