@@ -806,7 +806,8 @@ fn open_segment<F: FileSystem>(
         )));
     }
     file.read(0, &mut block)?;
-    let header = SegmentHeader::decode(&block)?;
+    let header = SegmentHeader::decode(&block)
+        .map_err(|error| EngineError::corrupt(format!("log segment {sequence}: {error}")))?;
     if header.database_id != database_id || header.sequence != sequence {
         return Err(EngineError::corrupt(format!(
             "log segment {sequence} belongs to another database"
