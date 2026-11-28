@@ -6,6 +6,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -13,6 +14,13 @@ use std::time::Instant;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
+use super::session::SideFile;
+use super::session::SideLock;
+use super::session::SideWords;
+use super::session::WORDS;
+use rhizodb_shm::FileId;
+use rhizodb_shm::Lock;
+use rhizodb_shm::Mapping;
 
 /// The files of one directory of the operating system's file system.
 #[derive(Debug)]
@@ -21,32 +29,30 @@ pub(crate) struct OsFs {
     read_only: Option<Claim>,
 }
 
-static READ_ONLY_FILES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+static OPEN_FILES: Mutex<BTreeSet<FileId>> = Mutex::new(BTreeSet::new());
 
 // ast-grep-ignore
-// Shared locks of one process never conflict, so a claim keeps it to one open of a file.
+// Locks of one process need not conflict, so a claim keeps it to one open of a file by identity.
 #[derive(Debug)]
-struct Claim(PathBuf);
+struct Claim(FileId);
 
 impl Claim {
     fn take(path: PathBuf) -> io::Result<Self> {
-        let path = fs::canonicalize(path)?;
-        let mut held = READ_ONLY_FILES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !held.insert(path.clone()) {
+        let id = rhizodb_shm::file_id(&File::open(path)?)?;
+        let mut held = OPEN_FILES.lock().unwrap_or_else(PoisonError::into_inner);
+        if !held.insert(id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the database file is already open read-only in this process",
             ));
         }
-        Ok(Self(path))
+        Ok(Self(id))
     }
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        READ_ONLY_FILES
+        OPEN_FILES
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.0);
@@ -126,8 +132,150 @@ fn lock_or_skip_where_unsupported(
     }
 }
 
+// ast-grep-ignore
+// Past any block, so it never refuses a write on Windows; on Unix an fcntl lock converts atomically.
+const SESSION_BYTE: u64 = 1 << 62;
+
+// ast-grep-ignore
+// Off Linux a phase 1 reader locks this byte, since a whole-file lock would hide sessions from its test.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const READER_BYTE: u64 = SESSION_BYTE + 1;
+
+fn try_range(file: &File, at: u64, kind: Lock) -> Result<(), TryLockError> {
+    match rhizodb_shm::try_lock(file, at, 1, kind) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(TryLockError::WouldBlock),
+        Err(error) => Err(TryLockError::Error(error)),
+    }
+}
+
+fn held_by_others(file: &File, len: u64) -> io::Result<bool> {
+    match rhizodb_shm::held_elsewhere(file, SESSION_BYTE, len, Lock::Exclusive) {
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(false),
+        outcome => outcome,
+    }
+}
+
+#[cfg(unix)]
+fn another_session() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "a session through another path to the database file holds it",
+    )
+}
+
+// ast-grep-ignore
+// Opened once per process, since closing any descriptor of it drops every classic fcntl lock.
+#[derive(Debug)]
+struct OsSide {
+    file: File,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct OsWords(Mapping);
+
+impl SideWords for OsWords {
+    fn word(&self, index: usize) -> &AtomicU64 {
+        &self.0.words()[index]
+    }
+}
+
+impl OsSide {
+    fn boxed(file: File, path: PathBuf) -> io::Result<Box<dyn SideFile>> {
+        if !rhizodb_shm::is_local(&file)? {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "processes on other machines share no memory, so a session needs a local file \
+                 system",
+            ));
+        }
+        Ok(Box::new(Self { file, path }))
+    }
+}
+
+impl SideFile for OsSide {
+    fn lock(&self, at: SideLock, kind: Lock) -> io::Result<()> {
+        rhizodb_shm::lock(&self.file, at.offset(), 1, kind)
+    }
+
+    fn try_lock(&self, at: SideLock, kind: Lock) -> io::Result<bool> {
+        rhizodb_shm::try_lock(&self.file, at.offset(), 1, kind)
+    }
+
+    fn unlock(&self, at: SideLock) -> io::Result<()> {
+        rhizodb_shm::unlock(&self.file, at.offset(), 1)
+    }
+
+    fn downgrade(&self, at: SideLock) -> io::Result<()> {
+        rhizodb_shm::downgrade(&self.file, at.offset(), 1)
+    }
+
+    #[cfg(not(windows))]
+    fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
+        self.try_lock(at, Lock::Exclusive)
+    }
+
+    #[cfg(windows)]
+    fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
+        self.unlock(at)?;
+        if self.try_lock(at, Lock::Exclusive)? {
+            return Ok(true);
+        }
+        self.lock(at, Lock::Shared)?;
+        Ok(false)
+    }
+
+    fn is_named(&self) -> io::Result<bool> {
+        let named = match File::open(&self.path) {
+            Ok(named) => named,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(rhizodb_shm::file_id(&named)? == rhizodb_shm::file_id(&self.file)?)
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        fs::remove_file(&self.path)
+    }
+
+    fn map(&self, grow: bool) -> io::Result<Box<dyn SideWords>> {
+        if grow {
+            rhizodb_shm::reserve(&self.file, (WORDS * 8) as u64)?;
+        }
+        Ok(Box::new(OsWords(Mapping::new(&self.file, WORDS)?)))
+    }
+}
+
 impl FileSystem for OsFs {
     type File = OsFile;
+
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        let path = self.directory.join(name);
+        let file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        OsSide::boxed(file, path)
+    }
+
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        let path = self.directory.join(name);
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        #[cfg(unix)]
+        if let Some(database) = name.strip_suffix("-shm")
+            && let Ok(metadata) = fs::metadata(self.directory.join(database))
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode() & 0o666;
+            let _ = file.set_permissions(fs::Permissions::from_mode(mode | ((mode & 0o444) >> 1)));
+        }
+        OsSide::boxed(file, path)
+    }
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         self.writable()?;
@@ -162,6 +310,10 @@ impl FileSystem for OsFs {
 
     fn remove(&self, name: &str) -> io::Result<()> {
         self.writable()?;
+        fs::remove_file(self.directory.join(name))
+    }
+
+    fn remove_side(&self, name: &str) -> io::Result<()> {
         fs::remove_file(self.directory.join(name))
     }
 
@@ -234,8 +386,63 @@ impl BlockFile for OsFile {
         lock_or_skip_where_unsupported(|| self.file.try_lock())
     }
 
+    fn held_elsewhere(&self) -> io::Result<bool> {
+        held_by_others(&self.file, 1)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn lock_shared(&self) -> io::Result<()> {
         lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn lock_shared(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| try_range(&self.file, READER_BYTE, Lock::Shared))
+    }
+
+    // ast-grep-ignore
+    // Linux keeps flock and range locks apart, and its flock unlocks before it turns shared.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        if first && self.held_elsewhere()? {
+            return Err(another_session());
+        }
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
+        self.lock_shared()
+    }
+
+    // ast-grep-ignore
+    // BSD kernels keep flock and fcntl locks in one list, so a test runs only while no flock is held.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    fn lock_session(&self, first: bool) -> io::Result<()> {
+        self.file.unlock()?;
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
+        if first && held_by_others(&self.file, 2)? {
+            let _ = rhizodb_shm::unlock(&self.file, SESSION_BYTE, 1);
+            return Err(another_session());
+        }
+        lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
+    }
+
+    // ast-grep-ignore
+    // A shared lock on Windows denies writes to what it covers, so this one lies past any block.
+    #[cfg(windows)]
+    fn lock_session(&self, _first: bool) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| try_range(&self.file, SESSION_BYTE, Lock::Shared))?;
+        let _ = self.file.unlock();
+        Ok(())
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        self.file.unlock()?;
+        #[cfg(not(windows))]
+        let _ = rhizodb_shm::unlock(&self.file, SESSION_BYTE, 1);
+        Ok(())
+    }
+
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        let id = rhizodb_shm::file_id(&self.file)?;
+        Ok((id.volume, id.file))
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {
@@ -299,8 +506,31 @@ fn locked_elsewhere(error: io::Error) -> io::Error {
     }
 }
 
+// ast-grep-ignore
+// A phase 1 reader's whole-file shared lock refuses writes for the moment it checks for -shm.
 #[cfg(windows)]
-fn write_all_at(file: &File, mut buffer: &[u8], mut offset: u64) -> io::Result<()> {
+fn write_all_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<()> {
+    let start = Instant::now();
+    let mut pause = Duration::from_micros(100);
+    loop {
+        match write_all_at_once(file, buffer, offset) {
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && start.elapsed() < WRITE_PATIENCE =>
+            {
+                thread::sleep(pause);
+                pause = pause.saturating_mul(2).min(LONGEST_LOCK_PAUSE);
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+#[cfg(windows)]
+const WRITE_PATIENCE: Duration = Duration::from_secs(2);
+
+#[cfg(windows)]
+fn write_all_at_once(file: &File, mut buffer: &[u8], mut offset: u64) -> io::Result<()> {
     while !buffer.is_empty() {
         match std::os::windows::fs::FileExt::seek_write(file, buffer, offset) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),

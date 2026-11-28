@@ -127,8 +127,8 @@ impl OpenOptions {
     /// in the same process fails with `DatabaseAlreadyOpen` too; share the one `Database`
     /// across threads instead.
     ///
-    /// It never creates, writes, renames, or removes a file, whatever [`OpenOptions::create`]
-    /// says: a path with no file or an empty file fails with
+    /// It never creates, writes, renames, or removes a file but one, whatever
+    /// [`OpenOptions::create`] says: a path with no file or an empty file fails with
     /// [`ErrorKind::DatabaseNotFound`](crate::ErrorKind::DatabaseNotFound). After an unclean
     /// shutdown it replays the write-ahead log into memory and leaves the log as it is, so reads
     /// see every commit the log holds, once it has synced the log so that no power loss takes
@@ -149,9 +149,17 @@ impl OpenOptions {
     /// [`Database::snapshot`] fails with `ReadOnly` after a crash cut a checkpoint between its
     /// stages, until an open that writes finishes it.
     ///
-    /// A read-only open also fails with `DatabaseAlreadyOpen` while a file named after the
-    /// database file with `-shm` lies beside it, which a later build keeps for processes that
-    /// share the file while one of them writes, since this build cannot read alongside them.
+    /// The one file it creates and writes is the side file named after the database file with
+    /// `-shm`, which every process that has the file open read-only maps to share the state of
+    /// their session, created with the database file's permissions. The last of them to close
+    /// removes it, and it is never needed to read the database. Where the directory refuses to
+    /// create it, as on read-only media, or on a file system that is not local, the open reads
+    /// the file alone instead, leaves no side file, and still shares the file with any number
+    /// of such opens. A process of another build fails to
+    /// join a running session with `DatabaseAlreadyOpen`, and an open that finds every slot of
+    /// the session taken fails with
+    /// [`ErrorKind::TooManyProcesses`](crate::ErrorKind::TooManyProcesses). A read-only open of
+    /// an earlier release refuses a file while a side file lies beside it.
     ///
     /// ```
     /// use rhizodb::Database;
@@ -361,10 +369,14 @@ impl OpenOptions {
                 format!("there is no database file at {}", path.display()),
             ));
         }
+        let engine = EngineOptions {
+            build: crate::graph::build_identity(),
+            ..self.engine
+        };
         let backend = if self.read_only {
-            open_backend_read_only(path, self.engine)?
+            open_backend_read_only(path, engine)?
         } else {
-            open_backend(path, self.engine)?
+            open_backend(path, engine)?
         };
         self.database(graph_on(backend, self.replica)?)
     }

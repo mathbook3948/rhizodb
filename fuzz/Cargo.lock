@@ -170,6 +170,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -240,6 +249,7 @@ dependencies = [
  "memchr",
  "regex-automata",
  "regex-syntax",
+ "rhizodb-shm",
  "rustix",
  "twox-hash",
  "unicode-normalization",
@@ -253,6 +263,16 @@ dependencies = [
  "libfuzzer-sys",
  "rhizodb",
  "tempfile",
+]
+
+[[package]]
+name = "rhizodb-shm"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "memmap2",
+ "rustix",
+ "windows-sys",
 ]
 
 [[package]]

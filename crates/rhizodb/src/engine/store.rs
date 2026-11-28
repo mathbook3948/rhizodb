@@ -55,6 +55,11 @@ use super::node::CellValue;
 use super::page::page_seed;
 use super::pages::PageSource;
 use super::pages::Pages;
+use super::session;
+use super::session::Identity as SessionIdentity;
+use super::session::Joined;
+use super::session::Session;
+use super::session::side_name;
 use super::staged::Staged;
 use super::staged::StagedOp;
 use super::tree::Tree;
@@ -143,6 +148,9 @@ pub(crate) struct EngineOptions {
     pub(crate) max_retained_bytes: u64,
     /// How long an export may pin a checkpoint before the engine releases it.
     pub(crate) pin_limit: Duration,
+    /// The graph format and tokenizer of this build, hashed, which every process of a
+    /// multi-process session must share.
+    pub(crate) build: u64,
 }
 
 impl Default for EngineOptions {
@@ -157,6 +165,7 @@ impl Default for EngineOptions {
             stage_floor: 256,
             max_retained_bytes: 1 << 30,
             pin_limit: Duration::from_secs(3600),
+            build: 0,
         }
     }
 }
@@ -261,6 +270,14 @@ struct Shared<F: FileSystem> {
     log_first: AtomicU64,
     retention: Mutex<Retention>,
     compaction_due: AtomicBool,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "held for the locks and slot it gives up when dropped"
+        )
+    )]
+    session: Option<Session>,
     #[cfg(test)]
     clock_ahead: Mutex<Duration>,
     #[cfg(test)]
@@ -351,11 +368,6 @@ fn write_new_database<F: BlockFile>(file: &F) -> Result<(), EngineError> {
 /// began a term from a copy of it.
 pub(crate) fn new_incarnation() -> u128 {
     (u128::from(random_u64()) << 64) | u128::from(random_u64())
-}
-
-/// The side file a multi-process session of a later build keeps beside the database file `name`.
-pub(crate) fn session_file_name(name: &str) -> String {
-    format!("{name}-shm")
 }
 
 pub(crate) fn staging_name(name: &str) -> String {
@@ -868,16 +880,38 @@ impl<F: FileSystem + 'static> Engine<F> {
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
         let file = fs.open(name, block_size()?)?;
-        file.lock_shared()?;
-        if fs.names()?.contains(&session_file_name(name)) {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "a multi-process session may hold the database file, since its -shm file exists, \
-                 and a read-only open of this build takes no part in one",
-            )
-            .into());
-        }
-        Self::start(fs, name, load(file, &options)?, options, true)
+        let session = match session::join(&*fs, name, &file)? {
+            Joined::Alone { recheck } => {
+                file.lock_shared()?;
+                if recheck && fs.names()?.contains(&side_name(name)) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "a multi-process session may hold the database file, since its -shm \
+                         file exists, and this open cannot take part in it",
+                    )
+                    .into());
+                }
+                if file.held_elsewhere()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "a multi-process session holds the database file through another path, \
+                         or an older build holds it where a lock test cannot tell the two apart",
+                    )
+                    .into());
+                }
+                None
+            }
+            Joined::Session(elected) => {
+                let (header, _) = read_header(&file)?;
+                let identity = SessionIdentity {
+                    build: options.build,
+                    database_id: header.database_id,
+                    file: file.identity()?,
+                };
+                Some(elected.finish(&file, identity, header.generation)?)
+            }
+        };
+        Self::start(fs, name, load(file, &options)?, options, true, session)
     }
 
     /// Opens the database `loaded` read from the locked file named `name`, as [`Engine::open`]
@@ -888,7 +922,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         loaded: Loaded<F::File>,
         options: EngineOptions,
     ) -> Result<Self, EngineError> {
-        Self::start(fs, name, loaded, options, false)
+        Self::start(fs, name, loaded, options, false, None)
     }
 
     fn start(
@@ -897,6 +931,7 @@ impl<F: FileSystem + 'static> Engine<F> {
         loaded: Loaded<F::File>,
         options: EngineOptions,
         read_only: bool,
+        session: Option<Session>,
     ) -> Result<Self, EngineError> {
         let Loaded {
             pages,
@@ -1017,6 +1052,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 ..Retention::default()
             }),
             compaction_due: AtomicBool::new(false),
+            session,
             #[cfg(test)]
             clock_ahead: Mutex::new(Duration::ZERO),
             #[cfg(test)]
@@ -1050,6 +1086,12 @@ impl<F: FileSystem + 'static> Engine<F> {
         let view = published.view.clone();
         *published.readers.entry(view.snapshot).or_default() += 1;
         view
+    }
+
+    /// The slot of the multi-process session this engine holds, if it takes part in one.
+    #[cfg(test)]
+    pub(crate) fn session_slot(&self) -> Option<usize> {
+        self.shared.session.as_ref().map(Session::slot)
     }
 
     /// How many entries scans have copied out of the memtables the published view reads.
