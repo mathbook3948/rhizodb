@@ -371,10 +371,20 @@ impl BlockFile for OsFile {
         lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
     }
 
-    #[cfg(not(windows))]
+    // ast-grep-ignore
+    // Linux turns a flock shared by unlocking it first, so the range lock covers that gap.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn lock_session(&self) -> io::Result<()> {
         lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))?;
         self.lock_shared()
+    }
+
+    // ast-grep-ignore
+    // BSD kernels keep flock and fcntl locks in one list and turn a flock shared in place.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    fn lock_session(&self) -> io::Result<()> {
+        self.lock_shared()?;
+        lock_or_skip_where_unsupported(|| try_session_range(&self.file, Lock::Shared))
     }
 
     // ast-grep-ignore
