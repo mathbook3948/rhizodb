@@ -255,3 +255,52 @@ fn a_reader_that_caught_up_in_the_background_reads_with_the_writers_newest_index
         "the reader paired new rows with an old index"
     );
 }
+
+#[test]
+fn reader_threads_keep_reading_beside_a_writer_that_commits_and_compacts() {
+    let fs = SimFs::new();
+    let writer = open_shared_writer(&fs).unwrap();
+    insert_items(&writer, 10);
+    let reader = Arc::new(open_read_only(&fs).unwrap());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let committing = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let mut round = 0;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                writer
+                    .execute("INSERT (:Item {i: 5})", &Parameters::new())
+                    .unwrap();
+                round += 1;
+                if round % 20 == 0 {
+                    writer.compact().unwrap();
+                }
+            }
+        })
+    };
+    let (done, finished) = std::sync::mpsc::channel();
+    for _ in 0..3 {
+        let reader = Arc::clone(&reader);
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut last = 0;
+            for _ in 0..400 {
+                let seen = count(&reader, "Item");
+                assert!(seen >= last, "a reader went back from {last} to {seen}");
+                assert!(
+                    fives(&reader) >= seen - 9,
+                    "the index lost rows the reader read"
+                );
+                last = seen;
+            }
+            let _ = done.send(last);
+        });
+    }
+    for _ in 0..3 {
+        finished
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the reader threads stalled, as a deadlock leaves them");
+    }
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    committing.join().unwrap();
+}

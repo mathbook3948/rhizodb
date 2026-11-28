@@ -413,6 +413,15 @@ fn seal(key: &[u8], bytes: &mut [u8]) {
     bytes[CHECKSUM_AT..FLAGS_AT].copy_from_slice(&sum.to_le_bytes());
 }
 
+/// Writes the checksum of a part or delta stored under `key` again over whatever its bytes now
+/// hold, so a fuzzer's damage reaches the parser behind the check.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn reseal_for_fuzzing(key: &[u8], bytes: &mut [u8]) {
+    if bytes.len() >= FLAGS_AT {
+        seal(key, bytes);
+    }
+}
+
 fn checked(key: &[u8], bytes: &[u8]) -> Result<(), GraphError> {
     if bytes.len() < FLAGS_AT || bytes[0] != LAYOUT_VERSION {
         return Err(UNKNOWN_LAYOUT);

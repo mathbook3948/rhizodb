@@ -264,6 +264,11 @@ pub(crate) enum Peek<'a> {
 }
 
 pub(crate) trait ReadTransaction {
+    /// Whether the transaction sees only committed data, as a read snapshot does, so what it
+    /// reads may enter caches that every transaction shares. A write transaction sees its own
+    /// writes, which a rollback can undo.
+    const SEES_ONLY_COMMITTED: bool;
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Every entry whose key starts with `prefix`, in ascending key order. An empty prefix scans the table.

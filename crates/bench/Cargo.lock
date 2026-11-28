@@ -2530,7 +2530,7 @@ checksum = "4389f1d5789befaf6029ebd9f7dac4af7f7e3d61b69d4f30e2ac02b57e7712b0"
 
 [[package]]
 name = "rhizodb"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "crc32fast",
  "jiff",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "rhizodb-shm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "memmap2",

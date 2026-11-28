@@ -723,43 +723,139 @@ fn a_database_of_format_eleven_moves_every_relationship_record_into_its_chunk() 
     }
 }
 
-#[test]
-fn a_database_of_format_fourteen_seals_every_relationship_chunk_with_its_checksum() {
+/// Rewrites a database of the current format in the layout of format `older`, 14 or 15.
+pub(crate) fn store_as_format(older: u32, write: &mut impl WriteTransaction) {
+    match older {
+        14 => store_as_format_fourteen(write),
+        15 => store_as_format_fifteen(write),
+        _ => unreachable!("no test stores format {older}"),
+    }
+}
+
+fn assert_upgrades_every_relationship_chunk(older: u32) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("graph.rhizodb");
     let expected = {
         let graph = Graph::open(test_engine::open(&path)).unwrap();
         let expected = many_relationships(&graph);
         let mut previous = graph.storage.begin_write().unwrap();
-        store_as_format_fourteen(&mut previous);
+        store_as_format(older, &mut previous);
         previous.commit().unwrap();
         expected
     };
-    let unsealed = test_engine::open(&path)
+    let older = test_engine::open(&path)
         .begin_read()
         .unwrap()
         .scan_prefix(Table::RelationshipChunks, &[])
         .unwrap();
-    assert!(unsealed.len() > 2048);
+    assert!(older.len() > 2048);
     assert!(
-        unsealed
+        older
             .iter()
             .all(|(key, value)| ChunkRef::parse(key, value).is_err())
     );
     for _ in 0..2 {
         let graph = Graph::open(test_engine::open(&path)).unwrap();
         assert_holds_relationships(&graph, &expected);
-        let sealed = graph
+        let upgraded = graph
             .read()
             .unwrap()
             .transaction
             .scan_prefix(Table::RelationshipChunks, &[])
             .unwrap();
-        assert_eq!(sealed.len(), unsealed.len());
-        for ((key, value), (unsealed_key, unsealed_value)) in sealed.iter().zip(&unsealed) {
-            assert_eq!(key, unsealed_key);
-            assert_eq!(relationships::unsealed(value), *unsealed_value);
+        assert_eq!(upgraded.len(), older.len());
+        for ((key, value), (older_key, older_value)) in upgraded.iter().zip(&older) {
+            assert_eq!(key, older_key);
+            assert!(ChunkRef::parse(key, value).is_ok());
+            assert_eq!(
+                relationships::stored_records(key, value),
+                relationships::stored_records(older_key, older_value)
+            );
         }
+    }
+}
+
+#[test]
+fn a_database_of_format_fourteen_seals_every_relationship_chunk_with_its_checksum() {
+    assert_upgrades_every_relationship_chunk(14);
+}
+
+#[test]
+fn a_database_of_format_fifteen_stores_every_relationship_chunk_in_columns() {
+    assert_upgrades_every_relationship_chunk(15);
+}
+
+#[test]
+fn an_upgrade_from_format_fifteen_takes_fewer_bytes_for_the_same_relationships() {
+    let graph = memory_graph();
+    many_relationships(&graph);
+    let bytes = |graph: &Graph<TestStorage>| -> usize {
+        graph
+            .storage
+            .begin_read()
+            .unwrap()
+            .scan_prefix(Table::RelationshipChunks, &[])
+            .unwrap()
+            .iter()
+            .map(|(_, value)| value.len())
+            .sum()
+    };
+    let columns = bytes(&graph);
+    let mut previous = graph.storage.begin_write().unwrap();
+    store_as_format_fifteen(&mut previous);
+    previous.commit().unwrap();
+    let records = bytes(&graph);
+    assert!(
+        columns * 4 < records * 3,
+        "{columns} bytes in columns, {records} in records"
+    );
+}
+
+#[test]
+fn an_upgrade_from_format_fifteen_refuses_a_damaged_chunk() {
+    let unframed = |records: &[(usize, Vec<u8>)], key: &[u8]| {
+        let mut value = relationships::in_records_layout(key, records);
+        value.push(0);
+        relationships::with_checksum(key, value)
+    };
+    let undecodable = |_: &[(usize, Vec<u8>)], key: &[u8]| {
+        relationships::in_records_layout(key, &[(0, vec![0xff; 3])])
+    };
+    let unsealed = |records: &[(usize, Vec<u8>)], key: &[u8]| {
+        let mut value = relationships::in_records_layout(key, records);
+        value[1] ^= 1;
+        value
+    };
+    for damage in [
+        unframed as fn(&[(usize, Vec<u8>)], &[u8]) -> Vec<u8>,
+        undecodable,
+        unsealed,
+    ] {
+        let graph = memory_graph();
+        let mut write = graph.write().unwrap();
+        let knows: Token<RelationshipType> = write.intern_token("KNOWS").unwrap();
+        let node = write.create_node(node_with(&[])).unwrap();
+        write
+            .create_relationship(&relationship(knows, node, node))
+            .unwrap();
+        write.commit().unwrap();
+        let mut previous = graph.storage.begin_write().unwrap();
+        store_as_format_fifteen(&mut previous);
+        let (key, value) = previous
+            .scan_prefix(Table::RelationshipChunks, &[])
+            .unwrap()
+            .remove(0);
+        let records = relationships::stored_records(&key, &value);
+        previous
+            .put(Table::RelationshipChunks, &key, &damage(&records, &key))
+            .unwrap();
+        previous.commit().unwrap();
+        let Graph { storage, .. } = graph;
+
+        assert!(matches!(
+            Graph::open(storage),
+            Err(GraphError::Decode(_) | GraphError::Corrupt(_))
+        ));
     }
 }
 
@@ -773,9 +869,7 @@ fn an_upgrade_from_format_fourteen_refuses_to_seal_a_damaged_chunk() {
     let undecodable = |_: &[u8], key: &[u8]| {
         let record = [0xff; 3];
         assert!(RelationshipRecord::decode(&record).is_err());
-        let mut edit = ChunkEdit::default();
-        edit.set(0, Some(&record));
-        relationships::unsealed(&edit.encode(key).unwrap())
+        relationships::unsealed(key, &[(0, record.to_vec())])
     };
     for damage in [unframed as fn(&[u8], &[u8]) -> Vec<u8>, undecodable] {
         let graph = memory_graph();
@@ -805,15 +899,38 @@ fn an_upgrade_from_format_fourteen_refuses_to_seal_a_damaged_chunk() {
     }
 }
 
-/// Rewrites a database of the current format in the layout of format 14, whose relationship
-/// chunks carried no checksum, so a test can open it as an older version.
-pub(crate) fn store_as_format_fourteen(write: &mut impl WriteTransaction) {
+/// Rewrites a database of the current format in the layout of format 15, whose relationship
+/// chunks held each record after its length, so a test can open it as an older version.
+pub(crate) fn store_as_format_fifteen(write: &mut impl WriteTransaction) {
     for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
+        let records = relationships::stored_records(&key, &value);
         write
             .put(
                 Table::RelationshipChunks,
                 &key,
-                &relationships::unsealed(&value),
+                &relationships::in_records_layout(&key, &records),
+            )
+            .unwrap();
+    }
+    write
+        .put(
+            Table::Metadata,
+            keys::FORMAT_VERSION_KEY,
+            &15u32.to_be_bytes(),
+        )
+        .unwrap();
+}
+
+/// Rewrites a database of the current format in the layout of format 14, whose relationship
+/// chunks carried no checksum, so a test can open it as an older version.
+pub(crate) fn store_as_format_fourteen(write: &mut impl WriteTransaction) {
+    for (key, value) in write.scan_prefix(Table::RelationshipChunks, &[]).unwrap() {
+        let records = relationships::stored_records(&key, &value);
+        write
+            .put(
+                Table::RelationshipChunks,
+                &key,
+                &relationships::unsealed(&key, &records),
             )
             .unwrap();
     }
@@ -872,7 +989,7 @@ pub(crate) fn store_as_format_eleven(write: &mut impl WriteTransaction) {
             let (slot, record) = entry.unwrap();
             let id = relationships::relationship_at(chunk, slot);
             write
-                .put(Table::Relationships, &keys::element_key(id.0), record)
+                .put(Table::Relationships, &keys::element_key(id.0), &record)
                 .unwrap();
         }
         write.delete(Table::RelationshipChunks, &key).unwrap();
@@ -937,6 +1054,9 @@ impl GatedWrite<'_> {
 }
 
 impl ReadTransaction for GatedWrite<'_> {
+    const SEES_ONLY_COMMITTED: bool =
+        <<TestStorage as Storage>::Write<'static> as ReadTransaction>::SEES_ONLY_COMMITTED;
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.count(table);
         self.inner.get(table, key)

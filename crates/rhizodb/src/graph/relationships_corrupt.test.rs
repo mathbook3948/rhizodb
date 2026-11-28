@@ -32,7 +32,7 @@ fn decoded(key: &[u8], bytes: &[u8]) -> Option<Vec<RelationshipRecord>> {
     ChunkRef::parse(key, bytes)
         .ok()?
         .entries()
-        .map(|entry| RelationshipRecord::decode(entry.ok()?.1).ok())
+        .map(|entry| RelationshipRecord::decode(&entry.ok()?.1).ok())
         .collect()
 }
 
@@ -46,10 +46,7 @@ fn silent_damage(key: &[u8], value: &[u8]) -> Vec<u8> {
             damaged
         })
         .find(|damaged| {
-            relationships::seal(key, &relationships::unsealed(damaged))
-                .ok()
-                .flatten()
-                .and_then(|resealed| decoded(key, &resealed))
+            decoded(key, &relationships::with_checksum(key, damaged.clone()))
                 .is_some_and(|after| after != before)
         })
         .expect("some damage of one byte decodes as other records")
@@ -118,7 +115,11 @@ fn a_relationship_chunk_stored_under_another_chunks_key_fails_the_check() {
 fn a_relationship_chunk_without_its_checksum_fails_as_corrupt_data_in_the_current_format() {
     let db = database_with_relationships();
     let (key, value) = stored_chunks(&db).remove(0);
-    store_chunk(&db, &key, &relationships::unsealed(&value));
+    store_chunk(
+        &db,
+        &key,
+        &relationships::unsealed(&key, &relationships::stored_records(&key, &value)),
+    );
 
     assert_eq!(db.check().unwrap_err().kind(), ErrorKind::CorruptData);
     assert_eq!(

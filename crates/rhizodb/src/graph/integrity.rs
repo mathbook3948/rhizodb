@@ -627,7 +627,7 @@ impl<T: ReadTransaction> GraphTx<T> {
                             let (slot, record) = entry?;
                             Ok((
                                 relationships::relationship_at(chunk, slot),
-                                RelationshipRecord::decode(record)?,
+                                RelationshipRecord::decode(&record)?,
                             ))
                         })
                         .collect()

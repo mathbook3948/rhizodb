@@ -33,6 +33,14 @@ const ORDER_LIMIT: Texts = Texts::graph(
 const HOP_1: Texts = Texts::graph("MATCH (a:Person {id: $id})-[:KNOWS]->(b:Person) RETURN b.id")
     .sql("SELECT dst FROM knows WHERE src = $id")
     .datalog("?[b] := *knows{src: $id, dst: b}");
+const HOP_1_SINCE: Texts =
+    Texts::graph("MATCH (a:Person {id: $id})-[k:KNOWS]->(b:Person) RETURN b.id, k.since")
+        .sql("SELECT dst, since FROM knows WHERE src = $id")
+        .datalog("?[b, since] := *knows{src: $id, dst: b, since}");
+const SUM_SINCE: Texts =
+    Texts::graph("MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(*), sum(k.since)")
+        .sql("SELECT count(*), sum(since) FROM knows")
+        .datalog("?[count(src), sum(since)] := *knows{src, dst, since}");
 const HOP_2: Texts = Texts::graph(
     "MATCH (a:Person {id: $id})-[:KNOWS]->(:Person)-[:KNOWS]->(c:Person) RETURN count(DISTINCT c)",
 )
@@ -84,6 +92,8 @@ pub fn workloads() -> Vec<Workload> {
         read("read/filter-scan", filter_scan),
         read("read/order-limit", order_limit),
         read("traverse/1-hop", hop_1),
+        read("traverse/1-hop-since", hop_1_since),
+        read("scan/knows-since-sum", sum_since),
         read("traverse/2-hop-distinct", hop_2),
         read("traverse/3-hop-distinct", hop_3),
         read("traverse/variable-length-1..3", variable_length),
@@ -151,6 +161,14 @@ fn order_limit(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
 
 fn hop_1(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
     starting_at(ctx, &HOP_1)
+}
+
+fn hop_1_since(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
+    starting_at(ctx, &HOP_1_SINCE)
+}
+
+fn sum_since(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
+    single(ctx, &SUM_SINCE)
 }
 
 fn hop_2(ctx: &Context<'_>) -> Result<Measurement, EngineError> {
