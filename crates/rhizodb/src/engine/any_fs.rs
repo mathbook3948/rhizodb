@@ -16,6 +16,7 @@ use super::mem_fs::MemFile;
 use super::mem_fs::MemFs;
 use super::os_fs::OsFile;
 use super::os_fs::OsFs;
+use super::session::SideFile;
 use super::snapshot::install;
 use super::store::Engine;
 use super::store::EngineOptions;
@@ -96,6 +97,24 @@ impl FileSystem for AnyFs {
             AnyFs::Sim(fs) => fs.sync_names(),
         }
     }
+
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        match self {
+            AnyFs::Os(fs) => fs.open_side(name),
+            AnyFs::Memory(fs) => fs.open_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.open_side(name),
+        }
+    }
+
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        match self {
+            AnyFs::Os(fs) => fs.create_side(name),
+            AnyFs::Memory(fs) => fs.create_side(name),
+            #[cfg(test)]
+            AnyFs::Sim(fs) => fs.create_side(name),
+        }
+    }
 }
 
 impl BlockFile for AnyFile {
@@ -150,6 +169,24 @@ impl BlockFile for AnyFile {
             AnyFile::Memory(file) => file.lock_shared(),
             #[cfg(test)]
             AnyFile::Sim(file) => file.lock_shared(),
+        }
+    }
+
+    fn lock_session(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.lock_session(),
+            AnyFile::Memory(file) => file.lock_session(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.lock_session(),
+        }
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        match self {
+            AnyFile::Os(file) => file.unlock(),
+            AnyFile::Memory(file) => file.unlock(),
+            #[cfg(test)]
+            AnyFile::Sim(file) => file.unlock(),
         }
     }
 

@@ -35,12 +35,14 @@ fn read_only() -> OpenOptions {
     OpenOptions::new().read_only(true)
 }
 
-/// Every file in `directory` with its bytes.
+/// Every file in `directory` with its bytes, but the side file of a multi-process session,
+/// which a read-only open creates beside the database file and changes as processes join.
 fn files(directory: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     std::fs::read_dir(directory)
         .unwrap()
-        .map(|entry| {
-            let path = entry.unwrap().path();
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| !path.to_string_lossy().ends_with("-shm"))
+        .map(|path| {
             let bytes = std::fs::read(&path).unwrap();
             (path, bytes)
         })
@@ -280,6 +282,79 @@ impl Holder {
         assert_eq!(self.line_starting("still "), "100");
         assert!(self.child.wait().unwrap().success());
     }
+}
+
+impl Holder {
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
+/// Starts a read-only child and kills it after `delay`, wherever its open has got to.
+fn kill_while_opening(path: &Path, delay: Duration) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["read_only_child", "--exact", "--ignored", "--nocapture"])
+        .env(DATABASE_ENV, path)
+        .env(MODE_ENV, "read")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(delay);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+fn next(seed: &mut u64) -> u64 {
+    *seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+#[test]
+fn read_only_processes_killed_at_any_point_leave_the_session_to_the_rest_and_then_to_a_writer() {
+    let (directory, path) = graph_file();
+    let before = files(directory.path());
+    let mut seed = seed();
+    let mut holders: Vec<Holder> = (0..3).map(|_| Holder::spawn(&path, "read")).collect();
+    for round in 0..8 {
+        let victim = (next(&mut seed) % holders.len() as u64) as usize;
+        holders.swap_remove(victim).kill();
+        kill_while_opening(&path, Duration::from_millis(next(&mut seed) % 40));
+        holders.push(Holder::spawn(&path, "read"));
+        assert_eq!(
+            count(&read_only().open(&path).unwrap()),
+            100,
+            "round {round}"
+        );
+        let error = Database::open(&path).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DatabaseAlreadyOpen,
+            "round {round}: {error}"
+        );
+    }
+    for holder in holders {
+        holder.kill();
+    }
+    kill_while_opening(&path, Duration::from_millis(next(&mut seed) % 40));
+    assert_eq!(files(directory.path()), before);
+    assert_eq!(count(&Database::open(&path).unwrap()), 100);
+}
+
+#[test]
+fn a_process_opens_a_file_read_only_once_through_any_of_its_names() {
+    let (directory, path) = graph_file();
+    let link = directory.path().join("linked.rhizodb");
+    std::fs::hard_link(&path, &link).unwrap();
+    let db = read_only().open(&path).unwrap();
+    let error = read_only().open(&link).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DatabaseAlreadyOpen, "{error}");
+    drop(db);
+    assert_eq!(count(&read_only().open(&link).unwrap()), 100);
 }
 
 impl Drop for Holder {

@@ -19,6 +19,7 @@ pub(crate) mod node;
 pub(crate) mod os_fs;
 pub(crate) mod page;
 pub(crate) mod pages;
+pub(crate) mod session;
 #[cfg(test)]
 pub(crate) mod sim_fs;
 pub(crate) mod snapshot;

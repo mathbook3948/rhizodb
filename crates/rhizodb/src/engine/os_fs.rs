@@ -6,6 +6,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -13,6 +14,13 @@ use std::time::Instant;
 use super::block_file::BlockFile;
 use super::block_file::BlockSize;
 use super::block_file::FileSystem;
+use super::session::SideFile;
+use super::session::SideLock;
+use super::session::SideWords;
+use super::session::WORDS;
+use rhizodb_shm::FileId;
+use rhizodb_shm::Lock;
+use rhizodb_shm::Mapping;
 
 /// The files of one directory of the operating system's file system.
 #[derive(Debug)]
@@ -21,32 +29,30 @@ pub(crate) struct OsFs {
     read_only: Option<Claim>,
 }
 
-static READ_ONLY_FILES: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+static OPEN_FILES: Mutex<BTreeSet<FileId>> = Mutex::new(BTreeSet::new());
 
 // ast-grep-ignore
-// Shared locks of one process never conflict, so a claim keeps it to one open of a file.
+// Locks of one process need not conflict, so a claim keeps it to one open of a file by identity.
 #[derive(Debug)]
-struct Claim(PathBuf);
+struct Claim(FileId);
 
 impl Claim {
     fn take(path: PathBuf) -> io::Result<Self> {
-        let path = fs::canonicalize(path)?;
-        let mut held = READ_ONLY_FILES
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !held.insert(path.clone()) {
+        let id = rhizodb_shm::file_id(&File::open(path)?)?;
+        let mut held = OPEN_FILES.lock().unwrap_or_else(PoisonError::into_inner);
+        if !held.insert(id) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "the database file is already open read-only in this process",
             ));
         }
-        Ok(Self(path))
+        Ok(Self(id))
     }
 }
 
 impl Drop for Claim {
     fn drop(&mut self) {
-        READ_ONLY_FILES
+        OPEN_FILES
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&self.0);
@@ -122,8 +128,99 @@ fn lock_or_skip_where_unsupported(
     }
 }
 
+#[cfg(windows)]
+const SESSION_BYTE: u64 = 1 << 62;
+
+// ast-grep-ignore
+// Opened once per process, since closing any descriptor of it drops every classic fcntl lock.
+#[derive(Debug)]
+struct OsSide {
+    file: File,
+}
+
+#[derive(Debug)]
+struct OsWords(Mapping);
+
+impl SideWords for OsWords {
+    fn word(&self, index: usize) -> &AtomicU64 {
+        &self.0.words()[index]
+    }
+}
+
+impl OsSide {
+    fn boxed(file: File) -> io::Result<Box<dyn SideFile>> {
+        if !rhizodb_shm::is_local(&file)? {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "processes on other machines share no memory, so a session needs a local file \
+                 system",
+            ));
+        }
+        Ok(Box::new(Self { file }))
+    }
+}
+
+impl SideFile for OsSide {
+    fn lock(&self, at: SideLock, kind: Lock) -> io::Result<()> {
+        rhizodb_shm::lock(&self.file, at.offset(), 1, kind)
+    }
+
+    fn try_lock(&self, at: SideLock, kind: Lock) -> io::Result<bool> {
+        rhizodb_shm::try_lock(&self.file, at.offset(), 1, kind)
+    }
+
+    fn unlock(&self, at: SideLock) -> io::Result<()> {
+        rhizodb_shm::unlock(&self.file, at.offset(), 1)
+    }
+
+    fn downgrade(&self, at: SideLock) -> io::Result<()> {
+        rhizodb_shm::downgrade(&self.file, at.offset(), 1)
+    }
+
+    #[cfg(not(windows))]
+    fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
+        self.try_lock(at, Lock::Exclusive)
+    }
+
+    #[cfg(windows)]
+    fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
+        self.unlock(at)?;
+        if self.try_lock(at, Lock::Exclusive)? {
+            return Ok(true);
+        }
+        self.lock(at, Lock::Shared)?;
+        Ok(false)
+    }
+
+    fn map(&self, grow: bool) -> io::Result<Box<dyn SideWords>> {
+        if grow {
+            rhizodb_shm::reserve(&self.file, (WORDS * 8) as u64)?;
+        }
+        Ok(Box::new(OsWords(Mapping::new(&self.file, WORDS)?)))
+    }
+}
+
 impl FileSystem for OsFs {
     type File = OsFile;
+
+    fn open_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        OsSide::boxed(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(self.directory.join(name))?,
+        )
+    }
+
+    fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
+        OsSide::boxed(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(self.directory.join(name))?,
+        )
+    }
 
     fn create(&self, name: &str, size: BlockSize) -> io::Result<OsFile> {
         self.writable()?;
@@ -215,6 +312,30 @@ impl BlockFile for OsFile {
 
     fn lock_shared(&self) -> io::Result<()> {
         lock_or_skip_where_unsupported(|| self.file.try_lock_shared())
+    }
+
+    #[cfg(not(windows))]
+    fn lock_session(&self) -> io::Result<()> {
+        self.lock_shared()
+    }
+
+    // ast-grep-ignore
+    // A shared lock on Windows denies writes to what it covers, so this one lies past any block.
+    #[cfg(windows)]
+    fn lock_session(&self) -> io::Result<()> {
+        lock_or_skip_where_unsupported(|| {
+            match rhizodb_shm::try_lock(&self.file, SESSION_BYTE, 1, Lock::Shared) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(TryLockError::WouldBlock),
+                Err(error) => Err(TryLockError::Error(error)),
+            }
+        })?;
+        let _ = self.file.unlock();
+        Ok(())
+    }
+
+    fn unlock(&self) -> io::Result<()> {
+        self.file.unlock()
     }
 
     fn set_block_count(&self, count: u64) -> io::Result<()> {

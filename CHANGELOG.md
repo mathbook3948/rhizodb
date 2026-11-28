@@ -4,6 +4,14 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Changed
+
+- A read-only open now creates a side file named after the database file with `-shm` and maps it, so the processes that have the file open read-only form a session that a later change lets a writer join. The side file stays once the last of them closes. A read-only open of 0.2.0 refuses a file while that side file lies beside it, so delete the side file, while no process has the database open, before reading the file with 0.2.0. Where the directory refuses to create the side file, as on read-only media, or on a network file system, a read-only open reads the file alone, as in 0.2.0. A process opens a file read-only at most once, now through any of its paths and hard links.
+
+### Added
+
+- `ErrorKind::TooManyProcesses`: an open found every slot of the file's multi-process session taken.
+
 ## 0.2.0
 
 Released on 2026-11-28.

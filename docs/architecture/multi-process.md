@@ -50,12 +50,15 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - No lock is a mutex in shared memory, since macOS has no robust mutexes and a robust mutex leaves its protected state for the next holder to repair.
 - Each process of a session holds a shared lock on the database file while it is open, so an older build or an exclusive open fails while a session is open.
 - On Windows that lock covers a byte range past any block the file can hold, since a shared lock there denies writes to the range it covers, the holder's own included.
-- The side file carries the session lock, the write lock, the checkpoint lock, and one liveness lock per slot, each on a byte past the mapped state, since Windows enforces locks on the bytes they cover.
+- The side file carries the gate lock, the session lock, the write lock, the checkpoint lock, and one liveness lock per slot, each on a byte past the mapped state, since Windows enforces locks on the bytes they cover.
 - A reset of the side file writes only the mapped state, so it never writes a byte that another process holds locked.
 - Every process holds the session lock shared while it is open, and an open that gets it exclusively is the first of its session.
-- The first process turns its exclusive session lock into a shared one without a gap, so no other open finds the lock free and takes itself for the first.
-- On Unix that change is one `fcntl` call, which the kernel makes atomically.
-- On Windows, which has no atomic downgrade, every open takes a gate lock on its own byte before it tries the session lock, and the first process holds the gate while it releases its exclusive session lock and takes a shared one.
+- Every open takes the gate lock exclusively, then the session lock shared, and then tries to turn it into an exclusive one, and an open whose try succeeds is the first of a new session, since every process that held the session lock closed or died.
+- On Unix that try is one `fcntl` call, which the kernel makes atomically, and on Windows, which has no atomic upgrade, the open releases its shared lock and tries the exclusive one, which is safe since only a holder of the gate elects.
+- The first process holds the gate and its exclusive session lock until it is ready, so every other open waits for it at the gate, and none joins a session half ready or takes itself for the first.
+- A first process that dies before it is ready leaves both locks free, so the next open finds itself the first and resets the side file again.
+- A process that closes takes the gate before it gives up its session lock, so an open that holds the gate sees a process of the session leave only by dying.
+- A read-only open on a file system where multi-process access is refused opens as in phase 1.
 - The write lock is held exclusively from the start of a write transaction to its commit or rollback.
 - A write that finds the write lock held waits, as a write waits for another in one process today.
 - The checkpoint lock is held exclusively by a process while it writes a checkpoint, a compaction, or any other header.

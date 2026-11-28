@@ -106,6 +106,12 @@ use upgrade::UpgradeStep;
 
 pub(crate) const FORMAT_VERSION: u32 = 15;
 
+/// The graph format and keyword tokenizer of this build in one word, which every process of a
+/// multi-process session must share.
+pub(crate) fn build_identity() -> u64 {
+    twox_hash::XxHash3_64::oneshot_with_seed(u64::from(FORMAT_VERSION), &tokenize::fingerprint())
+}
+
 /// The graph format a write of `value` under `key` of the metadata table records, when it is
 /// newer than this build reads.
 pub(crate) fn newer_format_put(key: &[u8], value: &[u8]) -> Option<u32> {
