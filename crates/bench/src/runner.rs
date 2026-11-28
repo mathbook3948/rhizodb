@@ -353,6 +353,10 @@ fn sync_copy(target: &Path) -> io::Result<()> {
 #[cfg(windows)]
 // ast-grep-ignore
 // Windows flushes only through a writable handle, and `fs::copy` keeps the read-only attribute.
+#[expect(
+    clippy::permissions_set_readonly_false,
+    reason = "on Windows this clears only the read-only attribute, and the kept permissions are restored after the sync"
+)]
 fn sync_copy(target: &Path) -> io::Result<()> {
     let kept = fs::metadata(target)?.permissions();
     if !kept.readonly() {
