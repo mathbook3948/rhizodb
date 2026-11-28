@@ -26,6 +26,10 @@ Node properties are stored as typed columns per row group, but the executor eval
 - `LIMIT` without `ORDER BY` stops the scan once it has the rows it returns.
 - Grouping and `DISTINCT` find a row of scalar values by a hash seeded per query that equal integers and floats share, and keep every other row in order, so both still group exactly as the global sort order equates values.
 - A scan tests stored strings as bytes and checks their UTF-8 only where it takes a string out, so a damaged segment that passes its checksum fails where its text is returned, grouped, or kept distinct.
+- A `MATCH` of one directed hop of fixed length, whose ends each have at most one label and no property map and are different variables, with no `WHERE`, fed by one row into an aggregating projection without keys, reads the relationship chunks in ID order instead of matching from each start node, when each aggregate counts rows or is a `count`, `sum`, `avg`, `min`, or `max` of a property of the relationship, without `DISTINCT` except on `min` and `max`.
+- Such a scan reads each chunk's columns once into a batch by slot and folds whole batches, and tests an end's label against a bitmap of that label's nodes read once per query.
+- It folds only what no order of the rows can change: counts, and integers whose sum, or average, has magnitudes that total at most `i64::MAX`, or 2^53, so that no partial sum overflows or rounds.
+- Any other value makes the scan stop and leaves the clause to the path that matches from each start node, which then answers and fails exactly as before.
 - Tests compare every scan with the row-at-a-time path, which they can force.
 
 ## Open

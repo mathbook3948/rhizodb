@@ -9,6 +9,7 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 ## Decisions
 
 - A clause splits only when it is a non-optional `MATCH` fed by exactly one row, whose first pattern starts from an unbound node that no property index or ID lookup can serve.
+- A clause that a scan of relationship chunks answers does not split, since that scan reads every chunk once on the calling thread, and a scan that stops hands the clause to the split as if it had not run.
 - The unit of work is a morsel, a contiguous run of the start nodes in ID order, and each thread takes the next morsel from a shared counter until none are left.
 - A morsel holds whole row groups, so each worker reads a group's columns once, and a row group is cut into equal parts only when there are fewer groups than threads.
 - A morsel restricts the start nodes of that one pattern part, found by identity, so later patterns, subqueries, and pattern predicates read the whole graph as before.

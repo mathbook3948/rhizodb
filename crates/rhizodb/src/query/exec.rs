@@ -426,6 +426,33 @@ impl<T: ReadTransaction> Env<'_, T> {
         Ok((self.read_clause(clause, rows)?, 1))
     }
 
+    /// What [`Env::read_clauses_at`] gives for a match and the aggregating projection after it
+    /// when a scan of relationship chunks answers them, or `None` when it does not.
+    pub(crate) fn relationship_clauses(
+        &self,
+        clauses: &[&ReadClause],
+        rows: &[Row],
+    ) -> Result<Option<(Vec<Row>, usize)>, Error> {
+        let (Some(ReadClause::Match(found)), Some(ReadClause::Project(projection))) =
+            (clauses.first(), clauses.get(1))
+        else {
+            return Ok(None);
+        };
+        let Items::Aggregate {
+            keys,
+            aggregates,
+            finals,
+        } = &projection.items
+        else {
+            return Ok(None);
+        };
+        let Some(groups) = self.relationship_groups(found, keys, aggregates, rows)? else {
+            return Ok(None);
+        };
+        let rows = groups.finish(self, finals)?;
+        Ok(Some((self.arrange(projection, rows)?, 2)))
+    }
+
     /// The groups of the aggregating projection with `keys` and `aggregates` over the matches of
     /// `found` from each of `rows`.
     pub(crate) fn match_groups<'p>(
@@ -446,6 +473,9 @@ impl<T: ReadTransaction> Env<'_, T> {
             };
             let count = usize::try_from(count).unwrap_or(usize::MAX);
             groups.count_rows(count.saturating_mul(rows.len()));
+            return Ok(groups);
+        }
+        if let Some(groups) = self.relationship_groups(found, keys, aggregates, rows)? {
             return Ok(groups);
         }
         if let Some(scan) = self.node_scan(found)?

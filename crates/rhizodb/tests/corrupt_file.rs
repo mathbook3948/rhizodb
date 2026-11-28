@@ -304,7 +304,7 @@ fn a_damaged_adjacency_part_fails_as_corrupt_data_where_it_is_read() {
         "MATCH (a:Item {i: 0})-[]->(b) RETURN b.i",
         "MATCH (a:Item {i: 0})-[:T]->(b) RETURN count(b)",
         "MATCH (a:Item {i: 0})-[]-(b) RETURN count(b)",
-        "MATCH (a:Item)-[:T]->(b) RETURN count(*)",
+        "MATCH (a:Item)-[:T]->(b) RETURN count(DISTINCT b)",
         "MATCH (a:Item {i: 0}) DETACH DELETE a",
     ] {
         assert_eq!(error_kind(&db, query), ErrorKind::CorruptData, "{query}");
