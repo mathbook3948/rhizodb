@@ -62,6 +62,28 @@ fn graph_file() -> (tempfile::TempDir, PathBuf) {
     (directory, path)
 }
 
+/// Runs `run` on a thread of its own and fails, naming `what` and the files of `directory`, when
+/// it has not returned within a minute, as a lock wait that never ends leaves it.
+fn within<T: Send + 'static>(
+    what: &str,
+    directory: &Path,
+    run: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|_| {
+            let names: Vec<_> = std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            panic!("{what} did not return within a minute, as a lock wait that never ends leaves it; the directory holds {names:?}")
+        })
+}
+
 fn count(db: &Database) -> i64 {
     ints(&run(db, "MATCH (n:Item) RETURN count(n)"))[0]
 }
@@ -417,7 +439,12 @@ fn a_read_only_open_after_a_writer_exits_without_closing_replays_its_commits_whe
         .unwrap();
     assert!(status.success());
     let before = files(directory.path());
-    let opened = read_only().open(&path);
+    let opened = {
+        let path = path.clone();
+        within("a read-only open", directory.path(), move || {
+            read_only().open(&path)
+        })
+    };
     if cfg!(windows) {
         let error = opened.map(drop).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ReadOnly, "{error}");
@@ -427,5 +454,8 @@ fn a_read_only_open_after_a_writer_exits_without_closing_replays_its_commits_whe
         db.check().unwrap();
     }
     assert_eq!(files(directory.path()), before);
-    assert_eq!(count(&Database::open(&path).unwrap()), 150);
+    let reopened = within("an open for writing", directory.path(), move || {
+        Database::open(&path)
+    });
+    assert_eq!(count(&reopened.unwrap()), 150);
 }

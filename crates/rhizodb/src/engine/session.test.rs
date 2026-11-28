@@ -801,3 +801,32 @@ fn a_reader_takes_a_log_segment_the_writer_created_but_has_not_written_for_one_s
     follower.catch_up().unwrap();
     assert_eq!(round_seen(&follower, 32), 6);
 }
+
+#[test]
+fn a_first_process_that_fails_before_it_is_ready_leaves_no_side_file_and_no_lock() {
+    let fs = written(1);
+    let file = fs
+        .open(NAME, crate::engine::store::block_size().unwrap())
+        .unwrap();
+    let Joined::Session(elected) = join(&fs, NAME, &file).unwrap() else {
+        panic!("a sim directory takes side files");
+    };
+    let identity = Identity {
+        build: 0,
+        database_id: crate::engine::store::read_header(&file)
+            .unwrap()
+            .0
+            .database_id,
+        file: file.identity().unwrap(),
+    };
+    let session = elected.finish(&file, identity, 1).unwrap();
+    drop(session);
+    drop(file);
+    assert!(
+        !fs.names().unwrap().contains(&side_name(NAME)),
+        "the side file outlived the only process of its session"
+    );
+    let next = reader(&fs, 0).unwrap();
+    assert_eq!(next.session_slot(), Some(0));
+    assert_eq!(items(&next), 1);
+}

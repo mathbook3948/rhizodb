@@ -612,6 +612,12 @@ impl Drop for Session {
             .word(SLOT_BASE + self.slot * SLOT_WORDS)
             .store(0, Ordering::SeqCst);
         let _ = self.side.unlock(SideLock::Slot(self.slot));
+        if self.getting_ready.load(Ordering::SeqCst) {
+            let _ = self.side.unlink();
+            let _ = self.side.unlock(SideLock::Session);
+            let _ = self.side.unlock(SideLock::Gate);
+            return;
+        }
         if self.side.lock(SideLock::Gate, Lock::Exclusive).is_ok() {
             if self.side.try_upgrade(SideLock::Session).unwrap_or(false) {
                 let _ = self.side.unlink();
