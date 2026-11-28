@@ -516,6 +516,26 @@ impl Session {
         fence(Ordering::SeqCst);
     }
 
+    // ast-grep-ignore
+    // Cleared under the slot's own lock, so a process that claims it meanwhile keeps its words.
+    fn clear_if_dead(&self, slot: usize) -> bool {
+        if slot == self.slot
+            || !self
+                .side
+                .try_lock(SideLock::Slot(slot), Lock::Exclusive)
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        for offset in 0..SLOT_WORDS {
+            self.words
+                .word(SLOT_BASE + slot * SLOT_WORDS + offset)
+                .store(0, Ordering::SeqCst);
+        }
+        let _ = self.side.unlock(SideLock::Slot(slot));
+        true
+    }
+
     /// The oldest generation that a tree of another live process reaches, or that an open
     /// joining now may load from the header this process published last, clearing the slot of
     /// each process that is gone.
@@ -528,8 +548,7 @@ impl Session {
             if generation == 0 {
                 continue;
             }
-            if self.slot_is_dead(slot).unwrap_or(false) {
-                let _ = word.compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst);
+            if self.clear_if_dead(slot) {
                 continue;
             }
             oldest = oldest.min(generation);
@@ -554,6 +573,7 @@ impl Session {
 
     /// Whether the process that held `slot` is gone, which frees the slot for the caller to
     /// clear. A slot this process holds is never gone.
+    #[cfg(test)]
     pub(crate) fn slot_is_dead(&self, slot: usize) -> io::Result<bool> {
         if slot == self.slot {
             return Ok(false);

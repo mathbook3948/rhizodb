@@ -426,3 +426,69 @@ fn a_process_whose_database_file_differs_fails_to_join() {
     let error = elected.finish(&file, identity, 1).unwrap_err();
     assert_eq!(kind(error), ErrorKind::DatabaseAlreadyOpen);
 }
+
+#[test]
+fn a_writer_that_takes_over_reuses_no_block_a_reader_of_the_writer_before_it_reads() {
+    let fs = SimFs::new();
+    let first = writer(&fs, churning()).unwrap();
+    put_round(&first, 1, 1024);
+    first.checkpoint().unwrap();
+    let options = EngineOptions {
+        cache_bytes: 4 * BLOCK,
+        ..EngineOptions::default()
+    };
+    let held = Engine::open_read_only(Arc::new(fs.clone()), NAME, options).unwrap();
+    for round in 2..30 {
+        put_round(&first, round, 1024);
+    }
+    first.close().unwrap();
+    let second = writer(&fs, churning()).unwrap();
+    for round in 30..90 {
+        put_round(&second, round, 1024);
+        if round % 10 == 0 {
+            second.compact().unwrap();
+        }
+    }
+    held.check().unwrap();
+    assert_eq!(round_seen(&held, 1024), 1);
+}
+
+#[test]
+fn a_reader_that_joins_while_a_stage_chose_its_space_reads_its_tree_whole() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 1024);
+    writer.checkpoint().unwrap();
+    put_round(&writer, 2, 1024);
+    writer.checkpoint().unwrap();
+    let joined = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut armed = false;
+    for round in 3..40 {
+        if !armed && joined.borrow().is_none() {
+            let joined = std::rc::Rc::clone(&joined);
+            let fs = fs.clone();
+            crate::engine::store::STAGE_PLACED.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    *joined.borrow_mut() = Some(reader(&fs, 0).unwrap());
+                }));
+            });
+            armed = true;
+        }
+        put_round(&writer, round, 1024);
+        if joined.borrow().is_some() {
+            armed = true;
+        }
+    }
+    let joined = joined
+        .borrow_mut()
+        .take()
+        .expect("no checkpoint ran in stages");
+    let seen = round_seen(&joined, 1024);
+    joined.check().unwrap();
+    for round in 40..60 {
+        put_round(&writer, round, 1024);
+    }
+    writer.compact().unwrap();
+    assert_eq!(round_seen(&joined, 1024), seen);
+    joined.check().unwrap();
+}

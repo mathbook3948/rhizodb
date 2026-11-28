@@ -127,7 +127,8 @@ The engine locks its file exclusively, keeps the commits since the last checkpoi
 - Beginning a read writes nothing to the side file and takes no lock, since the process's slot already covers the tree its published view holds.
 - From phase 3 on, a slot also records the oldest LSN that its process's snapshot pins keep, so a pin in a read-only process keeps the log too, and a checkpoint keeps the log after the oldest such LSN of every slot, as it keeps the log for a pin of its own.
 - Acknowledged peers live in the side file, so an `acknowledge` in any process keeps the log for that peer, and every header a checkpoint writes records them.
-- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process before it reads the generations.
+- A checkpoint test-locks the liveness lock of each slot in use other than its own, and clears the slot of a dead process while it holds that lock, so a process that claims the slot meanwhile never has its words cleared.
+- A writer that opens in a session keeps every extent slot the file holds, rather than lowering its high-water mark past the free slots at the end as a lone open does, since a tree of another process may reach them.
 - The log needs no entry in the slots, since a process that misses a segment adopts the checkpoint that released it.
 - The side file holds a fixed number of slots, and an open that finds none free fails with its own error kind.
 - A checkpoint never clears or ignores the slot of a live process, so a read that never ends, in any process, keeps every block its tree reaches from reuse, as a long read in one process does today.
