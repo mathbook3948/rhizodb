@@ -28,7 +28,7 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - A table-wise `CALL`, which heads each block of a `NEXT` chain, never runs per morsel, since it reads all its input rows at once.
 - A worker evaluates at least what the serial path would on its morsel, so any error the serial path raises also fails some worker.
 - When any worker or the merge fails, the clause runs again on the calling thread, which then returns the serial result or error exactly.
-- The calling thread works on morsels too, and a helper thread that cannot be spawned is skipped.
+- The calling thread works on morsels too, and a database whose helper threads cannot be started runs every clause on the calling thread.
 - Helper threads get a 2 MiB stack.
 - A worker that panics re-raises its panic on the calling thread.
 - A query that calls a host procedure, any updating query including an updating `CALL` or `NEXT` block, any query in a write transaction, and `MATCH (n) RETURN count(n)` answered from node counts stay on the calling thread.
@@ -36,7 +36,8 @@ A read transaction sees one snapshot, so threads can share it without coordinati
 - `OpenOptions::parallel_threshold` sets the start nodes a match needs before it splits, or that a split by row group reads alone before it takes helpers, defaulting to 8192, which is two row groups.
 - A threshold below two acts as two, since one start node cannot split.
 - Consecutive row groups join one morsel up to a quarter of a thread's share of the start nodes.
-- Threads are scoped to the query and spawned per split clause, with no pool.
+- Each database keeps a pool of one thread fewer than `threads` for the helpers of its splits, started by its first split and stopped when it drops, so a split wakes waiting threads instead of spawning them.
+- A split runs on the calling thread and hands only its helpers to the pool, and it ends once every helper has finished.
 - Each database counts the threads running its read queries, callers and helpers alike, and a clause splits only when that count leaves some of `threads` idle, taking at most the idle ones as helpers.
 - A clause that finds no idle thread runs on the calling thread without collecting its start nodes for morsels.
 - Tests compare every split query with the serial path on random graphs, and the whole integration suite, the reference evaluator among it, also runs with splitting forced at a threshold of two in `mise run random-deep`.

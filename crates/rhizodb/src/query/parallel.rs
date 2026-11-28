@@ -6,11 +6,15 @@ use std::ops::Deref;
 use std::ops::Range;
 use std::ptr;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::thread;
+
+use rayon_core::ThreadPool;
+use rayon_core::ThreadPoolBuilder;
 
 use crate::error::Error;
 use crate::graph::GraphTx;
@@ -62,10 +66,11 @@ impl Default for Parallelism {
 }
 
 /// The threads running read queries of one database, its callers and their helpers, so a split
-/// takes helpers only from the cores those threads leave idle.
+/// takes helpers only from the cores those threads leave idle, and the pool its helpers run on.
 #[derive(Debug, Default)]
 pub(crate) struct Workers {
     busy: AtomicUsize,
+    pool: OnceLock<Option<ThreadPool>>,
 }
 
 /// Threads counted as busy in [`Workers`] until it drops.
@@ -104,6 +109,21 @@ impl Workers {
             workers: self,
             threads: taken,
         }
+    }
+
+    /// The `helpers` threads that run the helpers of every split, started by the first split and
+    /// kept until the database drops, or `None` when they could not be started.
+    pub(crate) fn pool(&self, helpers: usize) -> Option<&ThreadPool> {
+        self.pool
+            .get_or_init(|| {
+                ThreadPoolBuilder::new()
+                    .num_threads(helpers)
+                    .stack_size(WORKER_STACK)
+                    .thread_name(|index| format!("rhizodb-read-{index}"))
+                    .build()
+                    .ok()
+            })
+            .as_ref()
     }
 }
 
@@ -271,6 +291,7 @@ struct Split<'q, 'w> {
     alone: usize,
     enough: Option<usize>,
     helpers: Busy<'w>,
+    pool: &'w ThreadPool,
 }
 
 fn split<'q, 'w, T: ReadTransaction>(
@@ -347,6 +368,7 @@ fn split<'q, 'w, T: ReadTransaction>(
     if helpers.threads == 0 {
         return None;
     }
+    let pool = workers.pool(parallelism.threads - 1)?;
     let (source, alone) = if stops {
         (
             Source::RowGroups(env.scanned_label(&part.start).ok()??),
@@ -366,6 +388,7 @@ fn split<'q, 'w, T: ReadTransaction>(
         alone,
         enough,
         helpers,
+        pool,
     })
 }
 
@@ -529,36 +552,34 @@ impl<'q> Split<'q, '_> {
             }
             Source::RowGroups(_) => self.helpers.threads,
         };
-        let finished = thread::scope(|scope| {
+        let helped = Mutex::new(Vec::new());
+        #[cfg_attr(
+            not(test),
+            expect(unused_variables, reason = "only tests read how many helpers ran")
+        )]
+        let (mut finished, spawned) = self.pool.in_place_scope(|scope| {
             let mut finished = work(self.alone);
             if failed.load(Ordering::Relaxed)
                 || next.load(Ordering::Relaxed) > last.load(Ordering::Relaxed)
             {
-                #[cfg(test)]
-                tests::ran(0, &finished);
-                return finished;
+                return (finished, 0);
             }
-            let handles: Vec<_> = (0..helpers)
-                .filter_map(|_| {
-                    thread::Builder::new()
-                        .stack_size(WORKER_STACK)
-                        .spawn_scoped(scope, move || work(usize::MAX))
-                        .ok()
-                })
-                .collect();
+            let (work, helped) = (&work, &helped);
+            for _ in 0..helpers {
+                scope.spawn(move |_| {
+                    let done = work(usize::MAX);
+                    helped
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .extend(done);
+                });
+            }
             finished.extend(work(usize::MAX));
-            #[cfg(test)]
-            let helpers = handles.len();
-            for handle in handles {
-                match handle.join() {
-                    Ok(done) => finished.extend(done),
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
-            }
-            #[cfg(test)]
-            tests::ran(helpers, &finished);
-            finished
+            (finished, helpers)
         });
+        finished.extend(helped.into_inner().unwrap_or_else(PoisonError::into_inner));
+        #[cfg(test)]
+        tests::ran(spawned, &finished);
         let kept = last.into_inner().saturating_add(1);
         let mut parts: Vec<Option<Option<Part<'q>>>> = Vec::new();
         for (index, part) in finished {

@@ -272,7 +272,8 @@ impl OpenOptions {
     /// thread. Zero and one keep every query on the calling thread. The threads are a budget the
     /// database's read queries share: a query splits only across the threads that other read
     /// queries of the database leave idle, so many concurrent queries each stay on their own
-    /// thread instead of crowding the cores.
+    /// thread instead of crowding the cores. The database starts the other threads at its first
+    /// split and keeps them waiting for the next one until it drops.
     ///
     /// ```
     /// use rhizodb::OpenOptions;
