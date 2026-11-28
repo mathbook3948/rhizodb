@@ -1,4 +1,4 @@
-use super::tests::store_as_format_fourteen;
+use super::tests::store_as_format;
 use super::*;
 use crate::engine::sim_fs::Crash;
 use crate::engine::sim_fs::Failure;
@@ -9,7 +9,7 @@ use crate::test_scale;
 
 type Expected = BTreeMap<RelationshipId, RelationshipRecord>;
 
-fn prepare(fs: &SimFs) -> Expected {
+fn prepare(fs: &SimFs, older: u32) -> Expected {
     let graph = Graph::open(test_engine::on_sim(fs).unwrap()).unwrap();
     let mut expected = Expected::new();
     let mut write = graph.write().unwrap();
@@ -51,7 +51,7 @@ fn prepare(fs: &SimFs) -> Expected {
     }
     write.commit().unwrap();
     let mut previous = graph.storage().begin_write().unwrap();
-    store_as_format_fourteen(&mut previous);
+    store_as_format(older, &mut previous);
     previous.commit().unwrap();
     expected
 }
@@ -90,8 +90,18 @@ fn assert_holds(graph: &Graph<TestStorage>, expected: &Expected, context: &str) 
 #[test]
 #[ignore = "left out of mise run check, run by mise run random"]
 fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_resumes_to_every_relationship() {
+    assert_crashes_resume_to_every_relationship(14);
+}
+
+#[test]
+#[ignore = "left out of mise run check, run by mise run random"]
+fn a_crash_at_any_write_of_the_upgrade_from_format_fifteen_resumes_to_every_relationship() {
+    assert_crashes_resume_to_every_relationship(15);
+}
+
+fn assert_crashes_resume_to_every_relationship(older: u32) {
     let prepared = SimFs::new();
-    let expected = prepare(&prepared);
+    let expected = prepare(&prepared, older);
     let operations = {
         let fs = prepared.crash(Crash::KeepUnsynced);
         let storage = test_engine::on_sim(&fs).unwrap();
@@ -116,7 +126,7 @@ fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_resumes_to_every_rel
                 let recovered = fs.crash(mode);
                 let format = stored_format(&recovered);
                 assert!(
-                    [14, 14 | UPGRADING, FORMAT_VERSION].contains(&format),
+                    [older, older | UPGRADING, FORMAT_VERSION].contains(&format),
                     "{context}"
                 );
                 if upgraded {
@@ -139,7 +149,7 @@ fn a_crash_at_any_write_of_the_upgrade_from_format_fourteen_resumes_to_every_rel
     }
     assert_eq!(
         outcomes,
-        [14, 14 | UPGRADING, FORMAT_VERSION].into(),
+        [older, older | UPGRADING, FORMAT_VERSION].into(),
         "the crashes land before, inside, and after the upgrade"
     );
 }

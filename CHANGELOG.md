@@ -4,6 +4,10 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ## Unreleased
 
+### Changed
+
+- Relationship chunks store their relationships in columns, which packs each type, source, target, and integer property in the fewest bits its chunk needs, so a graph's relationships take less than half the bytes they took. The graph format is now 16, and opening a database of an older graph format as its writer rewrites every relationship chunk in columns in the upgrade's commits of bounded size. 0.2.0 then refuses the file with `ErrorKind::UnsupportedFormatVersion`, so back it up with 0.2.0 first, and go back to 0.2.0 through `Database::export` and `Database::import`.
+
 ## 0.2.0
 
 Released on 2026-11-28.
