@@ -87,6 +87,7 @@ struct State {
     sessions: BTreeMap<usize, BTreeSet<u64>>,
     sides: BTreeMap<usize, Arc<SimSide>>,
     refuse_sides: bool,
+    unshared_sides: bool,
 }
 
 // ast-grep-ignore
@@ -396,11 +397,20 @@ impl SimFs {
         lock(&self.state).refuse_sides = true;
     }
 
-    fn side(&self, state: &mut State, inode: usize) -> SimSideHandle {
+    /// Makes side files unusable as on a file system that shares no mappings: a creation
+    /// leaves the file and then fails, and an open of one fails, both as unsupported.
+    pub(crate) fn refuse_side_sharing(&self) {
+        lock(&self.state).unshared_sides = true;
+    }
+
+    fn side(&self, state: &mut State, name: &str, inode: usize) -> SimSideHandle {
         state.handles += 1;
         SimSideHandle {
             side: Arc::clone(state.sides.entry(inode).or_default()),
             handle: state.handles,
+            state: Arc::clone(&self.state),
+            name: name.to_owned(),
+            inode,
         }
     }
 
@@ -553,7 +563,10 @@ impl FileSystem for SimFs {
         let mut state = lock(&self.state);
         state.operate(None, false)?;
         let inode = *state.live_names.get(name).ok_or_else(|| not_found(name))?;
-        Ok(Box::new(self.side(&mut state, inode)))
+        if state.unshared_sides {
+            return Err(unshared());
+        }
+        Ok(Box::new(self.side(&mut state, name, inode)))
     }
 
     fn create_side(&self, name: &str) -> io::Result<Box<dyn SideFile>> {
@@ -568,7 +581,10 @@ impl FileSystem for SimFs {
             BlockSize::new(SECTOR_SIZE).expect("a sector is a block"),
         )?;
         let mut state = lock(&self.state);
-        Ok(Box::new(self.side(&mut state, file.inode)))
+        if state.unshared_sides {
+            return Err(unshared());
+        }
+        Ok(Box::new(self.side(&mut state, name, file.inode)))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
@@ -715,6 +731,10 @@ impl BlockFile for SimFile {
         Ok(())
     }
 
+    fn identity(&self) -> io::Result<(u64, u128)> {
+        Ok((0, self.inode as u128))
+    }
+
     fn unlock(&self) -> io::Result<()> {
         let mut state = lock(&self.state);
         if matches!(state.locks.get(&self.inode), Some(Held::Exclusive(holder)) if *holder == self.handle)
@@ -825,6 +845,16 @@ enum SideHeld {
 struct SimSideHandle {
     side: Arc<SimSide>,
     handle: u64,
+    state: Arc<Mutex<State>>,
+    name: String,
+    inode: usize,
+}
+
+fn unshared() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the simulated file system shares no mappings",
+    )
 }
 
 #[derive(Debug)]
@@ -919,6 +949,20 @@ impl SideFile for SimSideHandle {
 
     fn try_upgrade(&self, at: SideLock) -> io::Result<bool> {
         self.try_lock(at, Lock::Exclusive)
+    }
+
+    fn is_named(&self) -> io::Result<bool> {
+        Ok(lock(&self.state).live_names.get(&self.name) == Some(&self.inode))
+    }
+
+    fn unlink(&self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.live_names.get(&self.name) == Some(&self.inode) {
+            state.change_names(NameChange::Remove {
+                name: self.name.clone(),
+            });
+        }
+        Ok(())
     }
 
     fn map(&self, _grow: bool) -> io::Result<Box<dyn SideWords>> {

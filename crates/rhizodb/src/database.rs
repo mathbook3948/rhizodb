@@ -149,14 +149,15 @@ impl OpenOptions {
     ///
     /// The one file it creates and writes is the side file named after the database file with
     /// `-shm`, which every process that has the file open read-only maps to share the state of
-    /// their session. It stays beside the database file once the last of them closes, and it is
-    /// never needed to read the database. Where the directory refuses to create it, as on
-    /// read-only media, or on a network file system, the open reads the file alone instead,
-    /// and still shares it with any number of such opens. A process of another build fails to
+    /// their session, created with the database file's permissions. The last of them to close
+    /// removes it, and it is never needed to read the database. Where the directory refuses to
+    /// create it, as on read-only media, or on a file system that is not local, the open reads
+    /// the file alone instead, leaves no side file, and still shares the file with any number
+    /// of such opens. A process of another build fails to
     /// join a running session with `DatabaseAlreadyOpen`, and an open that finds every slot of
     /// the session taken fails with
     /// [`ErrorKind::TooManyProcesses`](crate::ErrorKind::TooManyProcesses). A read-only open of
-    /// an earlier release refuses a file while its side file lies beside it.
+    /// an earlier release refuses a file while a side file lies beside it.
     ///
     /// ```
     /// use rhizodb::Database;

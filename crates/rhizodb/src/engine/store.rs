@@ -869,9 +869,9 @@ impl<F: FileSystem + 'static> Engine<F> {
     ) -> Result<Self, EngineError> {
         let file = fs.open(name, block_size()?)?;
         let session = match session::join(&*fs, name, &file)? {
-            Joined::Alone => {
+            Joined::Alone { recheck } => {
                 file.lock_shared()?;
-                if fs.names()?.contains(&side_name(name)) {
+                if recheck && fs.names()?.contains(&side_name(name)) {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
                         "a multi-process session may hold the database file, since its -shm \
@@ -886,6 +886,7 @@ impl<F: FileSystem + 'static> Engine<F> {
                 let identity = SessionIdentity {
                     build: options.build,
                     database_id: header.database_id,
+                    file: file.identity()?,
                 };
                 Some(elected.finish(&file, identity, header.generation)?)
             }
