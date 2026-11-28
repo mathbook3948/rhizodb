@@ -815,6 +815,32 @@ fn open_segment<F: FileSystem>(
     Ok((file, header))
 }
 
+// ast-grep-ignore
+// A writer creates a segment and then writes its header, so a follower may find it empty or torn.
+fn open_written_segment<F: FileSystem>(
+    fs: &F,
+    base: &str,
+    sequence: u64,
+    database_id: u128,
+) -> Result<Option<(F::File, SegmentHeader)>, EngineError> {
+    let size = BlockSize::new(WAL_BLOCK).ok_or(EngineError::TooLarge)?;
+    let file = fs.open(&segment_name(base, sequence), size)?;
+    if file.block_count()? == 0 {
+        return Ok(None);
+    }
+    let mut block = vec![0; WAL_BLOCK];
+    file.read(0, &mut block)?;
+    let Ok(header) = SegmentHeader::decode(&block) else {
+        return Ok(None);
+    };
+    if header.database_id != database_id || header.sequence != sequence {
+        return Err(EngineError::corrupt(format!(
+            "log segment {sequence} belongs to another database"
+        )));
+    }
+    Ok(Some((file, header)))
+}
+
 fn read_segment(
     file: &impl BlockFile,
     header: &SegmentHeader,
@@ -913,8 +939,9 @@ pub(crate) fn follow_published<F: FileSystem>(
                 .into_iter()
                 .filter(|sequence| *sequence >= header.wal.first_segment)
             {
-                match open_segment(fs, name, sequence, header.database_id) {
-                    Ok((_, segment)) if segment.salt == header.wal.salt => {
+                match open_written_segment(fs, name, sequence, header.database_id) {
+                    Ok(None) => break,
+                    Ok(Some((_, segment))) if segment.salt == header.wal.salt => {
                         if segment.first_lsn > next {
                             break;
                         }
