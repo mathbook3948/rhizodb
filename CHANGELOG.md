@@ -6,12 +6,38 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Changed
 
-- A read-only open now creates a side file named after the database file with `-shm` and maps it, so the processes that have the file open read-only form a session that a later change lets a writer join. The last of them to close removes the side file. A read-only open of 0.2.0 refuses a file while a session holds it, or after a process of one crashed until the next open removes its side file. Where the directory refuses to create the side file, as on read-only media, or on a file system that is not local, a read-only open reads the file alone, as in 0.2.0, and it leaves no side file. The side file takes the database file's permissions. A process opens a file read-only at most once, now through any of its paths and hard links.
+- Relationship chunks store their relationships in columns, which packs each type, source, target, and integer property in the fewest bits its chunk needs, so a graph's relationships take less than half the bytes they took. The graph format is now 16, and opening a database of an older graph format as its writer rewrites every relationship chunk in columns in the upgrade's commits of bounded size. 0.2.1 and earlier then refuse the file with `ErrorKind::UnsupportedFormatVersion`, so back it up with 0.2.1 first, and go back to 0.2.1 through `Database::export` and `Database::import`.
+- A read-only open now creates a side file named after the database file with `-shm` and maps it, so the processes that have the file open read-only form a session that a later change lets a writer join. The last of them to close removes the side file. A read-only open of 0.2.0 or 0.2.1 refuses a file while a session holds it, or after a process of one crashed until the next open removes its side file. Where the directory refuses to create the side file, as on read-only media, or on a file system that is not local, a read-only open reads the file alone, as in 0.2.1, and it leaves no side file. The side file takes the database file's permissions. A process opens a file read-only at most once, now through any of its paths and hard links.
 
 ### Added
 
 - `OpenOptions::multi_process`: a database opened for writing with it lets other processes open the file read-only while it writes. Each read-only process reads the commits made before it opened the file, the writer's checkpoints never reuse space a read-only process still reads, and a second writer in the session fails with `ErrorKind::DatabaseAlreadyOpen`. A writer that closes while read-only processes have the file open leaves its log for the next writer. It needs a local file system with byte-range locks and shared mappings.
 - `ErrorKind::TooManyProcesses`: an open found every slot of the file's multi-process session taken.
+
+## 0.2.1
+
+Released on 2026-11-28.
+
+Fixes for opens through symlinks and hard links, for `Database::apply` on a writer, and for `rand()` inside aggregates, and a cap on the dump lines that an import reads. The file format does not change.
+
+### Upgrading from 0.2.0
+
+- If a database was last opened through a symlink to its file and was not closed cleanly, make the first open after upgrading go through that same symlink, and not read-only. That open moves the log segments that 0.2.0 named after the symlink beside the file, as the entry under Fixed describes. An open through the real path fails with `ErrorKind::CorruptData` until then, and nothing is lost.
+- On Unix an open of a database file with more than one hard link now fails with `ErrorKind::Storage`. Copy the file instead of linking it, or remove the extra link.
+- On Windows an open that is not read-only now fails on a volume that does not support `GetFinalPathNameByHandle`, as the entry under Fixed describes.
+
+### Added
+
+- `OpenOptions::max_dump_line_bytes` caps the bytes of one dump line that `Database::import` reads. A longer line fails with `ErrorKind::InvalidDump` once that many bytes are read, so a host that imports dumps it did not write can bound the memory one line takes. No cap is set by default.
+
+### Fixed
+
+- Opening a database through a symlink to its file, or through a second hard link, looked for the write-ahead log segments and staging file beside that path and under its name instead of beside the file itself. After an unclean shutdown, an open through another path then failed with `ErrorKind::CorruptData` (write-ahead log missing) although every commit sat in segments named after the first path, and two read-only opens in one process through two hard links both succeeded. An open now follows every symlink and `..` in the path once and names every side file after the file it reaches, so every path to a file finds one log and counts as one open. On Unix an open of a file with more than one hard link now fails with `ErrorKind::Storage`, since each name would find its own log, so copy a database file instead of linking it.
+- A database that 0.2.0 or earlier left after an unclean shutdown, opened through a symlink to its file, kept its log beside the symlink under the symlink's name. The first open through that same path that is not read-only now moves those segments beside the file. It holds the file's lock throughout, and first replays the moved segments with any already beside the file as a read-only open would. If that replay fails, or the segments beside the file do not exactly continue the ones being moved, it moves nothing and fails with `ErrorKind::Storage`, naming the segment files. It moves the newest segment first and syncs both directories after each move, so a crash mid-move leaves the file without the start of its log: an open through the real path then fails with `ErrorKind::CorruptData` instead of reading part of the log, and the next open through the symlink finishes the move. A file system without file locks refuses the move, and a read-only open fails with `ErrorKind::ReadOnly` while the move is due. Only the exact path the crashed process used finds those segments, not the real path and not another link in a chain of symlinks, so make the first open after upgrading go through that path. If a segment cannot be renamed, for example because the symlink and the file are on different file systems, copy it beside the file under the file's name and remove the original.
+- An open through a symlink whose target does not exist yet replaced the symlink with a new regular file. It now creates the database file at the symlink's target and keeps the symlink.
+- On Windows a database path is now resolved with `GetFinalPathNameByHandle`, which some volumes, such as some RAM disks and network or virtual drives, do not support, so an open that is not read-only on such a volume now fails where it used to work, as a read-only open already did. Error messages there may show the path in its `\\?\` form.
+- `Database::apply` on a writer or a fenced writer could leave it refusing reads and writes with `ErrorKind::FormatUpgradePending`. This happened when the changes carried an older graph format or an upgrade, as a new writer's first changes after a rolling upgrade do. The apply failed with `ErrorKind::NotReplica` or `ErrorKind::WriteTransactionOnThisThread` but still marked the graph as waiting for an upgrade. The mark stayed when the call came from a thread holding a write transaction, until the next apply or promote, and otherwise cleared once the call returned. Only a replica now starts waiting for an upgrade.
+- An aggregate argument that called `rand()` only inside a pattern's property map or the clauses of a subquery was accepted, as in `sum(VALUE { RETURN rand() })` or `count(EXISTS { MATCH (n)-->(m) WHERE rand() < 0.5 })`, and returned a random result. It now fails with `ErrorKind::NonConstantExpression`, as `rand()` directly in the argument does.
 
 ## 0.2.0
 

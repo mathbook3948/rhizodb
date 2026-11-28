@@ -16,6 +16,7 @@ The randomized, crash, and stress tests took most of the time of the check that 
 - The child process entry points of the kill tests are ignored too, and they do nothing without the environment variable their parent sets.
 - Every push to `main` runs `mise run random` on Linux, macOS, and Windows.
 - The nightly workflow runs the ignored storage and integration tests at a hundred times the cases, beside the soak, advisory, and fuzz jobs.
+- Every test that scales its cases with `RHIZODB_TEST_SCALE` is selected by the nightly's deep tasks, and a check fails when one is not.
 - A workflow installs its tools only in its mise setup step, and its `mise run` steps never install one.
 - A failed run of the random or nightly workflow on `main` opens an issue labelled `bug` for each failing test, or comments on the open issue of the same title, with the seed it ran and a link to the run.
 - An issue title names the test binary with the test, and more than five failing tests in one run share one issue whose title names no count.

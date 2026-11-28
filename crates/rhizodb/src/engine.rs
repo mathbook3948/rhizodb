@@ -25,6 +25,7 @@ pub(crate) mod sim_fs;
 pub(crate) mod snapshot;
 pub(crate) mod staged;
 pub(crate) mod store;
+pub(crate) mod stray_log;
 pub(crate) mod tree;
 pub(crate) mod view;
 pub(crate) mod wal;
@@ -37,6 +38,10 @@ mod crash_tests;
 #[cfg(test)]
 #[path = "engine/bench.test.rs"]
 mod bench_tests;
+
+#[cfg(test)]
+#[path = "engine/size.test.rs"]
+mod size_report;
 
 pub(crate) use store::Epoch;
 pub(crate) use store::Role;

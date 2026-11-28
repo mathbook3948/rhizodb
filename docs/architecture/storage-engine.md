@@ -37,6 +37,15 @@ An off-the-shelf B-tree store sets a floor under the cost of a put, the growth o
 - In such a session only the last process to close checkpoints the whole log and removes its segments, as `multi-process.md` decides.
 - Opening an empty file with no log segments creates a new database in its place.
 - The write-ahead log is a separate log made of segment files next to the database file.
+- An open resolves the database path once, following every symlink and `..`, and finds the segments and the staging file beside the file it reaches, under that file's name, so every path to one file finds the same log.
+- An open through a symlink whose target does not exist creates the database file at the target and keeps the symlink.
+- An open on Unix refuses a database file with more than one hard link, since each name would find its own log.
+- An open that is not read-only moves segments that a release before the fix named after the symlink it was given, beside that symlink, to the file, when the log beside the file is missing or exactly continues the moved segments.
+- The move holds the file's lock, is refused where the file system has no locks, and first replays the moved segments with the file's own log as a read-only open, moving nothing and naming the segment files when that fails.
+- The move renames the newest segment first and syncs both directories after each, so a crash mid-move leaves the file without the start of its log, which an open through any other path refuses, and the next open through the symlink finishes.
+- Only the path the crashed process was given finds such segments, not the real path or another link in a chain of symlinks.
+- An open refuses, and changes no file, when the segments beside the file do not exactly continue the ones beside the symlink, and a read-only open refuses wherever the move is due.
+- On Windows resolving a path needs `GetFinalPathNameByHandle`, so a volume without it cannot hold a database, and paths in messages may take the `\\?\` form.
 - A WAL record is a logical key-value operation, the put of a value under a key of a table or the delete of a key.
 - A range delete of the storage trait is logged as one operation of its batch.
 - Every WAL record carries a log sequence number (LSN) and a checksum of its own.
