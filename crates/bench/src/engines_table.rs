@@ -58,7 +58,12 @@ fn smallest(sizes: &[(EngineKind, Option<f64>)]) -> String {
     match measured.as_slice() {
         [(first, _)] => first.title().to_owned(),
         [(first, least), (_, next), ..] => {
-            format!("{} {:.2}x smaller", first.title(), next / least)
+            let ratio = next / least;
+            if format!("{ratio:.1}") == "1.0" {
+                "similar".to_owned()
+            } else {
+                format!("{} {ratio:.1}x smaller", first.title())
+            }
         }
         [] => "n/a".to_owned(),
     }

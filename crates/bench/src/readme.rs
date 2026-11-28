@@ -235,14 +235,14 @@ fn run_shape(document: &Value) -> (&str, u64, u64, u64, u64) {
 pub(crate) fn english_heading(document: &Value, machine: &str, date: &str) -> String {
     let (scale, reps, persons, knows, cities) = run_shape(document);
     format!(
-        "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row whose ranges of runs overlap is marked similar.\n\n"
+        "Measured on {date} on {machine}, at the `{scale}` scale ({persons} persons, {knows} `KNOWS` edges, {cities} cities), with {reps} repetitions per workload. Times are medians in milliseconds for the whole workload, lower is better, and a row is marked similar when its ranges of runs overlap, or, for the file size, when the sizes differ by less than 5 percent.\n\n"
     )
 }
 
 fn korean_heading(document: &Value, machine: &str, date: &str) -> String {
     let (scale, reps, persons, knows, cities) = run_shape(document);
     format!(
-        "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치면 '유사'로 표시합니다.\n\n"
+        "{date}에 {machine}에서 쟀습니다. 규모는 `{scale}`(사람 {persons}명, `KNOWS` 관계 {knows}개, 도시 {cities}개)이고, 작업마다 {reps}번씩 반복했습니다. 시간은 작업 전체에 걸린 시간의 중앙값이고 단위는 밀리초입니다. 낮을수록 빠르고, 반복해 잰 값의 범위가 두 엔진에서 겹치거나, 파일 크기는 차이가 5% 미만이면 '유사'로 표시합니다.\n\n"
     )
 }
 

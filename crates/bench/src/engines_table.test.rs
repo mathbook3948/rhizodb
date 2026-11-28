@@ -80,7 +80,7 @@ fn an_engine_that_did_not_measure_shows_why_and_a_workload_none_ran_has_no_row()
 fn the_size_row_names_the_smallest_file_after_bulk_load() {
     assert!(
         table().contains(
-            "| File size after bulk load | 2.0 MiB | 3.0 MiB | 1.0 MiB | DuckDB 2.00x smaller |"
+            "| File size after bulk load | 2.0 MiB | 3.0 MiB | 1.0 MiB | DuckDB 2.0x smaller |"
         ),
         "{}",
         table()
