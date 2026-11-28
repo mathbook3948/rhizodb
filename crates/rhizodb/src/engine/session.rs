@@ -233,7 +233,6 @@ fn open_or_create<F: FileSystem>(
         match created {
             Ok(side) => return Ok(Ok(side)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) if being_removed(&error) => thread::sleep(Duration::from_millis(5)),
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                 return Ok(Err(Joined::Alone { recheck: false }));
             }
