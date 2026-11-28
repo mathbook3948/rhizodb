@@ -20,6 +20,14 @@ pub(crate) fn row_at_a_time() -> bool {
     ROW_PATH.with(Flag::get)
 }
 
+/// What `run` gives with every scan left to the row-at-a-time path.
+pub(crate) fn on_row_path<R>(run: impl FnOnce() -> R) -> R {
+    ROW_PATH.with(|flag| flag.set(true));
+    let result = run();
+    ROW_PATH.with(|flag| flag.set(false));
+    result
+}
+
 pub(crate) fn scanned() {
     SCANS.with(|scans| scans.set(scans.get() + 1));
 }
