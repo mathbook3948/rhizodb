@@ -72,6 +72,20 @@ fn page_checksum(seed: u64, page: &[u8]) -> u64 {
     )
 }
 
+/// Whether `page` holds the checksum of its own bytes, for a fuzzer that looks for pages.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn is_sealed(seed: u64, page: &[u8]) -> bool {
+    page.len() >= BLOCK && page[CHECKSUM_AT..PAGE_HEADER] == page_checksum(seed, page).to_le_bytes()
+}
+
+/// Writes the checksum of `page` again over whatever its bytes now hold, so a fuzzer's damage
+/// reaches the parser behind the check.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn reseal_for_fuzzing(seed: u64, page: &mut [u8]) {
+    let sum = page_checksum(seed, page);
+    page[CHECKSUM_AT..PAGE_HEADER].copy_from_slice(&sum.to_le_bytes());
+}
+
 impl PageHeader {
     /// Writes this header and the checksum into `page`, whose body is already in place.
     pub(crate) fn seal(&self, seed: u64, page: &mut [u8]) -> Result<(), EngineError> {

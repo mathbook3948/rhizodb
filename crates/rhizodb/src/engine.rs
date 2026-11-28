@@ -24,6 +24,7 @@ pub(crate) mod sim_fs;
 pub(crate) mod snapshot;
 pub(crate) mod staged;
 pub(crate) mod store;
+pub(crate) mod stray_log;
 pub(crate) mod tree;
 pub(crate) mod view;
 pub(crate) mod wal;

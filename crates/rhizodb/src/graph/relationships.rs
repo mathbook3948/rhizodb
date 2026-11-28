@@ -601,6 +601,16 @@ impl ChunkEdit {
     }
 }
 
+/// Writes the checksum of a chunk stored under `key` again over whatever its bytes now hold, so
+/// a fuzzer's damage reaches the parser behind the check.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn reseal_for_fuzzing(key: &[u8], bytes: &mut [u8]) {
+    if bytes.len() >= PRESENT_AT {
+        let sum = checksum(key, &bytes[PRESENT_AT..]);
+        bytes[CHECKSUM_AT..PRESENT_AT].copy_from_slice(&sum.to_le_bytes());
+    }
+}
+
 #[cfg(test)]
 #[path = "relationships.test.rs"]
 mod tests;

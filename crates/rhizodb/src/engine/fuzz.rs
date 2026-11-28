@@ -8,9 +8,13 @@ use super::error::EngineError;
 use super::header::Header;
 use super::layout::BLOCK;
 use super::layout::BlockRef;
+use super::layout::HEADER_SLOTS;
 use super::layout::WAL_BLOCK;
 use super::mem_fs::MemFs;
 use super::page::PageHeader;
+use super::page::is_sealed;
+use super::page::page_seed;
+use super::page::reseal_for_fuzzing;
 use super::snapshot::install;
 use super::snapshot::seal;
 use super::snapshot::unseal;
@@ -168,18 +172,22 @@ fn image() -> Result<&'static Image, String> {
         .map_err(Clone::clone)
 }
 
+fn xor_pairs(target: &mut [u8], bytes: &[u8]) {
+    for pair in bytes.as_chunks::<4>().0 {
+        let offset =
+            (usize::from(pair[0]) << 16 | usize::from(pair[1]) << 8 | usize::from(pair[2]))
+                % target.len();
+        target[offset] ^= pair[3];
+    }
+}
+
 /// Damages a cleanly closed database file by `bytes`, read as pairs of a three-byte offset and a
 /// byte to xor there, opens it, and reads every entry. Opening or reading may fail, but a panic,
 /// or entries that differ from the undamaged file's without an error, is a bug.
 pub(crate) fn open_damaged_file(bytes: &[u8]) -> Result<(), String> {
     let (pristine, expected) = image()?;
     let mut damaged = pristine.clone();
-    for pair in bytes.as_chunks::<4>().0 {
-        let offset =
-            (usize::from(pair[0]) << 16 | usize::from(pair[1]) << 8 | usize::from(pair[2]))
-                % damaged.len();
-        damaged[offset] ^= pair[3];
-    }
+    xor_pairs(&mut damaged, bytes);
     let fs = Arc::new(MemFs::default());
     let size = BlockSize::new(BLOCK).ok_or("block size")?;
     let file = fs.create(FILE, size).map_err(|error| error.to_string())?;
@@ -195,6 +203,62 @@ pub(crate) fn open_damaged_file(bytes: &[u8]) -> Result<(), String> {
         Ok(_) => engine.check().map(drop).or(Ok(())),
         Err(_) => Ok(()),
     }
+}
+
+const PAGE_BLOCKS: usize = 8;
+
+type Pages = (u64, Vec<(usize, usize)>);
+
+fn find_pages() -> Result<Pages, String> {
+    let (image, _) = image()?;
+    let header = Header::decode(&image[..BLOCK]).map_err(|error| error.to_string())?;
+    let seed = page_seed(header.database_id);
+    let blocks = image.len() / BLOCK;
+    let mut pages = Vec::new();
+    let mut block = HEADER_SLOTS as usize;
+    while block < blocks {
+        let found = (1..=PAGE_BLOCKS.min(blocks - block))
+            .find(|count| is_sealed(seed, &image[block * BLOCK..(block + count) * BLOCK]));
+        if let Some(count) = found {
+            pages.push((block, count));
+        }
+        block += found.unwrap_or(1);
+    }
+    Ok((seed, pages))
+}
+
+fn pages() -> Result<&'static Pages, String> {
+    static PAGES: OnceLock<Result<Pages, String>> = OnceLock::new();
+    PAGES.get_or_init(find_pages).as_ref().map_err(Clone::clone)
+}
+
+/// Damages a cleanly closed database file by `bytes` as [`open_damaged_file`] does, writes the
+/// checksum of every page again so the damage passes it, opens the file, reads every entry, and
+/// checks it. Damage under a valid checksum may read as other entries, so only a panic, a hang,
+/// or an allocation the fuzzer bounds is a bug.
+pub(crate) fn open_resealed_file(bytes: &[u8]) -> Result<(), String> {
+    let (pristine, _) = image()?;
+    let (seed, pages) = pages()?;
+    let mut damaged = pristine.clone();
+    xor_pairs(&mut damaged, bytes);
+    for (block, count) in pages {
+        reseal_for_fuzzing(*seed, &mut damaged[block * BLOCK..(block + count) * BLOCK]);
+    }
+    let Ok(engine) = open_image(&damaged) else {
+        return Ok(());
+    };
+    let _ = everything(&engine);
+    let _ = engine.check();
+    Ok(())
+}
+
+fn open_image(image: &[u8]) -> Result<Engine<MemFs>, String> {
+    let fs = Arc::new(MemFs::default());
+    let size = BlockSize::new(BLOCK).ok_or("block size")?;
+    let file = fs.create(FILE, size).map_err(|error| error.to_string())?;
+    file.write(0, image).map_err(|error| error.to_string())?;
+    drop(file);
+    Engine::open(fs, FILE, fuzz_options()).map_err(|error| error.to_string())
 }
 
 const FILE_BLOCKS_AT: usize = 40;
@@ -240,12 +304,7 @@ fn stream() -> Result<&'static Stream, String> {
 pub(crate) fn install_damaged_stream(bytes: &[u8]) -> Result<(), String> {
     let (pristine, file_blocks, expected) = stream()?;
     let mut damaged = pristine.clone();
-    for pair in bytes.as_chunks::<4>().0 {
-        let offset =
-            (usize::from(pair[0]) << 16 | usize::from(pair[1]) << 8 | usize::from(pair[2]))
-                % damaged.len();
-        damaged[offset] ^= pair[3];
-    }
+    xor_pairs(&mut damaged, bytes);
     let claimed = damaged
         .get(FILE_BLOCKS_AT..FILE_BLOCKS_AT + 8)
         .and_then(|bytes| bytes.try_into().ok())

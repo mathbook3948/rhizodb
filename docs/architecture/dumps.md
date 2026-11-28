@@ -36,6 +36,8 @@ A backup file only opens in a build that reads its storage format, and a host th
 - An import goes only into a database that holds no index and has never held a node or relationship, so every dumped ID is still free.
 - An import creates the indexes first and fills them as elements arrive.
 - An import commits a batch of lines at a time, so its memory is bounded by the batch and the longest line.
+- A host can cap the bytes of one dump line, and a longer line fails as an invalid dump before it is read whole.
+- No line cap is set by default, so every export imports.
 - Write transactions on other threads wait until an import ends, so no other write lands between its batches.
 - A failed import leaves its committed batches behind, so a host imports into a new file and deletes it on failure.
 - Export reads one snapshot and takes no write lock.

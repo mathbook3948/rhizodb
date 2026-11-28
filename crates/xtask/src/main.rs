@@ -4,6 +4,7 @@ mod failures;
 mod forbidden_chars;
 mod hooks;
 mod readme;
+mod scaled;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -28,9 +29,10 @@ fn main() -> ExitCode {
             rest.get(1).map(String::as_str),
         ),
         "readme" => readme::check(&workspace_root),
+        "scaled" => scaled::check(&workspace_root),
         _ => {
             eprintln!(
-                "usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks|failures|readme>"
+                "usage: xtask <commit-msg|commits|forbidden-chars|docs|docs-write|hooks|failures|readme|scaled>"
             );
             return ExitCode::from(2);
         }

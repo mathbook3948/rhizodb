@@ -503,6 +503,9 @@ impl Storage for CountingStorage {
 }
 
 impl ReadTransaction for CountingRead<'_> {
+    const SEES_ONLY_COMMITTED: bool =
+        <<TestStorage as Storage>::Read<'static> as ReadTransaction>::SEES_ONLY_COMMITTED;
+
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.visits.load(table, key);
         self.inner.get(table, key)

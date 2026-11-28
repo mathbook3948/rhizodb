@@ -81,6 +81,9 @@ A database that returns wrong results or loses data after a crash is worse than 
 - A test kills a child process that applies changes to a replica on disk at varied points and checks each reopened replica the same way.
 - A fuzz target damages valid changes, reseals their checksums, decodes them, applies them to a replica, and reads it, and must never panic.
 - A fuzz target damages a valid snapshot stream, reseals its chunks, installs it, and reads it, and must never panic or read entries that differ from the source's without an error.
+- A fuzz target damages a clean database file and writes every page's checksum again, and another damages one stored graph entry and writes its checksum again, so the parsers behind the checksums see malformed bytes, and both must never panic.
+- A fuzz target imports arbitrary bytes and damaged copies of a valid dump, and must never panic.
+- A fuzz target runs reading and writing queries with parameters of every value kind, including nodes and paths of IDs that do not exist, and must never panic.
 - Every check rejects a wildcard version and a dependency from an unknown registry or git source, and warns on duplicate versions.
 - A nightly job checks the workspace's locked dependencies against the RustSec advisories, so a new advisory fails the nightly rather than every pull request.
 
