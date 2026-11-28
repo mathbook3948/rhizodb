@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use std::convert::Infallible;
 use std::ops::Deref;
@@ -148,17 +149,17 @@ pub(crate) struct Caches {
     /// The property columns read so far.
     pub(crate) columns: RefCell<ColumnReader>,
     /// The property keys looked up so far that have a token.
-    pub(crate) keys: RefCell<Vec<(String, Token<PropertyKey>)>>,
+    pub(crate) keys: RefCell<HashMap<String, Token<PropertyKey>>>,
     /// The reader of node labels, opened on the first read.
     pub(crate) labels: RefCell<LabelReader>,
     /// The labels looked up so far that have a token.
-    pub(crate) label_tokens: RefCell<Vec<(String, Token<Label>)>>,
+    pub(crate) label_tokens: RefCell<HashMap<String, Token<Label>>>,
     /// The property indexes looked up so far, each with its ID or none.
     pub(crate) property_indexes: RefCell<Vec<IndexLookup>>,
     /// The adjacency segments read last.
     pub(crate) adjacency: RefCell<AdjacencyReader>,
     /// The relationship types looked up so far that have a token.
-    pub(crate) rel_type_tokens: RefCell<Vec<(String, Token<RelationshipType>)>>,
+    pub(crate) rel_type_tokens: RefCell<HashMap<String, Token<RelationshipType>>>,
 }
 
 /// The caches an [`Env`] reads through: its own, or those of the statement it serves.
@@ -241,13 +242,7 @@ impl<T: ReadTransaction> Env<'_, T> {
     }
 
     pub(crate) fn label_token(&self, name: &str) -> Result<Option<Token<Label>>, Error> {
-        if let Some((_, token)) = self
-            .caches
-            .label_tokens
-            .borrow()
-            .iter()
-            .find(|(held, _)| held == name)
-        {
+        if let Some(token) = self.caches.label_tokens.borrow().get(name) {
             return Ok(Some(*token));
         }
         let token = self.tx.lookup_token::<Label>(name)?;
@@ -255,7 +250,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             self.caches
                 .label_tokens
                 .borrow_mut()
-                .push((name.to_owned(), token));
+                .insert(name.to_owned(), token);
         }
         Ok(token)
     }
@@ -264,13 +259,7 @@ impl<T: ReadTransaction> Env<'_, T> {
         &self,
         name: &str,
     ) -> Result<Option<Token<RelationshipType>>, Error> {
-        if let Some((_, token)) = self
-            .caches
-            .rel_type_tokens
-            .borrow()
-            .iter()
-            .find(|(held, _)| held == name)
-        {
+        if let Some(token) = self.caches.rel_type_tokens.borrow().get(name) {
             return Ok(Some(*token));
         }
         let token = self.tx.lookup_token::<RelationshipType>(name)?;
@@ -278,7 +267,7 @@ impl<T: ReadTransaction> Env<'_, T> {
             self.caches
                 .rel_type_tokens
                 .borrow_mut()
-                .push((name.to_owned(), token));
+                .insert(name.to_owned(), token);
         }
         Ok(token)
     }
@@ -419,18 +408,12 @@ impl<T: ReadTransaction> Env<'_, T> {
 
     #[inline]
     pub(crate) fn property_key(&self, key: &str) -> Result<Option<Token<PropertyKey>>, Error> {
-        if let Some((_, token)) = self
-            .caches
-            .keys
-            .borrow()
-            .iter()
-            .find(|(name, _)| name == key)
-        {
+        if let Some(token) = self.caches.keys.borrow().get(key) {
             return Ok(Some(*token));
         }
         let token = self.tx.lookup_token::<PropertyKey>(key)?;
         if let Some(token) = token {
-            self.caches.keys.borrow_mut().push((key.to_owned(), token));
+            self.caches.keys.borrow_mut().insert(key.to_owned(), token);
         }
         Ok(token)
     }

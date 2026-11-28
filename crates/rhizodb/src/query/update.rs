@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::Error;
@@ -67,7 +68,8 @@ pub(crate) struct Writer<'a, W> {
     pub(crate) patterns: &'a Patterns,
     pub(crate) graveyard: &'a mut Graveyard,
     pub(crate) limits: Limits,
-    pub(crate) tokens: Vec<(u8, String, u32)>,
+    /// Per token kind tag, the tokens written so far by name.
+    pub(crate) tokens: [HashMap<String, u32>; 3],
     /// Per slot, what every value it holds is known to be.
     pub(crate) holds: &'a [Holds],
     /// What the query's evaluations read and looked up so far.
@@ -194,15 +196,12 @@ impl<W: WriteTransaction> Writer<'_, W> {
     }
 
     fn token<K: TokenKind>(&mut self, name: &str) -> Result<Token<K>, Error> {
-        if let Some((_, _, id)) = self
-            .tokens
-            .iter()
-            .find(|(tag, held, _)| *tag == K::TAG && held == name)
-        {
+        let tokens = &mut self.tokens[usize::from(K::TAG)];
+        if let Some(id) = tokens.get(name) {
             return Ok(Token::new(*id));
         }
         let token = self.tx.intern_token::<K>(name)?;
-        self.tokens.push((K::TAG, name.to_owned(), token.id()));
+        tokens.insert(name.to_owned(), token.id());
         Ok(token)
     }
 
