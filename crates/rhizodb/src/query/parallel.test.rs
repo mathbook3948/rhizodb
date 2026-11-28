@@ -193,3 +193,37 @@ fn a_split_limit_skips_row_groups_without_start_nodes() {
     );
     assert_eq!(read, 3);
 }
+
+#[test]
+fn every_split_of_a_database_runs_its_helpers_on_one_pool() {
+    let workers = Workers::default();
+
+    let first = workers.pool(3).expect("the pool starts");
+    let again = workers.pool(3).expect("the pool starts");
+
+    assert!(ptr::eq(first, again));
+    assert_eq!(first.current_num_threads(), 3);
+}
+
+#[test]
+fn splits_from_many_threads_at_once_share_the_pool_and_match_one_thread() {
+    let (serial, split) = numbered(2);
+    let query = "MATCH (n:P) WHERE n.id % 3 = 0 RETURN count(*), sum(n.id)";
+    let alone = outcome(&serial, query);
+
+    let outcomes: Vec<String> = thread::scope(|scope| {
+        let callers: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| (0..10).map(|_| outcome(&split, query)).collect::<Vec<_>>()))
+            .collect();
+        callers
+            .into_iter()
+            .flat_map(|caller| caller.join().unwrap())
+            .collect()
+    });
+
+    assert_eq!(outcomes.len(), 80);
+    assert!(
+        outcomes.iter().all(|parallel| *parallel == alone),
+        "{alone}"
+    );
+}
