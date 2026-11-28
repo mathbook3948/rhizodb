@@ -10,7 +10,7 @@ All notable changes to `rhizodb` are recorded here. The format follows [Keep a C
 
 ### Added
 
-- `OpenOptions::multi_process`: a database opened for writing with it lets other processes open the file read-only while it writes. Each read-only process reads every commit the writer made before each of its reads begins, the writer's checkpoints never reuse space a read-only process still reads, and a second writer in the session fails with `ErrorKind::DatabaseAlreadyOpen`. A writer that closes while read-only processes have the file open leaves its log for the next writer. It needs a local file system with byte-range locks and shared mappings.
+- `OpenOptions::multi_process`: a database opened for writing with it lets other processes open the file read-only while it writes. Each read-only process reads every commit the writer made before each of its reads begins, the writer's checkpoints never reuse space a read-only process still reads, and a second writer in the session fails with `ErrorKind::DatabaseAlreadyOpen`. A writer that closes while read-only processes have the file open leaves its log for the next writer, and it keeps the log after a checkpoint that a read-only process pins for a snapshot. A read-only process adopts the writer's newer checkpoints as its reads begin, so an idle one keeps the space of the last tree it read until its next read. It needs a local file system with byte-range locks and shared mappings.
 - `ErrorKind::TooManyProcesses`: an open found every slot of the file's multi-process session taken.
 
 ## 0.2.0

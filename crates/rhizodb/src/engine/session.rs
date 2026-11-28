@@ -353,6 +353,9 @@ fn claim_slot(
     for slot in 0..SLOTS {
         if side.try_lock(SideLock::Slot(slot), Lock::Exclusive)? {
             words
+                .word(SLOT_BASE + slot * SLOT_WORDS + 1)
+                .store(0, Ordering::SeqCst);
+            words
                 .word(SLOT_BASE + slot * SLOT_WORDS)
                 .store(generation, Ordering::SeqCst);
             return Ok(slot);
@@ -449,6 +452,28 @@ impl Session {
         fence(Ordering::SeqCst);
     }
 
+    /// Records that this process pins a checkpoint whose log after `lsn` its snapshots need, or
+    /// none, so the writer keeps that log as it keeps the log for a pin of its own.
+    pub(crate) fn hold_pin(&self, lsn: Option<u64>) {
+        self.words
+            .word(SLOT_BASE + self.slot * SLOT_WORDS + 1)
+            .store(lsn.map_or(0, |lsn| lsn + 1), Ordering::SeqCst);
+    }
+
+    /// The oldest LSN after which a snapshot pin of another live process needs the log.
+    pub(crate) fn oldest_other_pin(&self) -> Option<u64> {
+        (0..SLOTS)
+            .filter(|slot| *slot != self.slot)
+            .filter_map(|slot| {
+                let pin = self
+                    .words
+                    .word(SLOT_BASE + slot * SLOT_WORDS + 1)
+                    .load(Ordering::SeqCst);
+                (pin != 0 && !self.slot_is_dead(slot).unwrap_or(true)).then(|| pin - 1)
+            })
+            .min()
+    }
+
     /// The oldest generation that a tree of another live process reaches, or that an open
     /// joining now may load from the header this process published last, clearing the slot of
     /// each process that is gone.
@@ -463,6 +488,9 @@ impl Session {
             }
             if self.slot_is_dead(slot).unwrap_or(false) {
                 let _ = word.compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst);
+                self.words
+                    .word(SLOT_BASE + slot * SLOT_WORDS + 1)
+                    .store(0, Ordering::SeqCst);
                 continue;
             }
             oldest = oldest.min(generation);
@@ -501,6 +529,7 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        self.hold_pin(None);
         self.words
             .word(SLOT_BASE + self.slot * SLOT_WORDS)
             .store(0, Ordering::SeqCst);

@@ -440,3 +440,46 @@ fn a_reader_catching_up_while_a_writer_checkpoints_reads_whole_rounds_that_never
     assert_eq!(round_seen(&follower, 32), 149);
     writer.check().unwrap();
 }
+
+#[test]
+fn a_writer_keeps_the_log_after_the_checkpoint_a_reader_in_another_process_pins() {
+    let fs = SimFs::new();
+    let writer = writer(&fs, churning()).unwrap();
+    put_round(&writer, 1, 64);
+    writer.checkpoint().unwrap();
+    let follower = reader(&fs, 0).unwrap();
+    let pinned_at = follower.header().checkpoint_lsn;
+    let pin = follower.pin().unwrap();
+    for round in 2..30 {
+        put_round(&writer, round, 64);
+    }
+    writer.checkpoint().unwrap();
+    assert!(
+        writer.log_start() <= pinned_at + 1,
+        "the log a pin needs is gone"
+    );
+    drop(pin);
+    put_round(&writer, 30, 64);
+    writer.checkpoint().unwrap();
+    assert!(
+        writer.log_start() > pinned_at + 1,
+        "the log stayed after the pin went"
+    );
+}
+
+#[test]
+fn a_writer_that_joins_readers_of_an_unclean_file_recovers_it_and_the_readers_follow() {
+    let fs = SimFs::new();
+    let first = Engine::open(Arc::new(fs.clone()), NAME, EngineOptions::default()).unwrap();
+    put_round(&first, 1, 16);
+    let crashed = fs.crash(crate::engine::sim_fs::Crash::KeepUnsynced);
+    drop(first);
+    let early = reader(&crashed, 0).unwrap();
+    assert_eq!(round_seen(&early, 16), 1);
+    let writer = writer(&crashed, churning()).unwrap();
+    assert!(writer.header().clean || writer.header().checkpoint_lsn > 0);
+    put_round(&writer, 2, 16);
+    early.catch_up().unwrap();
+    assert_eq!(round_seen(&early, 16), 2);
+    assert_eq!(round_seen(&reader(&crashed, 0).unwrap(), 16), 2);
+}
